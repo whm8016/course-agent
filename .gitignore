@@ -1,0 +1,55 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+
+# Type check / test
+.mypy_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/
+
+# --- Secrets & local config ---
+**/.env
+!.env.example
+!**/.env.example
+
+# --- This project: runtime data ---
+backend/uploads/
+backend/vectorstore/
+backend/data/
+*.db
+*.sqlite3
+
+# --- Logs & debug ---
+*.log
+logs/
+
+# --- Frontend (monorepo root) ---
+frontend/node_modules/
+frontend/dist/
+frontend/dist-ssr/
+
+# --- OS & editors ---
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.suo
+*.ntvs*
+
+# --- Optional: keep local VS Code shared snippets ---
+# .vscode/*
+# !.vscode/extensions.json
