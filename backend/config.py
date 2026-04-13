@@ -68,3 +68,28 @@ else:
 # Upload limits
 # ---------------------------------------------------------------------------
 MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "10"))
+
+# ---------------------------------------------------------------------------
+# LightRAG
+# ---------------------------------------------------------------------------
+LIGHTRAG_ENABLED = os.getenv("LIGHTRAG_ENABLED", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+LIGHTRAG_WORKDIR = os.getenv("LIGHTRAG_WORKDIR", os.path.join(BASE_DIR, "lightrag_store"))
+LIGHTRAG_QUERY_MODE = os.getenv("LIGHTRAG_QUERY_MODE", "mix")
+LIGHTRAG_TOP_K = int(os.getenv("LIGHTRAG_TOP_K", "20"))
+LIGHTRAG_TIMEOUT_SEC = int(os.getenv("LIGHTRAG_TIMEOUT_SEC", "120"))
+LIGHTRAG_EMBEDDING_DIM = int(os.getenv("LIGHTRAG_EMBEDDING_DIM", "1024"))
+LIGHTRAG_AUTO_INDEX_TTL_SEC = int(os.getenv("LIGHTRAG_AUTO_INDEX_TTL_SEC", "120"))
+LIGHTRAG_STREAM_CONTEXT_LIMIT = int(os.getenv("LIGHTRAG_STREAM_CONTEXT_LIMIT", "4"))
+LIGHTRAG_STREAM_CONTEXT_MAX_CHARS = int(os.getenv("LIGHTRAG_STREAM_CONTEXT_MAX_CHARS", "800"))
+# LightRAG 默认会开 rerank；未配置 rerank 模型时会告警且可能长时间阻塞，故默认关闭
+LIGHTRAG_ENABLE_RERANK = os.getenv("LIGHTRAG_ENABLE_RERANK", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)

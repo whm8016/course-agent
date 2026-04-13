@@ -14,8 +14,8 @@
 
 ## 技术栈
 
-- **后端**: Python / FastAPI / LangGraph / LangChain / ChromaDB / SQLite
-- **前端**: React / TypeScript / Vite / TailwindCSS
+- **后端**: Python / FastAPI / LangGraph / LangChain / ChromaDB / 
+- **前端**: React / TypeScript / Vite / TailwindCSSSQLite
 - **LLM**: 通义千问 (Qwen API via DashScope)
 
 ## 架构

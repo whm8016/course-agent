@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-
+from fastapi import Request
 from fastapi import APIRouter, Depends, HTTPException, Header
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,13 +80,26 @@ async def register(body: RegisterBody, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login")
-async def login(body: LoginBody, db: AsyncSession = Depends(get_db)):
+async def login(
+    body: LoginBody,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    print(request.url)
+    print(request.headers)
+    
+    print(request.method)
+    print(request.url.path)
+    print(request.query_params)
+    print(request.client)
+
+    print(request.cookies)
+    print(request.headers)
     user = await authenticate_user(db, body.username, body.password)
     if not user:
         raise HTTPException(status_code=401, detail="用户名或密码错误")
     token = create_token(user["id"], user["username"])
     return {"token": token, "user": user}
-
 
 @router.get("/me")
 async def me(user: dict = Depends(get_current_user)):

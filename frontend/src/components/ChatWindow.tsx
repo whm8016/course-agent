@@ -33,6 +33,8 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
+  const [streamingStarted, setStreamingStarted] = useState(false)
+  const [streamPhase, setStreamPhase] = useState<'retrieving' | 'generating' | null>(null)
   const [imageFile, setImageFile] = useState<File | null>(null)
   const [imagePreview, setImagePreview] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -62,8 +64,8 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
   }, [sessionId])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    bottomRef.current?.scrollIntoView({ behavior: loading ? 'auto' : 'smooth' })
+  }, [messages, loading])
 
   const handleImageSelect = (file: File) => {
     setImageFile(file)
@@ -118,6 +120,8 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
     setInput('')
     clearImage()
     setLoading(true)
+    setStreamingStarted(false)
+    setStreamPhase('retrieving')
 
     const history = messages.map((m) => ({ role: m.role, content: m.content }))
 
@@ -137,6 +141,7 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
       (event: SSEEvent) => {
         switch (event.type) {
           case 'thinking':
+            setStreamPhase('retrieving')
             thinkingSteps.push({
               role: 'assistant',
               content: event.content || '',
@@ -145,6 +150,7 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
             break
 
           case 'tool_call':
+            setStreamPhase('retrieving')
             thinkingSteps.push({
               role: 'assistant',
               content: '',
@@ -154,6 +160,7 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
             break
 
           case 'tool_result':
+            setStreamPhase('retrieving')
             if (event.chunks) {
               ragChunks = event.chunks
               thinkingSteps.push({
@@ -166,6 +173,8 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
             break
 
           case 'token':
+            setStreamPhase('generating')
+            setStreamingStarted(true)
             answerContent += event.content || ''
             setMessages((prev) => {
               const last = prev[prev.length - 1]
@@ -177,7 +186,16 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
             break
 
           case 'answer':
+            setStreamPhase('generating')
+            setStreamingStarted(true)
             answerContent = event.content || ''
+            setMessages((prev) => {
+              const last = prev[prev.length - 1]
+              if (last?.role === 'assistant') {
+                return [...prev.slice(0, -1), { ...last, content: answerContent }]
+              }
+              return [...prev, { role: 'assistant', content: answerContent }]
+            })
             break
 
           case 'quiz':
@@ -235,6 +253,8 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
     }
 
     setLoading(false)
+    setStreamingStarted(false)
+    setStreamPhase(null)
   }, [input, imageFile, imagePreview, loading, messages, courseId, onSessionCreated])
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -266,7 +286,7 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
             thinkingSteps={(msg as unknown as Record<string, unknown>)._thinkingSteps as Message[] | undefined}
           />
         ))}
-        {loading && (
+        {loading && !streamingStarted && (
           <div className="flex justify-start mb-4">
             <div className="bg-white border border-slate-200 rounded-2xl rounded-bl-md px-4 py-3 shadow-sm">
               <div className="flex gap-1">
@@ -274,6 +294,9 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
                 <span className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
                 <span className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" />
               </div>
+              <p className="text-xs text-slate-500 mt-2">
+                {streamPhase === 'generating' ? '正在生成回答...' : '正在检索资料...'}
+              </p>
             </div>
           </div>
         )}

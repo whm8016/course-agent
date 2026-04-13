@@ -57,6 +57,7 @@ export async function login(username: string, password: string): Promise<AuthRes
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username, password }),
   })
+  
   if (!res.ok) {
     const data = await res.json().catch(() => ({}))
     throw new Error(data.detail || '登录失败')

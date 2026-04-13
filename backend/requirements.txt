@@ -19,3 +19,4 @@ sqlalchemy[asyncio]
 asyncpg
 redis
 alembic
+lightrag-hku

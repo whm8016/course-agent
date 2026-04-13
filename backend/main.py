@@ -22,8 +22,10 @@ from slowapi.util import get_remote_address
 from api.auth import router as auth_router
 from api.chat import router as chat_router
 from api.courses import router as courses_router
+from api.lightrag import router as lightrag_router
 from api.upload import router as upload_router
 from api.sessions import router as sessions_router
+from api.sse import router as sse_router
 from config import UPLOAD_DIR, ALLOWED_ORIGINS, REDIS_URL
 from core.database import init_db, close_db
 
@@ -55,10 +57,11 @@ app.add_middleware(
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
+app.include_router(lightrag_router, prefix="/api")
 app.include_router(courses_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
-
+app.include_router(sse_router, prefix="/api")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
