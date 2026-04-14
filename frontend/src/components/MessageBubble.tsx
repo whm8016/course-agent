@@ -52,6 +52,11 @@ export default function MessageBubble({ message, thinkingSteps }: Props) {
 
         {message.metadata?.intent && (
           <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
+            {message.metadata.mode === 'chat' && <span>💬 通用问答</span>}
+            {message.metadata.mode === 'deep_solve' && <span>🧠 深度解题</span>}
+            {message.metadata.mode === 'research' && <span>🔎 深度研究</span>}
+            {message.metadata.mode === 'quiz' && <span>📝 测验模式</span>}
+            {message.metadata.mode === 'vision' && <span>🖼️ 图像分析</span>}
             {message.metadata.intent === 'teach' && <span>📖 知识问答</span>}
             {message.metadata.intent === 'quiz' && <span>📝 测验模式</span>}
             {message.metadata.intent === 'summarize' && <span>📋 学习总结</span>}

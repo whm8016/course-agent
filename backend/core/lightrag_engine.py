@@ -360,7 +360,8 @@ async def retrieve_with_lightrag(
         conversation_history=_cap_history(_normalize_history(history)),
         enable_rerank=LIGHTRAG_ENABLE_RERANK,
     )
-
+   
+    logger.info("QueryParam: %s", param)
     result: Any = None
     retrieve_strategy = "aquery_fallback"
 
@@ -397,11 +398,14 @@ async def stream_answer_with_contexts(
     message: str,
     contexts: list[Any] | None = None,
     history: list[dict] | None = None,
+    memory_context: str = "",
 ) -> AsyncGenerator[str, None]:
     """
     Generate answer tokens with project LLM stream using retrieved contexts.
     """
     system_prompt = get_course_prompt(course_id)
+    if memory_context:
+        system_prompt += f"\n\n{memory_context}"
     context_block = _format_contexts_for_prompt(contexts or [])
     if context_block:
         system_prompt += (

@@ -24,7 +24,10 @@ export interface QuizData {
 
 export interface AgentMetadata {
   intent?: string
+  mode?: string
   tools_used?: string[]
+  retrieve_mode?: string
+  retrieve_strategy?: string
 }
 
 export interface SSEEvent {
@@ -49,6 +52,9 @@ export interface Message {
     chunks?: RagChunk[]
     quiz?: QuizData
     tools_used?: string[]
+    mode?: string
+    retrieve_mode?: string
+    retrieve_strategy?: string
   }
 }
 
@@ -56,9 +62,12 @@ export interface Session {
   id: string
   course_id: string
   title: string
+  mode?: ChatMode
   created_at: number
   updated_at: number
 }
+
+export type ChatMode = 'chat' | 'deep_solve' | 'quiz' | 'research' | 'vision' | 'summarize'
 
 export interface ChatSession {
   id: string
@@ -72,6 +81,13 @@ export interface User {
   id: string
   username: string
   display_name: string
+  summary_memory?: string
+  profile_memory?: {
+    level?: string
+    style?: string
+    goal?: string
+    preferred_mode?: string
+  }
 }
 
 export interface AuthResponse {

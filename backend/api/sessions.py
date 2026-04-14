@@ -13,8 +13,10 @@ from core.memory import (
     get_messages,
     get_session,
     list_sessions,
+    update_session_mode,
     update_session_title,
 )
+from core.orchestrator import normalize_mode
 
 router = APIRouter()
 
@@ -22,10 +24,15 @@ router = APIRouter()
 class CreateSessionBody(BaseModel):
     course_id: str
     title: str = "新对话"
+    mode: str = "chat"
 
 
 class UpdateSessionBody(BaseModel):
     title: str
+
+
+class UpdateSessionModeBody(BaseModel):
+    mode: str
 
 
 class AddMessageBody(BaseModel):
@@ -60,7 +67,13 @@ async def api_create_session(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    session = await create_session(db, body.course_id, body.title, user_id=user["id"])
+    session = await create_session(
+        db,
+        body.course_id,
+        body.title,
+        user_id=user["id"],
+        mode=normalize_mode(body.mode),
+    )
     return session
 
 
@@ -82,6 +95,18 @@ async def api_update_session(
 ):
     await _check_session_owner(db, session_id, user["id"])
     await update_session_title(db, session_id, body.title)
+    return {"ok": True}
+
+
+@router.patch("/sessions/{session_id}/mode")
+async def api_update_session_mode(
+    session_id: str,
+    body: UpdateSessionModeBody,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await _check_session_owner(db, session_id, user["id"])
+    await update_session_mode(db, session_id, normalize_mode(body.mode))
     return {"ok": True}
 
 

@@ -11,15 +11,19 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
 from config import LIGHTRAG_TIMEOUT_SEC, REDIS_URL
+from core.database import get_db
+from core.learner_profile import build_memory_context, update_learner_memory
 from core.lightrag_engine import (
     index_course_with_lightrag,
     is_lightrag_available,
     retrieve_with_lightrag,
     stream_answer_with_contexts,
 )
+from core.orchestrator import normalize_mode
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +62,11 @@ class IndexBody(BaseModel):
 
 @router.post("/chat/lightrag")
 @limiter.limit("20/minute")
-async def chat_with_lightrag(request: Request, user: dict = Depends(get_current_user)):
+async def chat_with_lightrag(
+    request: Request,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     ok, reason = is_lightrag_available()
     if not ok:
         raise HTTPException(status_code=503, detail=reason)
@@ -68,6 +76,7 @@ async def chat_with_lightrag(request: Request, user: dict = Depends(get_current_
     message: str = body.get("message", "")
     history: list[dict] = body.get("history", [])
     mode: str | None = body.get("mode")
+    chat_mode: str = normalize_mode(body.get("chat_mode", "chat"))
     session_id: str | None = body.get("session_id")
     trace_id = request.headers.get("x-trace-id") or uuid.uuid4().hex[:8]
     t0 = time.perf_counter()
@@ -86,8 +95,12 @@ async def chat_with_lightrag(request: Request, user: dict = Depends(get_current_
     )
 
     async def event_generator():
+        answer = ""
         try:
             logger.info("[trace=%s] retrieve_start t=%dms", trace_id, elapsed_ms())
+            if await request.is_disconnected():
+                logger.info("[trace=%s] client already disconnected before stream start", trace_id)
+                return
             yield f"data: {json.dumps({'type': 'thinking', 'content': '正在使用 LightRAG 检索知识图谱与向量证据...'}, ensure_ascii=False)}\n\n"
             yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'lightrag_query', 'input': {'course_id': course_id, 'mode': mode or 'mix'}}, ensure_ascii=False)}\n\n"
 
@@ -115,7 +128,11 @@ async def chat_with_lightrag(request: Request, user: dict = Depends(get_current_
                 message=message,
                 contexts=contexts,
                 history=history,
+                memory_context=build_memory_context(user),
             ):
+                if await request.is_disconnected():
+                    logger.info("[trace=%s] client disconnected during token stream", trace_id)
+                    return
                 if not first_token_logged:
                     logger.info("[trace=%s] first_token t=%dms", trace_id, elapsed_ms())
                     first_token_logged = True
@@ -125,7 +142,21 @@ async def chat_with_lightrag(request: Request, user: dict = Depends(get_current_
             answer = "".join(answer_parts)
             yield f"data: {json.dumps({'type': 'answer', 'content': answer}, ensure_ascii=False)}\n\n"
             logger.info("[trace=%s] done t=%dms answer_chars=%d", trace_id, elapsed_ms(), len(answer))
-            yield f"data: {json.dumps({'type': 'done', 'metadata': {'engine': 'lightrag', 'mode': retrieve_result.get('mode', 'mix'), 'retrieve_strategy': retrieve_result.get('retrieve_strategy', 'unknown')}}, ensure_ascii=False)}\n\n"
+            metadata = {
+                "engine": "lightrag",
+                "mode": chat_mode,
+                "retrieve_mode": retrieve_result.get("mode", "mix"),
+                "retrieve_strategy": retrieve_result.get("retrieve_strategy", "unknown"),
+            }
+            await update_learner_memory(
+                db,
+                user["id"],
+                course_id=course_id,
+                mode=chat_mode,
+                user_message=message,
+                assistant_answer=answer,
+            )
+            yield f"data: {json.dumps({'type': 'done', 'metadata': metadata}, ensure_ascii=False)}\n\n"
         except asyncio.TimeoutError:
             logger.warning("[trace=%s] timeout t=%dms", trace_id, elapsed_ms())
             error_data = json.dumps({"type": "error", "content": "LightRAG 查询超时"}, ensure_ascii=False)

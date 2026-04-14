@@ -7,10 +7,13 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
 from config import REDIS_URL
-from core.orchestrator import run_agent_stream
+from core.database import get_db
+from core.learner_profile import build_memory_context, update_learner_memory
+from core.orchestrator import normalize_mode, run_agent_stream
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +27,18 @@ MAX_HISTORY_LENGTH = 50
 
 @router.post("/chat")
 @limiter.limit("20/minute")
-async def chat(request: Request, user: dict = Depends(get_current_user)):
+async def chat(
+    request: Request,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     body = await request.json()
     course_id: str = body.get("course_id", "stamp")
     message: str = body.get("message", "")
     history: list[dict] = body.get("history", [])
     image_path: str | None = body.get("image_path")
     session_id: str | None = body.get("session_id")
+    mode: str = normalize_mode(body.get("chat_mode", "chat"))
 
     if len(message) > MAX_MESSAGE_LENGTH:
         message = message[:MAX_MESSAGE_LENGTH]
@@ -43,8 +51,38 @@ async def chat(request: Request, user: dict = Depends(get_current_user)):
     )
 
     async def event_generator():
+        answer_content = ""
+        final_mode = mode
         try:
-            async for event in run_agent_stream(course_id, message, history, image_path):
+            async for event in run_agent_stream(
+                course_id,
+                message,
+                history,
+                image_path,
+                mode=mode,
+                memory_context=build_memory_context(user),
+            ):
+                if await request.is_disconnected():
+                    logger.info(
+                        "Client disconnected, stop stream user=%s course=%s session=%s",
+                        user["id"],
+                        course_id,
+                        session_id,
+                    )
+                    return
+                if event.get("type") == "answer":
+                    answer_content = str(event.get("content") or "")
+                if event.get("type") == "done":
+                    metadata = event.get("metadata") or {}
+                    final_mode = str(metadata.get("mode") or final_mode)
+                    await update_learner_memory(
+                        db,
+                        user["id"],
+                        course_id=course_id,
+                        mode=final_mode,
+                        user_message=message,
+                        assistant_answer=answer_content,
+                    )
                 data = json.dumps(event, ensure_ascii=False)
                 yield f"data: {data}\n\n"
         except Exception as e:

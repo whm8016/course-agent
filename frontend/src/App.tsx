@@ -92,6 +92,7 @@ export default function App() {
   }
 
   const activeCourse = courses.find((c) => c.id === activeCourseId)
+  const activeSession = sessions.find((s) => s.id === activeSessionId) || null
 
   return (
     <div className="flex h-screen bg-slate-50">
@@ -113,6 +114,7 @@ export default function App() {
             courseId={activeCourseId}
             courseName={`${activeCourse.icon} ${activeCourse.name}`}
             sessionId={activeSessionId}
+            sessionMode={activeSession?.mode}
             onSessionCreated={handleSessionCreated}
           />
         ) : loadError ? (

@@ -12,6 +12,7 @@ from sqlalchemy import (
     Index,
     String,
     Text,
+    text,
     func,
 )
 from sqlalchemy.ext.asyncio import (
@@ -48,6 +49,8 @@ class User(Base):
     username = Column(String(32), unique=True, nullable=False)
     password_hash = Column(String(256), nullable=False)
     display_name = Column(String(64), nullable=False, default="")
+    summary_memory = Column(Text, nullable=False, default="")
+    profile_memory = Column(Text, nullable=False, default="{}")
     created_at = Column(Float, nullable=False, default=time.time)
 
 
@@ -58,6 +61,7 @@ class Session(Base):
     course_id = Column(String(64), nullable=False)
     user_id = Column(String(32), nullable=False, default="")
     title = Column(String(256), nullable=False, default="新对话")
+    mode = Column(String(32), nullable=False, default="chat")
     created_at = Column(Float, nullable=False, default=time.time)
     updated_at = Column(Float, nullable=False, default=time.time)
 
@@ -87,10 +91,44 @@ class Message(Base):
     )
 
 
+async def _ensure_column(conn, table_name: str, column_name: str, ddl: str):
+    exists_sql = text(
+        """
+        SELECT 1
+        FROM information_schema.columns
+        WHERE table_name = :table_name AND column_name = :column_name
+        LIMIT 1
+        """
+    )
+    result = await conn.execute(
+        exists_sql, {"table_name": table_name, "column_name": column_name}
+    )
+    if result.first() is None:
+        await conn.execute(text(ddl))
+
+
 async def init_db():
     """Create all tables if they don't exist (idempotent)."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _ensure_column(
+            conn,
+            "sessions",
+            "mode",
+            "ALTER TABLE sessions ADD COLUMN mode VARCHAR(32) NOT NULL DEFAULT 'chat'",
+        )
+        await _ensure_column(
+            conn,
+            "users",
+            "summary_memory",
+            "ALTER TABLE users ADD COLUMN summary_memory TEXT NOT NULL DEFAULT ''",
+        )
+        await _ensure_column(
+            conn,
+            "users",
+            "profile_memory",
+            "ALTER TABLE users ADD COLUMN profile_memory TEXT NOT NULL DEFAULT '{}'",
+        )
 
 
 async def close_db():

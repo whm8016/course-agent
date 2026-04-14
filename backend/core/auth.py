@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import time
 import uuid
 
@@ -83,14 +84,40 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> d
         return None
     if not verify_password(password, user.password_hash):
         return None
-    return {"id": user.id, "username": user.username, "display_name": user.display_name}
+    try:
+        profile_memory = json.loads(user.profile_memory or "{}")
+    except json.JSONDecodeError:
+        profile_memory = {}
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "summary_memory": user.summary_memory or "",
+        "profile_memory": profile_memory,
+    }
 
 
 async def get_user_by_id(db: AsyncSession, user_id: str) -> dict | None:
     result = await db.execute(
-        select(User.id, User.username, User.display_name).where(User.id == user_id)
+        select(
+            User.id,
+            User.username,
+            User.display_name,
+            User.summary_memory,
+            User.profile_memory,
+        ).where(User.id == user_id)
     )
     row = result.first()
     if not row:
         return None
-    return {"id": row.id, "username": row.username, "display_name": row.display_name}
+    try:
+        profile_memory = json.loads(row.profile_memory or "{}")
+    except json.JSONDecodeError:
+        profile_memory = {}
+    return {
+        "id": row.id,
+        "username": row.username,
+        "display_name": row.display_name,
+        "summary_memory": row.summary_memory or "",
+        "profile_memory": profile_memory,
+    }

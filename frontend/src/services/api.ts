@@ -1,4 +1,4 @@
-import type { Course, Session, SSEEvent, Message as AppMessage, RagChunk } from '../types'
+import type { Course, Session, SSEEvent, Message as AppMessage, RagChunk, ChatMode } from '../types'
 import { authHeaders } from './auth'
 
 async function readErrorMessage(res: Response): Promise<string> {
@@ -50,15 +50,25 @@ export async function fetchSessions(courseId?: string): Promise<Session[]> {
   return data.sessions || []
 }
 
-export async function createSession(courseId: string, title?: string): Promise<Session> {
+export async function createSession(courseId: string, title?: string, mode: ChatMode = 'chat'): Promise<Session> {
   const res = await fetch('/api/sessions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({ course_id: courseId, title: title || '新对话' }),
+    body: JSON.stringify({ course_id: courseId, title: title || '新对话', mode }),
   })
   checkUnauthorized(res)
   if (!res.ok) throw new Error(await readErrorMessage(res))
   return res.json()
+}
+
+export async function updateSessionMode(sessionId: string, mode: ChatMode): Promise<void> {
+  const res = await fetch(`/api/sessions/${sessionId}/mode`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ mode }),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
 }
 
 export async function deleteSession(sessionId: string): Promise<void> {
@@ -120,9 +130,16 @@ export async function chatStream(
   history: { role: string; content: string }[],
   imagePath?: string,
   sessionId?: string,
+  chatMode: ChatMode = 'chat',
+  signal?: AbortSignal,
   onEvent?: (event: SSEEvent) => void,
   onError?: (err: string) => void,
-) {
+): Promise<{ aborted: boolean }> {
+  const isAbortError = (err: unknown) => {
+    if (err instanceof DOMException) return err.name === 'AbortError'
+    if (err instanceof Error) return err.name === 'AbortError'
+    return false
+  }
   const useLightrag = courseId === 'algorithm'
   const endpoint = useLightrag ? '/api/chat/lightrag' : '/api/chat'
   const traceId =
@@ -142,6 +159,7 @@ export async function chatStream(
     logTrace('send', { endpoint })
     res = await fetch(endpoint, {
       method: 'POST',
+      signal,
       headers: { 'Content-Type': 'application/json', 'X-Trace-Id': traceId, ...authHeaders() },
       body: JSON.stringify({
         course_id: courseId,
@@ -149,22 +167,24 @@ export async function chatStream(
         history,
         image_path: imagePath || null,
         session_id: sessionId || null,
+        chat_mode: chatMode,
       }),
     })
-  } catch {
+  } catch (err) {
+    if (isAbortError(err) || signal?.aborted) return { aborted: true }
     onError?.('无法连接后端服务，请确认后端已启动')
-    return
+    return { aborted: false }
   }
 
   if (res.status === 401) {
     checkUnauthorized(res)
-    return
+    return { aborted: false }
   }
 
   logTrace('response_headers', { status: res.status })
   if (!res.ok || !res.body) {
     onError?.(await readErrorMessage(res))
-    return
+    return { aborted: false }
   }
 
   const reader = res.body.getReader()
@@ -172,81 +192,104 @@ export async function chatStream(
   let buffer = ''
   let firstEventLogged = false
   let firstTokenLogged = false
+  let aborted = false
 
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
+  try {
+    while (true) {
+      if (signal?.aborted) {
+        aborted = true
+        break
+      }
+      const { done, value } = await reader.read()
+      if (done) break
 
-    buffer += decoder.decode(value, { stream: true })
-    const events = buffer.split('\n\n')
-    buffer = events.pop() || ''
-    let shouldStop = false
+      buffer += decoder.decode(value, { stream: true })
+      const events = buffer.split('\n\n')
+      buffer = events.pop() || ''
+      let shouldStop = false
 
-    for (const eventBlock of events) {
-      const jsonStr = eventBlock
-        .split('\n')
-        .map((line) => line.trimEnd())
-        .filter((line) => line.startsWith('data:'))
-        .map((line) => line.slice(5).trimStart())
-        .join('\n')
-      if (!jsonStr) continue
+      for (const eventBlock of events) {
+        const jsonStr = eventBlock
+          .split('\n')
+          .map((line) => line.trimEnd())
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trimStart())
+          .join('\n')
+        if (!jsonStr) continue
 
-      try {
-        const event = JSON.parse(jsonStr) as SSEEvent
-        if (!firstEventLogged) {
-          logTrace('first_event', { type: event.type })
-          firstEventLogged = true
-        }
-        if (event.type === 'tool_result' && !event.chunks) {
-          const rawContexts = (event as SSEEvent & { contexts?: unknown[] }).contexts
-          if (Array.isArray(rawContexts) && rawContexts.length > 0) {
-            const chunks: RagChunk[] = rawContexts.map((ctx, idx) => {
-              if (typeof ctx === 'string') {
-                return { content: ctx, source: 'lightrag', score: 1 - idx * 0.01 }
-              }
-              if (ctx && typeof ctx === 'object') {
-                const row = ctx as Record<string, unknown>
-                const content = String(row.content ?? row.text ?? row.chunk ?? '')
-                const source = String(row.source ?? row.file ?? 'lightrag')
-                const scoreRaw = Number(row.score)
-                return {
-                  content,
-                  source,
-                  score: Number.isFinite(scoreRaw) ? scoreRaw : 1 - idx * 0.01,
+        try {
+          const event = JSON.parse(jsonStr) as SSEEvent
+          if (!firstEventLogged) {
+            logTrace('first_event', { type: event.type })
+            firstEventLogged = true
+          }
+          if (event.type === 'tool_result' && !event.chunks) {
+            const rawContexts = (event as SSEEvent & { contexts?: unknown[] }).contexts
+            if (Array.isArray(rawContexts) && rawContexts.length > 0) {
+              const chunks: RagChunk[] = rawContexts.map((ctx, idx) => {
+                if (typeof ctx === 'string') {
+                  return { content: ctx, source: 'lightrag', score: 1 - idx * 0.01 }
                 }
-              }
-              return { content: String(ctx), source: 'lightrag', score: 1 - idx * 0.01 }
-            }).filter((c) => c.content.trim().length > 0)
+                if (ctx && typeof ctx === 'object') {
+                  const row = ctx as Record<string, unknown>
+                  const content = String(row.content ?? row.text ?? row.chunk ?? '')
+                  const source = String(row.source ?? row.file ?? 'lightrag')
+                  const scoreRaw = Number(row.score)
+                  return {
+                    content,
+                    source,
+                    score: Number.isFinite(scoreRaw) ? scoreRaw : 1 - idx * 0.01,
+                  }
+                }
+                return { content: String(ctx), source: 'lightrag', score: 1 - idx * 0.01 }
+              }).filter((c) => c.content.trim().length > 0)
 
-            if (chunks.length > 0) {
-              event.chunks = chunks
+              if (chunks.length > 0) {
+                event.chunks = chunks
+              }
             }
           }
+          onEvent?.(event)
+          if (event.type === 'token' && !firstTokenLogged) {
+            logTrace('first_token')
+            firstTokenLogged = true
+          }
+          if (event.type === 'done' || event.type === 'error') {
+            logTrace('stream_end', { type: event.type })
+            shouldStop = true
+            break
+          }
+        } catch {
+          // skip malformed JSON
         }
-        onEvent?.(event)
-        if (event.type === 'token' && !firstTokenLogged) {
-          logTrace('first_token')
-          firstTokenLogged = true
+      }
+
+      if (shouldStop) {
+        try {
+          await reader.cancel()
+        } catch {
+          // ignore reader cancellation errors
         }
-        if (event.type === 'done' || event.type === 'error') {
-          logTrace('stream_end', { type: event.type })
-          shouldStop = true
-          break
-        }
-      } catch {
-        // skip malformed JSON
+        break
       }
     }
-
-    if (shouldStop) {
-      try {
-        await reader.cancel()
-      } catch {
-        // ignore reader cancellation errors
-      }
-      break
+  } catch (err) {
+    if (isAbortError(err) || signal?.aborted) {
+      aborted = true
+    } else {
+      onError?.('流式连接中断，请重试')
     }
   }
+
+  if (aborted) {
+    logTrace('stream_aborted')
+    try {
+      await reader.cancel()
+    } catch {
+      // ignore reader cancellation errors
+    }
+  }
+  return { aborted }
 }
 
 

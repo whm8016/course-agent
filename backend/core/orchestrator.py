@@ -40,6 +40,8 @@ class AgentState(TypedDict):
     message: str
     history: list[dict]
     image_path: str | None
+    mode: str
+    memory_context: str
     intent: str
     events: Annotated[list[dict], _merge_events]
 
@@ -57,12 +59,43 @@ def _get_llm(model: str | None = None) -> ChatOpenAI:
     )
 
 
+def normalize_mode(mode: str | None) -> str:
+    allowed = {"chat", "deep_solve", "quiz", "research", "vision", "summarize"}
+    if not mode:
+        return "chat"
+    normalized = mode.strip().lower()
+    return normalized if normalized in allowed else "chat"
+
+
 # ---------------------------------------------------------------------------
 # Graph nodes
 # ---------------------------------------------------------------------------
 
 def router_node(state: AgentState) -> dict:
     """Classify user intent using LLM."""
+    forced_mode = normalize_mode(state.get("mode"))
+    forced_intent_map = {
+        "deep_solve": "teach",
+        "research": "teach",
+        "quiz": "quiz",
+        "vision": "vision",
+        "summarize": "summarize",
+    }
+    if forced_mode in forced_intent_map:
+        forced_intent = forced_intent_map[forced_mode]
+        forced_labels = {
+            "chat": "通用问答模式",
+            "deep_solve": "深度解题模式",
+            "research": "深度研究模式",
+            "quiz": "测验出题模式",
+            "vision": "视觉分析模式",
+            "summarize": "学习总结模式",
+        }
+        return {
+            "intent": forced_intent,
+            "events": [{"type": "thinking", "content": f"模式已切换：{forced_labels[forced_mode]}"}],
+        }
+
     if state.get("image_path"):
         return {"intent": "vision", "events": [
             {"type": "thinking", "content": "检测到图片上传，启动视觉分析..."}
@@ -270,16 +303,31 @@ async def run_agent(
     message: str,
     history: list[dict],
     image_path: str | None = None,
+    mode: str = "chat",
+    memory_context: str = "",
 ) -> list[dict]:
     """Run the full agent pipeline and collect all events."""
     events: list[dict] = []
-    async for event in run_agent_stream(course_id, message, history, image_path):
+    async for event in run_agent_stream(
+        course_id,
+        message,
+        history,
+        image_path,
+        mode=mode,
+        memory_context=memory_context,
+    ):
         events.append(event)
     return events
 
 
 async def _stream_teach_events(state: AgentState) -> AsyncGenerator[dict, None]:
-    yield {"type": "thinking", "content": "正在从知识库检索相关内容..."}
+    teach_mode = normalize_mode(state.get("mode"))
+    thinking_labels = {
+        "chat": "正在从知识库检索相关内容...",
+        "deep_solve": "正在进行深度解题：先检索依据，再分步推导...",
+        "research": "正在进行主题研究：先检索证据，再组织结构化结论...",
+    }
+    yield {"type": "thinking", "content": thinking_labels.get(teach_mode, thinking_labels["chat"])}
     yield {
         "type": "tool_call",
         "tool": "search_knowledge",
@@ -290,11 +338,17 @@ async def _stream_teach_events(state: AgentState) -> AsyncGenerator[dict, None]:
     yield {"type": "tool_result", "tool": "search_knowledge", "chunks": chunks}
 
     system_prompt = get_course_prompt(state["course_id"])
+    if state.get("memory_context"):
+        system_prompt += f"\n\n{state['memory_context']}"
     if chunks:
         context = "\n\n---\n\n".join(c["content"] for c in chunks)
         system_prompt += (
             f"\n\n【参考资料】以下是从课程知识库中检索到的相关内容，请结合这些资料回答：\n\n{context}\n\n---\n"
         )
+    if teach_mode == "deep_solve":
+        system_prompt += "\n\n请采用“题目理解 -> 已知条件 -> 分步推导 -> 最终结论 -> 易错点”的结构作答。"
+    elif teach_mode == "research":
+        system_prompt += "\n\n请采用“核心观点 -> 关键证据 -> 对比分析 -> 实践建议”的结构输出。"
 
     answer_parts: list[str] = []
     async for token in chat_stream(
@@ -326,6 +380,8 @@ async def _stream_summarize_events(state: AgentState) -> AsyncGenerator[dict, No
 以下是对话历史：
 {history_text}
 """
+    if state.get("memory_context"):
+        system_prompt += f"\n\n{state['memory_context']}"
     user_message = "请生成学习小结。"
     answer_parts: list[str] = []
     async for token in chat_stream(
@@ -349,6 +405,8 @@ async def _stream_vision_events(state: AgentState) -> AsyncGenerator[dict, None]
     }
 
     system_prompt = get_course_prompt(state["course_id"])
+    if state.get("memory_context"):
+        system_prompt += f"\n\n{state['memory_context']}"
     user_message = state["message"] or "请赏析这张邮票图片。"
     answer_parts: list[str] = []
     async for token in chat_stream(
@@ -368,6 +426,8 @@ async def run_agent_stream(
     message: str,
     history: list[dict],
     image_path: str | None = None,
+    mode: str = "chat",
+    memory_context: str = "",
 ) -> AsyncGenerator[dict, None]:
     """Run the full agent pipeline and stream structured events."""
     state: AgentState = {
@@ -375,6 +435,8 @@ async def run_agent_stream(
         "message": message,
         "history": history,
         "image_path": image_path,
+        "mode": normalize_mode(mode),
+        "memory_context": memory_context,
         "intent": "",
         "events": [],
     }
@@ -411,5 +473,9 @@ async def run_agent_stream(
 
     yield {
         "type": "done",
-        "metadata": {"intent": intent, "tools_used": list(tools_used)},
+        "metadata": {
+            "intent": intent,
+            "mode": state["mode"],
+            "tools_used": list(tools_used),
+        },
     }

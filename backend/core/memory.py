@@ -19,7 +19,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 async def create_session(
-    db: AsyncSession, course_id: str, title: str = "新对话", user_id: str = "",
+    db: AsyncSession,
+    course_id: str,
+    title: str = "新对话",
+    user_id: str = "",
+    mode: str = "chat",
 ) -> dict:
     now = time.time()
     session = Session(
@@ -27,6 +31,7 @@ async def create_session(
         course_id=course_id,
         user_id=user_id,
         title=title,
+        mode=mode,
         created_at=now,
         updated_at=now,
     )
@@ -37,6 +42,7 @@ async def create_session(
         "course_id": session.course_id,
         "user_id": session.user_id,
         "title": session.title,
+        "mode": session.mode,
         "created_at": session.created_at,
         "updated_at": session.updated_at,
     }
@@ -57,6 +63,7 @@ async def list_sessions(
             "course_id": r.course_id,
             "user_id": r.user_id,
             "title": r.title,
+            "mode": r.mode,
             "created_at": r.created_at,
             "updated_at": r.updated_at,
         }
@@ -74,6 +81,7 @@ async def get_session(db: AsyncSession, session_id: str) -> dict | None:
         "course_id": r.course_id,
         "user_id": r.user_id,
         "title": r.title,
+        "mode": r.mode,
         "created_at": r.created_at,
         "updated_at": r.updated_at,
     }
@@ -84,6 +92,14 @@ async def update_session_title(db: AsyncSession, session_id: str, title: str):
         update(Session)
         .where(Session.id == session_id)
         .values(title=title, updated_at=time.time())
+    )
+
+
+async def update_session_mode(db: AsyncSession, session_id: str, mode: str):
+    await db.execute(
+        update(Session)
+        .where(Session.id == session_id)
+        .values(mode=mode, updated_at=time.time())
     )
 
 

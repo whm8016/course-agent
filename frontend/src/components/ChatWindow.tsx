@@ -1,14 +1,15 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { FiSend } from 'react-icons/fi'
+import { FiSend, FiSquare } from 'react-icons/fi'
 import MessageBubble from './MessageBubble'
 import ImageUpload from './ImageUpload'
-import { chatStream, uploadImage, fetchMessages, saveMessage, createSession } from '../services/api'
-import type { Message, Session, SSEEvent, RagChunk, QuizData } from '../types'
+import { chatStream, uploadImage, fetchMessages, saveMessage, createSession, updateSessionMode } from '../services/api'
+import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode } from '../types'
 
 interface Props {
   courseId: string
   courseName: string
   sessionId: string | null
+  sessionMode?: ChatMode
   onSessionCreated: (session: Session) => void
 }
 
@@ -29,20 +30,35 @@ function rowToMessage(row: ApiMessageRow): Message {
   }
 }
 
-export default function ChatWindow({ courseId, courseName, sessionId, onSessionCreated }: Props) {
+const MODE_OPTIONS: Array<{ value: ChatMode; label: string }> = [
+  { value: 'chat', label: '通用问答' },
+  { value: 'deep_solve', label: '深度解题' },
+  { value: 'quiz', label: '测验出题' },
+  { value: 'research', label: '深度研究' },
+  { value: 'vision', label: '图像分析' },
+]
+
+export default function ChatWindow({ courseId, courseName, sessionId, sessionMode, onSessionCreated }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const [streamingStarted, setStreamingStarted] = useState(false)
   const [streamPhase, setStreamPhase] = useState<'retrieving' | 'generating' | null>(null)
+  const [isStopping, setIsStopping] = useState(false)
+  const [chatMode, setChatMode] = useState<ChatMode>('chat')
   const [imageFile, setImageFile] = useState<File | null>(null)
   const [imagePreview, setImagePreview] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
   const currentSessionRef = useRef<string | null>(sessionId)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     currentSessionRef.current = sessionId
   }, [sessionId])
+
+  useEffect(() => {
+    setChatMode(sessionMode || 'chat')
+  }, [sessionMode, sessionId])
 
   useEffect(() => {
     if (!sessionId) {
@@ -67,6 +83,12 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
     bottomRef.current?.scrollIntoView({ behavior: loading ? 'auto' : 'smooth' })
   }, [messages, loading])
 
+  useEffect(() => {
+    return () => {
+      abortControllerRef.current?.abort()
+    }
+  }, [])
+
   const handleImageSelect = (file: File) => {
     setImageFile(file)
     setImagePreview(URL.createObjectURL(file))
@@ -88,7 +110,7 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
     if (!activeSessionId) {
       try {
         const title = (text || '图片分析').slice(0, 20) || '新对话'
-        const session = await createSession(courseId, title)
+        const session = await createSession(courseId, title, chatMode)
         activeSessionId = session.id
         currentSessionRef.current = session.id
         onSessionCreated(session)
@@ -120,8 +142,11 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
     setInput('')
     clearImage()
     setLoading(true)
+    setIsStopping(false)
     setStreamingStarted(false)
     setStreamPhase('retrieving')
+    const controller = new AbortController()
+    abortControllerRef.current = controller
 
     const history = messages.map((m) => ({ role: m.role, content: m.content }))
 
@@ -130,14 +155,19 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
     let ragChunks: RagChunk[] = []
     let quizData: QuizData | undefined
     let intent = ''
+    let resolvedMode: ChatMode = chatMode
     let toolsUsed: string[] = []
+    let retrieveMode = ''
+    let retrieveStrategy = ''
 
-    await chatStream(
+    const streamResult = await chatStream(
       courseId,
       userMsg.content,
       history,
       uploadedPath,
       activeSessionId || undefined,
+      chatMode,
+      controller.signal,
       (event: SSEEvent) => {
         switch (event.type) {
           case 'thinking':
@@ -204,7 +234,10 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
 
           case 'done':
             intent = event.metadata?.intent || ''
+            resolvedMode = (event.metadata?.mode as ChatMode) || chatMode
             toolsUsed = event.metadata?.tools_used || []
+            retrieveMode = event.metadata?.retrieve_mode || ''
+            retrieveStrategy = event.metadata?.retrieve_strategy || ''
             break
 
           case 'error':
@@ -216,15 +249,27 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
         answerContent = `出错了: ${err}`
       },
     )
+    abortControllerRef.current = null
+
+    if (streamResult.aborted) {
+      setLoading(false)
+      setIsStopping(false)
+      setStreamingStarted(false)
+      setStreamPhase(null)
+      return
+    }
 
     const assistantMsg: Message = {
       role: 'assistant',
       content: answerContent,
       metadata: {
         intent,
+        mode: resolvedMode,
         chunks: ragChunks.length > 0 ? ragChunks : undefined,
         quiz: quizData,
         tools_used: toolsUsed.length > 0 ? toolsUsed : undefined,
+        retrieve_mode: retrieveMode || undefined,
+        retrieve_strategy: retrieveStrategy || undefined,
       },
     }
     // @ts-expect-error attach thinking steps for rendering
@@ -243,9 +288,12 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
         await saveMessage(activeSessionId, 'user', userMsg.content, 'text')
         await saveMessage(activeSessionId, 'assistant', answerContent, 'text', {
           intent,
+          mode: resolvedMode,
           tools_used: toolsUsed,
           chunks: ragChunks.length > 0 ? ragChunks : undefined,
           quiz: quizData,
+          retrieve_mode: retrieveMode || undefined,
+          retrieve_strategy: retrieveStrategy || undefined,
         })
       } catch {
         /* persistence is best-effort */
@@ -253,9 +301,27 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
     }
 
     setLoading(false)
+    setIsStopping(false)
     setStreamingStarted(false)
     setStreamPhase(null)
-  }, [input, imageFile, imagePreview, loading, messages, courseId, onSessionCreated])
+  }, [input, imageFile, imagePreview, loading, messages, courseId, onSessionCreated, chatMode])
+
+  const handleStop = () => {
+    if (!loading) return
+    setIsStopping(true)
+    abortControllerRef.current?.abort()
+  }
+
+  const handleModeChange = async (nextMode: ChatMode) => {
+    setChatMode(nextMode)
+    if (currentSessionRef.current) {
+      try {
+        await updateSessionMode(currentSessionRef.current, nextMode)
+      } catch {
+        // keep local mode even if update fails
+      }
+    }
+  }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -268,7 +334,20 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
     <div className="flex flex-col h-full">
       <div className="border-b border-slate-200 px-6 py-4 bg-white/80 backdrop-blur-sm">
         <h1 className="text-lg font-semibold text-slate-800">{courseName} - 学习助手</h1>
-        <p className="text-xs text-slate-400 mt-0.5">多 Agent 编排 · RAG 知识检索 · 智能出题</p>
+        <div className="flex items-center justify-between mt-1 gap-3">
+          <p className="text-xs text-slate-400">多 Agent 编排 · RAG 知识检索 · 智能出题</p>
+          <select
+            value={chatMode}
+            onChange={(e) => void handleModeChange(e.target.value as ChatMode)}
+            className="text-xs border border-slate-200 rounded-md px-2 py-1 bg-white text-slate-600"
+          >
+            {MODE_OPTIONS.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       <div className="flex-1 overflow-y-auto px-6 py-4 bg-slate-50/50">
@@ -323,11 +402,14 @@ export default function ChatWindow({ courseId, courseName, sessionId, onSessionC
             />
           </div>
           <button
-            onClick={handleSend}
-            disabled={loading || (!input.trim() && !imageFile)}
-            className="p-3 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            onClick={loading ? handleStop : handleSend}
+            disabled={isStopping || (!loading && !input.trim() && !imageFile)}
+            className={`p-3 rounded-xl text-white disabled:opacity-40 disabled:cursor-not-allowed transition ${
+              loading ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'
+            }`}
+            title={loading ? '停止生成' : '发送'}
           >
-            <FiSend size={18} />
+            {loading ? <FiSquare size={18} /> : <FiSend size={18} />}
           </button>
         </div>
       </div>
