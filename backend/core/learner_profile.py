@@ -89,7 +89,9 @@ async def update_learner_memory(
     assistant_answer: str,
 ):
     result = await db.execute(
-        select(User.summary_memory, User.profile_memory).where(User.id == user_id)
+        select(User.summary_memory, User.profile_memory)
+        .where(User.id == user_id)
+        .with_for_update()
     )
     row = result.first()
     if not row:

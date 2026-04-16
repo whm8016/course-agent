@@ -26,9 +26,10 @@ from config import DATABASE_URL
 
 engine = create_async_engine(
     DATABASE_URL,
-    pool_size=20,
-    max_overflow=10,
+    pool_size=int(__import__("os").getenv("DB_POOL_SIZE", "5")),
+    max_overflow=int(__import__("os").getenv("DB_MAX_OVERFLOW", "5")),
     pool_pre_ping=True,
+    pool_recycle=1800,
 )
 
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
@@ -107,10 +108,23 @@ async def _ensure_column(conn, table_name: str, column_name: str, ddl: str):
         await conn.execute(text(ddl))
 
 
+# Serialize DDL on PostgreSQL so multiple uvicorn workers cannot race on create_all
+# (each worker runs lifespan startup; without a lock several processes may emit CREATE TABLE).
+_PG_INIT_LOCK_KEY1 = 842_061_437
+_PG_INIT_LOCK_KEY2 = 3_291_021
+
+
 async def init_db():
     """Create all tables if they don't exist (idempotent)."""
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        if engine.dialect.name == "postgresql":
+            await conn.execute(
+                text("SELECT pg_advisory_xact_lock(:k1, :k2)"),
+                {"k1": _PG_INIT_LOCK_KEY1, "k2": _PG_INIT_LOCK_KEY2},
+            )
+        await conn.run_sync(
+            lambda sync_conn: Base.metadata.create_all(sync_conn, checkfirst=True)
+        )
         await _ensure_column(
             conn,
             "sessions",

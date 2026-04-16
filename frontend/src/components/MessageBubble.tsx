@@ -50,17 +50,34 @@ export default function MessageBubble({ message, thinkingSteps }: Props) {
           <QuizCard quiz={message.metadata.quiz} />
         )}
 
+        {message.metadata?.guardrail && !message.metadata.guardrail.safe && (
+          <div className="mt-2 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-700">
+            <span className="font-medium">安全提示：</span>{message.metadata.guardrail.tip}
+          </div>
+        )}
+
+        {message.metadata?.hallucination && message.metadata.hallucination.tip && (
+          <div className="mt-2 px-3 py-1.5 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-700">
+            <span className="font-medium">可信度：</span>
+            {message.metadata.hallucination.tip}
+            {message.metadata.hallucination.confidence > 0 && (
+              <span className="ml-1 text-blue-500">
+                ({Math.round(message.metadata.hallucination.confidence * 100)}%)
+              </span>
+            )}
+          </div>
+        )}
+
         {message.metadata?.intent && (
           <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
-            {message.metadata.mode === 'chat' && <span>💬 通用问答</span>}
-            {message.metadata.mode === 'deep_solve' && <span>🧠 深度解题</span>}
-            {message.metadata.mode === 'research' && <span>🔎 深度研究</span>}
-            {message.metadata.mode === 'quiz' && <span>📝 测验模式</span>}
-            {message.metadata.mode === 'vision' && <span>🖼️ 图像分析</span>}
+            {message.metadata.intent === 'chitchat' && <span>💬 闲聊</span>}
+            {message.metadata.intent === 'knowledge' && <span>📖 知识问答</span>}
             {message.metadata.intent === 'teach' && <span>📖 知识问答</span>}
             {message.metadata.intent === 'quiz' && <span>📝 测验模式</span>}
             {message.metadata.intent === 'summarize' && <span>📋 学习总结</span>}
             {message.metadata.intent === 'vision' && <span>🔍 图像分析</span>}
+            {message.metadata.mode === 'deep_solve' && <span>🧠 深度解题</span>}
+            {message.metadata.mode === 'research' && <span>🔎 深度研究</span>}
             {message.metadata.tools_used && message.metadata.tools_used.length > 0 && (
               <span className="text-slate-300">
                 · 使用了 {message.metadata.tools_used.join(', ')}

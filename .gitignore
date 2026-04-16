@@ -30,6 +30,7 @@ htmlcov/
 backend/uploads/
 backend/vectorstore/
 backend/data/
+backend/lightrag_store/
 *.db
 *.sqlite3
 

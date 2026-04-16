@@ -22,12 +22,28 @@ export interface QuizData {
   questions: QuizQuestion[]
 }
 
+export interface GuardrailInfo {
+  safe: boolean
+  risk_type: string
+  risk_score: number
+  tip: string
+}
+
+export interface HallucinationInfo {
+  grounded: boolean
+  confidence: number
+  tip: string
+}
+
 export interface AgentMetadata {
   intent?: string
+  intent_confidence?: number
   mode?: string
   tools_used?: string[]
   retrieve_mode?: string
   retrieve_strategy?: string
+  guardrail?: GuardrailInfo
+  hallucination?: HallucinationInfo
 }
 
 export interface SSEEvent {
@@ -47,6 +63,7 @@ export interface Message {
   type?: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'quiz'
   metadata?: {
     intent?: string
+    intent_confidence?: number
     tool?: string
     toolInput?: Record<string, unknown>
     chunks?: RagChunk[]
@@ -55,6 +72,8 @@ export interface Message {
     mode?: string
     retrieve_mode?: string
     retrieve_strategy?: string
+    guardrail?: GuardrailInfo
+    hallucination?: HallucinationInfo
   }
 }
 

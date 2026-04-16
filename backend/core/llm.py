@@ -65,7 +65,10 @@ async def chat_stream(
     model = VISION_MODEL if image_path else TEXT_MODEL
     messages = _build_messages(system_prompt, history, user_message, image_path)
 
-    logger.info("LLM stream start model=%s msg_count=%d", model, len(messages))
+    logger.info(
+        "LLM stream start model=%s msg_count=%d has_image=%s user_msg=「%s」",
+        model, len(messages), bool(image_path), user_message[:80],
+    )
     stream = await client.chat.completions.create(
         model=model,
         messages=messages,

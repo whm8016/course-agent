@@ -1,6 +1,6 @@
 from __future__ import annotations
-
 import asyncio
+
 import logging
 import os
 import time
@@ -47,8 +47,11 @@ except Exception as exc:  # pragma: no cover - import availability branch
 
 _instances: dict[str, Any] = {}
 _init_locks: dict[str, asyncio.Lock] = {}
+_index_locks: dict[str, asyncio.Lock] = {}
 _index_signatures: dict[str, tuple[str, ...]] = {}
 _last_auto_index_at: dict[str, float] = {}
+_AUTO_INDEX_STATE_DIR = Path(LIGHTRAG_WORKDIR) / ".auto_index_state"
+_AUTO_INDEX_LOCK_DIR = Path(LIGHTRAG_WORKDIR) / ".auto_index_locks"
 
 # DashScope compatible API rejects oversized input (>30720).
 # Use conservative hard caps even if .env config is too aggressive.
@@ -59,7 +62,9 @@ _SAFE_MAX_ENTITY_TOKENS = min(int(os.getenv("LIGHTRAG_MAX_ENTITY_TOKENS", "4000"
 _SAFE_MAX_RELATION_TOKENS = min(int(os.getenv("LIGHTRAG_MAX_RELATION_TOKENS", "4000")), 6000)
 _SAFE_MAX_HISTORY_MESSAGES = int(os.getenv("LIGHTRAG_MAX_HISTORY_MESSAGES", "8"))
 _SAFE_MAX_HISTORY_CHARS = int(os.getenv("LIGHTRAG_MAX_HISTORY_CHARS", "8000"))
+
 _AUTO_INDEX_TTL_SEC = max(0, LIGHTRAG_AUTO_INDEX_TTL_SEC)
+
 _STREAM_CONTEXT_LIMIT = max(1, LIGHTRAG_STREAM_CONTEXT_LIMIT)
 _STREAM_CONTEXT_MAX_CHARS = max(200, LIGHTRAG_STREAM_CONTEXT_MAX_CHARS)
 
@@ -136,6 +141,8 @@ def _build_signature(file_paths: list[str]) -> tuple[str, ...]:
         stat = path.stat()
         signature.append(f"{file_path}|{stat.st_mtime_ns}|{stat.st_size}")
     return tuple(signature)
+
+
 
 
 def _collect_course_docs(source_dir: Path, course_id: str) -> tuple[list[str], list[str], list[str]]:
@@ -259,19 +266,15 @@ def _cap_history(messages: list[dict[str, str]]) -> list[dict[str, str]]:
     return capped
 
 
-async def query_with_lightrag(
-    course_id: str,
-    message: str,
-    history: list[dict] | None = None,
-    mode: str | None = None,
-) -> dict[str, Any]:
-    rag = await _get_instance(course_id)
-    await index_course_with_lightrag(course_id)
-
+def _build_query_param(
+    mode: str,
+    history: list[dict] | None,
+    *,
+    only_need_context: bool = False,
+):
     assert QueryParam is not None
-    query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
     param = QueryParam(
-        mode=query_mode,
+        mode=mode,
         top_k=_SAFE_TOP_K,
         chunk_top_k=_SAFE_CHUNK_TOP_K,
         max_total_tokens=_SAFE_MAX_TOTAL_TOKENS,
@@ -280,7 +283,50 @@ async def query_with_lightrag(
         conversation_history=_cap_history(_normalize_history(history)),
         enable_rerank=LIGHTRAG_ENABLE_RERANK,
     )
-    result = await rag.aquery(message, param=param)
+    if only_need_context:
+        # Compatible with multiple LightRAG versions.
+        if hasattr(param, "only_need_context"):
+            setattr(param, "only_need_context", True)
+        if hasattr(param, "return_context_only"):
+            setattr(param, "return_context_only", True)
+        if hasattr(param, "need_response"):
+            setattr(param, "need_response", False)
+    return param
+
+
+def _extract_contexts(result: Any) -> list[Any]:
+    if isinstance(result, list):
+        return result
+    if isinstance(result, str):
+        text = result.strip()
+        return [text] if text else []
+    if isinstance(result, dict):
+        for key in ("contexts", "context", "chunks", "references", "data"):
+            value = result.get(key)
+            if isinstance(value, list):
+                return value
+            if isinstance(value, dict):
+                return [value]
+            if isinstance(value, str) and value.strip():
+                return [value.strip()]
+    return []
+
+
+async def query_with_lightrag(
+    course_id: str,
+    message: str,
+    history: list[dict] | None = None,
+    mode: str | None = None,
+) -> dict[str, Any]:
+    rag = await _get_instance(course_id)
+    
+    await index_course_with_lightrag(course_id)
+
+    query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
+    param = _build_query_param(query_mode, history, only_need_context=False)
+    result = await rag.aquery(message, param=param) 
+
+    logger.info('query_with_lightrag result', result)
 
     if isinstance(result, dict):
         answer = (
@@ -289,11 +335,11 @@ async def query_with_lightrag(
             or result.get("content")
             or ""
         )
-        contexts = result.get("contexts") or result.get("context") or []
+        contexts = _extract_contexts(result)
     else:
         answer = str(result)
-        contexts = []
-
+        contexts = _extract_contexts(result)
+    logger.info('query_with_lightrag contexts', contexts)
     return {
         "answer": answer,
         "contexts": contexts,
@@ -334,58 +380,46 @@ async def retrieve_with_lightrag(
     Retrieve contexts from LightRAG first.
     Prefer context-only retrieval if supported by installed LightRAG version.
     """
+    logger.info(
+        "retrieve_with_lightrag course=%s mode=%s query=「%s」",
+        course_id, mode, message[:80],
+    )
     rag = await _get_instance(course_id)
-    now = time.monotonic()
-    last_index = _last_auto_index_at.get(course_id, 0.0)
-    if _AUTO_INDEX_TTL_SEC == 0 or (now - last_index) >= _AUTO_INDEX_TTL_SEC:
-        index_t0 = time.perf_counter()
-        index_result = await index_course_with_lightrag(course_id)
-        _last_auto_index_at[course_id] = now
-        logger.info(
-            "LightRAG auto-index course=%s skipped=%s elapsed_ms=%d",
-            course_id,
-            index_result.get("skipped"),
-            int((time.perf_counter() - index_t0) * 1000),
-        )
+    idx_lock = _index_locks.setdefault(course_id, asyncio.Lock())
+    async with idx_lock:
+        now = time.monotonic()
+        last_index = _last_auto_index_at.get(course_id, 0.0)
+        if _AUTO_INDEX_TTL_SEC == 0 or (now - last_index) >= _AUTO_INDEX_TTL_SEC:
+            index_t0 = time.perf_counter()
+            index_result = await index_course_with_lightrag(course_id)
+            _last_auto_index_at[course_id] = now
+            logger.info(
+                "LightRAG auto-index course=%s skipped=%s elapsed_ms=%d",
+                course_id,
+                index_result.get("skipped"),
+                int((time.perf_counter() - index_t0) * 1000),
+            )
 
-    assert QueryParam is not None
     query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
-    param = QueryParam(
-        mode=query_mode,
-        top_k=_SAFE_TOP_K,
-        chunk_top_k=_SAFE_CHUNK_TOP_K,
-        max_total_tokens=_SAFE_MAX_TOTAL_TOKENS,
-        max_entity_tokens=_SAFE_MAX_ENTITY_TOKENS,
-        max_relation_tokens=_SAFE_MAX_RELATION_TOKENS,
-        conversation_history=_cap_history(_normalize_history(history)),
-        enable_rerank=LIGHTRAG_ENABLE_RERANK,
-    )
-   
-    logger.info("QueryParam: %s", param)
-    result: Any = None
-    retrieve_strategy = "aquery_fallback"
+    param = _build_query_param(query_mode, history, only_need_context=False)
+    context_param = _build_query_param(query_mode, history, only_need_context=True)
 
-    context_only_kwargs = (
-        {"param": param, "only_need_context": True},
-        {"param": param, "return_context_only": True},
-        {"param": param, "need_response": False},
-    )
-    for kwargs in context_only_kwargs:
-        try:
-            result = await rag.aquery(message, **kwargs)
-            retrieve_strategy = "aquery_context_only"
-            break
-        except TypeError:
-            continue
-
-    if result is None:
+    logger.info("QueryParam: %s", context_param)
+    retrieve_strategy = "aquery_context_param"
+    try:
+        result: Any = await rag.aquery(message, param=context_param)
+    except TypeError:
+        retrieve_strategy = "aquery_fallback"
         result = await rag.aquery(message, param=param)
 
-    if isinstance(result, dict):
-        contexts = result.get("contexts") or result.get("context") or []
-    else:
-        contexts = []
+    contexts = _extract_contexts(result)
+    if not contexts and isinstance(result, dict):
+        logger.info("LightRAG empty contexts keys=%s", sorted(result.keys()))
 
+    logger.info(
+        "retrieve_with_lightrag done strategy=%s contexts=%d query=「%s」",
+        retrieve_strategy, len(contexts), message[:50],
+    )
     return {
         "contexts": contexts,
         "mode": query_mode,
@@ -399,13 +433,20 @@ async def stream_answer_with_contexts(
     contexts: list[Any] | None = None,
     history: list[dict] | None = None,
     memory_context: str = "",
+    guardrail_warning: str = "",
 ) -> AsyncGenerator[str, None]:
     """
     Generate answer tokens with project LLM stream using retrieved contexts.
     """
+    logger.info(
+        "stream_answer_with_contexts course=%s contexts=%d guardrail_warn=%s query=「%s」",
+        course_id, len(contexts or []), bool(guardrail_warning), message[:80],
+    )
     system_prompt = get_course_prompt(course_id)
     if memory_context:
         system_prompt += f"\n\n{memory_context}"
+    if guardrail_warning:
+        system_prompt += f"\n\n【安全提示】{guardrail_warning}请围绕课程内容回答，拒绝不当请求。"
     context_block = _format_contexts_for_prompt(contexts or [])
     if context_block:
         system_prompt += (

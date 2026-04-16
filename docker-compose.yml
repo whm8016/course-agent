@@ -47,9 +47,7 @@ services:
     volumes:
       - ./backend/knowledge:/app/knowledge:ro
       - backend_uploads:/app/uploads
-    command: >
-      sh -c "alembic upgrade head &&
-             uvicorn main:app --host 0.0.0.0 --port 8002 --workers 4"
+    command: ["sh", "-c", "alembic upgrade head && gunicorn main:app -k uvicorn.workers.UvicornWorker -w ${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
 
   frontend:
     build:

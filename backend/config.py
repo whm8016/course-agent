@@ -21,8 +21,8 @@ else:
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 DASHSCOPE_BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
-TEXT_MODEL = os.getenv("TEXT_MODEL", "qwen-max")
-VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-max")
+TEXT_MODEL = os.getenv("TEXT_MODEL", "qwen-plus")
+VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-plus")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
 
 # ---------------------------------------------------------------------------

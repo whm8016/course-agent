@@ -23,7 +23,16 @@ from core.lightrag_engine import (
     retrieve_with_lightrag,
     stream_answer_with_contexts,
 )
+from core.llm import chat_stream
 from core.orchestrator import normalize_mode
+from core.prompts import get_course_prompt
+from core.safety_pipeline import (
+    INTENT_CHITCHAT,
+    INTENT_KNOWLEDGE,
+    classify_intent,
+    evaluate_guardrail,
+    evaluate_hallucination,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +40,7 @@ router = APIRouter()
 limiter = Limiter(key_func=get_remote_address, storage_uri=REDIS_URL)
 
 MAX_MESSAGE_LENGTH = 2000
-MAX_HISTORY_LENGTH = 50
+MAX_HISTORY_LENGTH = 20
 TOOL_RESULT_CONTEXT_LIMIT = 4
 TOOL_RESULT_CONTEXT_MAX_CHARS = 300
 
@@ -61,7 +70,7 @@ class IndexBody(BaseModel):
 
 
 @router.post("/chat/lightrag")
-@limiter.limit("20/minute")
+@limiter.limit("200/minute")
 async def chat_with_lightrag(
     request: Request,
     user: dict = Depends(get_current_user),
@@ -90,64 +99,157 @@ async def chat_with_lightrag(
         history = history[-MAX_HISTORY_LENGTH:]
 
     logger.info(
-        "[trace=%s] POST /api/chat/lightrag user=%s course=%s msg_len=%d session=%s mode=%s",
-        trace_id, user["id"], course_id, len(message), session_id, mode,
+        "[trace=%s] POST /api/chat/lightrag user=%s course=%s session=%s chat_mode=%s rag_mode=%s question=「%s」",
+        trace_id, user["id"], course_id, session_id, chat_mode, mode, message[:120],
     )
 
     async def event_generator():
         answer = ""
         try:
-            logger.info("[trace=%s] retrieve_start t=%dms", trace_id, elapsed_ms())
             if await request.is_disconnected():
                 logger.info("[trace=%s] client already disconnected before stream start", trace_id)
                 return
-            yield f"data: {json.dumps({'type': 'thinking', 'content': '正在使用 LightRAG 检索知识图谱与向量证据...'}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'lightrag_query', 'input': {'course_id': course_id, 'mode': mode or 'mix'}}, ensure_ascii=False)}\n\n"
 
-            retrieve_result = await asyncio.wait_for(
-                retrieve_with_lightrag(course_id=course_id, message=message, history=history, mode=mode),
-                timeout=LIGHTRAG_TIMEOUT_SEC,
-            )
-
-            contexts = retrieve_result.get("contexts") or []
+            # ── Step 1: Intent classification ────────────────────────
+            intent_result = await classify_intent(message, history)
             logger.info(
-                "[trace=%s] retrieve_end t=%dms strategy=%s contexts=%d",
-                trace_id,
-                elapsed_ms(),
-                retrieve_result.get("retrieve_strategy", "unknown"),
-                len(contexts),
+                "[trace=%s] intent=%s confidence=%.2f reason=%s t=%dms",
+                trace_id, intent_result.intent, intent_result.confidence,
+                intent_result.reason, elapsed_ms(),
             )
-            if contexts:
-                compact_contexts = _compact_contexts_for_sse(contexts)
-                yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'lightrag_query', 'contexts': compact_contexts}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'thinking', 'content': f'意图识别: {intent_result.intent}'}, ensure_ascii=False)}\n\n"
 
-            answer_parts: list[str] = []
-            first_token_logged = False
-            async for token in stream_answer_with_contexts(
-                course_id=course_id,
-                message=message,
-                contexts=contexts,
-                history=history,
-                memory_context=build_memory_context(user),
-            ):
-                if await request.is_disconnected():
-                    logger.info("[trace=%s] client disconnected during token stream", trace_id)
-                    return
-                if not first_token_logged:
-                    logger.info("[trace=%s] first_token t=%dms", trace_id, elapsed_ms())
-                    first_token_logged = True
-                answer_parts.append(token)
-                yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+            # ── Step 2: Safety guardrail ──────────────────────────────
+            guard_result = evaluate_guardrail(message)
+            guardrail_dict = guard_result.to_dict()
+            logger.info(
+                "[trace=%s] guardrail safe=%s risk_type=%s score=%.2f t=%dms",
+                trace_id, guard_result.safe, guard_result.risk_type,
+                guard_result.risk_score, elapsed_ms(),
+            )
 
-            answer = "".join(answer_parts)
+            if not guard_result.safe:
+                logger.warning(
+                    "[trace=%s] guardrail BLOCKED risk=%s score=%.2f question=「%s」",
+                    trace_id, guard_result.risk_type, guard_result.risk_score,
+                    message[:80],
+                )
+
+            # ── Step 3: Route by intent ──────────────────────────────
+            contexts: list = []
+            retrieve_result: dict = {}
+            hallucination_dict: dict = {}
+
+            if intent_result.intent == INTENT_CHITCHAT:
+                logger.info(
+                    "[trace=%s] ▶ route=chitchat (skip RAG, direct LLM) t=%dms",
+                    trace_id, elapsed_ms(),
+                )
+                yield f"data: {json.dumps({'type': 'thinking', 'content': '闲聊模式，直接回复...'}, ensure_ascii=False)}\n\n"
+
+                system_prompt = get_course_prompt(course_id)
+                mem_ctx = build_memory_context(user)
+                if mem_ctx:
+                    system_prompt += f"\n\n{mem_ctx}"
+                if not guard_result.safe:
+                    system_prompt += "\n\n【安全提示】请围绕课程内容回答，拒绝不当请求。"
+
+                from core.lightrag_engine import _normalize_history, _cap_history
+                safe_history = _cap_history(_normalize_history(history))
+
+                answer_parts: list[str] = []
+                first_token_logged = False
+                async for token in chat_stream(
+                    system_prompt=system_prompt,
+                    history=safe_history,
+                    user_message=message,
+                    image_path=None,
+                ):
+                    if await request.is_disconnected():
+                        return
+                    if not first_token_logged:
+                        logger.info("[trace=%s] first_token t=%dms", trace_id, elapsed_ms())
+                        first_token_logged = True
+                    answer_parts.append(token)
+                    yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+
+                answer = "".join(answer_parts)
+
+            else:
+                logger.info(
+                    "[trace=%s] ▶ route=knowledge (full RAG pipeline) t=%dms",
+                    trace_id, elapsed_ms(),
+                )
+                logger.info("[trace=%s] LightRAG retrieve_start t=%dms", trace_id, elapsed_ms())
+                yield f"data: {json.dumps({'type': 'thinking', 'content': '正在使用 LightRAG 检索知识图谱与向量证据...'}, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'lightrag_query', 'input': {'course_id': course_id, 'mode': mode or 'mix'}}, ensure_ascii=False)}\n\n"
+
+                retrieve_result = await asyncio.wait_for(
+                    retrieve_with_lightrag(course_id=course_id, message=message, history=history, mode=mode),
+                    timeout=LIGHTRAG_TIMEOUT_SEC,
+                )
+
+                contexts = retrieve_result.get("contexts") or []
+                logger.info(
+                    "[trace=%s] retrieve_end t=%dms strategy=%s contexts=%d",
+                    trace_id, elapsed_ms(),
+                    retrieve_result.get("retrieve_strategy", "unknown"),
+                    len(contexts),
+                    'retrive_result',contexts,
+                )
+                if contexts:
+                    compact_contexts = _compact_contexts_for_sse(contexts)
+                    yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'lightrag_query', 'contexts': compact_contexts}, ensure_ascii=False)}\n\n"
+
+                answer_parts = []
+                first_token_logged = False
+                async for token in stream_answer_with_contexts(
+                    course_id=course_id,
+                    message=message,
+                    contexts=contexts,
+                    history=history,
+                    memory_context=build_memory_context(user),
+                    guardrail_warning=guard_result.tip if not guard_result.safe else "",
+                ):
+                    if await request.is_disconnected():
+                        logger.info("[trace=%s] client disconnected during token stream", trace_id)
+                        return
+                    if not first_token_logged:
+                        logger.info("[trace=%s] first_token t=%dms", trace_id, elapsed_ms())
+                        first_token_logged = True
+                    answer_parts.append(token)
+                    yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+
+                answer = "".join(answer_parts)
+
+                # ── Step 4: Hallucination detection (knowledge path only)
+                hallu_result = await evaluate_hallucination(answer, contexts)
+                hallucination_dict = hallu_result.to_dict()
+                logger.info(
+                    "[trace=%s] hallucination grounded=%s confidence=%.2f t=%dms",
+                    trace_id, hallu_result.grounded, hallu_result.confidence, elapsed_ms(),
+                )
+
             yield f"data: {json.dumps({'type': 'answer', 'content': answer}, ensure_ascii=False)}\n\n"
-            logger.info("[trace=%s] done t=%dms answer_chars=%d", trace_id, elapsed_ms(), len(answer))
-            metadata = {
+            logger.info(
+                "[trace=%s] ✅ DONE intent=%s answer_chars=%d total_time=%dms question=「%s」",
+                trace_id, intent_result.intent, len(answer), elapsed_ms(),
+                message[:60],
+            )
+
+            metadata: dict[str, object] = {
                 "engine": "lightrag",
                 "mode": chat_mode,
-                "retrieve_mode": retrieve_result.get("mode", "mix"),
-                "retrieve_strategy": retrieve_result.get("retrieve_strategy", "unknown"),
+                "intent": intent_result.intent,
+                "intent_confidence": intent_result.confidence,
+                "guardrail": guardrail_dict,
             }
+            if retrieve_result:
+                metadata["retrieve_mode"] = retrieve_result.get("mode", "mix")
+                metadata["retrieve_strategy"] = retrieve_result.get("retrieve_strategy", "unknown")
+            if hallucination_dict:
+                metadata["hallucination"] = hallucination_dict
+
             await update_learner_memory(
                 db,
                 user["id"],

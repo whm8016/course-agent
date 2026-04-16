@@ -22,7 +22,7 @@ router = APIRouter()
 limiter = Limiter(key_func=get_remote_address, storage_uri=REDIS_URL)
 
 MAX_MESSAGE_LENGTH = 2000
-MAX_HISTORY_LENGTH = 50
+MAX_HISTORY_LENGTH = 20
 
 
 @router.post("/chat")
@@ -46,8 +46,8 @@ async def chat(
         history = history[-MAX_HISTORY_LENGTH:]
 
     logger.info(
-        "POST /api/chat user=%s course=%s msg_len=%d session=%s",
-        user["id"], course_id, len(message), session_id,
+        "POST /api/chat user=%s course=%s mode=%s session=%s question=「%s」",
+        user["id"], course_id, mode, session_id, message[:120],
     )
 
     async def event_generator():

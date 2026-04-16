@@ -1,0 +1,14 @@
+---
+description: User-facing chat math — avoid LaTeX; use plain text / Unicode so formulas render everywhere.
+alwaysApply: true
+---
+
+# 聊天与说明里的公式写法
+
+在 Cursor 对话里，LaTeX（`\( \)`、`\[ \]`、`$$`、`\text{}` 等）经常不会渲染，用户会看到原始命令，体验很差。
+
+要求：
+
+1. 对用户说明、估算、容量公式等，用纯文本写清楚，例如：`4 个 worker × (pool_size + max_overflow) ≈ 40 条到库连接`。
+2. 可用 Unicode：`× ± ≤ ≥ ≠`；需要时用反引号包伪公式片段，例如 `pool_size + max_overflow`。
+3. 不要为了「好看」在聊天里写 LaTeX；项目内 Markdown 若明确在支持 KaTeX/MathJax 的渲染器里发布，可单独按文档场景处理（本规则主要针对对话回复）。

@@ -3,7 +3,7 @@ import { FiSend, FiSquare } from 'react-icons/fi'
 import MessageBubble from './MessageBubble'
 import ImageUpload from './ImageUpload'
 import { chatStream, uploadImage, fetchMessages, saveMessage, createSession, updateSessionMode } from '../services/api'
-import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode } from '../types'
+import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode, GuardrailInfo, HallucinationInfo } from '../types'
 
 interface Props {
   courseId: string
@@ -49,6 +49,8 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
   const [imageFile, setImageFile] = useState<File | null>(null)
   const [imagePreview, setImagePreview] = useState<string | null>(null)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const isUserNearBottomRef = useRef(true)
   const currentSessionRef = useRef<string | null>(sessionId)
   const abortControllerRef = useRef<AbortController | null>(null)
 
@@ -79,8 +81,18 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
     }
   }, [sessionId])
 
+  const handleScroll = useCallback(() => {
+    const el = scrollContainerRef.current
+    if (!el) return
+    const threshold = 80
+    isUserNearBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < threshold
+  }, [])
+
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: loading ? 'auto' : 'smooth' })
+    if (isUserNearBottomRef.current) {
+      bottomRef.current?.scrollIntoView({ behavior: loading ? 'auto' : 'smooth' })
+    }
   }, [messages, loading])
 
   useEffect(() => {
@@ -138,6 +150,7 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
       image: displayUrl,
     }
 
+    isUserNearBottomRef.current = true
     setMessages((prev) => [...prev, userMsg])
     setInput('')
     clearImage()
@@ -155,10 +168,13 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
     let ragChunks: RagChunk[] = []
     let quizData: QuizData | undefined
     let intent = ''
+    let intentConfidence = 0
     let resolvedMode: ChatMode = chatMode
     let toolsUsed: string[] = []
     let retrieveMode = ''
     let retrieveStrategy = ''
+    let guardrail: GuardrailInfo | undefined
+    let hallucination: HallucinationInfo | undefined
 
     const streamResult = await chatStream(
       courseId,
@@ -234,10 +250,13 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
 
           case 'done':
             intent = event.metadata?.intent || ''
+            intentConfidence = event.metadata?.intent_confidence || 0
             resolvedMode = (event.metadata?.mode as ChatMode) || chatMode
             toolsUsed = event.metadata?.tools_used || []
             retrieveMode = event.metadata?.retrieve_mode || ''
             retrieveStrategy = event.metadata?.retrieve_strategy || ''
+            guardrail = event.metadata?.guardrail
+            hallucination = event.metadata?.hallucination
             break
 
           case 'error':
@@ -264,12 +283,15 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
       content: answerContent,
       metadata: {
         intent,
+        intent_confidence: intentConfidence || undefined,
         mode: resolvedMode,
         chunks: ragChunks.length > 0 ? ragChunks : undefined,
         quiz: quizData,
         tools_used: toolsUsed.length > 0 ? toolsUsed : undefined,
         retrieve_mode: retrieveMode || undefined,
         retrieve_strategy: retrieveStrategy || undefined,
+        guardrail,
+        hallucination,
       },
     }
     // @ts-expect-error attach thinking steps for rendering
@@ -288,12 +310,15 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
         await saveMessage(activeSessionId, 'user', userMsg.content, 'text')
         await saveMessage(activeSessionId, 'assistant', answerContent, 'text', {
           intent,
+          intent_confidence: intentConfidence || undefined,
           mode: resolvedMode,
           tools_used: toolsUsed,
           chunks: ragChunks.length > 0 ? ragChunks : undefined,
           quiz: quizData,
           retrieve_mode: retrieveMode || undefined,
           retrieve_strategy: retrieveStrategy || undefined,
+          guardrail,
+          hallucination,
         })
       } catch {
         /* persistence is best-effort */
@@ -350,7 +375,7 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-6 py-4 bg-slate-50/50">
+      <div ref={scrollContainerRef} onScroll={handleScroll} className="flex-1 overflow-y-auto px-6 py-4 bg-slate-50/50">
         {messages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-slate-400">
             <div className="text-5xl mb-4">💬</div>
