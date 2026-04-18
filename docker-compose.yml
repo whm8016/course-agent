@@ -48,6 +48,12 @@ services:
       - ./backend/knowledge:/app/knowledge:ro
       - backend_uploads:/app/uploads
     command: ["sh", "-c", "alembic upgrade head && gunicorn main:app -k uvicorn.workers.UvicornWorker -w ${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/api/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   frontend:
     build:

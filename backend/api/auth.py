@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import logging
-from fastapi import Request
-from fastapi import APIRouter, Depends, HTTPException, Header
+
+from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -15,6 +15,7 @@ from core.auth import (
     get_user_by_id,
 )
 from core.database import get_db
+from core.limiter import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,8 @@ async def get_optional_user(
 # ---------------------------------------------------------------------------
 
 @router.post("/register")
-async def register(body: RegisterBody, db: AsyncSession = Depends(get_db)):
+@limiter.limit("10/minute")
+async def register(request: Request, body: RegisterBody, db: AsyncSession = Depends(get_db)):
     try:
         user = await create_user(db, body.username, body.password, body.display_name)
     except ValueError as e:
@@ -80,21 +82,12 @@ async def register(body: RegisterBody, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/login")
+@limiter.limit("15/minute")
 async def login(
-    body: LoginBody,
     request: Request,
+    body: LoginBody,
     db: AsyncSession = Depends(get_db),
 ):
-    print(request.url)
-    print(request.headers)
-    
-    print(request.method)
-    print(request.url.path)
-    print(request.query_params)
-    print(request.client)
-
-    print(request.cookies)
-    print(request.headers)
     user = await authenticate_user(db, body.username, body.password)
     if not user:
         raise HTTPException(status_code=401, detail="用户名或密码错误")

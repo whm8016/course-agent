@@ -20,3 +20,5 @@ asyncpg
 redis
 alembic
 lightrag-hku
+python-json-logger
+prometheus-fastapi-instrumentator

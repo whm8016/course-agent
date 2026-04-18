@@ -32,7 +32,7 @@ from core.llm import client as async_openai_client
 
 logger = logging.getLogger(__name__)
 
-_LLM_SEMAPHORE = asyncio.Semaphore(int(__import__("os").getenv("MAX_CONCURRENT_LLM", "10")))
+_LLM_SEMAPHORE = asyncio.Semaphore(int(__import__("os").getenv("MAX_CONCURRENT_LLM", "25")))
 
 
 def _merge_events(existing: list[dict], new: list[dict]) -> list[dict]:

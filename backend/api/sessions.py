@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
+from core.cache import cache_delete, cache_get, cache_set
 from core.database import get_db
 from core.memory import (
     add_message,
@@ -19,6 +20,8 @@ from core.memory import (
 from core.orchestrator import normalize_mode
 
 router = APIRouter()
+
+_SESSION_LIST_TTL = 30
 
 
 class CreateSessionBody(BaseModel):
@@ -52,13 +55,23 @@ async def _check_session_owner(db: AsyncSession, session_id: str, user_id: str) 
     return session
 
 
+def _sessions_cache_key(user_id: str, course_id: str | None) -> str:
+    return f"sessions:{user_id}:{course_id or 'all'}"
+
+
 @router.get("/sessions")
 async def api_list_sessions(
     course_id: str | None = None,
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    return {"sessions": await list_sessions(db, course_id, user_id=user["id"])}
+    ck = _sessions_cache_key(user["id"], course_id)
+    cached = await cache_get(ck)
+    if cached is not None:
+        return cached
+    result = {"sessions": await list_sessions(db, course_id, user_id=user["id"])}
+    await cache_set(ck, result, ttl=_SESSION_LIST_TTL)
+    return result
 
 
 @router.post("/sessions")
@@ -74,6 +87,8 @@ async def api_create_session(
         user_id=user["id"],
         mode=normalize_mode(body.mode),
     )
+    from core.cache import cache_delete_pattern
+    await cache_delete_pattern(f"sessions:{user['id']}:*")
     return session
 
 
@@ -95,6 +110,8 @@ async def api_update_session(
 ):
     await _check_session_owner(db, session_id, user["id"])
     await update_session_title(db, session_id, body.title)
+    from core.cache import cache_delete_pattern
+    await cache_delete_pattern(f"sessions:{user['id']}:*")
     return {"ok": True}
 
 
@@ -118,6 +135,8 @@ async def api_delete_session(
 ):
     await _check_session_owner(db, session_id, user["id"])
     await delete_session(db, session_id)
+    from core.cache import cache_delete_pattern
+    await cache_delete_pattern(f"sessions:{user['id']}:*")
     return {"ok": True}
 
 

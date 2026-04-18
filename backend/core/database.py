@@ -26,8 +26,8 @@ from config import DATABASE_URL
 
 engine = create_async_engine(
     DATABASE_URL,
-    pool_size=int(__import__("os").getenv("DB_POOL_SIZE", "5")),
-    max_overflow=int(__import__("os").getenv("DB_MAX_OVERFLOW", "5")),
+    pool_size=int(__import__("os").getenv("DB_POOL_SIZE", "10")),
+    max_overflow=int(__import__("os").getenv("DB_MAX_OVERFLOW", "15")),
     pool_pre_ping=True,
     pool_recycle=1800,
 )

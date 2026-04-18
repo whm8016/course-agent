@@ -4,20 +4,27 @@ import logging
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+from pythonjsonlogger import jsonlogger
+
+_log_handler = logging.StreamHandler()
+_log_handler.setFormatter(
+    jsonlogger.JsonFormatter(
+        fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+        rename_fields={"asctime": "timestamp", "levelname": "level"},
+    )
 )
+logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from prometheus_fastapi_instrumentator import Instrumentator
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
+from slowapi.middleware import SlowAPIMiddleware
 
 from api.auth import router as auth_router
 from api.chat import router as chat_router
@@ -28,10 +35,9 @@ from api.sessions import router as sessions_router
 from api.sse import router as sse_router
 from config import UPLOAD_DIR, ALLOWED_ORIGINS, REDIS_URL
 from core.database import init_db, close_db
+from core.limiter import limiter
 
 logger = logging.getLogger(__name__)
-
-limiter = Limiter(key_func=get_remote_address, storage_uri=REDIS_URL)
 
 
 @asynccontextmanager
@@ -46,6 +52,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="课程学习Agent", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,6 +61,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+Instrumentator(
+    excluded_handlers=["/api/health", "/metrics"],
+).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
 app.include_router(auth_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
@@ -68,4 +79,30 @@ app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 @app.get("/api/health")
 async def health():
-    return {"status": "ok"}
+    checks: dict[str, str] = {}
+
+    # DB check
+    try:
+        from core.database import engine
+        from sqlalchemy import text as sa_text
+        async with engine.connect() as conn:
+            await conn.execute(sa_text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception as exc:
+        checks["db"] = f"error: {exc}"
+
+    # Redis check
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(REDIS_URL, socket_connect_timeout=2)
+        await r.ping()
+        await r.aclose()
+        checks["redis"] = "ok"
+    except Exception as exc:
+        checks["redis"] = f"error: {exc}"
+
+    all_ok = all(v == "ok" for v in checks.values())
+    return JSONResponse(
+        status_code=200 if all_ok else 503,
+        content={"status": "ok" if all_ok else "degraded", "checks": checks},
+    )

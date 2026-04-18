@@ -52,15 +52,31 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 # ---------------------------------------------------------------------------
 # Security
 # ---------------------------------------------------------------------------
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-in-production")
+_JWT_DEFAULT = "dev-secret-change-in-production"
+JWT_SECRET = os.getenv("JWT_SECRET", _JWT_DEFAULT)
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "72"))
+
+if JWT_SECRET == _JWT_DEFAULT:
+    import warnings
+    warnings.warn(
+        "JWT_SECRET is using the insecure default value! "
+        "Set a strong JWT_SECRET environment variable before deploying to production.",
+        stacklevel=1,
+    )
 
 # ---------------------------------------------------------------------------
 # CORS
 # ---------------------------------------------------------------------------
-_origins_raw = os.getenv("ALLOWED_ORIGINS", "*")
-if _origins_raw.strip() == "*":
+_origins_raw = os.getenv("ALLOWED_ORIGINS", "").strip()
+if not _origins_raw or _origins_raw == "*":
     ALLOWED_ORIGINS: list[str] = ["*"]
+    if _origins_raw != "*" and not _origins_raw:
+        import warnings
+        warnings.warn(
+            "ALLOWED_ORIGINS is not set — defaulting to '*' (allow all). "
+            "Set explicit origins (e.g. 'https://example.com') for production.",
+            stacklevel=1,
+        )
 else:
     ALLOWED_ORIGINS = [o.strip() for o in _origins_raw.split(",") if o.strip()]
 
