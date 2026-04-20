@@ -31,6 +31,8 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "80"))
 TOP_K = int(os.getenv("TOP_K", "4"))
+INGEST_CHUNK_SIZE = int(os.getenv("INGEST_CHUNK_SIZE", "900"))
+INGEST_CHUNK_OVERLAP = int(os.getenv("INGEST_CHUNK_OVERLAP", "60"))
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -109,3 +111,10 @@ LIGHTRAG_ENABLE_RERANK = os.getenv("LIGHTRAG_ENABLE_RERANK", "false").strip().lo
     "yes",
     "on",
 )
+
+# ---------------------------------------------------------------------------
+# Admin / Knowledge Base Store
+# ---------------------------------------------------------------------------
+KB_STORE_DIR = os.getenv("KB_STORE_DIR", os.path.join(BASE_DIR, "kb_store"))
+ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
+MAX_KB_UPLOAD_MB = int(os.getenv("MAX_KB_UPLOAD_MB", "50"))

@@ -13,6 +13,7 @@ interface Props {
   onDeleteSession: (id: string) => void
   user: User
   onLogout: () => void
+  onAdmin?: () => void
 }
 
 export default function Sidebar({
@@ -26,6 +27,7 @@ export default function Sidebar({
   onDeleteSession,
   user,
   onLogout,
+  onAdmin,
 }: Props) {
   return (
     <aside className="w-64 h-full bg-white border-r border-slate-200 flex flex-col">
@@ -59,6 +61,9 @@ export default function Sidebar({
         <div className="flex items-center justify-between mb-2">
           <span className="text-sm text-slate-600 font-medium truncate" title={user.display_name}>
             {user.display_name}
+            {user.is_admin && (
+              <span className="ml-1 text-xs text-purple-500">管理员</span>
+            )}
           </span>
           <button
             onClick={onLogout}
@@ -67,6 +72,14 @@ export default function Sidebar({
             退出
           </button>
         </div>
+        {user.is_admin && onAdmin && (
+          <button
+            onClick={onAdmin}
+            className="w-full text-xs text-center text-indigo-600 hover:text-indigo-800 py-1 rounded hover:bg-indigo-50 transition mb-1"
+          >
+            管理后台
+          </button>
+        )}
         <div className="text-xs text-slate-400 space-y-0.5">
           <p className="text-center font-medium">v2.0 · Agent Architecture</p>
           <p className="text-center">LangGraph + ChromaDB + Qwen</p>

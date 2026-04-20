@@ -39,15 +39,16 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/course_agent
       REDIS_URL: redis://redis:6379/0
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
     volumes:
-      - ./backend/knowledge:/app/knowledge:ro
+      - ./backend:/app
       - backend_uploads:/app/uploads
-    command: ["sh", "-c", "alembic upgrade head && gunicorn main:app -k uvicorn.workers.UvicornWorker -w ${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
+    command: ["sh", "-c", "pip install --no-cache-dir -r requirements.txt && alembic upgrade head && gunicorn main:app -k uvicorn.workers.UvicornWorker -w ${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/api/health')\""]
       interval: 15s

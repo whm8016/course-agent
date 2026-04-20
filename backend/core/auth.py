@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import JWT_SECRET, JWT_EXPIRE_HOURS
+from config import JWT_SECRET, JWT_EXPIRE_HOURS, ADMIN_USERNAME
 from core.database import User
 
 logger = logging.getLogger(__name__)
@@ -66,6 +66,7 @@ async def create_user(db: AsyncSession, username: str, password: str, display_na
         username=username,
         password_hash=hash_password(password),
         display_name=display_name or username,
+        is_admin=(username == ADMIN_USERNAME),
         created_at=time.time(),
     )
     db.add(user)
@@ -74,7 +75,7 @@ async def create_user(db: AsyncSession, username: str, password: str, display_na
     except IntegrityError:
         await db.rollback()
         raise ValueError("用户名已存在")
-    return {"id": user.id, "username": user.username, "display_name": user.display_name}
+    return {"id": user.id, "username": user.username, "display_name": user.display_name, "is_admin": user.is_admin}
 
 
 async def authenticate_user(db: AsyncSession, username: str, password: str) -> dict | None:
@@ -92,6 +93,7 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> d
         "id": user.id,
         "username": user.username,
         "display_name": user.display_name,
+        "is_admin": bool(user.is_admin),
         "summary_memory": user.summary_memory or "",
         "profile_memory": profile_memory,
     }
@@ -103,6 +105,7 @@ async def get_user_by_id(db: AsyncSession, user_id: str) -> dict | None:
             User.id,
             User.username,
             User.display_name,
+            User.is_admin,
             User.summary_memory,
             User.profile_memory,
         ).where(User.id == user_id)
@@ -118,6 +121,7 @@ async def get_user_by_id(db: AsyncSession, user_id: str) -> dict | None:
         "id": row.id,
         "username": row.username,
         "display_name": row.display_name,
+        "is_admin": bool(row.is_admin),
         "summary_memory": row.summary_memory or "",
         "profile_memory": profile_memory,
     }

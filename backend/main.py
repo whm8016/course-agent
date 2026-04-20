@@ -26,6 +26,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
+from api.admin import router as admin_router
 from api.auth import router as auth_router
 from api.chat import router as chat_router
 from api.courses import router as courses_router
@@ -33,7 +34,7 @@ from api.lightrag import router as lightrag_router
 from api.upload import router as upload_router
 from api.sessions import router as sessions_router
 from api.sse import router as sse_router
-from config import UPLOAD_DIR, ALLOWED_ORIGINS, REDIS_URL
+from config import UPLOAD_DIR, ALLOWED_ORIGINS, REDIS_URL, KB_STORE_DIR
 from core.database import init_db, close_db
 from core.limiter import limiter
 
@@ -49,7 +50,27 @@ async def lifespan(app: FastAPI):
     await close_db()
 
 
-app = FastAPI(title="课程学习Agent", lifespan=lifespan)
+app = FastAPI(
+    title="课程学习Agent",
+    lifespan=lifespan,
+    swagger_ui_parameters={"persistAuthorization": True},
+)
+
+
+def _custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    from fastapi.openapi.utils import get_openapi
+    schema = get_openapi(title=app.title, version="1.0.0", routes=app.routes)
+    schema.setdefault("components", {})["securitySchemes"] = {
+        "BearerAuth": {"type": "http", "scheme": "bearer"}
+    }
+    schema["security"] = [{"BearerAuth": []}]
+    app.openapi_schema = schema
+    return schema
+
+
+app.openapi = _custom_openapi
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(SlowAPIMiddleware)
@@ -66,6 +87,7 @@ Instrumentator(
     excluded_handlers=["/api/health", "/metrics"],
 ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 
+app.include_router(admin_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(lightrag_router, prefix="/api")
@@ -74,6 +96,7 @@ app.include_router(upload_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
 app.include_router(sse_router, prefix="/api")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(KB_STORE_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 

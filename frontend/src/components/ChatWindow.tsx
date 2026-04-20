@@ -3,13 +3,17 @@ import { FiSend, FiSquare } from 'react-icons/fi'
 import MessageBubble from './MessageBubble'
 import ImageUpload from './ImageUpload'
 import { chatStream, uploadImage, fetchMessages, saveMessage, createSession, updateSessionMode } from '../services/api'
-import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode, GuardrailInfo, HallucinationInfo } from '../types'
+import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode, GuardrailInfo, HallucinationInfo, KBStatus } from '../types'
 
 interface Props {
   courseId: string
   courseName: string
   sessionId: string | null
   sessionMode?: ChatMode
+  /** 当前课程的 KB 是否就绪 → 决定 chatStream 走 /api/chat 还是 /api/chat/lightrag */
+  ragEnabled?: boolean
+  /** KB 索引状态，用于在未就绪时给用户一行提示 */
+  kbStatus?: KBStatus | null
   onSessionCreated: (session: Session) => void
 }
 
@@ -38,7 +42,7 @@ const MODE_OPTIONS: Array<{ value: ChatMode; label: string }> = [
   { value: 'vision', label: '图像分析' },
 ]
 
-export default function ChatWindow({ courseId, courseName, sessionId, sessionMode, onSessionCreated }: Props) {
+export default function ChatWindow({ courseId, courseName, sessionId, sessionMode, ragEnabled = false, kbStatus = null, onSessionCreated }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
@@ -267,20 +271,18 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
       (err) => {
         answerContent = `出错了: ${err}`
       },
+      ragEnabled,
     )
     abortControllerRef.current = null
 
-    if (streamResult.aborted) {
-      setLoading(false)
-      setIsStopping(false)
-      setStreamingStarted(false)
-      setStreamPhase(null)
-      return
-    }
+    const wasAborted = streamResult.aborted
+    const displayContent = wasAborted
+      ? (answerContent ? `${answerContent}\n\n_（已停止生成）_` : '_（已停止生成，未产生回答）_')
+      : answerContent
 
     const assistantMsg: Message = {
       role: 'assistant',
-      content: answerContent,
+      content: displayContent,
       metadata: {
         intent,
         intent_confidence: intentConfidence || undefined,
@@ -292,6 +294,7 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
         retrieve_strategy: retrieveStrategy || undefined,
         guardrail,
         hallucination,
+        stopped: wasAborted || undefined,
       },
     }
     // @ts-expect-error attach thinking steps for rendering
@@ -305,10 +308,12 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
       return [...prev, assistantMsg]
     })
 
-    if (activeSessionId && !answerContent.startsWith('出错了')) {
+    // 持久化：正常完成 → 必存；用户中断 → 也存（包括残留半句），保证刷新后还在
+    const shouldPersist = activeSessionId && !displayContent.startsWith('出错了')
+    if (shouldPersist) {
       try {
-        await saveMessage(activeSessionId, 'user', userMsg.content, 'text')
-        await saveMessage(activeSessionId, 'assistant', answerContent, 'text', {
+        await saveMessage(activeSessionId!, 'user', userMsg.content, 'text')
+        await saveMessage(activeSessionId!, 'assistant', displayContent, 'text', {
           intent,
           intent_confidence: intentConfidence || undefined,
           mode: resolvedMode,
@@ -319,6 +324,7 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
           retrieve_strategy: retrieveStrategy || undefined,
           guardrail,
           hallucination,
+          stopped: wasAborted || undefined,
         })
       } catch {
         /* persistence is best-effort */
@@ -358,7 +364,31 @@ export default function ChatWindow({ courseId, courseName, sessionId, sessionMod
   return (
     <div className="flex flex-col h-full">
       <div className="border-b border-slate-200 px-6 py-4 bg-white/80 backdrop-blur-sm">
-        <h1 className="text-lg font-semibold text-slate-800">{courseName} - 学习助手</h1>
+        <div className="flex items-center gap-2">
+          <h1 className="text-lg font-semibold text-slate-800">{courseName} - 学习助手</h1>
+          {ragEnabled ? (
+            <span
+              className="text-xs px-2 py-0.5 rounded-full bg-green-100 text-green-700"
+              title="该课程的知识库索引已就绪，提问会走 LightRAG 检索"
+            >
+              RAG 已就绪
+            </span>
+          ) : kbStatus === 'indexing' ? (
+            <span
+              className="text-xs px-2 py-0.5 rounded-full bg-blue-100 text-blue-700"
+              title="知识库正在索引，索引完成后会自动启用 RAG"
+            >
+              知识库索引中…
+            </span>
+          ) : kbStatus === 'pending' || kbStatus === 'paused' || kbStatus === 'error' ? (
+            <span
+              className="text-xs px-2 py-0.5 rounded-full bg-slate-100 text-slate-500"
+              title="知识库尚未就绪，当前回复仅基于内置 prompt，不含课程资料检索"
+            >
+              知识库未就绪
+            </span>
+          ) : null}
+        </div>
         <div className="flex items-center justify-between mt-1 gap-3">
           <p className="text-xs text-slate-400">多 Agent 编排 · RAG 知识检索 · 智能出题</p>
           <select

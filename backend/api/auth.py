@@ -53,6 +53,12 @@ async def get_current_user(
     return user
 
 
+async def get_current_admin(user: dict = Depends(get_current_user)) -> dict:
+    if not user.get("is_admin"):
+        raise HTTPException(status_code=403, detail="仅管理员可访问")
+    return user
+
+
 async def get_optional_user(
     authorization: str | None = Header(None),
     db: AsyncSession = Depends(get_db),

@@ -1,59 +1,6 @@
-COURSE_PROMPTS = {
-    "stamp": {
-        "name": "邮票赏析",
-        "icon": "🏷️",
-        "description": "探索邮票的历史、设计与收藏价值",
-        "system_prompt": """你是一位专业的邮票赏析课程助教，精通中外邮票的历史、设计与收藏。
+from __future__ import annotations
 
-【重要】你只负责邮票赏析相关的问题。如果学生问的问题与邮票、集邮、邮政历史等完全无关（例如政治、娱乐、生活等话题），请礼貌地回复："我是邮票赏析课程的助教，这个问题超出了我的服务范围哦～有邮票相关的问题随时可以问我！"
-
-回答要求：
-1. 当学生上传邮票图片时，从以下四个维度进行赏析：
-   - 发行背景：发行国家、年代、纪念意义
-   - 设计元素：图案内容、色彩运用、印刷工艺
-   - 艺术风格：设计流派、美学特点
-   - 收藏价值：稀缺性、保存状态、市场行情
-2. 回答课程理论问题时，结合具体邮票实例说明
-3. 使用清晰的结构化格式，适当使用 Markdown 标题和列表
-4. 语言亲切专业，鼓励学生探索和提问
-5. 如果不确定具体邮票信息，诚实说明并给出判断依据""",
-    },
-    "circuit": {
-        "name": "电路分析",
-        "icon": "⚡",
-        "description": "电路基础理论、分析方法与计算",
-        "system_prompt": """你是一位耐心的电路分析课程助教，擅长用通俗易懂的方式讲解电路知识。
-
-【重要】你只负责电路分析相关的问题。如果学生问的问题与电路、电子、电气工程等完全无关（例如政治、娱乐、生活等话题），请礼貌地回复："我是电路分析课程的助教，这个问题超出了我的服务范围哦～有电路相关的问题随时可以问我！"
-
-回答要求：
-1. 涉及公式时，使用 LaTeX 格式（用 $...$ 行内公式，$$...$$ 独立公式）
-2. 解题时展示完整推导过程，标注每一步用到的定律或定理
-3. 核心定律包括但不限于：
-   - 欧姆定律 $U = IR$
-   - 基尔霍夫电流定律（KCL）和电压定律（KVL）
-   - 戴维南定理与诺顿定理
-   - 叠加定理
-   - 电容电感的暂态与稳态分析
-4. 对于复杂电路，先画出等效电路思路，再逐步求解
-5. 每个回答末尾可以给一个简单的思考题帮助巩固
-6. 语言简洁明了，避免过于学术化的表述""",
-    },
-
-
-
-    "algorithm": {
-        "name": "算法",
-        "icon": "⚡",
-        "description": "算法基础理论、分析方法与应用",
-        "system_prompt": """你是一位耐心的算法课程助教，擅长用通俗易懂的方式讲解算法知识。
-
-【重要】你只负责算法、数据结构、程序设计等计算机相关课程的问题。如果学生问的问题与算法、编程、计算机科学等完全无关（例如政治、娱乐、生活等话题），请礼貌地回复："我是算法课程的助教，这个问题超出了我的服务范围哦～有算法相关的问题随时可以问我！"
-"""
-
-
-    },
-}
+from core.cache import cache_delete, cache_get, cache_set
 
 ROUTER_PROMPT = """你是一个智能路由器，负责分析学生消息的意图并分类。
 
@@ -100,21 +47,36 @@ SUMMARY_PROMPT = """你是一个学习总结专家。根据对话历史，为学
 4. 给出下一步学习建议
 5. 使用 Markdown 格式，结构清晰"""
 
+_FALLBACK_PROMPT = "你是一个通用学习助手。请尽力回答学生与课程学习相关的问题。如果问题与课程学习完全无关，请礼貌拒绝。"
 
-def get_course_prompt(course_id: str) -> str:
-    course = COURSE_PROMPTS.get(course_id)
-    if not course:
-        return "你是一个通用学习助手。请尽力回答学生与课程学习相关的问题。如果问题与课程学习完全无关，请礼貌拒绝。"
-    return course["system_prompt"]
+_PROMPT_CACHE_KEY = "course:prompt:{}"
+_PROMPT_CACHE_TTL = 600  # 10 分钟
 
 
-def get_course_list() -> list[dict]:
-    return [
-        {
-            "id": cid,
-            "name": c["name"],
-            "icon": c["icon"],
-            "description": c["description"],
-        }
-        for cid, c in COURSE_PROMPTS.items()
-    ]
+async def get_course_prompt(course_id: str) -> str:
+    """从 Redis 缓存或数据库获取课程 system_prompt。"""
+    key = _PROMPT_CACHE_KEY.format(course_id)
+    cached = await cache_get(key)
+    if cached is not None:
+        return cached
+
+    from sqlalchemy import select
+    from core.database import AsyncSessionLocal, KnowledgeBase
+
+    async with AsyncSessionLocal() as db:
+        result = await db.execute(
+            select(KnowledgeBase.system_prompt).where(KnowledgeBase.course_id == course_id)
+        )
+        row = result.first()
+
+    prompt = (row[0] or "").strip() if row else ""
+    if not prompt:
+        prompt = _FALLBACK_PROMPT
+
+    await cache_set(key, prompt, ttl=_PROMPT_CACHE_TTL)
+    return prompt
+
+
+async def invalidate_course_prompt_cache(course_id: str) -> None:
+    """管理员更新 system_prompt 后调用，使缓存立即失效。"""
+    await cache_delete(_PROMPT_CACHE_KEY.format(course_id))

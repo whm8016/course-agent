@@ -1,8 +1,16 @@
+export type KBStatus = 'pending' | 'indexing' | 'ready' | 'error' | 'paused'
+
 export interface Course {
   id: string
   name: string
   icon: string
   description: string
+  /** 后端附带的知识库状态，null 表示该课程没有 KB（仅有内置 system prompt） */
+  kb_status?: KBStatus | null
+  /** kb_status === 'ready' 时为 true，前端用它决定走 /api/chat 还是 /api/chat/lightrag */
+  rag_enabled?: boolean
+  /** 'builtin' | 'kb'，仅做来源标识 */
+  source?: 'builtin' | 'kb'
 }
 
 export interface RagChunk {
@@ -74,6 +82,7 @@ export interface Message {
     retrieve_strategy?: string
     guardrail?: GuardrailInfo
     hallucination?: HallucinationInfo
+    stopped?: boolean
   }
 }
 
@@ -100,6 +109,7 @@ export interface User {
   id: string
   username: string
   display_name: string
+  is_admin?: boolean
   summary_memory?: string
   profile_memory?: {
     level?: string

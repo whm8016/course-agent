@@ -134,14 +134,14 @@ export async function chatStream(
   signal?: AbortSignal,
   onEvent?: (event: SSEEvent) => void,
   onError?: (err: string) => void,
+  ragEnabled: boolean = false,
 ): Promise<{ aborted: boolean }> {
   const isAbortError = (err: unknown) => {
     if (err instanceof DOMException) return err.name === 'AbortError'
     if (err instanceof Error) return err.name === 'AbortError'
     return false
   }
-  const useLightrag = courseId === 'algorithm'
-  const endpoint = useLightrag ? '/api/chat/lightrag' : '/api/chat'
+  const endpoint = ragEnabled ? '/api/chat/lightrag' : '/api/chat'
   const traceId =
     typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
       ? crypto.randomUUID().slice(0, 8)

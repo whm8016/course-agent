@@ -53,6 +53,35 @@ _last_auto_index_at: dict[str, float] = {}
 _AUTO_INDEX_STATE_DIR = Path(LIGHTRAG_WORKDIR) / ".auto_index_state"
 _AUTO_INDEX_LOCK_DIR = Path(LIGHTRAG_WORKDIR) / ".auto_index_locks"
 
+# ── LLM 错误收集（LightRAG 内部会吞掉异常，这里在抛出前记录）─────────────────
+_llm_error_log: list[Exception] = []
+
+
+def take_llm_errors() -> list[Exception]:
+    """取出并清空已记录的 LLM 错误列表（每批插入后调用）。"""
+    errors = _llm_error_log.copy()
+    _llm_error_log.clear()
+    return errors
+
+
+def clear_llm_errors() -> None:
+    """清空错误缓冲（开始新索引前调用）。"""
+    _llm_error_log.clear()
+
+
+def _is_fatal_llm_error(exc: Exception) -> bool:
+    """判断是否为致命错误（账户余额/权限问题），不可重试。"""
+    s = str(exc).lower()
+    fatal_keywords = ("access denied", "account", "unauthorized", "authentication",
+                      "bad request", "quota", "insufficient")
+    if any(kw in s for kw in fatal_keywords):
+        return True
+    import re
+    m = re.search(r"error code[:\s]+(\d+)", s)
+    if m and int(m.group(1)) in (400, 401, 403):
+        return True
+    return False
+
 # DashScope compatible API rejects oversized input (>30720).
 # Use conservative hard caps even if .env config is too aggressive.
 _SAFE_TOP_K = min(LIGHTRAG_TOP_K, int(os.getenv("LIGHTRAG_SAFE_TOP_K", "12")))
@@ -91,16 +120,22 @@ async def _llm_model_func(
     safe_system_prompt = system_prompt
     if max_sys_chars > 0 and safe_system_prompt and len(safe_system_prompt) > max_sys_chars:
         safe_system_prompt = safe_system_prompt[:max_sys_chars]
-    return await openai_complete_if_cache(
-        TEXT_MODEL,
-        prompt,
-        system_prompt=safe_system_prompt,
-        history_messages=history_messages or [],
-        keyword_extraction=keyword_extraction,
-        api_key=DASHSCOPE_API_KEY,
-        base_url=DASHSCOPE_BASE_URL,
-        **kwargs,
-    )
+    try:
+        return await openai_complete_if_cache(
+            TEXT_MODEL,
+            prompt,
+            system_prompt=safe_system_prompt,
+            history_messages=history_messages or [],
+            keyword_extraction=keyword_extraction,
+            api_key=DASHSCOPE_API_KEY,
+            base_url=DASHSCOPE_BASE_URL,
+            **kwargs,
+        )
+    except Exception as exc:
+        # LightRAG 内部会捕获此异常并继续，但我们在此先记录
+        _llm_error_log.append(exc)
+        logger.error("LLM 调用失败（已记录）: %s", exc)
+        raise
 
 
 if wrap_embedding_func_with_attrs is not None and openai_embed is not None:
@@ -442,7 +477,7 @@ async def stream_answer_with_contexts(
         "stream_answer_with_contexts course=%s contexts=%d guardrail_warn=%s query=「%s」",
         course_id, len(contexts or []), bool(guardrail_warning), message[:80],
     )
-    system_prompt = get_course_prompt(course_id)
+    system_prompt = await get_course_prompt(course_id)
     if memory_context:
         system_prompt += f"\n\n{memory_context}"
     if guardrail_warning:

@@ -22,3 +22,8 @@ alembic
 lightrag-hku
 python-json-logger
 prometheus-fastapi-instrumentator
+llama-index-core>=0.12
+llama-index-readers-file>=0.3
+pypdf>=4.0
+python-docx>=1.0
+python-pptx>=0.6

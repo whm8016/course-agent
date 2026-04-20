@@ -23,7 +23,7 @@ from core.prompts import (
     QUIZ_PROMPT,
     ROUTER_PROMPT,
     SUMMARY_PROMPT,
-    get_course_prompt,
+    get_course_prompt,  # noqa: F401 — used as await get_course_prompt(...)
 )
 from core.rag import retrieve
 from core.llm import _image_to_data_url
@@ -154,7 +154,7 @@ async def teach_node(state: AgentState) -> dict:
     chunks = await asyncio.to_thread(retrieve, state["course_id"], state["message"], top_k=4)
     events.append({"type": "tool_result", "tool": "search_knowledge", "chunks": chunks})
 
-    system_prompt = get_course_prompt(state["course_id"])
+    system_prompt = await get_course_prompt(state["course_id"])
     if chunks:
         context = "\n\n---\n\n".join(c["content"] for c in chunks)
         system_prompt += (
@@ -250,7 +250,7 @@ async def vision_node(state: AgentState) -> dict:
     events.append({"type": "tool_call", "tool": "analyze_image",
                     "input": {"image_path": state["image_path"]}})
 
-    system_prompt = get_course_prompt(state["course_id"])
+    system_prompt = await get_course_prompt(state["course_id"])
     data_url = await asyncio.to_thread(_image_to_data_url, state["image_path"])
 
     messages = [SystemMessage(content=system_prompt)]
@@ -377,7 +377,7 @@ async def _stream_teach_events(state: AgentState) -> AsyncGenerator[dict, None]:
     )
     yield {"type": "tool_result", "tool": "search_knowledge", "chunks": chunks}
 
-    system_prompt = get_course_prompt(state["course_id"])
+    system_prompt = await get_course_prompt(state["course_id"])
     if state.get("memory_context"):
         system_prompt += f"\n\n{state['memory_context']}"
     if chunks:
@@ -459,7 +459,7 @@ async def _stream_vision_events(state: AgentState) -> AsyncGenerator[dict, None]
         "input": {"image_path": state["image_path"]},
     }
 
-    system_prompt = get_course_prompt(state["course_id"])
+    system_prompt = await get_course_prompt(state["course_id"])
     if state.get("memory_context"):
         system_prompt += f"\n\n{state['memory_context']}"
     user_message = state["message"] or "请赏析这张邮票图片。"

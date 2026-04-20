@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import Sidebar from './components/Sidebar'
 import ChatWindow from './components/ChatWindow'
 import LoginPage from './components/LoginPage'
+import AdminPage from './components/AdminPage'
 import { fetchCourses, fetchSessions, createSession, deleteSession } from './services/api'
 import { isLoggedIn, getUser, logout } from './services/auth'
 import type { Course, Session, User } from './types'
@@ -9,6 +10,7 @@ import './index.css'
 
 export default function App() {
   const [user, setUser] = useState<User | null>(getUser())
+  const [showAdmin, setShowAdmin] = useState(() => sessionStorage.getItem('_admin') === '1')
   const [courses, setCourses] = useState<Course[]>([])
   const [activeCourseId, setActiveCourseId] = useState<string>('')
   const [sessions, setSessions] = useState<Session[]>([])
@@ -19,19 +21,47 @@ export default function App() {
     setUser(u)
   }, [])
 
-  useEffect(() => {
-    if (!user) return
-    fetchCourses()
-      .then((list) => {
+  const reloadCourses = useCallback(
+    async (preserveActive: boolean = true) => {
+      try {
+        const list = await fetchCourses()
         setCourses(list)
         setLoadError('')
-        if (list.length > 0) setActiveCourseId(list[0].id)
-      })
-      .catch((err: unknown) => {
+        if (list.length === 0) {
+          setActiveCourseId('')
+          return list
+        }
+        // 第一次加载、或当前选中的课程已被删，自动切到第一个
+        setActiveCourseId((prev) => {
+          if (!preserveActive) return list[0].id
+          const stillExists = prev && list.some((c) => c.id === prev)
+          return stillExists ? prev : list[0].id
+        })
+        return list
+      } catch (err: unknown) {
         const message = err instanceof Error ? err.message : '加载课程失败'
         setLoadError(message)
-      })
-  }, [user])
+        return [] as Course[]
+      }
+    },
+    [],
+  )
+
+  useEffect(() => {
+    if (!user) return
+    void reloadCourses(false)
+  }, [user, reloadCourses])
+
+  // 只要存在 indexing 状态的课程，就每 5 秒轮询一次，等就绪后前端自动放开 RAG
+  useEffect(() => {
+    if (!user) return
+    const hasIndexing = courses.some((c) => c.kb_status === 'indexing')
+    if (!hasIndexing) return
+    const t = setInterval(() => {
+      void reloadCourses(true)
+    }, 5000)
+    return () => clearInterval(t)
+  }, [user, courses, reloadCourses])
 
   const loadSessions = useCallback(async (courseId: string) => {
     try {
@@ -91,6 +121,19 @@ export default function App() {
     return <LoginPage onLogin={handleLogin} />
   }
 
+  if (showAdmin && user.is_admin) {
+    return (
+      <AdminPage
+        user={user}
+        onBack={() => {
+          sessionStorage.removeItem('_admin')
+          setShowAdmin(false)
+          void reloadCourses(true)
+        }}
+      />
+    )
+  }
+
   const activeCourse = courses.find((c) => c.id === activeCourseId)
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null
 
@@ -107,6 +150,7 @@ export default function App() {
         onDeleteSession={handleDeleteSession}
         user={user}
         onLogout={logout}
+        onAdmin={user.is_admin ? () => { sessionStorage.setItem('_admin', '1'); setShowAdmin(true) } : undefined}
       />
       <main className="flex-1 h-full overflow-hidden">
         {activeCourse ? (
@@ -115,6 +159,8 @@ export default function App() {
             courseName={`${activeCourse.icon} ${activeCourse.name}`}
             sessionId={activeSessionId}
             sessionMode={activeSession?.mode}
+            ragEnabled={Boolean(activeCourse.rag_enabled)}
+            kbStatus={activeCourse.kb_status ?? null}
             onSessionCreated={handleSessionCreated}
           />
         ) : loadError ? (

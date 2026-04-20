@@ -69,5 +69,6 @@ export async function login(username: string, password: string): Promise<AuthRes
 
 export function logout() {
   clearAuth()
+  sessionStorage.removeItem('_admin')
   window.location.reload()
 }

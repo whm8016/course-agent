@@ -146,7 +146,7 @@ async def chat_with_lightrag(
                 )
                 yield f"data: {json.dumps({'type': 'thinking', 'content': '闲聊模式，直接回复...'}, ensure_ascii=False)}\n\n"
 
-                system_prompt = get_course_prompt(course_id)
+                system_prompt = await get_course_prompt(course_id)
                 mem_ctx = build_memory_context(user)
                 if mem_ctx:
                     system_prompt += f"\n\n{mem_ctx}"

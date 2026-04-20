@@ -31,7 +31,7 @@ async def handle_chat(
 ) -> AsyncGenerator[str, None]:
     """Simple single-pass chat — no multi-agent orchestration."""
     logger.info("handle_chat (legacy) course=%s", course_id)
-    system_prompt = get_course_prompt(course_id)
+    system_prompt = await get_course_prompt(course_id)
 
     if not image_path and message.strip():
         try:

@@ -1,0 +1,20 @@
+# build context 是 ./backend 时必须放在本目录（根目录 .dockerignore 不会生效）
+venv/
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# 体积大且构建不需要
+kb_store/
+lightrag_store/
+vectorstore/
+data/
+uploads/
+
+.env
+.git
+*.ipynb
