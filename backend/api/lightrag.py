@@ -188,38 +188,66 @@ async def chat_with_lightrag(
                     timeout=LIGHTRAG_TIMEOUT_SEC,
                 )
 
-                contexts = retrieve_result.get("contexts") or []
-                logger.info(
-                    "[trace=%s] retrieve_end t=%dms strategy=%s contexts=%d",
-                    trace_id, elapsed_ms(),
-                    retrieve_result.get("retrieve_strategy", "unknown"),
-                    len(contexts),
-                    'retrive_result',contexts,
-                )
-                if contexts:
-                    compact_contexts = _compact_contexts_for_sse(contexts)
-                    yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'lightrag_query', 'contexts': compact_contexts}, ensure_ascii=False)}\n\n"
-
-                answer_parts = []
+                # LightRAG aquery(stream=True) 返回 AsyncIterator[str]；stream=False 返回 str/dict
+                contexts: list = []
+                answer_parts: list[str] = []
                 first_token_logged = False
-                async for token in stream_answer_with_contexts(
-                    course_id=course_id,
-                    message=message,
-                    contexts=contexts,
-                    history=history,
-                    memory_context=build_memory_context(user),
-                    guardrail_warning=guard_result.tip if not guard_result.safe else "",
-                ):
-                    if await request.is_disconnected():
-                        logger.info("[trace=%s] client disconnected during token stream", trace_id)
-                        return
-                    if not first_token_logged:
-                        logger.info("[trace=%s] first_token t=%dms", trace_id, elapsed_ms())
-                        first_token_logged = True
-                    answer_parts.append(token)
-                    yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
 
-                answer = "".join(answer_parts)
+                if hasattr(retrieve_result, "__aiter__"):
+                    async for token in retrieve_result:
+                        if await request.is_disconnected():
+                            logger.info("[trace=%s] client disconnected during lightrag stream", trace_id)
+                            return
+                        if not token:
+                            continue
+                        if not first_token_logged:
+                            logger.info("[trace=%s] first_token t=%dms (lightrag native stream)", trace_id, elapsed_ms())
+                            first_token_logged = True
+                        answer_parts.append(str(token))
+                        yield f"data: {json.dumps({'type': 'token', 'content': str(token)}, ensure_ascii=False)}\n\n"
+                    answer = "".join(answer_parts)
+                elif isinstance(retrieve_result, dict):
+                    answer = str(
+                        retrieve_result.get("response")
+                        or retrieve_result.get("answer")
+                        or retrieve_result.get("content")
+                        or ""
+                    )
+                    raw_ctx = (
+                        retrieve_result.get("contexts")
+                        or retrieve_result.get("context")
+                        or retrieve_result.get("chunks")
+                        or []
+                    )
+                    if isinstance(raw_ctx, list):
+                        contexts = raw_ctx
+                    elif isinstance(raw_ctx, dict):
+                        contexts = [raw_ctx]
+                    elif isinstance(raw_ctx, str) and raw_ctx.strip():
+                        contexts = [raw_ctx]
+                    if contexts:
+                        compact_contexts = _compact_contexts_for_sse(contexts)
+                        yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'lightrag_query', 'contexts': compact_contexts}, ensure_ascii=False)}\n\n"
+                    if answer:
+                        logger.info("[trace=%s] first_token t=%dms (lightrag native non-stream)", trace_id, elapsed_ms())
+                        yield f"data: {json.dumps({'type': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
+                else:
+                    answer = str(retrieve_result or "")
+                    if answer:
+                        logger.info("[trace=%s] first_token t=%dms (lightrag native non-stream)", trace_id, elapsed_ms())
+                        yield f"data: {json.dumps({'type': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
+
+                logger.info(
+                    "[trace=%s] retrieve_end t=%dms result_type=%s answer_chars=%d contexts=%d",
+                    trace_id, elapsed_ms(),
+                    type(retrieve_result).__name__,
+                    len(answer),
+                    len(contexts),
+                )
+
+                if await request.is_disconnected():
+                    logger.info("[trace=%s] client disconnected after native answer", trace_id)
+                    return
 
                 # ── Step 4: Hallucination detection (knowledge path only)
                 hallu_result = await evaluate_hallucination(answer, contexts)
@@ -243,9 +271,13 @@ async def chat_with_lightrag(
                 "intent_confidence": intent_result.confidence,
                 "guardrail": guardrail_dict,
             }
-            if retrieve_result:
-                metadata["retrieve_mode"] = retrieve_result.get("mode", "mix")
-                metadata["retrieve_strategy"] = retrieve_result.get("retrieve_strategy", "unknown")
+            if isinstance(retrieve_result, dict):
+                metadata["retrieve_mode"] = retrieve_result.get("mode", mode or "mix")
+                metadata["retrieve_strategy"] = retrieve_result.get("retrieve_strategy", "lightrag_native")
+            elif retrieve_result:
+                metadata["retrieve_mode"] = mode or "mix"
+                metadata["retrieve_strategy"] = "lightrag_native"
+            metadata["answer_engine"] = "lightrag_native"
             if hallucination_dict:
                 metadata["hallucination"] = hallucination_dict
 

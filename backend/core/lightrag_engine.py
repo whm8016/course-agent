@@ -437,7 +437,12 @@ async def retrieve_with_lightrag(
 
     query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
     param = _build_query_param(query_mode, history, only_need_context=False)
-    context_param = _build_query_param(query_mode, history, only_need_context=True)
+    context_param = _build_query_param(query_mode, history, only_need_context=False)
+    # 打开 LightRAG 原生流式输出：aquery 返回 AsyncIterator[str]
+    if hasattr(context_param, "stream"):
+        context_param.stream = True
+    if hasattr(param, "stream"):
+        param.stream = True
 
     logger.info("QueryParam: %s", context_param)
     retrieve_strategy = "aquery_context_param"
@@ -446,20 +451,20 @@ async def retrieve_with_lightrag(
     except TypeError:
         retrieve_strategy = "aquery_fallback"
         result = await rag.aquery(message, param=param)
+    return result
+    # contexts = _extract_contexts(result)
+    # if not contexts and isinstance(result, dict):
+    #     logger.info("LightRAG empty contexts keys=%s", sorted(result.keys()))
 
-    contexts = _extract_contexts(result)
-    if not contexts and isinstance(result, dict):
-        logger.info("LightRAG empty contexts keys=%s", sorted(result.keys()))
-
-    logger.info(
-        "retrieve_with_lightrag done strategy=%s contexts=%d query=「%s」",
-        retrieve_strategy, len(contexts), message[:50],
-    )
-    return {
-        "contexts": contexts,
-        "mode": query_mode,
-        "retrieve_strategy": retrieve_strategy,
-    }
+    # logger.info(
+    #     "retrieve_with_lightrag done strategy=%s contexts=%d query=「%s」",
+    #     retrieve_strategy, len(contexts), message[:50],
+    # )
+    # return {
+    #     "contexts": contexts,
+    #     "mode": query_mode,
+    #     "retrieve_strategy": retrieve_strategy,
+    # }
 
 
 async def stream_answer_with_contexts(

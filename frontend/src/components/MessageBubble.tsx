@@ -11,8 +11,40 @@ interface Props {
   thinkingSteps?: Message[]
 }
 
+function looksLikeMath(expr: string): boolean {
+  const t = expr.trim()
+  if (!t) return false
+  if (/\\[a-zA-Z]+/.test(t)) return true
+  if (/[_^]/.test(t)) return true
+  if (/=/.test(t) && /[a-zA-Z]/.test(t)) return true
+  if (/^[a-zA-Z](?:_\{?[^}]+\}?)?$/.test(t)) return true
+  return false
+}
+
+function normalizeMathDelimiters(content: string): string {
+  if (!content) return content
+
+  let normalized = content
+    .replace(/\\\[((?:.|\n)+?)\\\]/g, (_, expr: string) => `$$${expr.trim()}$$`)
+    .replace(/\\\(((?:.|\n)+?)\\\)/g, (_, expr: string) => `$${expr.trim()}$`)
+
+  normalized = normalized.replace(
+    /\[\s+([^\[\]\n]{1,500}?)\s+\]/g,
+    (match, inner: string) => (looksLikeMath(inner) ? `$$${inner.trim()}$$` : match),
+  )
+
+  normalized = normalized.replace(
+    /(^|[^$])\(\s+([^()\n]{1,200}?)\s+\)/g,
+    (match, prefix: string, inner: string) =>
+      looksLikeMath(inner) ? `${prefix}$${inner.trim()}$` : match,
+  )
+
+  return normalized
+}
+
 export default function MessageBubble({ message, thinkingSteps }: Props) {
   const isUser = message.role === 'user'
+  const renderedContent = normalizeMathDelimiters(message.content || '')
 
   if (isUser) {
     return (
@@ -37,7 +69,7 @@ export default function MessageBubble({ message, thinkingSteps }: Props) {
         {message.content && (
           <div className="markdown-body text-sm leading-relaxed">
             <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
-              {message.content}
+              {renderedContent}
             </ReactMarkdown>
           </div>
         )}
