@@ -113,8 +113,48 @@ LIGHTRAG_ENABLE_RERANK = os.getenv("LIGHTRAG_ENABLE_RERANK", "false").strip().lo
 )
 
 # ---------------------------------------------------------------------------
-# Admin / Knowledge Base Store
+# Admin / Knowledge Base Store  /lightrag的
 # ---------------------------------------------------------------------------
 KB_STORE_DIR = os.getenv("KB_STORE_DIR", os.path.join(BASE_DIR, "kb_store"))
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 MAX_KB_UPLOAD_MB = int(os.getenv("MAX_KB_UPLOAD_MB", "50"))
+
+# ---------------------------------------------------------------------------
+# Question coordinator (AgentCoordinator)
+# ---------------------------------------------------------------------------
+QUESTION_LOG_DIR = os.getenv(
+    "QUESTION_LOG_DIR",
+    os.path.join(BASE_DIR, "logs", "question"),
+)
+QUESTION_TOOL_WEB_SEARCH = os.getenv("QUESTION_TOOL_WEB_SEARCH", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+QUESTION_TOOL_RAG = os.getenv("QUESTION_TOOL_RAG", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+QUESTION_TOOL_CODE_EXECUTION = os.getenv("QUESTION_TOOL_CODE_EXECUTION", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+QUESTION_DEFAULT_TOOL_FLAGS: dict[str, bool] = {
+    "web_search": QUESTION_TOOL_WEB_SEARCH,
+    "rag": QUESTION_TOOL_RAG,
+    "code_execution": QUESTION_TOOL_CODE_EXECUTION,
+}
+
+# LlamaIndex 向量库根目录（每个 course 一个子目录，其下 llamaindex_storage/）
+LLAMA_INDEX_KB_ROOT = os.getenv(
+    "LLAMA_INDEX_KB_ROOT",
+    os.path.join(BASE_DIR, "data", "knowledge_bases")
+)
+QUESTION_USE_LLAMAINDEX = os.getenv("QUESTION_USE_LLAMAINDEX", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)

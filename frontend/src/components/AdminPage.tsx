@@ -206,6 +206,16 @@ export default function AdminPage({ user, onBack }: Props) {
     }
   }
 
+  const handleLlamaIndexBuild = async (courseId: string) => {
+    try {
+      await apiFetch(`/admin/kb/${courseId}/llamaindex/build`, { method: 'POST' })
+      await loadKBs()
+      if (selectedKB?.course_id === courseId) await loadKBDetail(courseId)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'LlamaIndex 构建索引失败')
+    }
+  }
+
   return (
     <div className="flex h-screen bg-slate-50">
       {/* 侧边栏 */}
@@ -300,6 +310,7 @@ export default function AdminPage({ user, onBack }: Props) {
                   onIndex={handleIndex}
                   onPause={handlePauseIndex}
                   onStop={handleStopIndex}
+                  onLlamaIndexBuild={handleLlamaIndexBuild}
                   onRefresh={() => loadKBDetail(selectedKB.course_id)}
                   onUploaded={async () => { await loadKBDetail(selectedKB.course_id); await loadKBs() }}
                   onUpdated={async () => { await loadKBDetail(selectedKB.course_id); await loadKBs() }}
@@ -359,7 +370,7 @@ export default function AdminPage({ user, onBack }: Props) {
 // ── KB 详情子组件 ────────────────────────────────────────────────────────────
 
 function KBDetail({
-  kb, onDelete, onDeleteFile, onIndex, onPause, onStop, onRefresh, onUploaded, onUpdated,
+  kb, onDelete, onDeleteFile, onIndex, onPause, onStop, onLlamaIndexBuild, onRefresh, onUploaded, onUpdated,
 }: {
   kb: KB
   onDelete: (courseId: string) => void
@@ -367,6 +378,7 @@ function KBDetail({
   onIndex: (courseId: string, force?: boolean, resume?: boolean) => void
   onPause: (courseId: string) => void
   onStop: (courseId: string) => void
+  onLlamaIndexBuild: (courseId: string) => void
   onRefresh: () => void
   onUploaded: () => void
   onUpdated: () => void
@@ -632,8 +644,19 @@ function KBDetail({
             </button>
           )}
 
-          {/* indexing：暂停 + 终止小图标按钮 */}
-          {kb.status === 'indexing' && (
+          {/* indexing：LlamaIndex 构建中 —— 只显示等待提示，无暂停/终止 */}
+          {kb.status === 'indexing' && kb.progress_msg?.includes('LlamaIndex') && (
+            <span className="flex items-center gap-1.5 text-sm text-teal-600">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                className="animate-spin" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+              </svg>
+              LlamaIndex 构建中，请稍候…
+            </span>
+          )}
+
+          {/* indexing：LightRAG 主流程 —— 暂停 + 终止 */}
+          {kb.status === 'indexing' && !kb.progress_msg?.includes('LlamaIndex') && (
             <>
               <button
                 onClick={() => onPause(kb.course_id)}
@@ -704,6 +727,20 @@ function KBDetail({
                 重新索引
               </button>
             </>
+          )}
+
+          {/* LlamaIndex 独立构建按钮：非索引中状态均可触发 */}
+          {kb.status !== 'indexing' && kb.file_count > 0 && (
+            <button
+              onClick={() => onLlamaIndexBuild(kb.course_id)}
+              className="flex items-center gap-1.5 text-sm text-teal-700 border border-teal-300 bg-teal-50 px-3 py-1.5 rounded-lg hover:bg-teal-100 transition"
+              title="仅构建 LlamaIndex 向量索引（不触发 LightRAG 摄入）"
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+              </svg>
+              LlamaIndex 构建索引
+            </button>
           )}
 
           <p className="text-xs text-slate-400 ml-1">

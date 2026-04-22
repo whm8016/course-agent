@@ -2,8 +2,7 @@ import sys
 import os
 import logging
 
-sys.path.insert(0, os.path.dirname(__file__))
-
+sys.path.insert(0, os.path.dirname(__file__))  
 from pythonjsonlogger import jsonlogger
 
 _log_handler = logging.StreamHandler()
@@ -25,12 +24,14 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
-
+from api.question import router as question_router
+from api.llama_rag import router as llama_rag_router
 from api.admin import router as admin_router
 from api.auth import router as auth_router
 from api.chat import router as chat_router
 from api.courses import router as courses_router
 from api.lightrag import router as lightrag_router
+from api.memory import router as memory_router
 from api.upload import router as upload_router
 from api.sessions import router as sessions_router
 from api.sse import router as sse_router
@@ -39,6 +40,7 @@ from core.database import init_db, close_db
 from core.limiter import limiter
 
 logger = logging.getLogger(__name__)
+
 
 
 @asynccontextmanager
@@ -86,15 +88,17 @@ app.add_middleware(
 Instrumentator(
     excluded_handlers=["/api/health", "/metrics"],
 ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
-
+app.include_router(question_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
+app.include_router(llama_rag_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(lightrag_router, prefix="/api")
 app.include_router(courses_router, prefix="/api")
 app.include_router(upload_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
 app.include_router(sse_router, prefix="/api")
+app.include_router(memory_router, prefix="/api")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(KB_STORE_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")

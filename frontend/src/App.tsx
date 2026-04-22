@@ -3,6 +3,7 @@ import Sidebar from './components/Sidebar'
 import ChatWindow from './components/ChatWindow'
 import LoginPage from './components/LoginPage'
 import AdminPage from './components/AdminPage'
+import QuestionGeneratorPanel from './components/QuestionGeneratorPanel'
 import { fetchCourses, fetchSessions, createSession, deleteSession } from './services/api'
 import { isLoggedIn, getUser, logout } from './services/auth'
 import type { Course, Session, User } from './types'
@@ -16,6 +17,7 @@ export default function App() {
   const [sessions, setSessions] = useState<Session[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string>('')
+  const [mainView, setMainView] = useState<'chat' | 'quiz'>('chat')
 
   const handleLogin = useCallback((u: User) => {
     setUser(u)
@@ -152,26 +154,59 @@ export default function App() {
         onLogout={logout}
         onAdmin={user.is_admin ? () => { sessionStorage.setItem('_admin', '1'); setShowAdmin(true) } : undefined}
       />
-      <main className="flex-1 h-full overflow-hidden">
-        {activeCourse ? (
-          <ChatWindow
-            courseId={activeCourseId}
-            courseName={`${activeCourse.icon} ${activeCourse.name}`}
-            sessionId={activeSessionId}
-            sessionMode={activeSession?.mode}
-            ragEnabled={Boolean(activeCourse.rag_enabled)}
-            kbStatus={activeCourse.kb_status ?? null}
-            onSessionCreated={handleSessionCreated}
-          />
-        ) : loadError ? (
-          <div className="flex items-center justify-center h-full text-red-500 px-8 text-center">
-            {loadError}
-          </div>
-        ) : (
-          <div className="flex items-center justify-center h-full text-slate-400">
-            加载中...
+      <main className="flex-1 h-full overflow-hidden flex flex-col">
+        {/* 顶部视图切换栏 */}
+        {activeCourse && (
+          <div className="flex-none flex items-center gap-1 px-4 pt-3 pb-0 bg-slate-50 border-b border-slate-100">
+            <button
+              type="button"
+              onClick={() => setMainView('chat')}
+              className={`px-3 py-1.5 text-xs rounded-t-lg font-medium transition ${
+                mainView === 'chat'
+                  ? 'bg-white border border-b-white border-slate-200 text-indigo-600'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              💬 对话
+            </button>
+            <button
+              type="button"
+              onClick={() => setMainView('quiz')}
+              className={`px-3 py-1.5 text-xs rounded-t-lg font-medium transition ${
+                mainView === 'quiz'
+                  ? 'bg-white border border-b-white border-slate-200 text-indigo-600'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              📝 出题
+            </button>
           </div>
         )}
+        <div className="flex-1 overflow-hidden">
+          {activeCourse ? (
+            mainView === 'quiz' ? (
+              <QuestionGeneratorPanel kbName={activeCourseId} />
+            ) : (
+              <ChatWindow
+                courseId={activeCourseId}
+                courseName={`${activeCourse.icon} ${activeCourse.name}`}
+                sessionId={activeSessionId}
+                sessionMode={activeSession?.mode}
+                ragEnabled={Boolean(activeCourse.rag_enabled)}
+                kbStatus={activeCourse.kb_status ?? null}
+                onSessionCreated={handleSessionCreated}
+              />
+            )
+          ) : loadError ? (
+            <div className="flex items-center justify-center h-full text-red-500 px-8 text-center">
+              {loadError}
+            </div>
+          ) : (
+            <div className="flex items-center justify-center h-full text-slate-400">
+              加载中...
+            </div>
+          )}
+        </div>
       </main>
     </div>
   )

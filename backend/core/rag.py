@@ -250,6 +250,23 @@ def retrieve_texts(course_id: str, query: str, top_k: int = TOP_K) -> list[str]:
     return [c["content"] for c in chunks]
 
 
+def retrieve_context(course_id: str, query: str, top_k: int = TOP_K) -> dict[str, str]:
+    """
+    Merge top RAG chunks into one context string for agents.
+    Return shape matches legacy rag_search: ``answer`` (concatenated text) and ``provider`` label.
+    """
+    chunks = retrieve(course_id, query, top_k=top_k)
+    if not chunks:
+        return {"answer": "", "provider": f"rag:{RAG_BACKEND}"}
+    parts: list[str] = []
+    for c in chunks:
+        content = str(c.get("content", ""))
+        src = str(c.get("source", "")).strip()
+        parts.append(f"[{src}]\n{content}" if src else content)
+    answer = "\n\n---\n\n".join(parts)
+    return {"answer": answer, "provider": f"rag:{RAG_BACKEND}"}
+
+
 def index_all_courses():
     if not os.path.isdir(KNOWLEDGE_DIR):
         return

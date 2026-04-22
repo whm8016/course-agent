@@ -111,12 +111,7 @@ export interface User {
   display_name: string
   is_admin?: boolean
   summary_memory?: string
-  profile_memory?: {
-    level?: string
-    style?: string
-    goal?: string
-    preferred_mode?: string
-  }
+  profile_memory?: string
 }
 
 export interface AuthResponse {

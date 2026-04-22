@@ -1,0 +1,22 @@
+{
+  "mix:keywords:4e70d60c68ee675d76dcb7856a9f939c": {
+    "return": "{\"high_level_keywords\": [\"Backpack problem\", \"Explanation\"], \"low_level_keywords\": [\"Knapsack problem\"]}",
+    "cache_type": "keywords",
+    "chunk_id": null,
+    "original_prompt": "解释一下背包问题",
+    "queryparam": {
+      "mode": "mix",
+      "response_type": "Multiple Paragraphs",
+      "top_k": 12,
+      "chunk_top_k": 8,
+      "max_entity_tokens": 4000,
+      "max_relation_tokens": 4000,
+      "max_total_tokens": 22000,
+      "user_prompt": "",
+      "enable_rerank": false
+    },
+    "create_time": 1776682947,
+    "update_time": 1776682947,
+    "_id": "mix:keywords:4e70d60c68ee675d76dcb7856a9f939c"
+  }
+}
