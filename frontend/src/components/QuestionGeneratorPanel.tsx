@@ -176,8 +176,6 @@ export default function QuestionGeneratorPanel({ kbName }: Props) {
         setStatusText(`正在生成第 ${cur}/${tot} 道题…`)
       } else if (stage === 'complete') {
         setStatusText(`生成完成，共 ${msg.completed ?? cur} 道`)
-        setPhase('done')
-        closeRef.current?.()
       }
       return
     }

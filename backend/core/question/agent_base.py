@@ -88,7 +88,7 @@ class QuestionAgentBase:
         _ = (stage, attachments, trace_meta, kwargs)
         m = model or TEXT_MODEL
         t = 0.7 if temperature is None else temperature
-        mt = 4096 if max_tokens is None else max_tokens
+        mt = 8192 if max_tokens is None else max_tokens
 
         if messages:
             msgs = messages
