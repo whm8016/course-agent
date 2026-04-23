@@ -10,6 +10,7 @@ _log_handler.setFormatter(
     jsonlogger.JsonFormatter(
         fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
         rename_fields={"asctime": "timestamp", "levelname": "level"},
+        json_ensure_ascii=False,
     )
 )
 logging.basicConfig(level=logging.INFO, handlers=[_log_handler])

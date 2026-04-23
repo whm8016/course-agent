@@ -48,8 +48,28 @@ class QuestionAgentBase:
             pass
 
     def get_prompt(self, name: str, default: str = "") -> str:
-        """DeepTutor 用 YAML；此处先返回 default，由子类内联模板补齐。"""
-        return default
+        """从 prompts/{language}/{agent_name}.yaml 读取指定 prompt，找不到则返回 default。"""
+        try:
+            import yaml
+            from pathlib import Path
+            prompt_path = (
+                Path(__file__).parent          # core/question/
+                / "prompts"
+                / self.language                # zh
+                / f"{self.agent_name}.yaml"    # idea_agent.yaml / generator.yaml
+            )
+            if not prompt_path.exists():
+                self.logger.warning(f"prompt file not found: {prompt_path}")
+                return default
+            with open(prompt_path, encoding="utf-8") as f:
+                data = yaml.safe_load(f)
+            if not isinstance(data, dict):
+                self.logger.warning(f"prompt file is not a dictionary: {prompt_path}")
+                return default
+            return str(data.get(name, default) or default)
+        except Exception as exc:
+            self.logger.warning(f"get_prompt failed ({self.agent_name}/{name}): {exc}")
+            return default
 
     async def stream_llm(
         self,

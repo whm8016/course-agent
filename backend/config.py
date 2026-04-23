@@ -155,6 +155,6 @@ LLAMA_INDEX_KB_ROOT = os.getenv(
     "LLAMA_INDEX_KB_ROOT",
     os.path.join(BASE_DIR, "data", "knowledge_bases")
 )
-QUESTION_USE_LLAMAINDEX = os.getenv("QUESTION_USE_LLAMAINDEX", "false").strip().lower() in (
+QUESTION_USE_LLAMAINDEX = os.getenv("QUESTION_USE_LLAMAINDEX", "True").strip().lower() in (
     "1", "true", "yes", "on",
 )

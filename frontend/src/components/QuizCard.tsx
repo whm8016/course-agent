@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { QuizData } from '../types'
+import FormattedMarkdown from './FormattedMarkdown'
 
 interface Props {
   quiz: QuizData
@@ -42,9 +43,15 @@ export default function QuizCard({ quiz }: Props) {
 
           return (
             <div key={qIdx}>
-              <p className="text-sm font-medium text-slate-800 mb-2">
-                {qIdx + 1}. {q.question}
-              </p>
+              <div className="mb-2 flex gap-1.5 items-start">
+                <span className="text-sm font-semibold text-slate-800 shrink-0 pt-0.5">{qIdx + 1}.</span>
+                <div className="min-w-0 flex-1">
+                  <FormattedMarkdown
+                    content={q.question}
+                    className="markdown-body text-sm text-slate-800 [&_p]:my-1.5 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0 [&_ol]:my-1.5 [&_ul]:my-1.5"
+                  />
+                </div>
+              </div>
               <div className="space-y-1.5">
                 {q.options.map((opt) => {
                   const optLetter = opt.charAt(0)
@@ -77,9 +84,21 @@ export default function QuizCard({ quiz }: Props) {
                 })}
               </div>
               {submitted && (
-                <div className={`mt-2 px-3 py-2 rounded-lg text-xs ${isCorrect ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}>
-                  {isCorrect ? '✓ 回答正确！' : `✗ 正确答案是 ${q.answer}`}
-                  {q.explanation && <span className="ml-1">— {q.explanation}</span>}
+                <div className="mt-2 space-y-2">
+                  <div
+                    className={`px-3 py-2 rounded-lg text-xs font-medium ${isCorrect ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'}`}
+                  >
+                    {isCorrect ? '✓ 回答正确！' : `✗ 正确答案是 ${q.answer}`}
+                  </div>
+                  {q.explanation && (
+                    <div className="px-1 py-2 rounded-lg border border-slate-100 bg-slate-50/80">
+                      <p className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-1.5">解析</p>
+                      <FormattedMarkdown
+                        content={q.explanation}
+                        className="markdown-body text-xs leading-relaxed text-slate-700"
+                      />
+                    </div>
+                  )}
                 </div>
               )}
             </div>

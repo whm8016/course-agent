@@ -1,7 +1,8 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { connectQuestionGenerate, type QuestionGenMessage } from '../services/questionWs'
 import type { QuizData, QuizQuestion } from '../types'
 import QuizCard from './QuizCard'
+import FormattedMarkdown from './FormattedMarkdown'
 
 // ---------- 后端 QAPair 的结构 ----------
 interface QAPairRaw {
@@ -64,9 +65,15 @@ function OpenQuestionCard({ q, idx }: { q: QuizQuestion; idx: number }) {
   return (
     <div className="border border-slate-200 rounded-xl overflow-hidden bg-white">
       <div className="px-4 py-3">
-        <p className="text-sm font-medium text-slate-800">
-          {idx + 1}. {q.question}
-        </p>
+        <div className="flex gap-1.5 items-start">
+          <span className="text-sm font-semibold text-slate-800 shrink-0 pt-0.5">{idx + 1}.</span>
+          <div className="min-w-0 flex-1">
+            <FormattedMarkdown
+              content={q.question}
+              className="markdown-body text-sm text-slate-800 [&_p]:my-1.5 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0 [&_ol]:my-1.5 [&_ul]:my-1.5"
+            />
+          </div>
+        </div>
       </div>
       {!revealed ? (
         <div className="px-4 pb-3">
@@ -79,14 +86,21 @@ function OpenQuestionCard({ q, idx }: { q: QuizQuestion; idx: number }) {
           </button>
         </div>
       ) : (
-        <div className="px-4 pb-3 space-y-1">
-          <p className="text-xs text-emerald-700 bg-emerald-50 px-3 py-2 rounded-lg">
-            <span className="font-semibold">参考答案：</span>{q.answer}
-          </p>
+        <div className="px-4 pb-3 space-y-2">
+          <div>
+            <p className="text-[11px] font-semibold text-emerald-800 mb-1">参考答案</p>
+            <div className="text-emerald-900 bg-emerald-50 px-3 py-2 rounded-lg">
+              <FormattedMarkdown
+                content={typeof q.answer === 'string' ? q.answer : String(q.answer)}
+                className="markdown-body text-xs leading-relaxed"
+              />
+            </div>
+          </div>
           {q.explanation && (
-            <p className="text-xs text-slate-500 px-3 py-2 bg-slate-50 rounded-lg">
-              {q.explanation}
-            </p>
+            <div className="bg-slate-50 rounded-lg px-3 py-2 border border-slate-100">
+              <p className="text-[11px] font-semibold text-slate-500 mb-1.5">解析</p>
+              <FormattedMarkdown content={q.explanation} className="markdown-body text-xs leading-relaxed text-slate-700" />
+            </div>
           )}
         </div>
       )}
@@ -134,6 +148,12 @@ export default function QuestionGeneratorPanel({ kbName }: Props) {
   const [errorMsg, setErrorMsg] = useState('')
 
   const closeRef = useRef<(() => void) | null>(null)
+
+  useEffect(() => {
+    return () => {
+      closeRef.current?.()
+    }
+  }, [])
 
   // 把后端 result message 中的 QAPair 追加到 questions 列表
   const handleMessage = useCallback((msg: QuestionGenMessage) => {

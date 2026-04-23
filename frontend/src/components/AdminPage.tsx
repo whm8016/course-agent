@@ -90,6 +90,7 @@ export default function AdminPage({ user, onBack }: Props) {
   const [selectedKB, setSelectedKB] = useState<KB | null>(null)
   const [error, setError] = useState('')
   const [showCreateModal, setShowCreateModal] = useState(false)
+  const [llamaIndexSubmitting, setLlamaIndexSubmitting] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   // ── 加载数据 ──────────────────────────────────────────────────────────────
@@ -127,25 +128,28 @@ export default function AdminPage({ user, onBack }: Props) {
     loadUsers()
   }, [])
 
-  // ── 轮询正在索引的知识库 ──────────────────────────────────────────────────
+  // ── 轮询正在索引的知识库（依赖用 hasIndexing + 课程 id，避免每次 loadKBs 后重建定时器）──
+
+  const hasIndexing = kbs.some(k => k.status === 'indexing')
+  const selectedCourseId = selectedKB?.course_id ?? null
 
   useEffect(() => {
-    const indexing = kbs.some(k => k.status === 'indexing')
-    if (indexing && !pollRef.current) {
+    if (hasIndexing && !pollRef.current) {
       pollRef.current = setInterval(() => {
-        loadKBs()
-        if (selectedKB?.status === 'indexing') {
-          loadKBDetail(selectedKB.course_id)
-        }
-      }, 3000)
-    } else if (!indexing && pollRef.current) {
+        void loadKBs()
+        if (selectedCourseId) void loadKBDetail(selectedCourseId)
+      }, 2000)
+    } else if (!hasIndexing && pollRef.current) {
       clearInterval(pollRef.current)
       pollRef.current = null
     }
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current)
+      if (pollRef.current) {
+        clearInterval(pollRef.current)
+        pollRef.current = null
+      }
     }
-  }, [kbs, selectedKB])
+  }, [hasIndexing, selectedCourseId])
 
   // ── 操作 ──────────────────────────────────────────────────────────────────
 
@@ -207,12 +211,16 @@ export default function AdminPage({ user, onBack }: Props) {
   }
 
   const handleLlamaIndexBuild = async (courseId: string) => {
+    setLlamaIndexSubmitting(courseId)
+    setError('')
     try {
       await apiFetch(`/admin/kb/${courseId}/llamaindex/build`, { method: 'POST' })
       await loadKBs()
       if (selectedKB?.course_id === courseId) await loadKBDetail(courseId)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'LlamaIndex 构建索引失败')
+    } finally {
+      setLlamaIndexSubmitting(null)
     }
   }
 
@@ -311,6 +319,7 @@ export default function AdminPage({ user, onBack }: Props) {
                   onPause={handlePauseIndex}
                   onStop={handleStopIndex}
                   onLlamaIndexBuild={handleLlamaIndexBuild}
+                  llamaIndexSubmitting={llamaIndexSubmitting === selectedKB.course_id}
                   onRefresh={() => loadKBDetail(selectedKB.course_id)}
                   onUploaded={async () => { await loadKBDetail(selectedKB.course_id); await loadKBs() }}
                   onUpdated={async () => { await loadKBDetail(selectedKB.course_id); await loadKBs() }}
@@ -370,7 +379,7 @@ export default function AdminPage({ user, onBack }: Props) {
 // ── KB 详情子组件 ────────────────────────────────────────────────────────────
 
 function KBDetail({
-  kb, onDelete, onDeleteFile, onIndex, onPause, onStop, onLlamaIndexBuild, onRefresh, onUploaded, onUpdated,
+  kb, onDelete, onDeleteFile, onIndex, onPause, onStop, onLlamaIndexBuild, llamaIndexSubmitting, onRefresh, onUploaded, onUpdated,
 }: {
   kb: KB
   onDelete: (courseId: string) => void
@@ -379,6 +388,7 @@ function KBDetail({
   onPause: (courseId: string) => void
   onStop: (courseId: string) => void
   onLlamaIndexBuild: (courseId: string) => void
+  llamaIndexSubmitting: boolean
   onRefresh: () => void
   onUploaded: () => void
   onUpdated: () => void
@@ -395,6 +405,13 @@ function KBDetail({
   const [editOrder, setEditOrder] = useState(kb.sort_order ?? 0)
   const [editLoading, setEditLoading] = useState(false)
   const [editError, setEditError] = useState('')
+
+  /** 与 backend/api/llama_rag.py 中写入的 progress_msg 一致 */
+  const llamaIndexBuildComplete =
+    kb.status === 'ready' && (kb.progress_msg || '').includes('LlamaIndex 索引已完成')
+
+  /** LightRAG 主流程（admin 摄入）曾跑过会有文本块数；仅做 LlamaIndex 向量构建时多为 0 */
+  const hasLightRagIngested = (kb.chunks_total ?? 0) > 0
 
   const handleEditSave = async () => {
     setEditLoading(true)
@@ -462,13 +479,17 @@ function KBDetail({
             <span className={`text-sm px-3 py-1 rounded-full ${STATUS_COLOR[kb.status]}`}>
               {STATUS_LABEL[kb.status]}
             </span>
-            {/* ready 状态：把"重新索引"折叠成小刷新图标 */}
+            {/* ready 状态：小图标与下方「启动 / 重新 LightRAG」同一动作 */}
             {kb.status === 'ready' && (
               <button
                 onClick={() => onIndex(kb.course_id, false, false)}
                 className="text-slate-400 hover:text-indigo-600 p-1.5 rounded hover:bg-indigo-50 transition"
-                title="重新索引（清空已有图谱后从头构建）"
-                aria-label="重新索引"
+                title={
+                  hasLightRagIngested
+                    ? '重新构建 LightRAG 知识图谱（会清空后从头摄入）'
+                    : '启动 LightRAG 摄入，构建知识图谱（尚未跑过主流程时）'
+                }
+                aria-label={hasLightRagIngested ? '重新构建 LightRAG' : '启动 LightRAG 摄入'}
               >
                 <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="23 4 23 10 17 10" />
@@ -634,13 +655,34 @@ function KBDetail({
         )}
 
         <div className="mt-4 flex items-center flex-wrap gap-2">
-          {/* pending：开始索引（大按钮） */}
+          {/* ready：显式展示两条路 — LightRAG 图谱 与 LlamaIndex 向量库 互不替代 */}
+          {kb.status === 'ready' && kb.file_count > 0 && (
+            <button
+              type="button"
+              onClick={() => onIndex(kb.course_id, false, false)}
+              className="flex items-center gap-1.5 text-sm bg-indigo-600 text-white px-3 py-1.5 rounded-lg hover:bg-indigo-700 transition"
+              title={
+                hasLightRagIngested
+                  ? '重新构建将清空当前图谱后，按现有文件重新摄入 LightRAG'
+                  : '首次把已上传文件解析并摄入 LightRAG 知识图谱（与下方 LlamaIndex 向量库是两条线）'
+              }
+            >
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="23 4 23 10 17 10" />
+                <polyline points="1 20 1 14 7 14" />
+                <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+              </svg>
+              {hasLightRagIngested ? '重新构建 LightRAG' : '启动 LightRAG 摄入'}
+            </button>
+          )}
+
+          {/* pending：开始索引（大按钮）— LightRAG 主流程 */}
           {kb.status === 'pending' && (
             <button
               onClick={() => onIndex(kb.course_id, false, false)}
               className="text-sm bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition"
             >
-              开始索引
+              开始索引（LightRAG）
             </button>
           )}
 
@@ -729,18 +771,52 @@ function KBDetail({
             </>
           )}
 
-          {/* LlamaIndex 独立构建按钮：非索引中状态均可触发 */}
+          {/* LlamaIndex 向量索引：与 LightRAG 独立；完成态显示文案 + 可再构建 */}
           {kb.status !== 'indexing' && kb.file_count > 0 && (
-            <button
-              onClick={() => onLlamaIndexBuild(kb.course_id)}
-              className="flex items-center gap-1.5 text-sm text-teal-700 border border-teal-300 bg-teal-50 px-3 py-1.5 rounded-lg hover:bg-teal-100 transition"
-              title="仅构建 LlamaIndex 向量索引（不触发 LightRAG 摄入）"
-            >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-              </svg>
-              LlamaIndex 构建索引
-            </button>
+            llamaIndexBuildComplete ? (
+              <div className="flex items-center flex-wrap gap-2">
+                <span className="inline-flex items-center gap-1.5 text-sm font-medium text-teal-800 bg-teal-100/80 border border-teal-200/80 px-3 py-1.5 rounded-lg">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-teal-600">
+                    <path d="M20 6L9 17l-5-5" />
+                  </svg>
+                  LlamaIndex 构建索引完成
+                </span>
+                <button
+                  type="button"
+                  onClick={() => onLlamaIndexBuild(kb.course_id)}
+                  disabled={llamaIndexSubmitting}
+                  className="flex items-center gap-1.5 text-sm text-teal-800 border border-teal-300 bg-white px-3 py-1.5 rounded-lg hover:bg-teal-50 transition disabled:opacity-50 disabled:pointer-events-none"
+                  title="重新生成 LlamaIndex 向量库文件"
+                >
+                  {llamaIndexSubmitting ? '正在提交…' : '重新构建 LlamaIndex'}
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => onLlamaIndexBuild(kb.course_id)}
+                disabled={llamaIndexSubmitting}
+                className="flex items-center gap-1.5 text-sm text-teal-700 border border-teal-300 bg-teal-50 px-3 py-1.5 rounded-lg hover:bg-teal-100 transition disabled:opacity-50 disabled:pointer-events-none"
+                title="仅构建 LlamaIndex 向量索引（不触发 LightRAG 摄入）"
+              >
+                {llamaIndexSubmitting ? (
+                  <>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                      className="animate-spin" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                    </svg>
+                    正在提交…
+                  </>
+                ) : (
+                  <>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                    </svg>
+                    LlamaIndex 构建索引
+                  </>
+                )}
+              </button>
+            )
           )}
 
           <p className="text-xs text-slate-400 ml-1">

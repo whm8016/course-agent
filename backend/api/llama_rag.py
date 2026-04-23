@@ -1,6 +1,7 @@
 """LlamaIndex 向量库：后台建索引 + 检索（管理员）。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -20,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["llama-rag"])
 
+# 进度回调在 worker 线程触发，节流后写入 DB，避免打爆库与缓存
+_LLAMA_PROGRESS_THROTTLE: dict[str, float] = {}
+_LLAMA_PROGRESS_MIN_INTERVAL = 0.8
+
 
 async def _get_kb_or_404(db: AsyncSession, course_id: str) -> KnowledgeBase:
     r = await db.execute(select(KnowledgeBase).where(KnowledgeBase.course_id == course_id))
@@ -29,37 +34,65 @@ async def _get_kb_or_404(db: AsyncSession, course_id: str) -> KnowledgeBase:
     return kb
 
 
-async def _run_llamaindex_build(kb_id: str, course_id: str, file_paths: list[str]) -> None:
-    """后台任务：与 DeepTutor `run_initialization_task` 类似，HTTP 立即返回，这里慢慢 embed + 落盘。"""
+async def _update_llamaindex_progress(
+    kb_id: str, batch_num: int, total_batches: int, *, _now: float | None = None
+) -> None:
+    t = time.monotonic() if _now is None else _now
+    last = _LLAMA_PROGRESS_THROTTLE.get(kb_id, 0.0)
+    if t - last < _LLAMA_PROGRESS_MIN_INTERVAL and batch_num < total_batches:
+        return
+    _LLAMA_PROGRESS_THROTTLE[kb_id] = t
+    total = max(total_batches, 1)
+    pct = min(99, int(100 * min(batch_num, total_batches) / total))
+    msg = f"LlamaIndex embedding 批次 {batch_num}/{total_batches}"
     try:
         async with AsyncSessionLocal() as db:
             async with db.begin():
                 r = await db.execute(select(KnowledgeBase).where(KnowledgeBase.id == kb_id))
                 kb = r.scalar_one_or_none()
-                if kb:
-                    kb.status = "indexing"
-                    kb.progress = 0
-                    kb.error_msg = ""
-                    kb.progress_msg = "LlamaIndex 向量索引构建中…"
+                if kb and kb.status == "indexing":
+                    kb.progress = pct
+                    kb.progress_msg = msg
                     kb.updated_at = time.time()
-        await invalidate_courses_cache()
+    except Exception:
+        logger.exception("LlamaIndex 进度写入失败 kb_id=%s", kb_id)
 
+
+async def _run_llamaindex_build(kb_id: str, course_id: str, file_paths: list[str]) -> None:
+    """后台任务：与 DeepTutor `run_initialization_task` 类似，HTTP 先已把状态置为 indexing，这里慢慢 embed + 落盘。"""
+    main_loop: asyncio.AbstractEventLoop | None = None
+    try:
+        main_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+
+    try:
         pipeline = LlamaIndexPipeline(kb_base_dir=str(LLAMA_INDEX_KB_ROOT))
 
         def _on_progress(batch_num: int, total_batches: int) -> None:
-            # progress_tracker 在 LlamaIndex 里是同步回调；这里只做轻量日志，避免在回调里开 DB
             logger.info(
                 "LlamaIndex embedding batches %s/%s (course_id=%s)",
                 batch_num,
                 total_batches,
                 course_id,
             )
+            if not main_loop:
+                return
+
+            def _schedule() -> None:
+                asyncio.create_task(
+                    _update_llamaindex_progress(kb_id, batch_num, total_batches)
+                )
+
+            main_loop.call_soon_threadsafe(_schedule)
 
         ok = await pipeline.initialize(
             kb_name=course_id,
             file_paths=file_paths,
             progress_callback=_on_progress,
         )
+
+        _LLAMA_PROGRESS_THROTTLE.pop(kb_id, None)
 
         async with AsyncSessionLocal() as db:
             async with db.begin():
@@ -77,6 +110,7 @@ async def _run_llamaindex_build(kb_id: str, course_id: str, file_paths: list[str
                     kb.updated_at = time.time()
         await invalidate_courses_cache()
     except Exception as e:
+        _LLAMA_PROGRESS_THROTTLE.pop(kb_id, None)
         logger.exception("LlamaIndex 后台建库失败 course_id=%s", course_id)
         try:
             async with AsyncSessionLocal() as db:
@@ -113,6 +147,20 @@ async def build_llamaindex_index(
     file_paths = [f.file_path for f in files if Path(f.file_path).exists()]
     if not file_paths:
         raise HTTPException(status_code=400, detail="文件在磁盘上不存在，请重新上传")
+
+    if kb.status == "indexing":
+        raise HTTPException(
+            status_code=409,
+            detail="知识库正在索引中，请稍候完成后再试",
+        )
+
+    kb.status = "indexing"
+    kb.progress = 0
+    kb.error_msg = ""
+    kb.progress_msg = "LlamaIndex 向量索引构建中…"
+    kb.updated_at = time.time()
+    await db.commit()
+    await invalidate_courses_cache()
 
     background_tasks.add_task(_run_llamaindex_build, kb.id, course_id, file_paths)
 

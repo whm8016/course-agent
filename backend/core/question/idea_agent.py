@@ -11,6 +11,7 @@ from typing import Any
 from config import QUESTION_USE_LLAMAINDEX
 from core.rag_llama import llamaindex_has_index, retrieve_context_llamaindex
 from core.question.agent_base import QuestionAgentBase
+from core.question.flow_log import log_question_flow
 from core.question.json_parser import parse_json_response
 from core.question.models import QuestionTemplate
 from core.question.trace import build_trace_metadata, new_call_id
@@ -32,6 +33,7 @@ class IdeaAgent(QuestionAgentBase):
         enable_rag: bool = True,
         language: str = "zh",
         **kwargs: Any,
+        
     ) -> None:
         super().__init__(
             module_name="question",
@@ -64,9 +66,18 @@ class IdeaAgent(QuestionAgentBase):
                 batch_number=batch_number,
             )
             knowledge_context = self._build_context(retrievals)
+            self.logger.info("idea_agent full knowledge_context:\n%s", knowledge_context)
         else:
             retrievals = []
             knowledge_context = "Retrieval disabled."
+        log_question_flow(
+            self.logger,
+            "idea_agent.context_built",
+            trace_id=trace_id,
+            rag_enabled=bool(self.enable_rag and self.kb_name),
+            retrieval_n=len(retrievals),
+            knowledge_context=knowledge_context,
+        )
 
         templates = await self._generate_templates(
             user_topic=user_topic,
@@ -125,12 +136,14 @@ class IdeaAgent(QuestionAgentBase):
             use_llama = QUESTION_USE_LLAMAINDEX or llamaindex_has_index(self.kb_name)
             if use_llama:
                 result = await retrieve_context_llamaindex(self.kb_name, user_topic)
+                self.logger.info("idea_agent retrieve_context_llamaindex result:\n%s", result)
             else:
-                result = await asyncio.to_thread(
-                    retrieve_context,
-                    self.kb_name,
-                    user_topic,
-                )
+                # result = await asyncio.to_thread(
+                #     retrieve_context,
+                #     self.kb_name,
+                #     user_topic,
+                # )
+                 raise RuntimeError("仅允许 LlamaIndex，请设置 QUESTION_USE_LLAMAINDEX=true 并为该知识库建索引")
             await self._emit_trace_event(
                 {
                     "event": "tool_result",
@@ -211,6 +224,14 @@ class IdeaAgent(QuestionAgentBase):
             knowledge_context=knowledge_context,
             num_ideas=num_ideas,
             existing_concentrations=json.dumps(existing_concentrations or [], ensure_ascii=False, indent=2),
+        )
+        log_question_flow(
+            self.logger,
+            "idea_agent.llm_messages",
+            trace_id=trace_id,
+            batch=batch_number,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
         )
         try:
             _chunks: list[str] = []

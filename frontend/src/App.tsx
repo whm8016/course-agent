@@ -182,21 +182,32 @@ export default function App() {
             </button>
           </div>
         )}
-        <div className="flex-1 overflow-hidden">
+        <div className="flex-1 min-h-0 overflow-hidden">
           {activeCourse ? (
-            mainView === 'quiz' ? (
-              <QuestionGeneratorPanel kbName={activeCourseId} />
-            ) : (
-              <ChatWindow
-                courseId={activeCourseId}
-                courseName={`${activeCourse.icon} ${activeCourse.name}`}
-                sessionId={activeSessionId}
-                sessionMode={activeSession?.mode}
-                ragEnabled={Boolean(activeCourse.rag_enabled)}
-                kbStatus={activeCourse.kb_status ?? null}
-                onSessionCreated={handleSessionCreated}
-              />
-            )
+            <>
+              <div
+                className={
+                  mainView === 'chat'
+                    ? 'h-full min-h-0 flex flex-col overflow-hidden'
+                    : 'hidden'
+                }
+              >
+                <ChatWindow
+                  courseId={activeCourseId}
+                  courseName={`${activeCourse.icon} ${activeCourse.name}`}
+                  sessionId={activeSessionId}
+                  sessionMode={activeSession?.mode}
+                  ragEnabled={Boolean(activeCourse.rag_enabled)}
+                  kbStatus={activeCourse.kb_status ?? null}
+                  onSessionCreated={handleSessionCreated}
+                />
+              </div>
+              <div
+                className={mainView === 'quiz' ? 'h-full min-h-0 overflow-hidden' : 'hidden'}
+              >
+                <QuestionGeneratorPanel kbName={activeCourseId} />
+              </div>
+            </>
           ) : loadError ? (
             <div className="flex items-center justify-center h-full text-red-500 px-8 text-center">
               {loadError}

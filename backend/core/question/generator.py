@@ -10,6 +10,7 @@ import re
 from typing import Any
 
 from core.question.agent_base import QuestionAgentBase
+from core.question.flow_log import log_question_flow
 from core.question.models import QAPair, QuestionTemplate
 from core.question.trace import build_trace_metadata, new_call_id
 
@@ -150,7 +151,7 @@ class Generator(QuestionAgentBase):
             previous_questions=previous_questions or "(none)",
             knowledge_context=knowledge_context or "(none)",
             available_tools=available_tools,
-        )
+        )#就是一段str通过format赋值
 
         _chunks: list[str] = []
         async for _c in self.stream_llm(
@@ -169,8 +170,10 @@ class Generator(QuestionAgentBase):
         ):
             _chunks.append(_c)
         response = "".join(_chunks)
-        payload = self._parse_json_like(response)
+        self.logger.warning(f"[generator] raw LLM response for {template.question_id}: {response[:2000]}")
 
+        payload = self._parse_json_like(response)
+        
         if "question" not in payload or not str(payload.get("question", "")).strip():
             payload["question"] = (
                 f"Based on {template.concentration}, answer this {template.difficulty} "
@@ -262,7 +265,16 @@ class Generator(QuestionAgentBase):
             "- If question_type is written: do not provide options, and the learner must write an explanation or short answer.\n"
             "- If question_type is coding: do not provide options, and the learner must write code, pseudocode, or an algorithmic solution.\n"
             "- For written/coding questions, never ask the learner to select, choose, or pick among options.\n"
+            "- For written/coding: write correct_answer and explanation as Markdown (## sections, numbered steps, "
+            "inline code like [1,2,3] for array state).\n"
             "- Return JSON only with keys: question_type, question, options, correct_answer, explanation.\n"
+        )
+        log_question_flow(
+            self.logger,
+            "generator.llm_repair_payload",
+            question_id=template.question_id,
+            issue_count=len(issues),
+            repair_prompt=repair_prompt,
         )
 
         _chunks: list[str] = []
@@ -442,11 +454,11 @@ class Generator(QuestionAgentBase):
         except Exception:
             pass
 
-        obj_match = re.search(r"\{[\s\S]*\}", cleaned)
-        if obj_match:
-            try:
-                payload = json.loads(obj_match.group(0))
-                return payload if isinstance(payload, dict) else {}
-            except Exception:
-                return {}
-        return {}
+        start = cleaned.find("{")
+        if start == -1:
+            return {}
+        try:
+            payload, _end = json.JSONDecoder().raw_decode(cleaned, start)
+            return payload if isinstance(payload, dict) else {}
+        except Exception:
+            return {}

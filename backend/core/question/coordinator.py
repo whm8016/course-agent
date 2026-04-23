@@ -22,8 +22,8 @@ from config import QUESTION_DEFAULT_TOOL_FLAGS, QUESTION_LOG_DIR
 
 import logging
 from core.question.exam_stubs import extract_questions_from_paper, parse_pdf_with_mineru
+from core.question.flow_log import log_question_flow
 from core.question.path import get_question_dir
-from config import QUESTION_DEFAULT_TOOL_FLAGS  
 
 
 
@@ -110,6 +110,16 @@ class AgentCoordinator:
     ) -> dict[str, Any]:
         self._current_batch_dir = self._create_batch_dir("custom")
         requested = max(1, int(num_questions or 1))
+        log_question_flow(
+            self.logger,
+            "coordinator.topic_start",
+            num_questions=requested,
+            user_topic=user_topic,
+            preference=preference,
+            history_context=history_context,
+            kb_name=self.kb_name or "",
+            enable_idea_rag=self.enable_idea_rag,
+        )
         idea_agent = self._create_idea_agent()
         templates: list[QuestionTemplate] = []
         batch_trace: list[dict[str, Any]] = []
@@ -152,6 +162,14 @@ class AgentCoordinator:
                 target_question_type=target_question_type,
                 existing_concentrations=existing_concentrations,
                 batch_number=batch_number,
+            )
+            log_question_flow(
+                self.logger,
+                "coordinator.ideation_batch_done",
+                batch=batch_number,
+                batch_templates=len(idea_result.get("templates") or []),
+                knowledge_context=str(idea_result.get("knowledge_context", "")),
+                retrievals_n=len(idea_result.get("retrievals") or []),
             )
             batch_templates = idea_result.get("templates", [])
             if not isinstance(batch_templates, list):
@@ -224,6 +242,14 @@ class AgentCoordinator:
     ) -> dict[str, Any]:
         if self._current_batch_dir is None:
             self._current_batch_dir = self._create_batch_dir("mimic")
+        log_question_flow(
+            self.logger,
+            "coordinator.exam_start",
+            exam_paper_path=exam_paper_path,
+            max_questions=max_questions,
+            paper_mode=paper_mode,
+            history_context=history_context,
+        )
         templates, parse_trace = await self._parse_exam_to_templates(
             exam_paper_path=exam_paper_path,
             max_questions=max_questions,
@@ -269,7 +295,7 @@ class AgentCoordinator:
         total = len(templates)
         generated_questions: list[str] = []
 
-        for idx, template in enumerate[QuestionTemplate](templates, 1):
+        for idx, template in enumerate(templates, 1):
             await self._send_ws_update(
                 "question_update",
                 {
@@ -282,6 +308,18 @@ class AgentCoordinator:
 
             success = True
             try:
+                tmpl_meta = template.metadata if isinstance(template.metadata, dict) else {}
+                log_question_flow(
+                    self.logger,
+                    "coordinator.before_generator",
+                    question_id=template.question_id,
+                    concentration=template.concentration,
+                    user_topic=user_topic,
+                    preference=preference,
+                    history_context=history_context,
+                    previous_questions_n=len(generated_questions),
+                    knowledge_context=str(tmpl_meta.get("knowledge_context", "")),
+                )
                 qa_pair = await generator.process(
                     template=template,
                     user_topic=user_topic,
