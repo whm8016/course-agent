@@ -9,6 +9,7 @@ import QuizCard from './QuizCard'
 interface Props {
   message: Message
   thinkingSteps?: Message[]
+  courseId?: string
 }
 
 function looksLikeMath(expr: string): boolean {
@@ -42,7 +43,7 @@ function normalizeMathDelimiters(content: string): string {
   return normalized
 }
 
-export default function MessageBubble({ message, thinkingSteps }: Props) {
+export default function MessageBubble({ message, thinkingSteps, courseId }: Props) {
   const isUser = message.role === 'user'
   const renderedContent = normalizeMathDelimiters(message.content || '')
 
@@ -79,7 +80,7 @@ export default function MessageBubble({ message, thinkingSteps }: Props) {
         )}
 
         {message.metadata?.quiz && (
-          <QuizCard quiz={message.metadata.quiz} />
+          <QuizCard quiz={message.metadata.quiz} courseId={courseId} />
         )}
 
         {message.metadata?.guardrail && !message.metadata.guardrail.safe && (
