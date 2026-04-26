@@ -117,7 +117,7 @@ class KnowledgeBase(Base):
     token_estimate = Column(Integer, nullable=False, default=0)    # 估算 token 消耗
     created_at = Column(Float, nullable=False, default=time.time)
     updated_at = Column(Float, nullable=False, default=time.time)
-
+    is_visible = Column(Boolean, nullable=False, default=True)
     files = relationship("KBFile", back_populates="kb", cascade="all, delete-orphan")
 
 
@@ -247,6 +247,12 @@ async def init_db():
             "knowledge_bases",
             "sort_order",
             "ALTER TABLE knowledge_bases ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+        )
+        await _ensure_column(
+            conn,
+            "knowledge_bases",
+            "is_visible",
+            "ALTER TABLE knowledge_bases ADD COLUMN is_visible BOOLEAN NOT NULL DEFAULT TRUE",
         )
 
     # 将硬编码课程一次性 seed 进数据库（幂等：已存在则跳过）

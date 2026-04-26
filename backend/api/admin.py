@@ -60,6 +60,7 @@ def _kb_to_dict(kb: KnowledgeBase) -> dict:
         "token_estimate": kb.token_estimate,
         "created_at": kb.created_at,
         "updated_at": kb.updated_at,
+        "is_visible": bool(kb.is_visible),
     }
 
 
@@ -227,7 +228,7 @@ class CreateKBBody(BaseModel):
     icon: str = "📘"
     system_prompt: str = ""
     sort_order: int = 0
-
+    is_visible: bool = True
 
 @router.post("/kb", status_code=201)
 async def create_kb(
@@ -249,6 +250,7 @@ async def create_kb(
         icon=body.icon,
         system_prompt=body.system_prompt,
         sort_order=body.sort_order,
+        is_visible=body.is_visible,
     )
     db.add(kb)
     await db.flush()
@@ -265,6 +267,7 @@ class UpdateKBBody(BaseModel):
     icon: str | None = None
     system_prompt: str | None = None
     sort_order: int | None = None
+    is_visible: bool | None = None
 
 
 @router.patch("/kb/{course_id}")
@@ -283,6 +286,8 @@ async def update_kb(
         kb.description = body.description
     if body.icon is not None:
         kb.icon = body.icon
+    if body.is_visible is not None:
+        kb.is_visible = body.is_visible
     if body.system_prompt is not None:
         kb.system_prompt = body.system_prompt
     if body.sort_order is not None:

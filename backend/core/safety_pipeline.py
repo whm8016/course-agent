@@ -28,12 +28,10 @@ INTENT_SUMMARIZE = "summarize"
 
 _GREETING_PATTERNS = re.compile(
     r"^(你好|嗨|hi|hello|hey|哈喽|喂|在吗|早上好|晚上好|下午好|嘿|早安|晚安"
-    r"|谢谢|感谢|多谢|辛苦了|拜拜|再见|bye|好的|ok|收到|明白了|了解"
-    r"|哈哈|嗯嗯|666|牛|厉害|可以|棒|对的|是的|好吧|行|okok"
+    r"|谢谢|感谢|多谢|辛苦了|拜拜|再见|bye"
     r"|你是谁|你叫什么|你能做什么|你会什么)[\s!！?？。.~～…]*$",
     re.IGNORECASE,
 )
-
 _QUIZ_KEYWORDS = {"出题", "测验", "考考我", "来几道题", "来道题", "做题", "quiz"}
 _SUMMARY_KEYWORDS = {"总结", "归纳", "回顾", "小结", "知识清单", "summarize"}
 
@@ -75,31 +73,18 @@ async def classify_intent(
         logger.info("classify_intent result=summarize reason=summary_keyword")
         return IntentResult(INTENT_SUMMARIZE, 0.90, "summary_keyword")
 
-    if len(text) <= 6 and not any(
-        ch in text for ch in "什怎为何哪啥如何解释说明分析证明推导计算求"
-    ):
-        logger.info("classify_intent result=chitchat reason=short_non_question")
-        return IntentResult(INTENT_CHITCHAT, 0.85, "short_non_question")
+    
 
     if _KNOWLEDGE_QUESTION_PATTERN.search(text):
         logger.info("classify_intent result=knowledge reason=knowledge_question_pattern")
         return IntentResult(INTENT_KNOWLEDGE, 0.92, "knowledge_question_pattern")
 
     try:
+        from core.prompts import ROUTER_PROMPT
         resp = await _client.chat.completions.create(
             model=TEXT_MODEL,
             messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "你是一个意图分类器。判断用户消息属于哪一类：\n"
-                        '- "chitchat": 闲聊、打招呼、感谢、告别、不涉及课程知识\n'
-                        '- "knowledge": 涉及课程知识内容的提问或讨论\n'
-                        '- "quiz": 要求出题或做练习\n'
-                        '- "summarize": 要求总结或归纳\n\n'
-                        '只输出 JSON: {"intent":"...","confidence":0.0~1.0}'
-                    ),
-                },
+                {"role": "system", "content": ROUTER_PROMPT},
                 {"role": "user", "content": text},
             ],
             temperature=0,
@@ -107,12 +92,19 @@ async def classify_intent(
         )
         raw = (resp.choices[0].message.content or "").strip()
         obj = json.loads(raw)
-        intent = obj.get("intent", INTENT_KNOWLEDGE)
-        conf = float(obj.get("confidence", 0.8))
-        if intent not in (INTENT_CHITCHAT, INTENT_KNOWLEDGE, INTENT_QUIZ, INTENT_SUMMARIZE):
-            intent = INTENT_KNOWLEDGE
-        logger.info("classify_intent result=%s confidence=%.2f reason=llm", intent, conf)
-        return IntentResult(intent, conf, "llm")
+        raw_intent = obj.get("intent", "teach")
+        # ROUTER_PROMPT 返回 teach/quiz/summarize/off_topic，映射到本模块标签
+        _intent_map = {
+            "teach": INTENT_KNOWLEDGE,
+            "knowledge": INTENT_KNOWLEDGE,
+            "off_topic": INTENT_CHITCHAT,
+            "chitchat": INTENT_CHITCHAT,
+            "quiz": INTENT_QUIZ,
+            "summarize": INTENT_SUMMARIZE,
+        }
+        intent = _intent_map.get(raw_intent, INTENT_KNOWLEDGE)
+        logger.info("classify_intent result=%s (raw=%s) reason=llm", intent, raw_intent)
+        return IntentResult(intent, 0.9, "llm")
     except Exception:
         logger.warning("classify_intent LLM fallback failed, default to knowledge", exc_info=True)
         return IntentResult(INTENT_KNOWLEDGE, 0.6, "fallback")

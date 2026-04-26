@@ -20,6 +20,13 @@ from core.lightrag_engine import (
     is_lightrag_available,
     retrieve_with_lightrag,
     stream_answer_with_contexts,
+    agentic_pipeline,
+)
+from core.lightrag_engine import (
+    index_course_with_lightrag,
+    is_lightrag_available,
+    retrieve_with_lightrag,
+    stream_answer_with_contexts,
 )
 from core.llm import chat_stream
 from core.orchestrator import normalize_mode
@@ -173,77 +180,150 @@ async def chat_with_lightrag(
                     yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
 
                 answer = "".join(answer_parts)
+              
 
             else:
                 logger.info(
-                    "[trace=%s] ▶ route=knowledge (full RAG pipeline) t=%dms",
+                    "[trace=%s] ▶ route=knowledge (agentic pipeline) t=%dms",
                     trace_id, elapsed_ms(),
                 )
-                logger.info("[trace=%s] LightRAG retrieve_start t=%dms", trace_id, elapsed_ms())
-                yield f"data: {json.dumps({'type': 'thinking', 'content': '正在使用 LightRAG 检索知识图谱与向量证据...'}, ensure_ascii=False)}\n\n"
-                yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'lightrag_query', 'input': {'course_id': course_id, 'mode': mode or 'mix'}}, ensure_ascii=False)}\n\n"
+                # yield f"data: {json.dumps({'type': 'thinking', 'content': '正在分析问题、检索证据并整理回答...'}, ensure_ascii=False)}\n\n"
 
-                retrieve_result = await asyncio.wait_for(
-                    retrieve_with_lightrag(course_id=course_id, message=message, history=history, mode=mode),
-                    timeout=LIGHTRAG_TIMEOUT_SEC,
-                )
-
-                # LightRAG aquery(stream=True) 返回 AsyncIterator[str]；stream=False 返回 str/dict
-                contexts: list = []
+                # answer_parts: list[str] = []
+                # first_token_logged = False
+                # async for token in agentic_pipeline(
+                #     course_id=course_id,
+                #     message=message,
+                #     history=history,
+                #     mode=mode,
+                # ):
+                #     if await request.is_disconnected():
+                #         logger.info("[trace=%s] client disconnected during agentic stream", trace_id)
+                #         return
+                #     if not first_token_logged:
+                #         logger.info("[trace=%s] first_token t=%dms (agentic)", trace_id, elapsed_ms())
+                #         first_token_logged = True
+                #     answer_parts.append(token)
+                #     yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+                # answer = "".join(answer_parts)
                 answer_parts: list[str] = []
                 first_token_logged = False
-
-                if hasattr(retrieve_result, "__aiter__"):
-                    async for token in retrieve_result:
-                        if await request.is_disconnected():
-                            logger.info("[trace=%s] client disconnected during lightrag stream", trace_id)
-                            return
-                        if not token:
-                            continue
+                _STAGE_LABELS = {
+                    "thinking": "分析问题",
+                    "retrieving": "检索知识图谱",
+                    "observing": "整理证据",
+                    "responding": "生成回答",
+                }
+                async for event in agentic_pipeline(
+                    course_id=course_id,
+                    message=message,
+                    history=history,
+                    mode=mode,
+                ):
+                    if await request.is_disconnected():
+                        return
+                    if event["type"] == "stage":
+                        stage = event["stage"]
+                        state = event["state"]
+                        label = _STAGE_LABELS.get(stage, stage)
+                        call_state = "running" if state == "start" else "complete"
+                        display = f"{label}..." if state == "start" else f"{label} ✓"
+                        yield f"data: {json.dumps({'type': 'thinking', 'content': display, 'stage': stage, 'call_state': call_state}, ensure_ascii=False)}\n\n"
+                    elif event["type"] == "stage_chunk":
+                        yield f"data: {json.dumps({'type': 'thinking_chunk', 'content': event['content'], 'stage': event['stage']}, ensure_ascii=False)}\n\n"
+                    elif event["type"] == "token":
+                        token = event["content"]
                         if not first_token_logged:
-                            logger.info("[trace=%s] first_token t=%dms (lightrag native stream)", trace_id, elapsed_ms())
+                            logger.info("[trace=%s] first_token t=%dms (agentic)", trace_id, elapsed_ms())
                             first_token_logged = True
-                        answer_parts.append(str(token))
-                        yield f"data: {json.dumps({'type': 'token', 'content': str(token)}, ensure_ascii=False)}\n\n"
-                    answer = "".join(answer_parts)
-                elif isinstance(retrieve_result, dict):
-                    answer = str(
-                        retrieve_result.get("response")
-                        or retrieve_result.get("answer")
-                        or retrieve_result.get("content")
-                        or ""
-                    )
-                    raw_ctx = (
-                        retrieve_result.get("contexts")
-                        or retrieve_result.get("context")
-                        or retrieve_result.get("chunks")
-                        or []
-                    )
-                    if isinstance(raw_ctx, list):
-                        contexts = raw_ctx
-                    elif isinstance(raw_ctx, dict):
-                        contexts = [raw_ctx]
-                    elif isinstance(raw_ctx, str) and raw_ctx.strip():
-                        contexts = [raw_ctx]
-                    if contexts:
-                        compact_contexts = _compact_contexts_for_sse(contexts)
-                        yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'lightrag_query', 'contexts': compact_contexts}, ensure_ascii=False)}\n\n"
-                    if answer:
-                        logger.info("[trace=%s] first_token t=%dms (lightrag native non-stream)", trace_id, elapsed_ms())
-                        yield f"data: {json.dumps({'type': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
-                else:
-                    answer = str(retrieve_result or "")
-                    if answer:
-                        logger.info("[trace=%s] first_token t=%dms (lightrag native non-stream)", trace_id, elapsed_ms())
-                        yield f"data: {json.dumps({'type': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
+                        answer_parts.append(token)
+                        yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+                answer = "".join(answer_parts)
 
                 logger.info(
-                    "[trace=%s] retrieve_end t=%dms result_type=%s answer_chars=%d contexts=%d",
-                    trace_id, elapsed_ms(),
-                    type(retrieve_result).__name__,
-                    len(answer),
-                    len(contexts),
+                    "[trace=%s] agentic_pipeline done answer_chars=%d t=%dms",
+                    trace_id, len(answer), elapsed_ms(),
                 )
+
+                if await request.is_disconnected():
+                    return
+
+                # hallucination check（knowledge 路径保留）
+                hallu_result = await evaluate_hallucination(answer, [])
+                hallucination_dict = hallu_result.to_dict()
+
+                
+            # else:
+            #     logger.info(
+            #         "[trace=%s] ▶ route=knowledge (full RAG pipeline) t=%dms",
+            #         trace_id, elapsed_ms(),
+            #     )
+            #     logger.info("[trace=%s] LightRAG retrieve_start t=%dms", trace_id, elapsed_ms())
+            #     yield f"data: {json.dumps({'type': 'thinking', 'content': '正在使用 LightRAG 检索知识图谱与向量证据...'}, ensure_ascii=False)}\n\n"
+            #     yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'lightrag_query', 'input': {'course_id': course_id, 'mode': mode or 'mix'}}, ensure_ascii=False)}\n\n"
+
+            #     retrieve_result = await asyncio.wait_for(
+            #         retrieve_with_lightrag(course_id=course_id, message=message, history=history, mode=mode),
+            #         timeout=LIGHTRAG_TIMEOUT_SEC,
+            #     )
+
+            #     # LightRAG aquery(stream=True) 返回 AsyncIterator[str]；stream=False 返回 str/dict
+            #     contexts: list = []
+            #     answer_parts: list[str] = []
+            #     first_token_logged = False
+
+            #     if hasattr(retrieve_result, "__aiter__"):
+            #         async for token in retrieve_result:
+            #             if await request.is_disconnected():
+            #                 logger.info("[trace=%s] client disconnected during lightrag stream", trace_id)
+            #                 return
+            #             if not token:
+            #                 continue
+            #             if not first_token_logged:
+            #                 logger.info("[trace=%s] first_token t=%dms (lightrag native stream)", trace_id, elapsed_ms())
+            #                 first_token_logged = True
+            #             answer_parts.append(str(token))
+            #             yield f"data: {json.dumps({'type': 'token', 'content': str(token)}, ensure_ascii=False)}\n\n"
+            #         answer = "".join(answer_parts)
+            #     elif isinstance(retrieve_result, dict):
+            #         answer = str(
+            #             retrieve_result.get("response")
+            #             or retrieve_result.get("answer")
+            #             or retrieve_result.get("content")
+            #             or ""
+            #         )
+            #         raw_ctx = (
+            #             retrieve_result.get("contexts")
+            #             or retrieve_result.get("context")
+            #             or retrieve_result.get("chunks")
+            #             or []
+            #         )
+            #         if isinstance(raw_ctx, list):
+            #             contexts = raw_ctx
+            #         elif isinstance(raw_ctx, dict):
+            #             contexts = [raw_ctx]
+            #         elif isinstance(raw_ctx, str) and raw_ctx.strip():
+            #             contexts = [raw_ctx]
+            #         if contexts:
+            #             compact_contexts = _compact_contexts_for_sse(contexts)
+            #             yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'lightrag_query', 'contexts': compact_contexts}, ensure_ascii=False)}\n\n"
+            #         if answer:
+            #             logger.info("[trace=%s] first_token t=%dms (lightrag native non-stream)", trace_id, elapsed_ms())
+            #             yield f"data: {json.dumps({'type': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
+            #     else:
+            #         answer = str(retrieve_result or "")
+            #         if answer:
+            #             logger.info("[trace=%s] first_token t=%dms (lightrag native non-stream)", trace_id, elapsed_ms())
+            #             yield f"data: {json.dumps({'type': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
+
+            #     logger.info(
+            #         "[trace=%s] retrieve_end t=%dms result_type=%s answer_chars=%d contexts=%d",
+            #         trace_id, elapsed_ms(),
+            #         type(retrieve_result).__name__,
+            #         len(answer),
+            #         len(contexts),
+            #     )
+
 
                 if await request.is_disconnected():
                     logger.info("[trace=%s] client disconnected after native answer", trace_id)

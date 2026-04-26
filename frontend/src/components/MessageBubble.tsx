@@ -10,6 +10,7 @@ interface Props {
   message: Message
   thinkingSteps?: Message[]
   courseId?: string
+  isStreaming?: boolean
 }
 
 function looksLikeMath(expr: string): boolean {
@@ -43,7 +44,7 @@ function normalizeMathDelimiters(content: string): string {
   return normalized
 }
 
-export default function MessageBubble({ message, thinkingSteps, courseId }: Props) {
+export default function MessageBubble({ message, thinkingSteps, courseId, isStreaming }: Props) {
   const isUser = message.role === 'user'
   const renderedContent = normalizeMathDelimiters(message.content || '')
 
@@ -64,7 +65,7 @@ export default function MessageBubble({ message, thinkingSteps, courseId }: Prop
     <div className="flex justify-start mb-4">
       <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-white border border-slate-200 text-slate-800 rounded-bl-md shadow-sm">
         {thinkingSteps && thinkingSteps.length > 0 && (
-          <ThinkingProcess steps={thinkingSteps} />
+          <ThinkingProcess steps={thinkingSteps} isStreaming={isStreaming} />
         )}
 
         {message.content && (

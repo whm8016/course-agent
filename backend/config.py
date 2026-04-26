@@ -150,6 +150,11 @@ QUESTION_DEFAULT_TOOL_FLAGS: dict[str, bool] = {
     "code_execution": QUESTION_TOOL_CODE_EXECUTION,
 }
 
+# ---------------------------------------------------------------------------
+# LlamaParse（图像 PDF / 扫描件解析）
+# ---------------------------------------------------------------------------
+LLAMA_CLOUD_API_KEY = os.getenv("LLAMA_CLOUD_API_KEY") or os.getenv("LLAMAPARSE_API_KEY", "")
+
 # LlamaIndex 向量库根目录（每个 course 一个子目录，其下 llamaindex_storage/）
 LLAMA_INDEX_KB_ROOT = os.getenv(
     "LLAMA_INDEX_KB_ROOT",

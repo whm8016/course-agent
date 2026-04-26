@@ -1,4 +1,5 @@
-FROM python:3.12-slim
+# Pinned: docker mirror (e.g. xuanyuan) often breaks floating tags (3.12-slim) with "content size of zero"
+FROM python:3.12.11-slim-bookworm
 
 WORKDIR /app
 

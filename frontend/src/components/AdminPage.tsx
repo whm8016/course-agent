@@ -24,6 +24,7 @@ interface KB {
   icon: string
   system_prompt: string
   sort_order: number
+  is_visible: boolean
   status: 'pending' | 'indexing' | 'ready' | 'error' | 'paused'
   file_count: number
   error_msg: string
@@ -288,9 +289,16 @@ export default function AdminPage({ user, onBack }: Props) {
                   >
                     <div className="flex items-center justify-between mb-1">
                       <span className="text-sm font-medium text-slate-800 truncate">{kb.name}</span>
-                      <span className={`text-xs px-1.5 py-0.5 rounded-full ml-1 shrink-0 ${STATUS_COLOR[kb.status]}`}>
-                        {STATUS_LABEL[kb.status]}
-                      </span>
+                      <div className="flex items-center gap-1 ml-1 shrink-0">
+                        {!kb.is_visible && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-400" title="已隐藏，学生不可见">
+                            隐藏
+                          </span>
+                        )}
+                        <span className={`text-xs px-1.5 py-0.5 rounded-full ${STATUS_COLOR[kb.status]}`}>
+                          {STATUS_LABEL[kb.status]}
+                        </span>
+                      </div>
                     </div>
                     <div className="text-xs text-slate-400">{kb.course_id} · {kb.file_count} 个文件</div>
                   </button>
@@ -403,6 +411,7 @@ function KBDetail({
   const [editIcon, setEditIcon] = useState(kb.icon || '📘')
   const [editPrompt, setEditPrompt] = useState(kb.system_prompt || '')
   const [editOrder, setEditOrder] = useState(kb.sort_order ?? 0)
+  const [editVisible, setEditVisible] = useState(kb.is_visible ?? true)
   const [editLoading, setEditLoading] = useState(false)
   const [editError, setEditError] = useState('')
 
@@ -426,6 +435,7 @@ function KBDetail({
           icon: editIcon,
           system_prompt: editPrompt,
           sort_order: editOrder,
+          is_visible: editVisible,
         }),
       })
       setShowEdit(false)
@@ -564,14 +574,27 @@ function KBDetail({
                 placeholder="你是一位耐心的课程助教..."
               />
             </div>
-            <div className="w-24">
-              <label className="block text-xs font-medium text-slate-600 mb-1">排序（小的在前）</label>
-              <input
-                type="number"
-                value={editOrder}
-                onChange={e => setEditOrder(Number(e.target.value))}
-                className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-indigo-400"
-              />
+            <div className="flex items-end gap-4">
+              <div className="w-24">
+                <label className="block text-xs font-medium text-slate-600 mb-1">排序（小的在前）</label>
+                <input
+                  type="number"
+                  value={editOrder}
+                  onChange={e => setEditOrder(Number(e.target.value))}
+                  className="w-full border border-slate-300 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:border-indigo-400"
+                />
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer select-none pb-1.5">
+                <div
+                  onClick={() => setEditVisible(v => !v)}
+                  className={`relative w-9 h-5 rounded-full transition-colors ${editVisible ? 'bg-indigo-500' : 'bg-slate-300'}`}
+                >
+                  <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${editVisible ? 'translate-x-4' : ''}`} />
+                </div>
+                <span className="text-xs font-medium text-slate-600">
+                  {editVisible ? '学生可见' : '学生不可见'}
+                </span>
+              </label>
             </div>
             <div className="flex gap-2">
               <button
@@ -916,6 +939,7 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
   const [description, setDescription] = useState('')
   const [icon, setIcon] = useState('📘')
   const [systemPrompt, setSystemPrompt] = useState('')
+  const [isVisible, setIsVisible] = useState(true)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -933,6 +957,7 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
           description,
           icon,
           system_prompt: systemPrompt,
+          is_visible: isVisible,
         }),
       })
       onCreated()
@@ -1008,6 +1033,17 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
               placeholder="你是一位耐心的课程助教，擅长讲解..."
             />
           </div>
+          <label className="flex items-center gap-3 cursor-pointer select-none">
+            <div
+              onClick={() => setIsVisible(v => !v)}
+              className={`relative w-9 h-5 rounded-full transition-colors ${isVisible ? 'bg-indigo-500' : 'bg-slate-300'}`}
+            >
+              <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${isVisible ? 'translate-x-4' : ''}`} />
+            </div>
+            <span className="text-sm text-slate-700">
+              {isVisible ? '对学生可见' : '对学生隐藏'}
+            </span>
+          </label>
           <div className="flex gap-3 pt-2">
             <button
               type="submit"

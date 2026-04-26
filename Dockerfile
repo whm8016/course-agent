@@ -7,7 +7,8 @@ COPY frontend/ ./
 RUN npm run build
 
 # ---- Stage 2: Backend + Nginx ----
-FROM python:3.12-slim
+# Pinned: docker mirror (e.g. xuanyuan) often breaks floating tags (3.12-slim) with "content size of zero"
+FROM python:3.12.11-slim-bookworm
 
 RUN apt-get update && apt-get install -y --no-install-recommends nginx && \
     rm -rf /var/lib/apt/lists/*

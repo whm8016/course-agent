@@ -300,6 +300,44 @@ def _cap_history(messages: list[dict[str, str]]) -> list[dict[str, str]]:
         total_chars = sum(len(m["content"]) for m in capped)
     return capped
 
+# 替换 LightRAG 内置 rag_response：去掉强制 References 章节，保留三个必要占位符
+_LIGHTRAG_RESPONSE_TEMPLATE = """---角色---
+
+你是擅长综合知识库信息的 AI 助手，须**仅**依据提供的 **Context（上下文）** 准确回答用户问题。
+
+---目标---
+
+对用户问题给出全面、结构清晰的回答。
+回答须整合 **Context** 中「知识图谱数据」与「文档片段」的事实。
+若提供对话历史，请保持连贯并避免重复已说内容。
+
+---说明---
+
+1. 步骤指引：
+  - 结合对话历史判断用户意图与信息需求。
+  - 仔细查阅 **Context** 中的 `Knowledge Graph Data` 与 `Document Chunks`，提取与问题直接相关的全部信息。
+  - 将事实组织成连贯回答；你的自身知识**仅**用于润色句子和衔接，**不得**引入上下文未出现的信息。
+
+2. 内容与依据：
+  - 严格遵循 **Context**；**不得**编造、臆测或推断未明确陈述的内容。
+  - 若 **Context** 不足以回答，请说明信息不足，不要猜测。
+
+3. 格式与语言：
+  - 回答语言须与用户问题语言一致。
+  - 回答须使用 Markdown（标题、加粗、列表等）以提升可读性。
+  - 回答以 {response_type} 形式呈现。
+
+4. 来源处理：
+  - **不要**在答案末尾单独列出参考文献、References、参考依据等章节。
+  - 若需提及来源，将其自然融入正文（如"根据实验教案..."）。
+
+5. 附加说明：{user_prompt}
+
+
+---Context（上下文）---
+
+{context_data}
+"""
 
 def _build_query_param(
     mode: str,
@@ -421,51 +459,160 @@ async def retrieve_with_lightrag(
     )
     rag = await _get_instance(course_id)
     idx_lock = _index_locks.setdefault(course_id, asyncio.Lock())
-    async with idx_lock:
-        now = time.monotonic()
-        last_index = _last_auto_index_at.get(course_id, 0.0)
-        if _AUTO_INDEX_TTL_SEC == 0 or (now - last_index) >= _AUTO_INDEX_TTL_SEC:
-            index_t0 = time.perf_counter()
-            index_result = await index_course_with_lightrag(course_id)
-            _last_auto_index_at[course_id] = now
-            logger.info(
-                "LightRAG auto-index course=%s skipped=%s elapsed_ms=%d",
-                course_id,
-                index_result.get("skipped"),
-                int((time.perf_counter() - index_t0) * 1000),
-            )
+    # async with idx_lock:
+    #     now = time.monotonic()
+    #     last_index = _last_auto_index_at.get(course_id, 0.0)
+    #     if _AUTO_INDEX_TTL_SEC == 0 or (now - last_index) >= _AUTO_INDEX_TTL_SEC:
+    #         index_t0 = time.perf_counter()
+    #         index_result = await index_course_with_lightrag(course_id)
+    #         _last_auto_index_at[course_id] = now
+    #         logger.info(
+    #             "LightRAG auto-index course=%s skipped=%s elapsed_ms=%d",
+    #             course_id,
+    #             index_result.get("skipped"),
+    #             int((time.perf_counter() - index_t0) * 1000),
+    #         )
 
+    # query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
+    # param = _build_query_param(query_mode, history, only_need_context=False)
+    # context_param = _build_query_param(query_mode, history, only_need_context=False)
+    # # 打开 LightRAG 原生流式输出：aquery 返回 AsyncIterator[str]
+    # if hasattr(context_param, "stream"):
+    #     context_param.stream = True
+    # if hasattr(param, "stream"):
+    #     param.stream = True
+
+    # logger.info("QueryParam: %s", context_param)
+    # retrieve_strategy = "aquery_context_param"
+    # try:
+    #     result: Any = await rag.aquery(message, param=context_param)
+    # except TypeError:
+    #     retrieve_strategy = "aquery_fallback"
+    #     result = await rag.aquery(message, param=param)
+    # return result
     query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
+
+    course_system_prompt = await get_course_prompt(course_id)
+    lightrag_system_prompt = course_system_prompt + "\n\n" + _LIGHTRAG_RESPONSE_TEMPLATE
+
     param = _build_query_param(query_mode, history, only_need_context=False)
-    context_param = _build_query_param(query_mode, history, only_need_context=False)
-    # 打开 LightRAG 原生流式输出：aquery 返回 AsyncIterator[str]
-    if hasattr(context_param, "stream"):
-        context_param.stream = True
     if hasattr(param, "stream"):
         param.stream = True
 
-    logger.info("QueryParam: %s", context_param)
-    retrieve_strategy = "aquery_context_param"
+    logger.info("QueryParam: %s", param)
     try:
-        result: Any = await rag.aquery(message, param=context_param)
+        result: Any = await rag.aquery(message, param=param, system_prompt=lightrag_system_prompt)
     except TypeError:
-        retrieve_strategy = "aquery_fallback"
+        # 旧版 LightRAG 不接受 system_prompt 参数，退回默认
         result = await rag.aquery(message, param=param)
     return result
-    # contexts = _extract_contexts(result)
-    # if not contexts and isinstance(result, dict):
-    #     logger.info("LightRAG empty contexts keys=%s", sorted(result.keys()))
 
-    # logger.info(
-    #     "retrieve_with_lightrag done strategy=%s contexts=%d query=「%s」",
-    #     retrieve_strategy, len(contexts), message[:50],
-    # )
-    # return {
-    #     "contexts": contexts,
-    #     "mode": query_mode,
-    #     "retrieve_strategy": retrieve_strategy,
-    # }
+async def agentic_pipeline(
+    course_id: str,
+    message: str,
+    history: list[dict] | None = None,
+    mode: str | None = None,
+) -> AsyncGenerator[dict, None]:
+    """
+    四阶段 pipeline，yield dict：
+      {'type': 'stage', 'stage': 'thinking'|'retrieving'|'observing'|'responding',
+       'state': 'start'|'done', 'content': str}
+      {'type': 'stage_chunk', 'stage': str, 'content': str}
+      {'type': 'token', 'content': str}
+    """
+    from core.prompts import THINKING_PROMPT, OBSERVING_PROMPT, RESPONDING_PROMPT, _CONCISE_SUFFIX
 
+    course_prompt = await get_course_prompt(course_id)
+    safe_history = _cap_history(_normalize_history(history))
+
+    # ── Stage 1: Thinking ────────────────────────────────────────────
+    logger.info("agentic_pipeline [thinking] start course=%s", course_id)
+    yield {"type": "stage", "stage": "thinking", "state": "start", "content": ""}
+    await asyncio.sleep(0)
+    thinking_chunks: list[str] = []
+    async for token in chat_stream(
+        system_prompt=course_prompt + "\n\n" + THINKING_PROMPT,
+        history=safe_history,
+        user_message=message,
+        image_path=None,
+    ):
+        thinking_chunks.append(token)
+        yield {"type": "stage_chunk", "stage": "thinking", "content": token}
+    thinking = "".join(thinking_chunks).strip()
+    logger.info("agentic_pipeline [thinking] done chars=%d", len(thinking))
+    yield {"type": "stage", "stage": "thinking", "state": "done", "content": ""}
+    await asyncio.sleep(0)
+
+    # ── Stage 2: Retrieve ────────────────────────────────────────────
+    logger.info("agentic_pipeline [retrieve] start course=%s mode=%s", course_id, mode)
+    yield {"type": "stage", "stage": "retrieving", "state": "start", "content": ""}
+    await asyncio.sleep(0)
+    rag = await _get_instance(course_id)
+    query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
+    context_param = _build_query_param(query_mode, history, only_need_context=True)
+    if hasattr(context_param, "stream"):
+        context_param.stream = False
+    try:
+        raw = await rag.aquery(message, param=context_param)
+    except Exception:
+        logger.exception("agentic_pipeline retrieve failed, falling back to empty context")
+        raw = ""
+    if isinstance(raw, str):
+        retrieved_context = raw.strip()
+    elif isinstance(raw, dict):
+        retrieved_context = str(
+            raw.get("context") or raw.get("contexts") or raw.get("content") or raw
+        ).strip()
+    else:
+        retrieved_context = str(raw or "").strip()
+    if len(retrieved_context) > 8000:
+        retrieved_context = retrieved_context[:8000] + "\n...(truncated)"
+    logger.info("agentic_pipeline [retrieve] done context_chars=%d", len(retrieved_context))
+    yield {"type": "stage", "stage": "retrieving", "state": "done", "content": f"检索到 {len(retrieved_context)} 字符"}
+    await asyncio.sleep(0)
+
+    # ── Stage 3: Observing ───────────────────────────────────────────
+    logger.info("agentic_pipeline [observing] start")
+    yield {"type": "stage", "stage": "observing", "state": "start", "content": ""}
+    await asyncio.sleep(0)
+    obs_user = (
+        f"[Thinking]\n{thinking}\n\n"
+        f"[Retrieved Context]\n{retrieved_context if retrieved_context else '（知识库无匹配内容）'}\n\n"
+        f"用户问题：{message}\n\n"
+        "请输出观察总结。"
+    )
+    obs_chunks: list[str] = []
+    async for token in chat_stream(
+        system_prompt=course_prompt + "\n\n" + OBSERVING_PROMPT,
+        history=[],
+        user_message=obs_user,
+        image_path=None,
+    ):
+        obs_chunks.append(token)
+        yield {"type": "stage_chunk", "stage": "observing", "content": token}
+    observation = "".join(obs_chunks).strip()
+    logger.info("agentic_pipeline [observing] done chars=%d", len(observation))
+    yield {"type": "stage", "stage": "observing", "state": "done", "content": ""}
+    await asyncio.sleep(0)
+
+    # ── Stage 4: Responding（流式 token）────────────────────────────
+    logger.info("agentic_pipeline [responding] start")
+    yield {"type": "stage", "stage": "responding", "state": "start", "content": ""}
+    await asyncio.sleep(0)
+    resp_user = (
+        f"[Thinking]\n{thinking}\n\n"
+        f"[Observation]\n{observation}\n\n"
+        f"用户问题：{message}\n\n"
+        "请给出正式回答。"
+    )
+    async for token in chat_stream(
+        system_prompt=course_prompt + "\n\n" + RESPONDING_PROMPT + _CONCISE_SUFFIX,
+        history=safe_history,
+        user_message=resp_user,
+        image_path=None,
+    ):
+        yield {"type": "token", "content": token}
+    logger.info("agentic_pipeline [responding] done")
 
 async def stream_answer_with_contexts(
     course_id: str,

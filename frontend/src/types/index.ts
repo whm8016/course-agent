@@ -55,13 +55,15 @@ export interface AgentMetadata {
 }
 
 export interface SSEEvent {
-  type: 'thinking' | 'tool_call' | 'tool_result' | 'answer' | 'quiz' | 'done' | 'error' | 'token'
+  type: 'thinking' | 'thinking_chunk' | 'tool_call' | 'tool_result' | 'answer' | 'quiz' | 'done' | 'error' | 'token'
   content?: string
   tool?: string
   input?: Record<string, unknown>
   chunks?: RagChunk[]
   quiz?: QuizData
   metadata?: AgentMetadata
+  stage?: string
+  call_state?: string
 }
 
 export interface Message {
@@ -83,6 +85,9 @@ export interface Message {
     guardrail?: GuardrailInfo
     hallucination?: HallucinationInfo
     stopped?: boolean
+    stage?: string
+    call_state?: string
+    timestamp?: number
   }
 }
 

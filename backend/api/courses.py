@@ -30,8 +30,10 @@ async def list_courses(db: AsyncSession = Depends(get_db)):
         return cached
 
     result = await db.execute(
-        select(KnowledgeBase).order_by(KnowledgeBase.sort_order.asc(), KnowledgeBase.created_at.asc())
-    )
+    select(KnowledgeBase)
+    .where(KnowledgeBase.is_visible == True)
+    .order_by(KnowledgeBase.sort_order.asc(), KnowledgeBase.created_at.asc())
+)
     courses = [_kb_to_course(kb) for kb in result.scalars().all()]
     payload = {"courses": courses}
     await cache_set(_COURSES_CACHE_KEY, payload, ttl=_COURSES_CACHE_TTL)

@@ -35,6 +35,11 @@ function rowToMessage(row: ApiMessageRow): Message {
   }
 }
 
+/** 与 MessageBubble 的 _thinkingSteps 同结构；必须每次 setState 用新引用，流式中才会重绘 */
+function cloneThinkingSnapshot(steps: Message[]): Message[] {
+  return steps.map((m) => ({ ...m, metadata: m.metadata ? { ...m.metadata } : undefined }))
+}
+
 // ---------- 能力定义 ----------
 type CapValue = 'chat' | 'deep_solve' | 'quiz' | 'research'
 
@@ -482,8 +487,70 @@ export default function ChatWindow({
       controller.signal,
       (event: SSEEvent) => {
         switch (event.type) {
+          case 'thinking_chunk': {
+            // 找到当前 stage 对应的最后一个 thinking step，把 token 追加进去
+            const chunkStage = event.stage
+            const chunkToken = event.content || ''
+            const lastIdx = [...thinkingSteps].map((s, i) => ({ s, i }))
+              .filter(({ s }) => s.type === 'thinking' && s.metadata?.stage === chunkStage)
+              .pop()?.i
+            if (lastIdx !== undefined) {
+              thinkingSteps[lastIdx] = {
+                ...thinkingSteps[lastIdx],
+                content: (thinkingSteps[lastIdx].content || '') + chunkToken,
+              }
+            } else {
+              // stage_chunk 先于 thinking start 到达时兜底
+              thinkingSteps.push({
+                role: 'assistant',
+                content: chunkToken,
+                type: 'thinking',
+                metadata: { stage: chunkStage, call_state: 'running', timestamp: Date.now() / 1000 },
+              })
+            }
+            setStreamingStarted(true)
+            {
+              const snap = cloneThinkingSnapshot(thinkingSteps)
+              setMessages((prev) => {
+                const last = prev[prev.length - 1]
+                const withSteps = (base: Message) => {
+                  const o = { ...base } as Message & { _thinkingSteps?: Message[] }
+                  o._thinkingSteps = snap
+                  return o
+                }
+                if (last?.role === 'assistant') return [...prev.slice(0, -1), withSteps(last)]
+                return [...prev, withSteps({ role: 'assistant', content: '' })]
+              })
+            }
+            break
+          }
           case 'thinking':
-            thinkingSteps.push({ role: 'assistant', content: event.content || '', type: 'thinking' })
+            thinkingSteps.push({
+              role: 'assistant',
+              content: event.content || '',
+              type: 'thinking',
+              metadata: {
+                stage: event.stage,
+                call_state: event.call_state,
+                timestamp: Date.now() / 1000,
+              },
+            })
+            setStreamingStarted(true)
+            {
+              const snap = cloneThinkingSnapshot(thinkingSteps)
+              setMessages((prev) => {
+                const last = prev[prev.length - 1]
+                const withSteps = (base: Message) => {
+                  const o = { ...base } as Message & { _thinkingSteps?: Message[] }
+                  o._thinkingSteps = snap
+                  return o
+                }
+                if (last?.role === 'assistant') {
+                  return [...prev.slice(0, -1), withSteps(last)]
+                }
+                return [...prev, withSteps({ role: 'assistant', content: '' })]
+              })
+            }
             break
           case 'tool_call':
             thinkingSteps.push({
@@ -492,6 +559,22 @@ export default function ChatWindow({
               type: 'tool_call',
               metadata: { tool: event.tool, toolInput: event.input as Record<string, unknown> },
             })
+            setStreamingStarted(true)
+            {
+              const snap = cloneThinkingSnapshot(thinkingSteps)
+              setMessages((prev) => {
+                const last = prev[prev.length - 1]
+                const withSteps = (base: Message) => {
+                  const o = { ...base } as Message & { _thinkingSteps?: Message[] }
+                  o._thinkingSteps = snap
+                  return o
+                }
+                if (last?.role === 'assistant') {
+                  return [...prev.slice(0, -1), withSteps(last)]
+                }
+                return [...prev, withSteps({ role: 'assistant', content: '' })]
+              })
+            }
             break
           case 'tool_result':
             if (event.chunks) {
@@ -502,6 +585,22 @@ export default function ChatWindow({
                 type: 'tool_result',
                 metadata: { chunks: event.chunks },
               })
+              setStreamingStarted(true)
+              {
+                const snap = cloneThinkingSnapshot(thinkingSteps)
+                setMessages((prev) => {
+                  const last = prev[prev.length - 1]
+                  const withSteps = (base: Message) => {
+                    const o = { ...base } as Message & { _thinkingSteps?: Message[] }
+                    o._thinkingSteps = snap
+                    return o
+                  }
+                  if (last?.role === 'assistant') {
+                    return [...prev.slice(0, -1), withSteps(last)]
+                  }
+                  return [...prev, withSteps({ role: 'assistant', content: '' })]
+                })
+              }
             }
             break
           case 'token':
@@ -510,7 +609,11 @@ export default function ChatWindow({
             setMessages((prev) => {
               const last = prev[prev.length - 1]
               if (last?.role === 'assistant') {
-                return [...prev.slice(0, -1), { ...last, content: answerContent }]
+                const o = { ...last, content: answerContent } as Message & { _thinkingSteps?: Message[] }
+                if ((last as Message & { _thinkingSteps?: Message[] })._thinkingSteps) {
+                  o._thinkingSteps = (last as Message & { _thinkingSteps: Message[] })._thinkingSteps
+                }
+                return [...prev.slice(0, -1), o]
               }
               return [...prev, { role: 'assistant', content: answerContent }]
             })
@@ -521,7 +624,11 @@ export default function ChatWindow({
             setMessages((prev) => {
               const last = prev[prev.length - 1]
               if (last?.role === 'assistant') {
-                return [...prev.slice(0, -1), { ...last, content: answerContent }]
+                const o = { ...last, content: answerContent } as Message & { _thinkingSteps?: Message[] }
+                if ((last as Message & { _thinkingSteps?: Message[] })._thinkingSteps) {
+                  o._thinkingSteps = (last as Message & { _thinkingSteps: Message[] })._thinkingSteps
+                }
+                return [...prev.slice(0, -1), o]
               }
               return [...prev, { role: 'assistant', content: answerContent }]
             })
@@ -702,6 +809,7 @@ export default function ChatWindow({
             message={msg}
             courseId={courseId}
             thinkingSteps={(msg as unknown as Record<string, unknown>)._thinkingSteps as Message[] | undefined}
+            isStreaming={loading && i === messages.length - 1}
           />
         ))}
         {/* 出题流式进度气泡 */}

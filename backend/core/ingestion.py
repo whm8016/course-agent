@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Literal, Optional
 
-from config import INGEST_CHUNK_OVERLAP, INGEST_CHUNK_SIZE
+from config import INGEST_CHUNK_OVERLAP, INGEST_CHUNK_SIZE, LLAMA_CLOUD_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -104,11 +104,24 @@ _TOKEN_OVERHEAD_PER_CHUNK = 2000
 try:
     from llama_index.core import SimpleDirectoryReader
     from llama_index.core.node_parser import SentenceSplitter
+    from llama_index.core.schema import Document as LlamaDocument
     logger.info("LlamaIndex 可用，将使用智能文档解析")
 except ImportError as e:
     raise ImportError(
         "llama-index-core 未安装，请执行: pip install llama-index-core"
     ) from e
+
+# ── LlamaParse（可选，图像 PDF 专用）─────────────────────────────────────────
+try:
+    from llama_cloud_services import LlamaParse
+    _llamaparse_available = True
+except ImportError:
+    try:
+        from llama_parse import LlamaParse  # type: ignore[no-redef]
+        _llamaparse_available = True
+    except ImportError:
+        _llamaparse_available = False
+        logger.warning("llama-cloud-services 未安装，图像 PDF 将无法解析；请执行: pip install llama-cloud-services")
     
 
 
@@ -140,6 +153,30 @@ def _split_text(
 
 # ── 核心解析函数 ─────────────────────────────────────────────────────────────
 
+_IMAGE_PDF_THRESHOLD = 0.3  # 空文档占比超过此值时认定为图像 PDF（扫描件）
+
+
+def _llamaparse_pdfs(pdf_paths: list[str]) -> list[LlamaDocument]:
+    """用 LlamaParse 解析图像 PDF，返回 LlamaIndex Document 列表。"""
+    if not _llamaparse_available or not LLAMA_CLOUD_API_KEY:
+        logger.warning(
+            "LlamaParse 不可用（llama-parse 未安装或 LLAMA_CLOUD_API_KEY 未配置），"
+            "图像 PDF 将跳过：%s",
+            pdf_paths,
+        )
+        return []
+
+    parser = LlamaParse(
+        api_key=LLAMA_CLOUD_API_KEY,
+        result_type="text",
+        language="ch_sim",
+    )
+    logger.info("LlamaParse 开始解析 %d 个 PDF...", len(pdf_paths))
+    docs = parser.load_data(pdf_paths)
+    logger.info("LlamaParse 解析完成: %d 个文档", len(docs))
+    return docs
+
+
 def parse_files(
     file_paths: list[str],
     chunk_size: int = INGEST_CHUNK_SIZE,
@@ -147,11 +184,26 @@ def parse_files(
 ) -> list[str]:
     """
     解析文件列表，返回文本 chunk 列表（使用 LlamaIndex，支持 PDF/DOCX/PPTX/TXT）。
+    对图像 PDF（无文字层）自动降级到 LlamaParse 云服务解析。
     """
     if not file_paths:
         return []
 
     docs = SimpleDirectoryReader(input_files=file_paths).load_data()
+
+    # 检测是否为图像 PDF：空文档占比超过阈值
+    empty_count = sum(1 for d in docs if not d.get_content().strip())
+    if docs and empty_count / len(docs) > _IMAGE_PDF_THRESHOLD:
+        logger.info(
+            "检测到图像 PDF（%d/%d 个文档内容为空），尝试 LlamaParse 重新解析...",
+            empty_count, len(docs),
+        )
+        pdf_paths = [p for p in file_paths if p.lower().endswith(".pdf")]
+        non_pdf_docs = [d for d in docs if d.get_content().strip()]
+        if pdf_paths:
+            parsed_docs = _llamaparse_pdfs(pdf_paths)
+            docs = non_pdf_docs + parsed_docs
+
     nodes = SentenceSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
