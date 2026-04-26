@@ -93,6 +93,7 @@ async def chat_with_lightrag(
     mode: str | None = body.get("mode")
     chat_mode: str = normalize_mode(body.get("chat_mode", "chat"))
     session_id: str | None = body.get("session_id")
+    enabled_tools: list[str] = body.get("tools", [])   # 新增
     trace_id = request.headers.get("x-trace-id") or uuid.uuid4().hex[:8]
     t0 = time.perf_counter()
 
@@ -219,6 +220,7 @@ async def chat_with_lightrag(
                     message=message,
                     history=history,
                     mode=mode,
+                    enabled_tools=enabled_tools,   # 新增
                 ):
                     if await request.is_disconnected():
                         return

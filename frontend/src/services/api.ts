@@ -135,6 +135,7 @@ export async function chatStream(
   onEvent?: (event: SSEEvent) => void,
   onError?: (err: string) => void,
   ragEnabled: boolean = false,
+  enabledTools: string[] = [],
 ): Promise<{ aborted: boolean }> {
   const isAbortError = (err: unknown) => {
     if (err instanceof DOMException) return err.name === 'AbortError'
@@ -168,6 +169,7 @@ export async function chatStream(
         image_path: imagePath || null,
         session_id: sessionId || null,
         chat_mode: chatMode,
+        tools: enabledTools,
       }),
     })
   } catch (err) {

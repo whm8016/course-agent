@@ -512,9 +512,12 @@ async def agentic_pipeline(
     message: str,
     history: list[dict] | None = None,
     mode: str | None = None,
+    enabled_tools: list[str] | None = None,
 ) -> AsyncGenerator[dict, None]:
     """
-    四阶段 pipeline，yield dict：
+    四阶段 pipeline（对标 DeepTutor）：
+      Thinking → Acting（执行用户选定工具） → Observing → Responding
+    yield dict：
       {'type': 'stage', 'stage': 'thinking'|'retrieving'|'observing'|'responding',
        'state': 'start'|'done', 'content': str}
       {'type': 'stage_chunk', 'stage': str, 'content': str}
@@ -524,6 +527,7 @@ async def agentic_pipeline(
 
     course_prompt = await get_course_prompt(course_id)
     safe_history = _cap_history(_normalize_history(history))
+    _tools = enabled_tools or []
 
     # ── Stage 1: Thinking ────────────────────────────────────────────
     logger.info("agentic_pipeline [thinking] start course=%s", course_id)
@@ -543,33 +547,65 @@ async def agentic_pipeline(
     yield {"type": "stage", "stage": "thinking", "state": "done", "content": ""}
     await asyncio.sleep(0)
 
-    # ── Stage 2: Retrieve ────────────────────────────────────────────
-    logger.info("agentic_pipeline [retrieve] start course=%s mode=%s", course_id, mode)
+    # ── Stage 2: Acting（执行用户选定的工具）──────────────────────────
+    logger.info("agentic_pipeline [acting] start course=%s tools=%s", course_id, _tools)
     yield {"type": "stage", "stage": "retrieving", "state": "start", "content": ""}
     await asyncio.sleep(0)
-    rag = await _get_instance(course_id)
-    query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
-    context_param = _build_query_param(query_mode, history, only_need_context=True)
-    if hasattr(context_param, "stream"):
-        context_param.stream = False
-    try:
-        raw = await rag.aquery(message, param=context_param)
-    except Exception:
-        logger.exception("agentic_pipeline retrieve failed, falling back to empty context")
-        raw = ""
-    if isinstance(raw, str):
-        retrieved_context = raw.strip()
-    elif isinstance(raw, dict):
-        retrieved_context = str(
-            raw.get("context") or raw.get("contexts") or raw.get("content") or raw
-        ).strip()
+
+    async def _run_rag() -> dict:
+        try:
+            rag = await _get_instance(course_id)
+            query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
+            context_param = _build_query_param(query_mode, history, only_need_context=True)
+            if hasattr(context_param, "stream"):
+                context_param.stream = False
+            raw = await rag.aquery(message, param=context_param)
+            content = raw.strip() if isinstance(raw, str) else str(raw or "").strip()
+            if len(content) > 6000:
+                content = content[:6000] + "\n...(truncated)"
+            logger.info("agentic_pipeline rag done chars=%d", len(content))
+            return {"name": "rag", "query": message, "content": content, "success": bool(content)}
+        except Exception:
+            logger.exception("agentic_pipeline rag failed")
+            return {"name": "rag", "query": message, "content": "（知识库检索失败）", "success": False}
+
+    async def _run_web_search() -> dict:
+        try:
+            from core.tool_registry import _execute_web_search
+            result = await _execute_web_search(query=message)
+            return {"name": "web_search", "query": message, "content": result.content, "success": result.success}
+        except Exception:
+            logger.exception("agentic_pipeline web_search failed")
+            return {"name": "web_search", "query": message, "content": "（网络搜索失败）", "success": False}
+
+    tasks = []
+    if "rag" in _tools:
+        yield {"type": "stage_chunk", "stage": "retrieving", "content": "检索知识库..."}
+        tasks.append(_run_rag())
+    if "web_search" in _tools:
+        yield {"type": "stage_chunk", "stage": "retrieving", "content": "搜索网络..."}
+        tasks.append(_run_web_search())
+
+    if tasks:
+        results = await asyncio.gather(*tasks)
+        tool_traces: list[dict] = list(results)
     else:
-        retrieved_context = str(raw or "").strip()
-    if len(retrieved_context) > 8000:
-        retrieved_context = retrieved_context[:8000] + "\n...(truncated)"
-    logger.info("agentic_pipeline [retrieve] done context_chars=%d", len(retrieved_context))
-    yield {"type": "stage", "stage": "retrieving", "state": "done", "content": f"检索到 {len(retrieved_context)} 字符"}
+        tool_traces = []
+
+    logger.info("agentic_pipeline [acting] done traces=%d", len(tool_traces))
+    yield {"type": "stage", "stage": "retrieving", "state": "done",
+           "content": f"完成 {len(tool_traces)} 个工具"}
     await asyncio.sleep(0)
+
+    def _fmt_traces(traces: list[dict]) -> str:
+        if not traces:
+            return "（本轮未使用任何工具）"
+        parts = []
+        for t in traces:
+            parts.append(f"[工具: {t['name']}]\n查询: {t['query']}\n结果:\n{t['content']}")
+        return "\n\n---\n\n".join(parts)
+
+    tool_trace_text = _fmt_traces(tool_traces)
 
     # ── Stage 3: Observing ───────────────────────────────────────────
     logger.info("agentic_pipeline [observing] start")
@@ -577,7 +613,7 @@ async def agentic_pipeline(
     await asyncio.sleep(0)
     obs_user = (
         f"[Thinking]\n{thinking}\n\n"
-        f"[Retrieved Context]\n{retrieved_context if retrieved_context else '（知识库无匹配内容）'}\n\n"
+        f"[Tool Traces]\n{tool_trace_text}\n\n"
         f"用户问题：{message}\n\n"
         "请输出观察总结。"
     )
@@ -601,6 +637,7 @@ async def agentic_pipeline(
     await asyncio.sleep(0)
     resp_user = (
         f"[Thinking]\n{thinking}\n\n"
+        f"[Tool Traces]\n{tool_trace_text}\n\n"
         f"[Observation]\n{observation}\n\n"
         f"用户问题：{message}\n\n"
         "请给出正式回答。"

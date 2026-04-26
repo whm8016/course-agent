@@ -475,7 +475,7 @@ export default function ChatWindow({
     let guardrail: GuardrailInfo | undefined
     let hallucination: HallucinationInfo | undefined
 
-    const effectiveRagEnabled = ragEnabled || useKb
+    const effectiveRagEnabled = ragEnabled || useKb || useWebSearch
 
     const streamResult = await chatStream(
       courseId,
@@ -653,6 +653,10 @@ export default function ChatWindow({
       },
       (err) => { answerContent = `出错了: ${err}` },
       effectiveRagEnabled,
+      [
+        ...(effectiveRagEnabled ? ['rag'] : []),
+        ...(useWebSearch ? ['web_search'] : []),
+      ],
     )
     abortControllerRef.current = null
 
