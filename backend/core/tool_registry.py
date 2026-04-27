@@ -22,6 +22,19 @@ async def _execute_rag(course_id: str, query: str, **kwargs) -> ToolResult:
         content = raw.strip() if isinstance(raw, str) else str(raw or "").strip()
         if len(content) > 6000:
             content = content[:6000] + "\n...(truncated)"
+        _preview = (content[:800] + "…") if len(content) > 800 else content
+        logger.info(
+            "tool_registry [rag] course=%s mode=%s query_chars=%d retrieved_chars=%d empty=%s\n"
+            "--- RAG 检索结果预览（前 800 字）---\n%s\n--- end preview ---",
+            course_id,
+            mode,
+            len(query),
+            len(content),
+            not bool(content),
+            _preview or "（空）",
+        )
+        if content:
+            logger.debug("tool_registry [rag] full retrieved_context:\n%s", content)
         return ToolResult(content=content, sources=[{"type": "rag", "query": query}])
     except Exception as e:
         logger.exception("rag tool failed")

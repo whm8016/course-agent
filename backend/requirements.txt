@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 gunicorn
 openai
+langsmith
 langchain
 langchain-community
 langchain-openai

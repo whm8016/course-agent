@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { normalizeQuizMarkdown } from '../lib/normalizeQuizMarkdown'
@@ -17,7 +18,7 @@ export default function FormattedMarkdown({ content, className = 'markdown-body 
   const md = normalizeQuizMarkdown(content)
   return (
     <div className={className}>
-      <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+      <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
         {md}
       </ReactMarkdown>
     </div>

@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import type { Message } from '../types'
@@ -13,35 +14,23 @@ interface Props {
   isStreaming?: boolean
 }
 
-function looksLikeMath(expr: string): boolean {
-  const t = expr.trim()
-  if (!t) return false
-  if (/\\[a-zA-Z]+/.test(t)) return true
-  if (/[_^]/.test(t)) return true
-  if (/=/.test(t) && /[a-zA-Z]/.test(t)) return true
-  if (/^[a-zA-Z](?:_\{?[^}]+\}?)?$/.test(t)) return true
-  return false
-}
 
 function normalizeMathDelimiters(content: string): string {
   if (!content) return content
 
-  let normalized = content
-    .replace(/\\\[((?:.|\n)+?)\\\]/g, (_, expr: string) => `$$${expr.trim()}$$`)
-    .replace(/\\\(((?:.|\n)+?)\\\)/g, (_, expr: string) => `$${expr.trim()}$`)
-
-  normalized = normalized.replace(
-    /\[\s+([^\[\]\n]{1,500}?)\s+\]/g,
-    (match, inner: string) => (looksLikeMath(inner) ? `$$${inner.trim()}$$` : match),
-  )
-
-  normalized = normalized.replace(
-    /(^|[^$])\(\s+([^()\n]{1,200}?)\s+\)/g,
-    (match, prefix: string, inner: string) =>
-      looksLikeMath(inner) ? `${prefix}$${inner.trim()}$` : match,
-  )
-
-  return normalized
+  return content
+    // 表格行（含 | 的行）内的 <br> → 空格；其余 <br> → 真换行
+    .replace(/^(.*\|.*)<br\s*\/?>(.*\|.*)$/gim, '$1 $2')
+    .replace(/<br\s*\/?>/gi, '\n')
+    // \[...\] → 独立成行的 $$...$$
+    .replace(/\\\[([\s\S]+?)\\\]/g, (_, expr: string) => `\n$$\n${expr.trim()}\n$$\n`)
+    // \(...\) → 行内 $...$，允许换行（多行行内公式）
+    .replace(/\\\(([\s\S]+?)\\\)/g, (_, expr: string) => `$${expr.trim()}$`)
+    // 已经是 $$...$$ 的块公式，保证前后各有一个空行，防止被 GFM 当普通文本解析
+    // 注意：不能跨越空行（\n\n），否则会把两个表格之间的内容整体吞掉
+    .replace(/([^\n])\$\$((?:(?!\n\n)[\s\S])+?)\$\$([^\n])/g, (_, pre, expr: string, post) =>
+      `${pre}\n$$\n${expr.trim()}\n$$\n${post}`,
+    )
 }
 
 export default function MessageBubble({ message, thinkingSteps, courseId, isStreaming }: Props) {
@@ -49,13 +38,18 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
   const renderedContent = normalizeMathDelimiters(message.content || '')
 
   if (isUser) {
+    const userContent = renderedContent
     return (
       <div className="flex justify-end mb-4">
         <div className="max-w-[75%] rounded-2xl px-4 py-3 bg-indigo-600 text-white rounded-br-md">
           {message.image && (
             <img src={message.image} alt="上传的图片" className="max-w-[280px] rounded-lg mb-2" />
           )}
-          <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
+          <div className="text-sm leading-relaxed markdown-body markdown-user">
+            <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
+              {userContent}
+            </ReactMarkdown>
+          </div>
         </div>
       </div>
     )
@@ -70,7 +64,7 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
 
         {message.content && (
           <div className="markdown-body text-sm leading-relaxed">
-            <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+            <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
               {renderedContent}
             </ReactMarkdown>
           </div>

@@ -94,6 +94,7 @@ async def chat_with_lightrag(
     chat_mode: str = normalize_mode(body.get("chat_mode", "chat"))
     session_id: str | None = body.get("session_id")
     enabled_tools: list[str] = body.get("tools", [])   # 新增
+    image_path: str | None = body.get("image_path")
     trace_id = request.headers.get("x-trace-id") or uuid.uuid4().hex[:8]
     t0 = time.perf_counter()
 
@@ -106,8 +107,8 @@ async def chat_with_lightrag(
         history = history[-MAX_HISTORY_LENGTH:]
 
     logger.info(
-        "[trace=%s] POST /api/chat/lightrag user=%s course=%s session=%s chat_mode=%s rag_mode=%s question=「%s」",
-        trace_id, user["id"], course_id, session_id, chat_mode, mode, message[:120],
+        "[trace=%s] POST /api/chat/lightrag user=%s course=%s session=%s chat_mode=%s rag_mode=%s question=「%s」has_image=%s",
+        trace_id, user["id"], course_id, session_id, chat_mode, mode, message[:120], image_path is not None,
     )
 
     async def event_generator():
@@ -170,7 +171,7 @@ async def chat_with_lightrag(
                     system_prompt=system_prompt,
                     history=safe_history,
                     user_message=message,
-                    image_path=None,
+                    image_path=image_path,
                 ):
                     if await request.is_disconnected():
                         return
@@ -209,6 +210,7 @@ async def chat_with_lightrag(
                 # answer = "".join(answer_parts)
                 answer_parts: list[str] = []
                 first_token_logged = False
+                agentic_contexts: list = []
                 _STAGE_LABELS = {
                     "thinking": "分析问题",
                     "retrieving": "检索知识图谱",
@@ -220,7 +222,8 @@ async def chat_with_lightrag(
                     message=message,
                     history=history,
                     mode=mode,
-                    enabled_tools=enabled_tools,   # 新增
+                    enabled_tools=enabled_tools,
+                    image_path=image_path,
                 ):
                     if await request.is_disconnected():
                         return
@@ -240,6 +243,8 @@ async def chat_with_lightrag(
                             first_token_logged = True
                         answer_parts.append(token)
                         yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
+                    elif event["type"] == "contexts":
+                        agentic_contexts = event.get("contexts", [])
                 answer = "".join(answer_parts)
 
                 logger.info(
@@ -250,11 +255,14 @@ async def chat_with_lightrag(
                 if await request.is_disconnected():
                     return
 
-                # hallucination check（knowledge 路径保留）
-                hallu_result = await evaluate_hallucination(answer, [])
+                # hallucination check，使用 agentic pipeline 实际检索到的 contexts
+                hallu_result = await evaluate_hallucination(answer, agentic_contexts)
                 hallucination_dict = hallu_result.to_dict()
+                logger.info(
+                    "[trace=%s] hallucination grounded=%s confidence=%.2f t=%dms",
+                    trace_id, hallu_result.grounded, hallu_result.confidence, elapsed_ms(),
+                )
 
-                
             # else:
             #     logger.info(
             #         "[trace=%s] ▶ route=knowledge (full RAG pipeline) t=%dms",
@@ -325,19 +333,6 @@ async def chat_with_lightrag(
             #         len(answer),
             #         len(contexts),
             #     )
-
-
-                if await request.is_disconnected():
-                    logger.info("[trace=%s] client disconnected after native answer", trace_id)
-                    return
-
-                # ── Step 4: Hallucination detection (knowledge path only)
-                hallu_result = await evaluate_hallucination(answer, contexts)
-                hallucination_dict = hallu_result.to_dict()
-                logger.info(
-                    "[trace=%s] hallucination grounded=%s confidence=%.2f t=%dms",
-                    trace_id, hallu_result.grounded, hallu_result.confidence, elapsed_ms(),
-                )
 
             yield f"data: {json.dumps({'type': 'answer', 'content': answer}, ensure_ascii=False)}\n\n"
             logger.info(

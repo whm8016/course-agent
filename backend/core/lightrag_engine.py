@@ -513,6 +513,7 @@ async def agentic_pipeline(
     history: list[dict] | None = None,
     mode: str | None = None,
     enabled_tools: list[str] | None = None,
+    image_path: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """
     四阶段 pipeline（对标 DeepTutor）：
@@ -523,22 +524,32 @@ async def agentic_pipeline(
       {'type': 'stage_chunk', 'stage': str, 'content': str}
       {'type': 'token', 'content': str}
     """
-    from core.prompts import THINKING_PROMPT, OBSERVING_PROMPT, RESPONDING_PROMPT, _CONCISE_SUFFIX
+    from core.prompts import (
+        THINKING_PROMPT, THINKING_KB_HINT, THINKING_TOOL_LIST_PREFIX,
+        OBSERVING_PROMPT, RESPONDING_PROMPT, _CONCISE_SUFFIX,
+    )
 
     course_prompt = await get_course_prompt(course_id)
     safe_history = _cap_history(_normalize_history(history))
     _tools = enabled_tools or []
 
+    # 动态拼 thinking prompt：有 rag 工具时注入 kb_hint，同时附上启用工具列表
+    _kb_hint = THINKING_KB_HINT if "rag" in _tools else ""
+    _tool_list_text = (THINKING_TOOL_LIST_PREFIX + "\n".join(f"- {t}" for t in _tools)) if _tools else ""
+    _thinking_prompt = THINKING_PROMPT.replace("{kb_hint}", _kb_hint)
+    if _tool_list_text:
+        _thinking_prompt += "\n\n" + _tool_list_text
+
     # ── Stage 1: Thinking ────────────────────────────────────────────
-    logger.info("agentic_pipeline [thinking] start course=%s", course_id)
+    logger.info("agentic_pipeline [thinking] start course=%s tools=%s", course_id, _tools)
     yield {"type": "stage", "stage": "thinking", "state": "start", "content": ""}
     await asyncio.sleep(0)
     thinking_chunks: list[str] = []
     async for token in chat_stream(
-        system_prompt=course_prompt + "\n\n" + THINKING_PROMPT,
+        system_prompt=course_prompt + "\n\n" + _thinking_prompt,
         history=safe_history,
         user_message=message,
-        image_path=None,
+        image_path=image_path,
     ):
         thinking_chunks.append(token)
         yield {"type": "stage_chunk", "stage": "thinking", "content": token}
@@ -556,14 +567,39 @@ async def agentic_pipeline(
         try:
             rag = await _get_instance(course_id)
             query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
+            # 先尝试 only_need_context=True 拿纯 context 文本
             context_param = _build_query_param(query_mode, history, only_need_context=True)
             if hasattr(context_param, "stream"):
                 context_param.stream = False
             raw = await rag.aquery(message, param=context_param)
-            content = raw.strip() if isinstance(raw, str) else str(raw or "").strip()
+            content = raw.strip() if isinstance(raw, str) else ""
+            # 如果 only_need_context 模式返回的不是字符串（部分 LightRAG 版本返回结构体），
+            # 则退回完整查询，用返回的答案文本作为证据
+            if not content:
+                full_param = _build_query_param(query_mode, history, only_need_context=False)
+                if hasattr(full_param, "stream"):
+                    full_param.stream = False
+                raw2 = await rag.aquery(message, param=full_param)
+                content = raw2.strip() if isinstance(raw2, str) else str(raw2 or "").strip()
+                logger.info(
+                    "agentic_pipeline [rag] only_need_context returned empty, fallback to full query chars=%d",
+                    len(content),
+                )
             if len(content) > 6000:
                 content = content[:6000] + "\n...(truncated)"
-            logger.info("agentic_pipeline rag done chars=%d", len(content))
+            _preview = (content[:800] + "…") if len(content) > 800 else content
+            logger.info(
+                "agentic_pipeline [rag] course=%s mode=%s query_chars=%d retrieved_chars=%d empty=%s\n"
+                "--- RAG 检索结果预览（前 800 字）---\n%s\n--- end preview ---",
+                course_id,
+                query_mode,
+                len(message),
+                len(content),
+                not bool(content),
+                _preview or "（空）",
+            )
+            if content:
+                logger.debug("agentic_pipeline [rag] full retrieved_context:\n%s", content)
             return {"name": "rag", "query": message, "content": content, "success": bool(content)}
         except Exception:
             logger.exception("agentic_pipeline rag failed")
@@ -622,7 +658,7 @@ async def agentic_pipeline(
         system_prompt=course_prompt + "\n\n" + OBSERVING_PROMPT,
         history=[],
         user_message=obs_user,
-        image_path=None,
+        image_path=image_path,
     ):
         obs_chunks.append(token)
         yield {"type": "stage_chunk", "stage": "observing", "content": token}
@@ -646,10 +682,12 @@ async def agentic_pipeline(
         system_prompt=course_prompt + "\n\n" + RESPONDING_PROMPT + _CONCISE_SUFFIX,
         history=safe_history,
         user_message=resp_user,
-        image_path=None,
+        image_path=image_path,
     ):
         yield {"type": "token", "content": token}
     logger.info("agentic_pipeline [responding] done")
+    # 把本轮工具检索结果回传，供调用方做 hallucination check
+    yield {"type": "contexts", "contexts": tool_traces}
 
 async def stream_answer_with_contexts(
     course_id: str,

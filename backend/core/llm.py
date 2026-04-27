@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
@@ -11,7 +12,17 @@ from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, TEXT_MODEL, VISION_MOD
 
 logger = logging.getLogger(__name__)
 
-client = AsyncOpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
+_client = AsyncOpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
+if os.getenv("LANGSMITH_TRACING", "").strip().lower() in ("1", "true", "yes") and (
+    os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
+):
+    try:
+        from langsmith import wrappers
+
+        _client = wrappers.wrap_openai(_client, chat_name="course_agent_chat")
+    except Exception:
+        logger.exception("LangSmith wrap_openai failed; using raw AsyncOpenAI client")
+client = _client
 
 
 def _image_to_data_url(image_path: str) -> str:

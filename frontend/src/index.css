@@ -65,3 +65,44 @@ body {
 .markdown-body strong {
   font-weight: 600;
 }
+
+.markdown-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.75em 0;
+  font-size: 0.9em;
+  overflow-x: auto;
+  display: block;
+}
+
+.markdown-body th,
+.markdown-body td {
+  border: 1px solid #e2e8f0;
+  padding: 0.45em 0.75em;
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-body th {
+  background: #f8fafc;
+  font-weight: 600;
+  color: #374151;
+}
+
+.markdown-body tr:nth-child(even) td {
+  background: #f8fafc;
+}
+
+/* 用户气泡（深蓝背景）内的公式、文字全部继承白色 */
+.markdown-user .katex,
+.markdown-user .katex-html,
+.markdown-user .katex * {
+  color: inherit !important;
+}
+.markdown-user p {
+  margin: 0.25em 0;
+}
+.markdown-user code {
+  background: rgba(255, 255, 255, 0.15);
+  color: inherit;
+}

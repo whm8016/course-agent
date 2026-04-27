@@ -35,10 +35,12 @@ _GREETING_PATTERNS = re.compile(
 _QUIZ_KEYWORDS = {"出题", "测验", "考考我", "来几道题", "来道题", "做题", "quiz"}
 _SUMMARY_KEYWORDS = {"总结", "归纳", "回顾", "小结", "知识清单", "summarize"}
 
-# 明显在问知识点 / 求讲解：跳过意图 LLM，避免多一次网络往返（对「什么是…」类问题尤其有效）
+# 明显在问知识点 / 求讲解 / 课程信息：跳过意图 LLM，避免多一次网络往返
 _KNOWLEDGE_QUESTION_PATTERN = re.compile(
     r"(什么是|是啥|指什么|含义|定义|概念|原理|区别|对比|为什么|为何|怎么|如何|怎样|请问|解释一下|说明一下|"
-    r"推导|证明|计算|复杂度|时间复杂度|空间复杂度|算法|数据结构|代码实现|伪代码)",
+    r"推导|证明|计算|复杂度|时间复杂度|空间复杂度|算法|数据结构|代码实现|伪代码|"
+    r"课程安排|课程计划|课程大纲|课程内容|课程介绍|课程目标|学什么|学哪些|讲什么|讲哪些|"
+    r"有哪些章节|章节安排|知识点有|包含哪些|涵盖哪些|先学什么|后学什么|怎么学|如何学习)",
     re.I,
 )
 
@@ -145,7 +147,7 @@ def evaluate_guardrail(message: str) -> GuardrailResult:
                 risk_score=score,
                 tip="检测到可能的不当请求，回答将围绕课程内容进行。",
             )
-    logger.debug("guardrail passed input=「%s」", message[:40])
+    logger.info("guardrail passed input=「%s」", message[:40])
     return GuardrailResult(safe=True, risk_type="none", risk_score=0.0, tip="")
 
 
@@ -167,6 +169,9 @@ async def evaluate_hallucination(
 ) -> HallucinationResult:
     """Check if the answer is grounded in the retrieved contexts."""
     if not contexts:
+        logger.info(
+            "evaluate_hallucination skipped LLM: contexts empty -> confidence=0.3",
+        )
         return HallucinationResult(
             grounded=False,
             confidence=0.3,
@@ -178,13 +183,24 @@ async def evaluate_hallucination(
         if isinstance(ctx, str):
             ctx_text += ctx[:500] + "\n"
         elif isinstance(ctx, dict):
-            for key in ("content", "text", "chunk"):
+            for key in ("content", "text", "chunk", "result"):
                 v = ctx.get(key)
-                if isinstance(v, str):
+                if isinstance(v, str) and v.strip():
                     ctx_text += v[:500] + "\n"
                     break
 
+    logger.info(
+        "evaluate_hallucination ctx_count=%d ctx_text_len=%d",
+        len(contexts), len(ctx_text.strip()),
+    )
+
     if not ctx_text.strip():
+        logger.warning(
+            "evaluate_hallucination: contexts present (%d) but all empty; returning low confidence. "
+            "contexts keys=%s",
+            len(contexts),
+            [list(c.keys()) if isinstance(c, dict) else type(c).__name__ for c in contexts[:3]],
+        )
         return HallucinationResult(
             grounded=False,
             confidence=0.3,
@@ -223,5 +239,5 @@ async def evaluate_hallucination(
             tip = "回答的证据支撑度一般，仅供参考。"
         return HallucinationResult(grounded=grounded, confidence=conf, tip=tip)
     except Exception:
-        logger.debug("hallucination check failed", exc_info=True)
+        logger.warning("hallucination check failed", exc_info=True)
         return HallucinationResult(grounded=True, confidence=0.5, tip="")
