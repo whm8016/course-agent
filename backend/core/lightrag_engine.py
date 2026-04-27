@@ -19,6 +19,7 @@ from config import (
     LIGHTRAG_ENABLED,
     LIGHTRAG_ENABLE_RERANK,
     LIGHTRAG_AUTO_INDEX_TTL_SEC,
+    LIGHTRAG_AGENTIC_RAG_MAX_CHARS,
     LIGHTRAG_QUERY_MODE,
     LIGHTRAG_STREAM_CONTEXT_LIMIT,
     LIGHTRAG_STREAM_CONTEXT_MAX_CHARS,
@@ -84,7 +85,7 @@ def _is_fatal_llm_error(exc: Exception) -> bool:
 
 # DashScope compatible API rejects oversized input (>30720).
 # Use conservative hard caps even if .env config is too aggressive.
-_SAFE_TOP_K = min(LIGHTRAG_TOP_K, int(os.getenv("LIGHTRAG_SAFE_TOP_K", "12")))
+_SAFE_TOP_K = min(LIGHTRAG_TOP_K, int(os.getenv("LIGHTRAG_SAFE_TOP_K", "10")))
 _SAFE_CHUNK_TOP_K = min(int(os.getenv("LIGHTRAG_CHUNK_TOP_K", "8")), _SAFE_TOP_K)
 _SAFE_MAX_TOTAL_TOKENS = min(int(os.getenv("LIGHTRAG_MAX_TOTAL_TOKENS", "22000")), 26000)
 _SAFE_MAX_ENTITY_TOKENS = min(int(os.getenv("LIGHTRAG_MAX_ENTITY_TOKENS", "4000")), 6000)
@@ -96,6 +97,7 @@ _AUTO_INDEX_TTL_SEC = max(0, LIGHTRAG_AUTO_INDEX_TTL_SEC)
 
 _STREAM_CONTEXT_LIMIT = max(1, LIGHTRAG_STREAM_CONTEXT_LIMIT)
 _STREAM_CONTEXT_MAX_CHARS = max(200, LIGHTRAG_STREAM_CONTEXT_MAX_CHARS)
+_AGENTIC_RAG_MAX_CHARS = max(2000, LIGHTRAG_AGENTIC_RAG_MAX_CHARS)
 
 
 def is_lightrag_available() -> tuple[bool, str]:
@@ -585,8 +587,8 @@ async def agentic_pipeline(
                     "agentic_pipeline [rag] only_need_context returned empty, fallback to full query chars=%d",
                     len(content),
                 )
-            if len(content) > 6000:
-                content = content[:6000] + "\n...(truncated)"
+            if len(content) > _AGENTIC_RAG_MAX_CHARS:
+                content = content[:_AGENTIC_RAG_MAX_CHARS] + "\n...(truncated)"
             _preview = (content[:800] + "…") if len(content) > 800 else content
             logger.info(
                 "agentic_pipeline [rag] course=%s mode=%s query_chars=%d retrieved_chars=%d empty=%s\n"
@@ -599,11 +601,24 @@ async def agentic_pipeline(
                 _preview or "（空）",
             )
             if content:
-                logger.debug("agentic_pipeline [rag] full retrieved_context:\n%s", content)
+                logger.debug("agentic_pipeline [rag] full retrieved_context chars=%d:\n%s", len(content), content)
             return {"name": "rag", "query": message, "content": content, "success": bool(content)}
         except Exception:
             logger.exception("agentic_pipeline rag failed")
             return {"name": "rag", "query": message, "content": "（知识库检索失败）", "success": False}
+
+    async def _run_llamaindex_rag() -> dict:
+        try:
+            from core.rag_llama import retrieve_chunks_llamaindex
+            content = await retrieve_chunks_llamaindex(course_id, message)
+            logger.info(
+                "agentic_pipeline [llamaindex_rag] course=%s query_chars=%d result_chars=%d",
+                course_id, len(message), len(content),
+            )
+            return {"name": "llamaindex_rag", "query": message, "content": content, "success": bool(content.strip())}
+        except Exception:
+            logger.exception("agentic_pipeline llamaindex_rag failed")
+            return {"name": "llamaindex_rag", "query": message, "content": "（LlamaIndex 检索失败）", "success": False}
 
     async def _run_web_search() -> dict:
         try:
@@ -618,6 +633,9 @@ async def agentic_pipeline(
     if "rag" in _tools:
         yield {"type": "stage_chunk", "stage": "retrieving", "content": "检索知识库..."}
         tasks.append(_run_rag())
+    if "llamaindex_rag" in _tools:
+        yield {"type": "stage_chunk", "stage": "retrieving", "content": "检索 LlamaIndex 向量库..."}
+        tasks.append(_run_llamaindex_rag())
     if "web_search" in _tools:
         yield {"type": "stage_chunk", "stage": "retrieving", "content": "搜索网络..."}
         tasks.append(_run_web_search())

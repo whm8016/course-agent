@@ -232,6 +232,12 @@ async def evaluate_hallucination(
         obj = json.loads(raw)
         grounded = bool(obj.get("grounded", True))
         conf = float(obj.get("confidence", 0.7))
+        logger.info(
+            "evaluate_hallucination result raw=%s obj=%s grounded=%s confidence=%.2f tip=%s",
+            raw,
+            obj,
+            grounded, conf, tip,
+        )
         tip = ""
         if not grounded:
             tip = "部分内容可能缺少资料支撑，建议对照课件核实。"

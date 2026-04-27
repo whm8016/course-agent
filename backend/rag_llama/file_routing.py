@@ -34,6 +34,7 @@ class FileClassification:
 
     parser_files: List[str]
     text_files: List[str]
+    docx_files: List[str]
     unsupported: List[str]
 
 
@@ -143,6 +144,7 @@ class FileTypeRouter:
         """Classify a list of files by processing method."""
         parser_files = []
         text_files = []
+        docx_files = []
         unsupported = []
 
         for path in file_paths:
@@ -152,19 +154,56 @@ class FileTypeRouter:
                 parser_files.append(path)
             elif doc_type in (DocumentType.TEXT, DocumentType.MARKDOWN):
                 text_files.append(path)
+            elif doc_type == DocumentType.DOCX:
+                ext = Path(path).suffix.lower()
+                if ext == ".docx":
+                    docx_files.append(path)
+                else:
+                    # legacy binary .doc — not supported by python-docx; keep explicit
+                    unsupported.append(path)
             else:
                 unsupported.append(path)
 
         logger.debug(
             f"Classified {len(file_paths)} files: "
-            f"{len(parser_files)} parser, {len(text_files)} text, {len(unsupported)} unsupported"
+            f"{len(parser_files)} parser, {len(text_files)} text, {len(docx_files)} docx, "
+            f"{len(unsupported)} unsupported"
         )
 
         return FileClassification(
             parser_files=parser_files,
             text_files=text_files,
+            docx_files=docx_files,
             unsupported=unsupported,
         )
+
+    @classmethod
+    def extract_docx_text(cls, file_path: str) -> str:
+        """Read plain text from a .docx (Office Open XML). Legacy .doc is not supported."""
+        p = Path(file_path)
+        if p.suffix.lower() != ".docx":
+            return ""
+        try:
+            from docx import Document
+        except ImportError:
+            logger.warning("python-docx is not installed; cannot read .docx")
+            return ""
+        try:
+            d = Document(str(p))
+            parts: list[str] = []
+            for para in d.paragraphs:
+                t = (para.text or "").strip()
+                if t:
+                    parts.append(t)
+            for table in d.tables:
+                for row in table.rows:
+                    cells = [c.text.strip() for c in row.cells if c.text.strip()]
+                    if cells:
+                        parts.append(" | ".join(cells))
+            return "\n\n".join(parts)
+        except Exception as exc:
+            logger.warning("Failed to read .docx %s: %s", p.name, exc)
+            return ""
 
     @classmethod
     async def read_text_file(cls, file_path: str) -> str:

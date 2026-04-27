@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
-from config import LIGHTRAG_TIMEOUT_SEC
+from config import AGENTIC_RAG_BACKEND, LIGHTRAG_TIMEOUT_SEC
 from core.database import get_db
 from core.learner_profile import build_memory_context, update_learner_memory
 from core.lightrag_engine import (
@@ -93,7 +93,21 @@ async def chat_with_lightrag(
     mode: str | None = body.get("mode")
     chat_mode: str = normalize_mode(body.get("chat_mode", "chat"))
     session_id: str | None = body.get("session_id")
-    enabled_tools: list[str] = body.get("tools", [])   # 新增
+    enabled_tools: list[str] = body.get("tools", [])  # 如 ["rag","web_search"]；与 AGENTIC_RAG_BACKEND 一起决定实际检索
+    if enabled_tools:
+        if AGENTIC_RAG_BACKEND == "llamaindex":
+            enabled_tools = [
+                "llamaindex_rag" if t == "rag" else t for t in enabled_tools
+            ]
+        else:
+            enabled_tools = [
+                "rag" if t == "llamaindex_rag" else t for t in enabled_tools
+            ]
+    logger.info(
+        "AGENTIC_RAG_BACKEND=%s enabled_tools=%s",
+        AGENTIC_RAG_BACKEND,
+        enabled_tools,
+    )
     image_path: str | None = body.get("image_path")
     trace_id = request.headers.get("x-trace-id") or uuid.uuid4().hex[:8]
     t0 = time.perf_counter()

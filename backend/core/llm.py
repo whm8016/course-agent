@@ -13,15 +13,26 @@ from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, TEXT_MODEL, VISION_MOD
 logger = logging.getLogger(__name__)
 
 _client = AsyncOpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
-if os.getenv("LANGSMITH_TRACING", "").strip().lower() in ("1", "true", "yes") and (
-    os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY")
-):
+_tracing_flag = os.getenv("LANGSMITH_TRACING", "").strip().lower()
+_has_ls_key = bool(os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY"))
+if _tracing_flag in ("1", "true", "yes") and _has_ls_key:
     try:
         from langsmith import wrappers
 
         _client = wrappers.wrap_openai(_client, chat_name="course_agent_chat")
+        logger.info(
+            "LangSmith: OpenAI client wrapped; runs go to project=%r",
+            os.getenv("LANGSMITH_PROJECT") or os.getenv("LANGCHAIN_PROJECT") or "(default)",
+        )
     except Exception:
         logger.exception("LangSmith wrap_openai failed; using raw AsyncOpenAI client")
+else:
+    logger.info(
+        "LangSmith: disabled (LANGSMITH_TRACING=%r, has_api_key=%s). "
+        "Set LANGSMITH_TRACING=true and LANGSMITH_API_KEY in backend/.env, restart backend.",
+        os.getenv("LANGSMITH_TRACING", ""),
+        _has_ls_key,
+    )
 client = _client
 
 

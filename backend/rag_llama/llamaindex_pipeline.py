@@ -227,6 +227,24 @@ class LlamaIndexPipeline:
                 else:
                     self.logger.warning(f"Skipped empty document: {file_path.name}")
 
+            for file_path_str in classification.docx_files:
+                file_path = Path(file_path_str)
+                self.logger.info(f"Parsing DOCX: {file_path.name}")
+                text = FileTypeRouter.extract_docx_text(str(file_path))
+                if text.strip():
+                    documents.append(
+                        Document(
+                            text=text,
+                            metadata={
+                                "file_name": file_path.name,
+                                "file_path": str(file_path),
+                            },
+                        )
+                    )
+                    self.logger.info(f"Loaded: {file_path.name} ({len(text)} chars)")
+                else:
+                    self.logger.warning(f"Skipped empty or unreadable DOCX: {file_path.name}")
+
             for file_path_str in classification.unsupported:
                 self.logger.warning(f"Skipped unsupported file: {Path(file_path_str).name}")
 
@@ -458,6 +476,24 @@ class LlamaIndexPipeline:
                     self.logger.info(f"Loaded: {file_path.name} ({len(text)} chars)")
                 else:
                     self.logger.warning(f"Skipped empty document: {file_path.name}")
+
+            for file_path_str in classification.docx_files:
+                file_path = Path(file_path_str)
+                self.logger.info(f"Parsing DOCX: {file_path.name}")
+                text = FileTypeRouter.extract_docx_text(str(file_path))
+                if text.strip():
+                    documents.append(
+                        Document(
+                            text=text,
+                            metadata={
+                                "file_name": file_path.name,
+                                "file_path": str(file_path),
+                            },
+                        )
+                    )
+                    self.logger.info(f"Loaded: {file_path.name} ({len(text)} chars)")
+                else:
+                    self.logger.warning(f"Skipped empty or unreadable DOCX: {file_path.name}")
 
             for file_path_str in classification.unsupported:
                 self.logger.warning(f"Skipped unsupported file: {Path(file_path_str).name}")

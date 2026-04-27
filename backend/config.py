@@ -6,6 +6,40 @@ from dotenv import load_dotenv
 BASE_DIR = os.path.dirname(__file__)
 load_dotenv(os.path.join(BASE_DIR, ".env"))
 
+
+def _sync_langsmith_env() -> None:
+    """Align with langsmith.utils.tracing_is_enabled(): value must be exactly 'true' (lowercase)."""
+    truthy = ("1", "true", "yes", "on")
+    for key in (
+        "LANGSMITH_TRACING",
+        "LANGCHAIN_TRACING",
+        "LANGSMITH_TRACING_V2",
+        "LANGCHAIN_TRACING_V2",
+    ):
+        raw = os.getenv(key)
+        if raw is None or str(raw).strip() == "":
+            continue
+        if str(raw).strip().lower() in truthy:
+            os.environ[key] = "true"
+    # Many docs use LANGSMITH_TRACING; SDK also checks *_TRACING_V2 first.
+    if os.getenv("LANGSMITH_TRACING") == "true" or os.getenv("LANGCHAIN_TRACING") == "true":
+        os.environ.setdefault("LANGSMITH_TRACING_V2", "true")
+    ls_key = os.getenv("LANGSMITH_API_KEY", "").strip()
+    lc_key = os.getenv("LANGCHAIN_API_KEY", "").strip()
+    if ls_key and not lc_key:
+        os.environ["LANGCHAIN_API_KEY"] = ls_key
+    if lc_key and not ls_key:
+        os.environ["LANGSMITH_API_KEY"] = lc_key
+    try:
+        from langsmith.utils import get_env_var  # type: ignore[import-untyped]
+
+        get_env_var.cache_clear()
+    except Exception:
+        pass
+
+
+_sync_langsmith_env()
+
 # ---------------------------------------------------------------------------
 # RAG backend selection
 # ---------------------------------------------------------------------------
@@ -104,6 +138,8 @@ LIGHTRAG_EMBEDDING_DIM = int(os.getenv("LIGHTRAG_EMBEDDING_DIM", "1024"))
 LIGHTRAG_AUTO_INDEX_TTL_SEC = int(os.getenv("LIGHTRAG_AUTO_INDEX_TTL_SEC", "120"))
 LIGHTRAG_STREAM_CONTEXT_LIMIT = int(os.getenv("LIGHTRAG_STREAM_CONTEXT_LIMIT", "4"))
 LIGHTRAG_STREAM_CONTEXT_MAX_CHARS = int(os.getenv("LIGHTRAG_STREAM_CONTEXT_MAX_CHARS", "800"))
+# agentic_pipeline._run_rag：aquery 返回文本写入 tool trace 前的最大字符数（过长会截断）
+LIGHTRAG_AGENTIC_RAG_MAX_CHARS = int(os.getenv("LIGHTRAG_AGENTIC_RAG_MAX_CHARS", "10000"))
 # LightRAG 默认会开 rerank；未配置 rerank 模型时会告警且可能长时间阻塞，故默认关闭
 LIGHTRAG_ENABLE_RERANK = os.getenv("LIGHTRAG_ENABLE_RERANK", "false").strip().lower() in (
     "1",
@@ -160,6 +196,18 @@ LLAMA_INDEX_KB_ROOT = os.getenv(
     "LLAMA_INDEX_KB_ROOT",
     os.path.join(BASE_DIR, "data", "knowledge_bases")
 )
+# POST /api/chat/lightrag → agentic_pipeline 里「知识检索」用哪套引擎（与 body tools 里的 rag/llamaindex_rag 对齐）
+#   lightrag   — 使用 LightRAG（默认）
+#   llamaindex — 使用 LlamaIndex 向量库（需已对该 course_id 建 llamaindex 索引）
+# 兼容旧变量：AGENTIC_KB_TOOL=llamaindex_rag 等价于 AGENTIC_RAG_BACKEND=llamaindex
+_arg_backend = os.getenv("AGENTIC_RAG_BACKEND", "").strip().lower()
+_legacy_kb = os.getenv("AGENTIC_KB_TOOL", "").strip().lower()
+if _arg_backend in ("lightrag", "llamaindex"):
+    AGENTIC_RAG_BACKEND: str = _arg_backend
+elif _legacy_kb == "llamaindex_rag":
+    AGENTIC_RAG_BACKEND = "llamaindex"
+else:
+    AGENTIC_RAG_BACKEND = "lightrag"
 QUESTION_USE_LLAMAINDEX = os.getenv("QUESTION_USE_LLAMAINDEX", "True").strip().lower() in (
     "1", "true", "yes", "on",
 )
