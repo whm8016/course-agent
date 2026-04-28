@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
-from config import AGENTIC_RAG_BACKEND, LIGHTRAG_TIMEOUT_SEC
+from config import AGENTIC_RAG_BACKEND, FAQ_CACHE_THRESHOLD, LIGHTRAG_TIMEOUT_SEC
 from core.database import get_db
 from core.learner_profile import build_memory_context, update_learner_memory
 from core.lightrag_engine import (
@@ -41,6 +41,7 @@ from core.safety_pipeline import (
 
 logger = logging.getLogger(__name__)
 
+from core.cache import faq_answer_get, faq_answer_set, faq_record
 from core.limiter import limiter
 
 router = APIRouter()
@@ -131,6 +132,19 @@ async def chat_with_lightrag(
             if await request.is_disconnected():
                 logger.info("[trace=%s] client already disconnected before stream start", trace_id)
                 return
+
+            # ── FAQ 高频统计 + 缓存命中检查 ───────────────────────────
+            faq_count = await faq_record(course_id, message)
+            if FAQ_CACHE_THRESHOLD > 0 and faq_count >= FAQ_CACHE_THRESHOLD:
+                cached = await faq_answer_get(course_id, message)
+                if cached:
+                    logger.info(
+                        "[trace=%s] FAQ cache HIT course=%s count=%d question=%s",
+                        trace_id, course_id, faq_count, message[:60],
+                    )
+                    yield f"data: {json.dumps({'type': 'answer', 'content': cached}, ensure_ascii=False)}\n\n"
+                    yield f"data: {json.dumps({'type': 'done', 'metadata': {'engine': 'faq_cache'}}, ensure_ascii=False)}\n\n"
+                    return
 
             # ── Step 1: Intent classification ────────────────────────
             intent_result = await classify_intent(message, history)
@@ -380,6 +394,15 @@ async def chat_with_lightrag(
                 user_message=message,
                 assistant_answer=answer,
             )
+
+            # ── FAQ 答案写缓存（阈值达到且本次未命中）──────────────────
+            if FAQ_CACHE_THRESHOLD > 0 and faq_count >= FAQ_CACHE_THRESHOLD and answer:
+                await faq_answer_set(course_id, message, answer)
+                logger.info(
+                    "[trace=%s] FAQ answer cached course=%s count=%d question=%s",
+                    trace_id, course_id, faq_count, message[:60],
+                )
+
             yield f"data: {json.dumps({'type': 'done', 'metadata': metadata}, ensure_ascii=False)}\n\n"
         except asyncio.TimeoutError:
             logger.warning("[trace=%s] timeout t=%dms", trace_id, elapsed_ms())

@@ -22,7 +22,11 @@ from llama_index.core.bridge.pydantic import PrivateAttr
 
 
 from rag_llama.embedding_bridge import get_embedding_client, get_embedding_config
-from rag_llama.file_routing import FileTypeRouter
+from rag_llama.indexing_documents import (
+    LLAMA_INDEX_CHUNK_OVERLAP,
+    LLAMA_INDEX_CHUNK_SIZE,
+    file_paths_to_llama_documents,
+)
 def get_logger(name: str) -> logging.Logger:
     return logging.getLogger(name)
 
@@ -136,12 +140,13 @@ class LlamaIndexPipeline:
         embedding_cfg = get_embedding_config()
 
         Settings.embed_model = CustomEmbedding()
-        Settings.chunk_size = 512
-        Settings.chunk_overlap = 50
+        Settings.chunk_size = LLAMA_INDEX_CHUNK_SIZE
+        Settings.chunk_overlap = LLAMA_INDEX_CHUNK_OVERLAP
 
         self.logger.info(
             f"LlamaIndex configured: embedding={embedding_cfg.model} "
-            f"({embedding_cfg.dim}D, {embedding_cfg.binding}), chunk_size=512"
+            f"({embedding_cfg.dim}D, {embedding_cfg.binding}), "
+            f"chunk_size={LLAMA_INDEX_CHUNK_SIZE}"
         )
 
     async def _verify_embedding_connectivity(self) -> None:
@@ -187,66 +192,9 @@ class LlamaIndexPipeline:
             # Verify embedding API is reachable before doing any heavy work
             await self._verify_embedding_connectivity()
 
-            # Parse documents with centralized file routing
-            documents = []
-            classification = FileTypeRouter.classify_files(file_paths)
-
-            for file_path_str in classification.parser_files:
-                file_path = Path(file_path_str)
-                self.logger.info(f"Parsing PDF: {file_path.name}")
-                text = self._extract_pdf_text(file_path)
-                if text.strip():
-                    documents.append(
-                        Document(
-                            text=text,
-                            metadata={
-                                "file_name": file_path.name,
-                                "file_path": str(file_path),
-                            },
-                        )
-                    )
-                    self.logger.info(f"Loaded: {file_path.name} ({len(text)} chars)")
-                else:
-                    self.logger.warning(f"Skipped empty document: {file_path.name}")
-
-            for file_path_str in classification.text_files:
-                file_path = Path(file_path_str)
-                self.logger.info(f"Parsing text: {file_path.name}")
-                text = await FileTypeRouter.read_text_file(str(file_path))
-                if text.strip():
-                    documents.append(
-                        Document(
-                            text=text,
-                            metadata={
-                                "file_name": file_path.name,
-                                "file_path": str(file_path),
-                            },
-                        )
-                    )
-                    self.logger.info(f"Loaded: {file_path.name} ({len(text)} chars)")
-                else:
-                    self.logger.warning(f"Skipped empty document: {file_path.name}")
-
-            for file_path_str in classification.docx_files:
-                file_path = Path(file_path_str)
-                self.logger.info(f"Parsing DOCX: {file_path.name}")
-                text = FileTypeRouter.extract_docx_text(str(file_path))
-                if text.strip():
-                    documents.append(
-                        Document(
-                            text=text,
-                            metadata={
-                                "file_name": file_path.name,
-                                "file_path": str(file_path),
-                            },
-                        )
-                    )
-                    self.logger.info(f"Loaded: {file_path.name} ({len(text)} chars)")
-                else:
-                    self.logger.warning(f"Skipped empty or unreadable DOCX: {file_path.name}")
-
-            for file_path_str in classification.unsupported:
-                self.logger.warning(f"Skipped unsupported file: {Path(file_path_str).name}")
+            documents, _classification = file_paths_to_llama_documents(
+                file_paths, log=self.logger
+            )
 
             if not documents:
                 self.logger.error("No valid documents found")
@@ -282,24 +230,6 @@ class LlamaIndexPipeline:
         finally:
             if isinstance(Settings.embed_model, CustomEmbedding):
                 Settings.embed_model.set_progress_callback(None)
-
-    def _extract_pdf_text(self, file_path: Path) -> str:
-        """Extract text from PDF using PyMuPDF."""
-        try:
-            import fitz  # PyMuPDF
-
-            doc = fitz.open(file_path)
-            texts = []
-            for page in doc:
-                texts.append(page.get_text())
-            doc.close()
-            return "\n\n".join(texts)
-        except ImportError:
-            self.logger.warning("PyMuPDF not installed. Cannot extract PDF text.")
-            return ""
-        except Exception as e:
-            self.logger.error(f"Failed to extract PDF text: {e}")
-            return ""
 
     async def search(
         self,
@@ -437,66 +367,9 @@ class LlamaIndexPipeline:
             if progress_callback and isinstance(Settings.embed_model, CustomEmbedding):
                 Settings.embed_model.set_progress_callback(progress_callback)
 
-            # Parse new documents with centralized file routing
-            documents = []
-            classification = FileTypeRouter.classify_files(file_paths)
-
-            for file_path_str in classification.parser_files:
-                file_path = Path(file_path_str)
-                self.logger.info(f"Parsing PDF: {file_path.name}")
-                text = self._extract_pdf_text(file_path)
-                if text.strip():
-                    documents.append(
-                        Document(
-                            text=text,
-                            metadata={
-                                "file_name": file_path.name,
-                                "file_path": str(file_path),
-                            },
-                        )
-                    )
-                    self.logger.info(f"Loaded: {file_path.name} ({len(text)} chars)")
-                else:
-                    self.logger.warning(f"Skipped empty document: {file_path.name}")
-
-            for file_path_str in classification.text_files:
-                file_path = Path(file_path_str)
-                self.logger.info(f"Parsing text: {file_path.name}")
-                text = await FileTypeRouter.read_text_file(str(file_path))
-                if text.strip():
-                    documents.append(
-                        Document(
-                            text=text,
-                            metadata={
-                                "file_name": file_path.name,
-                                "file_path": str(file_path),
-                            },
-                        )
-                    )
-                    self.logger.info(f"Loaded: {file_path.name} ({len(text)} chars)")
-                else:
-                    self.logger.warning(f"Skipped empty document: {file_path.name}")
-
-            for file_path_str in classification.docx_files:
-                file_path = Path(file_path_str)
-                self.logger.info(f"Parsing DOCX: {file_path.name}")
-                text = FileTypeRouter.extract_docx_text(str(file_path))
-                if text.strip():
-                    documents.append(
-                        Document(
-                            text=text,
-                            metadata={
-                                "file_name": file_path.name,
-                                "file_path": str(file_path),
-                            },
-                        )
-                    )
-                    self.logger.info(f"Loaded: {file_path.name} ({len(text)} chars)")
-                else:
-                    self.logger.warning(f"Skipped empty or unreadable DOCX: {file_path.name}")
-
-            for file_path_str in classification.unsupported:
-                self.logger.warning(f"Skipped unsupported file: {Path(file_path_str).name}")
+            documents, _classification = file_paths_to_llama_documents(
+                file_paths, log=self.logger
+            )
 
             if not documents:
                 self.logger.warning("No valid documents to add")

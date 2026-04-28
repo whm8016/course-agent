@@ -74,3 +74,56 @@ async def cache_delete_pattern(pattern: str) -> None:
                 break
     except Exception:
         logger.debug("cache_delete_pattern failed for pattern=%s", pattern, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# FAQ 高频问题
+# ---------------------------------------------------------------------------
+
+import hashlib
+
+
+def _faq_hash(question: str) -> str:
+    """问题文本 → 16 位 MD5，用作 Redis key 的一部分。"""
+    return hashlib.md5(question.strip().lower().encode()).hexdigest()[:16]
+
+
+async def faq_record(course_id: str, question: str) -> int:
+    """记录一次提问，返回该问题累计被问次数（失败返回 0）。"""
+    try:
+        key = f"faq:count:{course_id}"
+        member = question.strip()
+        count = await _get_pool().zincrby(key, 1, member)
+        return int(count)
+    except Exception:
+        logger.debug("faq_record failed course=%s", course_id, exc_info=True)
+        return 0
+
+
+async def faq_top(course_id: str, n: int = 20) -> list[dict]:
+    """返回 Top-N 高频问题，格式 [{'question': ..., 'count': ...}]。"""
+    try:
+        pairs = await _get_pool().zrevrange(f"faq:count:{course_id}", 0, n - 1, withscores=True)
+        return [{"question": q, "count": int(s)} for q, s in pairs]
+    except Exception:
+        logger.debug("faq_top failed course=%s", course_id, exc_info=True)
+        return []
+
+
+async def faq_answer_get(course_id: str, question: str) -> str | None:
+    """获取高频问题的缓存答案（无则返回 None）。"""
+    try:
+        key = f"faq:answer:{course_id}:{_faq_hash(question)}"
+        return await _get_pool().get(key)
+    except Exception:
+        logger.debug("faq_answer_get failed course=%s", course_id, exc_info=True)
+        return None
+
+
+async def faq_answer_set(course_id: str, question: str, answer: str) -> None:
+    """永久缓存高频问题的答案（不设 TTL）。"""
+    try:
+        key = f"faq:answer:{course_id}:{_faq_hash(question)}"
+        await _get_pool().set(key, answer)
+    except Exception:
+        logger.debug("faq_answer_set failed course=%s", course_id, exc_info=True)

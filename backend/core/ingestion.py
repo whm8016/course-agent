@@ -1,17 +1,32 @@
-"""LlamaIndex → LightRAG 摄入流水线。
+"""LightRAG 摄入流水线（管理端「开始索引」）。
 
-LlamaIndex 负责文档解析与分块（PDF/DOCX/PPTX/TXT），
-LightRAG 负责知识图谱构建与向量索引。
+解析与切块与 rag_llama/indexing_documents + rag_llama/llamaindex_pipeline 共用；
+LightRAG 仅负责 ainsert。
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-from config import INGEST_CHUNK_OVERLAP, INGEST_CHUNK_SIZE, LLAMA_CLOUD_API_KEY
+from config import (
+    INGEST_CHUNK_OVERLAP,
+    INGEST_CHUNK_SIZE,
+    LLAMA_CLOUD_API_KEY,
+    LIGHTRAG_INGEST_CHUNKS_SNAPSHOT,
+    LIGHTRAG_INGEST_CHUNKS_SUBDIR,
+    LIGHTRAG_SAVE_INGEST_CHUNKS,
+    LIGHTRAG_WORKDIR,
+)
+from rag_llama.indexing_documents import (
+    LLAMA_INDEX_CHUNK_OVERLAP,
+    LLAMA_INDEX_CHUNK_SIZE,
+    file_paths_to_llama_documents,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +117,6 @@ _TOKEN_OVERHEAD_PER_CHUNK = 2000
 
 # ── LlamaIndex（可选）────────────────────────────────────────────────────────
 try:
-    from llama_index.core import SimpleDirectoryReader
     from llama_index.core.node_parser import SentenceSplitter
     from llama_index.core.schema import Document as LlamaDocument
     logger.info("LlamaIndex 可用，将使用智能文档解析")
@@ -155,7 +169,6 @@ def _split_text(
 
 _IMAGE_PDF_THRESHOLD = 0.3  # 空文档占比超过此值时认定为图像 PDF（扫描件）
 
-
 def _llamaparse_pdfs(pdf_paths: list[str]) -> list[LlamaDocument]:
     """用 LlamaParse 解析图像 PDF，返回 LlamaIndex Document 列表。"""
     if not _llamaparse_available or not LLAMA_CLOUD_API_KEY:
@@ -177,41 +190,50 @@ def _llamaparse_pdfs(pdf_paths: list[str]) -> list[LlamaDocument]:
     return docs
 
 
-def parse_files(
-    file_paths: list[str],
-    chunk_size: int = INGEST_CHUNK_SIZE,
-    chunk_overlap: int = INGEST_CHUNK_OVERLAP,
-) -> list[str]:
+def parse_files(file_paths: list[str]) -> list[str]:
     """
-    解析文件列表，返回文本 chunk 列表（使用 LlamaIndex，支持 PDF/DOCX/PPTX/TXT）。
-    对图像 PDF（无文字层）自动降级到 LlamaParse 云服务解析。
+    解析文件列表，返回文本 chunk 列表（供 LightRAG 摄入）。
+    路由与 llamaindex_pipeline 一致；SentenceSplitter 固定 1200/120 与 Settings 对齐。
+    图像 PDF 仍可能走 LlamaParse（需 LLAMA_CLOUD_API_KEY）。
     """
     if not file_paths:
         return []
 
-    docs = SimpleDirectoryReader(input_files=file_paths).load_data()
+    documents, classification = file_paths_to_llama_documents(
+        file_paths, log=logger
+    )
 
-    # 检测是否为图像 PDF：空文档占比超过阈值
-    empty_count = sum(1 for d in docs if not d.get_content().strip())
-    if docs and empty_count / len(docs) > _IMAGE_PDF_THRESHOLD:
+    empty_count = sum(1 for d in documents if not d.get_content().strip())
+    if (
+        documents
+        and empty_count / len(documents) > _IMAGE_PDF_THRESHOLD
+        and classification.parser_files
+    ):
         logger.info(
             "检测到图像 PDF（%d/%d 个文档内容为空），尝试 LlamaParse 重新解析...",
-            empty_count, len(docs),
+            empty_count,
+            len(documents),
         )
-        pdf_paths = [p for p in file_paths if p.lower().endswith(".pdf")]
-        non_pdf_docs = [d for d in docs if d.get_content().strip()]
+        pdf_paths = list(classification.parser_files)
+        non_pdf_docs = [d for d in documents if d.get_content().strip()]
         if pdf_paths:
             parsed_docs = _llamaparse_pdfs(pdf_paths)
-            docs = non_pdf_docs + parsed_docs
+            documents = non_pdf_docs + parsed_docs
+
+    if not documents:
+        logger.warning("摄入解析结果为空（无有效文档）")
+        return []
 
     nodes = SentenceSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-    ).get_nodes_from_documents(docs)
+        chunk_size=LLAMA_INDEX_CHUNK_SIZE,
+        chunk_overlap=LLAMA_INDEX_CHUNK_OVERLAP,
+    ).get_nodes_from_documents(documents)
     chunks = [n.get_content() for n in nodes if n.get_content().strip()]
     logger.info(
-        "LlamaIndex 解析完成: %d 个文件 → %d 个文档 → %d 个 chunk",
-        len(file_paths), len(docs), len(chunks),
+        "摄入解析完成: %d 个输入文件 → %d 个文档 → %d 个 chunk",
+        len(file_paths),
+        len(documents),
+        len(chunks),
     )
     return chunks
 
@@ -221,24 +243,68 @@ def parse_files(
 ProgressCallback = Optional[Callable[..., Awaitable[None]]]
 
 
+def _lightrag_ingest_chunks_dir(course_id: str) -> Path:
+    """lightrag_store/course_{course_id}/ingest_chunks/（与 core.lightrag_engine workspace 命名一致）。"""
+    return Path(LIGHTRAG_WORKDIR) / f"course_{course_id}" / LIGHTRAG_INGEST_CHUNKS_SUBDIR
+
+
+def _persist_lightrag_ingest_chunks(
+    course_id: str,
+    file_paths: list[str],
+    all_chunks: list[str],
+    resume_from_chunk: int,
+) -> Path | None:
+    """
+    将摄入前切分好的文本块写入 JSON（供排查/审计；不参与 LightRAG 加载）。
+    返回写入的 latest.json 路径；失败时记日志并返回 None。
+    """
+    if not LIGHTRAG_SAVE_INGEST_CHUNKS:
+        return None
+    out_dir = _lightrag_ingest_chunks_dir(course_id)
+    try:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "version": 1,
+            "course_id": course_id,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "source_files": [str(Path(p).name) for p in file_paths],
+            "source_paths": [str(Path(p).resolve()) for p in file_paths],
+            "chunk_count": len(all_chunks),
+            "resume_from_chunk_at_save": resume_from_chunk,
+            "chunks": all_chunks,
+        }
+        latest = out_dir / "latest.json"
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        latest.write_text(text, encoding="utf-8")
+        if LIGHTRAG_INGEST_CHUNKS_SNAPSHOT:
+            ts_name = f"chunks_{int(datetime.now(timezone.utc).timestamp())}.json"
+            (out_dir / ts_name).write_text(text, encoding="utf-8")
+        logger.info(
+            "已保存 LightRAG 摄入切块 course=%s dir=%s chunks=%d",
+            course_id,
+            out_dir,
+            len(all_chunks),
+        )
+        return latest
+    except OSError as e:
+        logger.warning("保存摄入切块失败 course=%s: %s", course_id, e)
+        return None
+
+
 async def ingest_to_lightrag(
     course_id: str,
     file_paths: list[str],
-    chunk_size: int = INGEST_CHUNK_SIZE,
-    chunk_overlap: int = INGEST_CHUNK_OVERLAP,
     batch_size: int = 4,
     on_progress: ProgressCallback = None,
     resume_from_chunk: int = 0,
     control: Optional[IndexingControl] = None,
 ) -> dict:
     """
-    完整摄入流水线：LlamaIndex 解析 → LightRAG 索引。
+    完整摄入流水线：与 LlamaIndex 同策略解析切块 → LightRAG ainsert。
 
     Args:
         course_id:         课程 ID
         file_paths:        待摄入文件列表
-        chunk_size:        分块大小（字符数）
-        chunk_overlap:     分块重叠大小
         batch_size:        每批插入 LightRAG 的 chunk 数
         on_progress:       异步进度回调
         resume_from_chunk: 断点续传：从第 N 个 chunk 开始（跳过前 N 个）
@@ -274,12 +340,20 @@ async def ingest_to_lightrag(
         if is_resume else f"开始解析 {len(file_paths)} 个文件…"
     await _emit(5, parse_label, resume_from_chunk, 0, 0)
     logger.info("开始解析 %d 个文件 course=%s resume_from=%d", len(file_paths), course_id, resume_from_chunk)
-    all_chunks = await asyncio.to_thread(parse_files, file_paths, chunk_size, chunk_overlap)
+    all_chunks = await asyncio.to_thread(parse_files, file_paths)
 
     if not all_chunks:
         logger.warning("解析结果为空 course=%s", course_id)
         await _emit(100, "解析结果为空，无可索引内容", 0, 0, 0)
         return {"status": "empty", "chunks": 0, "files": len(file_paths)}
+
+    await asyncio.to_thread(
+        _persist_lightrag_ingest_chunks,
+        course_id,
+        file_paths,
+        all_chunks,
+        resume_from_chunk,
+    )
 
     total = len(all_chunks)
     avg_chars = sum(len(c) for c in all_chunks) / total

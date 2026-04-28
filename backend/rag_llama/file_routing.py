@@ -206,8 +206,144 @@ class FileTypeRouter:
             return ""
 
     @classmethod
-    async def read_text_file(cls, file_path: str) -> str:
-        """Read a text file with automatic encoding detection."""
+    def extract_docx_sections(cls, file_path: str) -> list[dict]:
+        """Parse a .docx and split it into sections by Heading 1.
+
+        Each returned dict has:
+          - title   : heading text (e.g. "实验九 二端口网络研究")
+          - content : full text of that section, including table cells with
+                      column-header prefixes and [图: 电路图] image placeholders
+          - metadata: {"section": title, "file_name": basename}
+
+        Falls back to a single section containing the whole document when
+        no Heading 1 paragraphs are found (e.g. plain text docs).
+        """
+        p = Path(file_path)
+        if p.suffix.lower() != ".docx":
+            return []
+        try:
+            from docx import Document as _DocxDocument
+        except ImportError:
+            logger.warning("python-docx is not installed; cannot read .docx")
+            return []
+
+        NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        DML = "http://schemas.openxmlformats.org/drawingml/2006/main"
+        PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+
+        try:
+            d = _DocxDocument(str(p))
+        except Exception as exc:
+            logger.warning("Failed to open .docx %s: %s", p.name, exc)
+            return []
+
+        # Build a lookup: docx table objects → their serialized text
+        def _serialize_table(tbl) -> str:
+            rows = tbl.rows
+            if not rows:
+                return ""
+            # Treat first row as header if it contains non-empty cells
+            first_cells = [c.text.strip() for c in rows[0].cells]
+            has_header = any(first_cells)
+            headers = first_cells if has_header else []
+            lines: list[str] = []
+            start = 1 if has_header else 0
+            if has_header:
+                lines.append(" | ".join(h for h in headers if h))
+            for row in rows[start:]:
+                cells = [c.text.strip() for c in row.cells]
+                if not any(cells):
+                    continue
+                if headers:
+                    pairs = []
+                    for h, v in zip(headers, cells):
+                        if h and v:
+                            pairs.append(f"{h}: {v}")
+                        elif v:
+                            pairs.append(v)
+                    lines.append(" | ".join(pairs))
+                else:
+                    lines.append(" | ".join(c for c in cells if c))
+            return "\n".join(lines)
+
+        # Walk body XML children to preserve paragraph/table order per section
+        body = d.element.body
+        sections: list[dict] = []
+        current_title: str | None = None
+        current_parts: list[str] = []
+
+        # Map xml element id → table object for quick lookup
+        tbl_map: dict[int, object] = {id(t._element): t for t in d.tables}
+
+        def _flush(title: str | None, parts: list[str]) -> None:
+            if parts:
+                content = "\n\n".join(parts)
+                t = title or ""
+                sections.append({
+                    "title": t,
+                    "content": (f"{t}\n\n{content}").strip() if t else content,
+                    "metadata": {"section": t, "file_name": p.name},
+                })
+
+        # pStyle val values that map to Heading 1 across different Word versions/locales:
+        # "Heading1"  — English style id
+        # "1"         — common numeric alias
+        # "2"         — OOXML built-in numeric id observed in Chinese Word installs
+        _H1_SVALS = {"Heading1", "1", "2"}
+
+        for child in list(body):
+            tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+
+            if tag == "p":
+                pStyle = child.find(f".//{{{NS}}}pStyle")
+                sval = (pStyle.get(f"{{{NS}}}val") or "") if pStyle is not None else ""
+                txt = "".join(t.text or "" for t in child.iter(f"{{{NS}}}t")).strip()
+
+                # Heading 1 → start new section (require non-empty title)
+                if sval in _H1_SVALS and txt:
+                    _flush(current_title, current_parts)
+                    current_title = txt
+                    current_parts = []
+                    continue
+
+                # Image detection
+                has_image = (
+                    child.find(f".//{{{DML}}}blip") is not None
+                    or child.find(f".//{{{PIC}}}pic") is not None
+                )
+                if has_image:
+                    label = f"[图: {txt}]" if txt else "[图: 电路图]"
+                    current_parts.append(label)
+                elif txt:
+                    current_parts.append(txt)
+
+            elif tag == "tbl":
+                tbl_obj = tbl_map.get(id(child))
+                if tbl_obj is not None:
+                    serialized = _serialize_table(tbl_obj)
+                    if serialized:
+                        current_parts.append(serialized)
+
+        _flush(current_title, current_parts)
+
+        # If no Heading 1 was found, fall back to whole-doc single section
+        if not sections:
+            fallback = cls.extract_docx_text(file_path)
+            if fallback:
+                sections.append({
+                    "title": p.stem,
+                    "content": fallback,
+                    "metadata": {"section": p.stem, "file_name": p.name},
+                })
+
+        logger.info(
+            "extract_docx_sections: %s → %d sections", p.name, len(sections)
+        )
+        return sections
+
+    @classmethod
+    def read_text_file_sync(cls, file_path: str) -> str:
+        """Read a text file with automatic encoding detection (sync; 与 LightRAG 线程池解析共用)."""
         encodings = ["utf-8", "utf-8-sig", "gbk", "gb2312", "gb18030", "latin-1", "cp1252"]
 
         for encoding in encodings:
@@ -219,6 +355,30 @@ class FileTypeRouter:
 
         with open(file_path, "rb") as f:
             return f.read().decode("utf-8", errors="replace")
+
+    @classmethod
+    def extract_pdf_text(cls, file_path: str) -> str:
+        """Extract PDF text with PyMuPDF（LlamaIndex / LightRAG 摄入共用）。"""
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            logger.warning("PyMuPDF not installed. Cannot extract PDF text.")
+            return ""
+        try:
+            doc = fitz.open(file_path)
+            texts = []
+            for page in doc:
+                texts.append(page.get_text())
+            doc.close()
+            return "\n\n".join(texts)
+        except Exception as exc:
+            logger.warning("Failed to extract PDF text %s: %s", file_path, exc)
+            return ""
+
+    @classmethod
+    async def read_text_file(cls, file_path: str) -> str:
+        """Read a text file with automatic encoding detection."""
+        return cls.read_text_file_sync(file_path)
 
     @classmethod
     def needs_parser(cls, file_path: str) -> bool:

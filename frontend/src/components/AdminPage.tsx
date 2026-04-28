@@ -85,7 +85,25 @@ async function apiFetch(path: string, init?: RequestInit) {
 }
 
 export default function AdminPage({ user, onBack }: Props) {
-  const [tab, setTab] = useState<'kb' | 'users'>('kb')
+  const [tab, setTab] = useState<'kb' | 'users' | 'faq'>('kb')
+  const [faqCourseId, setFaqCourseId] = useState('')
+  const [faqItems, setFaqItems] = useState<{ question: string; count: number; course_id?: string; course_name?: string }[]>([])
+  const [faqThreshold, setFaqThreshold] = useState(3)
+  const [faqLoading, setFaqLoading] = useState(false)
+
+  const loadFaq = async (courseId?: string) => {
+    setFaqLoading(true)
+    try {
+      const qs = courseId ? `?course_id=${encodeURIComponent(courseId)}&top_n=50` : '?top_n=50'
+      const data = await apiFetch(`/admin/faq${qs}`)
+      setFaqItems(data.questions ?? [])
+      setFaqThreshold(data.threshold ?? 3)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '加载失败')
+    } finally {
+      setFaqLoading(false)
+    }
+  }
   const [kbs, setKbs] = useState<KB[]>([])
   const [users, setUsers] = useState<SysUser[]>([])
   const [selectedKB, setSelectedKB] = useState<KB | null>(null)
@@ -234,17 +252,20 @@ export default function AdminPage({ user, onBack }: Props) {
           <p className="text-xs text-slate-400 mt-0.5">{user.display_name}</p>
         </div>
         <nav className="flex-1 p-3 space-y-1">
-          {(['kb', 'users'] as const).map(t => (
+          {(['kb', 'users', 'faq'] as const).map(t => (
             <button
               key={t}
-              onClick={() => setTab(t)}
+              onClick={() => {
+                setTab(t)
+                if (t === 'faq') loadFaq(faqCourseId || undefined)
+              }}
               className={`w-full text-left px-3 py-2 rounded-lg text-sm transition ${
                 tab === t
                   ? 'bg-indigo-50 text-indigo-700 font-medium'
                   : 'text-slate-600 hover:bg-slate-50'
               }`}
             >
-              {t === 'kb' ? '知识库管理' : '用户管理'}
+              {t === 'kb' ? '知识库管理' : t === 'users' ? '用户管理' : '高频问题'}
             </button>
           ))}
         </nav>
@@ -335,6 +356,78 @@ export default function AdminPage({ user, onBack }: Props) {
               )}
             </div>
           </>
+        ) : tab === 'faq' ? (
+          <div className="flex-1 overflow-y-auto p-6">
+            {error && (
+              <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg flex justify-between">
+                <span>{error}</span>
+                <button onClick={() => setError('')} className="ml-2">✕</button>
+              </div>
+            )}
+            <div className="flex items-center gap-3 mb-4">
+              <h2 className="text-lg font-semibold text-slate-800">高频问题</h2>
+              <span className="text-xs text-slate-400">（达到 {faqThreshold} 次后缓存答案）</span>
+              <div className="flex-1" />
+              <input
+                type="text"
+                placeholder="课程 ID（留空=全部）"
+                value={faqCourseId}
+                onChange={e => setFaqCourseId(e.target.value)}
+                className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm w-48 focus:outline-none focus:ring-2 focus:ring-indigo-300"
+              />
+              <button
+                onClick={() => loadFaq(faqCourseId || undefined)}
+                disabled={faqLoading}
+                className="text-sm bg-indigo-600 text-white px-4 py-1.5 rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition"
+              >
+                {faqLoading ? '加载中...' : '查询'}
+              </button>
+            </div>
+            {faqItems.length === 0 ? (
+              <p className="text-sm text-slate-400 text-center mt-16">暂无数据（学生提问后自动统计）</p>
+            ) : (
+              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 w-12">#</th>
+                      {!faqCourseId && (
+                        <th className="text-left px-4 py-3 text-xs font-medium text-slate-500">课程</th>
+                      )}
+                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500">问题</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 w-24">提问次数</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 w-20">已缓存</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {faqItems.map((item, idx) => (
+                      <tr key={idx} className="hover:bg-slate-50">
+                        <td className="px-4 py-3 text-slate-400">{idx + 1}</td>
+                        {!faqCourseId && (
+                          <td className="px-4 py-3 text-slate-500 text-xs">
+                            <span className="bg-slate-100 px-1.5 py-0.5 rounded">{item.course_name || item.course_id}</span>
+                          </td>
+                        )}
+                        <td className="px-4 py-3 text-slate-800">{item.question}</td>
+                        <td className="px-4 py-3">
+                          <span className={`font-semibold ${item.count >= faqThreshold ? 'text-indigo-600' : 'text-slate-500'}`}>
+                            {item.count}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          {item.count >= faqThreshold ? (
+                            <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">已缓存</span>
+                          ) : (
+                            <span className="text-xs text-slate-300">—</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
         ) : (
           <div className="flex-1 overflow-y-auto p-6">
             {error && (

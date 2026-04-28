@@ -86,6 +86,12 @@ DATABASE_URL = os.getenv(
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
 # ---------------------------------------------------------------------------
+# FAQ 高频问题
+# ---------------------------------------------------------------------------
+# 问题被问到达此次数后，开始缓存答案（0 = 不缓存）
+FAQ_CACHE_THRESHOLD = int(os.getenv("FAQ_CACHE_THRESHOLD", "3"))
+
+# ---------------------------------------------------------------------------
 # Security
 # ---------------------------------------------------------------------------
 _JWT_DEFAULT = "dev-secret-change-in-production"
@@ -142,6 +148,20 @@ LIGHTRAG_STREAM_CONTEXT_MAX_CHARS = int(os.getenv("LIGHTRAG_STREAM_CONTEXT_MAX_C
 LIGHTRAG_AGENTIC_RAG_MAX_CHARS = int(os.getenv("LIGHTRAG_AGENTIC_RAG_MAX_CHARS", "10000"))
 # LightRAG 默认会开 rerank；未配置 rerank 模型时会告警且可能长时间阻塞，故默认关闭
 LIGHTRAG_ENABLE_RERANK = os.getenv("LIGHTRAG_ENABLE_RERANK", "false").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+# 管理端 LightRAG 摄入时，将 SentenceSplitter 后的文本块落盘（与 LightRAG workspace 并列子目录）
+LIGHTRAG_SAVE_INGEST_CHUNKS = os.getenv("LIGHTRAG_SAVE_INGEST_CHUNKS", "true").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+LIGHTRAG_INGEST_CHUNKS_SUBDIR = os.getenv("LIGHTRAG_INGEST_CHUNKS_SUBDIR", "ingest_chunks")
+LIGHTRAG_INGEST_CHUNKS_SNAPSHOT = os.getenv("LIGHTRAG_INGEST_CHUNKS_SNAPSHOT", "false").strip().lower() in (
     "1",
     "true",
     "yes",
@@ -211,3 +231,9 @@ else:
 QUESTION_USE_LLAMAINDEX = os.getenv("QUESTION_USE_LLAMAINDEX", "True").strip().lower() in (
     "1", "true", "yes", "on",
 )
+
+LANGSMITH_TRACING=os.getenv("LANGSMITH_TRACING", "False").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+LANGSMITH_API_KEY=os.getenv("LANGSMITH_API_KEY", "")
+LANGSMITH_PROJECT=os.getenv("LANGSMITH_PROJECT", "")

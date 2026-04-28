@@ -14,9 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_admin
 from api.courses import invalidate_courses_cache
-from config import KB_STORE_DIR, MAX_KB_UPLOAD_MB
+from config import FAQ_CACHE_THRESHOLD, KB_STORE_DIR, MAX_KB_UPLOAD_MB
 from core.prompts import invalidate_course_prompt_cache
 from core.database import AsyncSessionLocal, KBFile, KnowledgeBase, User, get_db
+from core.cache import faq_top
 from core.ingestion import (
     IndexingAborted,
     IndexingControl,
@@ -580,3 +581,35 @@ async def list_users(
         }
         for u in users
     ]
+
+
+# ── 高频问题看板 ───────────────────────────────────────────────────────────────
+
+@router.get("/faq")
+async def get_faq(
+    course_id: str | None = None,
+    top_n: int = 20,
+    _: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """返回各课程 Top-N 高频问题列表（按次数降序）。
+    - course_id 为空时，查询所有已知课程并合并返回。
+    """
+    if top_n < 1 or top_n > 100:
+        top_n = 20
+
+    if course_id:
+        items = await faq_top(course_id, top_n)
+        return {"course_id": course_id, "threshold": FAQ_CACHE_THRESHOLD, "questions": items}
+
+    # 遍历所有课程
+    kb_result = await db.execute(select(KnowledgeBase.course_id, KnowledgeBase.name))
+    courses = kb_result.all()
+    all_items: list[dict] = []
+    for cid, cname in courses:
+        items = await faq_top(cid, top_n)
+        for item in items:
+            all_items.append({"course_id": cid, "course_name": cname, **item})
+    # 按 count 降序排列后取 top_n
+    all_items.sort(key=lambda x: x["count"], reverse=True)
+    return {"course_id": None, "threshold": FAQ_CACHE_THRESHOLD, "questions": all_items[:top_n]}

@@ -15,10 +15,55 @@ interface Props {
 }
 
 
+/**
+ * 表格行内的公式含 | 会被 GFM 当作列分隔符，导致列错位 / 公式截断。
+ * 将公式内的 | 替换为 \vert（KaTeX 等价），\t 替换为空格。
+ */
+function escapeTablePipes(content: string): string {
+  return content.replace(/^(\|.+)$/gm, (line: string) => {
+    line = line.replace(/\t/g, ' ')
+
+    const segments: string[] = []
+    let i = 0
+    while (i < line.length) {
+      // $$ 块公式
+      if (line[i] === '$' && line[i + 1] === '$') {
+        const end = line.indexOf('$$', i + 2)
+        if (end !== -1) {
+          segments.push(line.slice(i, end + 2).replace(/\|/g, '\\vert '))
+          i = end + 2
+          continue
+        }
+      }
+      // $ 行内公式
+      if (line[i] === '$') {
+        const end = line.indexOf('$', i + 1)
+        if (end !== -1) {
+          segments.push(line.slice(i, end + 1).replace(/\|/g, '\\vert '))
+          i = end + 1
+          continue
+        }
+      }
+      // \( ... \) 行内公式
+      if (line[i] === '\\' && line[i + 1] === '(') {
+        const end = line.indexOf('\\)', i + 2)
+        if (end !== -1) {
+          segments.push(line.slice(i, end + 2).replace(/\|/g, '\\vert '))
+          i = end + 2
+          continue
+        }
+      }
+      segments.push(line[i])
+      i++
+    }
+    return segments.join('')
+  })
+}
+
 function normalizeMathDelimiters(content: string): string {
   if (!content) return content
 
-  return content
+  return escapeTablePipes(content)
     // 表格行（含 | 的行）内的 <br> → 空格；其余 <br> → 真换行
     .replace(/^(.*\|.*)<br\s*\/?>(.*\|.*)$/gim, '$1 $2')
     .replace(/<br\s*\/?>/gi, '\n')
@@ -27,7 +72,6 @@ function normalizeMathDelimiters(content: string): string {
     // \(...\) → 行内 $...$，允许换行（多行行内公式）
     .replace(/\\\(([\s\S]+?)\\\)/g, (_, expr: string) => `$${expr.trim()}$`)
     // 已经是 $$...$$ 的块公式，保证前后各有一个空行，防止被 GFM 当普通文本解析
-    // 注意：不能跨越空行（\n\n），否则会把两个表格之间的内容整体吞掉
     .replace(/([^\n])\$\$((?:(?!\n\n)[\s\S])+?)\$\$([^\n])/g, (_, pre, expr: string, post) =>
       `${pre}\n$$\n${expr.trim()}\n$$\n${post}`,
     )
