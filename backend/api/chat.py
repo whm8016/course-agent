@@ -8,10 +8,10 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
-from core.database import get_db
-from core.learner_profile import build_memory_context, update_learner_memory
-from core.limiter import limiter
-from core.orchestrator import normalize_mode, run_agent_stream
+from core.db.database import get_db
+from core.memory.learner_profile import build_memory_context, update_learner_memory
+from core.db.limiter import limiter
+from core.agent.orchestrator import normalize_mode, run_agent_stream
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +67,7 @@ async def chat(
                     )
                     return
                 if event.get("type") == "answer":
-                    answer_content = str(event.get("content") or "")
+                    answer_content += str(event.get("content") or "")
                 if event.get("type") == "done":
                     metadata = event.get("metadata") or {}
                     final_mode = str(metadata.get("mode") or final_mode)

@@ -5,9 +5,9 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
-from core.cache import cache_delete, cache_get, cache_set
-from core.database import get_db
-from core.memory import (
+from core.db.cache import cache_delete, cache_get, cache_set
+from core.db.database import get_db
+from core.memory.memory import (
     add_message,
     create_session,
     delete_session,
@@ -17,7 +17,7 @@ from core.memory import (
     update_session_mode,
     update_session_title,
 )
-from core.orchestrator import normalize_mode
+from core.agent.orchestrator import normalize_mode
 
 router = APIRouter()
 
@@ -87,7 +87,7 @@ async def api_create_session(
         user_id=user["id"],
         mode=normalize_mode(body.mode),
     )
-    from core.cache import cache_delete_pattern
+    from core.db.cache import cache_delete_pattern
     await cache_delete_pattern(f"sessions:{user['id']}:*")
     return session
 
@@ -110,7 +110,7 @@ async def api_update_session(
 ):
     await _check_session_owner(db, session_id, user["id"])
     await update_session_title(db, session_id, body.title)
-    from core.cache import cache_delete_pattern
+    from core.db.cache import cache_delete_pattern
     await cache_delete_pattern(f"sessions:{user['id']}:*")
     return {"ok": True}
 
@@ -135,7 +135,7 @@ async def api_delete_session(
 ):
     await _check_session_owner(db, session_id, user["id"])
     await delete_session(db, session_id)
-    from core.cache import cache_delete_pattern
+    from core.db.cache import cache_delete_pattern
     await cache_delete_pattern(f"sessions:{user['id']}:*")
     return {"ok": True}
 

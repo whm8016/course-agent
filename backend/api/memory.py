@@ -14,15 +14,15 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
-from core.database import get_db
-from core.learner_profile import (
+from core.db.database import get_db
+from core.memory.learner_profile import (
     MEMORY_FILES,
     clear_memory,
     read_snapshot,
     refresh_from_source,
     write_file,
 )
-from core.memory import get_messages, get_session
+from core.memory.memory import get_messages, get_session
 
 router = APIRouter(prefix="/memory")
 

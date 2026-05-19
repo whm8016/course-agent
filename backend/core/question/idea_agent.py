@@ -9,14 +9,14 @@ import asyncio
 import json
 from typing import Any
 from config import QUESTION_USE_LLAMAINDEX
-from core.rag_llama import llamaindex_has_index, retrieve_context_llamaindex
+from core.rag.rag_llama import llamaindex_has_index, retrieve_context_llamaindex
 from core.question.agent_base import QuestionAgentBase
 from core.question.flow_log import log_question_flow
 from core.question.json_parser import parse_json_response
 from core.question.models import QuestionTemplate
 from core.question.trace import build_trace_metadata, new_call_id
 
-from core.rag import retrieve_context
+from core.rag.rag import retrieve_context
 
 
 BATCH_SIZE = 5

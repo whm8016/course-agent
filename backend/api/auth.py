@@ -7,15 +7,15 @@ from fastapi import APIRouter, Depends, HTTPException, Header, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.auth import (
+from core.db.auth import (
     authenticate_user,
     create_token,
     create_user,
     decode_token,
     get_user_by_id,
 )
-from core.database import get_db
-from core.limiter import limiter
+from core.db.database import get_db
+from core.db.limiter import limiter
 
 logger = logging.getLogger(__name__)
 

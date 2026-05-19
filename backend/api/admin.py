@@ -15,10 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.auth import get_current_admin
 from api.courses import invalidate_courses_cache
 from config import FAQ_CACHE_THRESHOLD, KB_STORE_DIR, MAX_KB_UPLOAD_MB
-from core.prompts import invalidate_course_prompt_cache
-from core.database import AsyncSessionLocal, KBFile, KnowledgeBase, User, get_db
-from core.cache import faq_top
-from core.ingestion import (
+from core.llm.prompts import invalidate_course_prompt_cache
+from core.db.database import AsyncSessionLocal, KBFile, KnowledgeBase, User, get_db
+from core.db.cache import faq_top
+from core.rag.ingestion import (
     IndexingAborted,
     IndexingControl,
     ingest_to_lightrag,
@@ -198,7 +198,7 @@ async def _run_indexing(
 @router.get("/info")
 async def admin_info(_: dict = Depends(get_current_admin)):
     """返回管理后台基本信息。"""
-    from core.lightrag_engine import is_lightrag_available
+    from core.rag.lightrag_engine import is_lightrag_available
     rag_ok, rag_reason = is_lightrag_available()
     return {
         "llama_index_available": llama_available(),

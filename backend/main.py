@@ -25,7 +25,9 @@ from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
+from api.deep_research import router as deep_research_router
 from api.question import router as question_router
+from api.question_notebook import router as question_notebook_router
 from api.llama_rag import router as llama_rag_router
 from api.admin import router as admin_router
 from api.auth import router as auth_router
@@ -37,8 +39,8 @@ from api.upload import router as upload_router
 from api.sessions import router as sessions_router
 from api.sse import router as sse_router
 from config import UPLOAD_DIR, ALLOWED_ORIGINS, REDIS_URL, KB_STORE_DIR
-from core.database import init_db, close_db
-from core.limiter import limiter
+from core.db.database import init_db, close_db
+from core.db.limiter import limiter
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,7 @@ Instrumentator(
     excluded_handlers=["/api/health", "/metrics"],
 ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
 app.include_router(question_router, prefix="/api")
+app.include_router(question_notebook_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(llama_rag_router, prefix="/api")
@@ -100,6 +103,7 @@ app.include_router(upload_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
 app.include_router(sse_router, prefix="/api")
 app.include_router(memory_router, prefix="/api")
+app.include_router(deep_research_router, prefix="/api")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(KB_STORE_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
@@ -111,7 +115,7 @@ async def health():
 
     # DB check
     try:
-        from core.database import engine
+        from core.db.database import engine
         from sqlalchemy import text as sa_text
         async with engine.connect() as conn:
             await conn.execute(sa_text("SELECT 1"))

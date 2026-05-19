@@ -13,25 +13,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
 from config import AGENTIC_RAG_BACKEND, FAQ_CACHE_THRESHOLD, LIGHTRAG_TIMEOUT_SEC
-from core.database import get_db
-from core.learner_profile import build_memory_context, update_learner_memory
-from core.lightrag_engine import (
+from core.db.database import get_db
+from core.memory.learner_profile import build_memory_context, update_learner_memory
+from core.rag.lightrag_engine import (
     index_course_with_lightrag,
     is_lightrag_available,
-    retrieve_with_lightrag,
-    stream_answer_with_contexts,
     agentic_pipeline,
 )
-from core.lightrag_engine import (
-    index_course_with_lightrag,
-    is_lightrag_available,
-    retrieve_with_lightrag,
-    stream_answer_with_contexts,
-)
-from core.llm import chat_stream
-from core.orchestrator import normalize_mode
-from core.prompts import get_course_prompt
-from core.safety_pipeline import (
+from core.llm.llm import chat_stream
+from core.agent.orchestrator import normalize_mode
+from core.llm.prompts import get_course_prompt
+from core.agent.safety_pipeline import (
     INTENT_CHITCHAT,
     INTENT_KNOWLEDGE,
     classify_intent,
@@ -41,8 +33,8 @@ from core.safety_pipeline import (
 
 logger = logging.getLogger(__name__)
 
-from core.cache import faq_answer_get, faq_answer_set, faq_record
-from core.limiter import limiter
+from core.db.cache import faq_answer_get, faq_answer_set, faq_record
+from core.db.limiter import limiter
 
 router = APIRouter()
 
@@ -190,7 +182,7 @@ async def chat_with_lightrag(
                 if not guard_result.safe:
                     system_prompt += "\n\n【安全提示】请围绕课程内容回答，拒绝不当请求。"
 
-                from core.lightrag_engine import _normalize_history, _cap_history
+                from core.rag.lightrag_engine import _normalize_history, _cap_history
                 safe_history = _cap_history(_normalize_history(history))
 
                 answer_parts: list[str] = []
@@ -252,6 +244,7 @@ async def chat_with_lightrag(
                     mode=mode,
                     enabled_tools=enabled_tools,
                     image_path=image_path,
+                    memory_context=build_memory_context(user),
                 ):
                     if await request.is_disconnected():
                         return
@@ -290,77 +283,6 @@ async def chat_with_lightrag(
                     "[trace=%s] hallucination grounded=%s confidence=%.2f t=%dms",
                     trace_id, hallu_result.grounded, hallu_result.confidence, elapsed_ms(),
                 )
-
-            # else:
-            #     logger.info(
-            #         "[trace=%s] ▶ route=knowledge (full RAG pipeline) t=%dms",
-            #         trace_id, elapsed_ms(),
-            #     )
-            #     logger.info("[trace=%s] LightRAG retrieve_start t=%dms", trace_id, elapsed_ms())
-            #     yield f"data: {json.dumps({'type': 'thinking', 'content': '正在使用 LightRAG 检索知识图谱与向量证据...'}, ensure_ascii=False)}\n\n"
-            #     yield f"data: {json.dumps({'type': 'tool_call', 'tool': 'lightrag_query', 'input': {'course_id': course_id, 'mode': mode or 'mix'}}, ensure_ascii=False)}\n\n"
-
-            #     retrieve_result = await asyncio.wait_for(
-            #         retrieve_with_lightrag(course_id=course_id, message=message, history=history, mode=mode),
-            #         timeout=LIGHTRAG_TIMEOUT_SEC,
-            #     )
-
-            #     # LightRAG aquery(stream=True) 返回 AsyncIterator[str]；stream=False 返回 str/dict
-            #     contexts: list = []
-            #     answer_parts: list[str] = []
-            #     first_token_logged = False
-
-            #     if hasattr(retrieve_result, "__aiter__"):
-            #         async for token in retrieve_result:
-            #             if await request.is_disconnected():
-            #                 logger.info("[trace=%s] client disconnected during lightrag stream", trace_id)
-            #                 return
-            #             if not token:
-            #                 continue
-            #             if not first_token_logged:
-            #                 logger.info("[trace=%s] first_token t=%dms (lightrag native stream)", trace_id, elapsed_ms())
-            #                 first_token_logged = True
-            #             answer_parts.append(str(token))
-            #             yield f"data: {json.dumps({'type': 'token', 'content': str(token)}, ensure_ascii=False)}\n\n"
-            #         answer = "".join(answer_parts)
-            #     elif isinstance(retrieve_result, dict):
-            #         answer = str(
-            #             retrieve_result.get("response")
-            #             or retrieve_result.get("answer")
-            #             or retrieve_result.get("content")
-            #             or ""
-            #         )
-            #         raw_ctx = (
-            #             retrieve_result.get("contexts")
-            #             or retrieve_result.get("context")
-            #             or retrieve_result.get("chunks")
-            #             or []
-            #         )
-            #         if isinstance(raw_ctx, list):
-            #             contexts = raw_ctx
-            #         elif isinstance(raw_ctx, dict):
-            #             contexts = [raw_ctx]
-            #         elif isinstance(raw_ctx, str) and raw_ctx.strip():
-            #             contexts = [raw_ctx]
-            #         if contexts:
-            #             compact_contexts = _compact_contexts_for_sse(contexts)
-            #             yield f"data: {json.dumps({'type': 'tool_result', 'tool': 'lightrag_query', 'contexts': compact_contexts}, ensure_ascii=False)}\n\n"
-            #         if answer:
-            #             logger.info("[trace=%s] first_token t=%dms (lightrag native non-stream)", trace_id, elapsed_ms())
-            #             yield f"data: {json.dumps({'type': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
-            #     else:
-            #         answer = str(retrieve_result or "")
-            #         if answer:
-            #             logger.info("[trace=%s] first_token t=%dms (lightrag native non-stream)", trace_id, elapsed_ms())
-            #             yield f"data: {json.dumps({'type': 'token', 'content': answer}, ensure_ascii=False)}\n\n"
-
-            #     logger.info(
-            #         "[trace=%s] retrieve_end t=%dms result_type=%s answer_chars=%d contexts=%d",
-            #         trace_id, elapsed_ms(),
-            #         type(retrieve_result).__name__,
-            #         len(answer),
-            #         len(contexts),
-            #     )
 
             yield f"data: {json.dumps({'type': 'answer', 'content': answer}, ensure_ascii=False)}\n\n"
             logger.info(

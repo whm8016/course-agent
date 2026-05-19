@@ -14,8 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.auth import get_current_admin
 from api.courses import invalidate_courses_cache
 from config import LLAMA_INDEX_KB_ROOT
-from core.database import AsyncSessionLocal, KBFile, KnowledgeBase, get_db
-from rag_llama.llamaindex_pipeline import LlamaIndexPipeline
+from core.db.database import AsyncSessionLocal, KBFile, KnowledgeBase, get_db
+from core.rag.llamaindex.llamaindex_pipeline import LlamaIndexPipeline
 
 logger = logging.getLogger(__name__)
 

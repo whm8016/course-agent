@@ -9,7 +9,7 @@ from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
 from config import TEXT_MODEL
-from core.llm import client as _openai_client
+from core.llm.llm import client as _openai_client
 
 TraceCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 

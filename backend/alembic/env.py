@@ -11,7 +11,7 @@ from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from config import DATABASE_URL
-from core.database import Base
+from core.db.database import Base
 
 config = context.config
 
