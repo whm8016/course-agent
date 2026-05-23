@@ -27,7 +27,7 @@ function checkUnauthorized(res: Response) {
 export async function fetchCourses(): Promise<Course[]> {
   let res: Response
   try {
-    res = await fetch('/api/courses')
+    res = await fetch('/api/courses', { headers: authHeaders() })
   } catch {
     throw new Error('无法连接后端服务，请确认后端已启动')
   }

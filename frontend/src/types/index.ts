@@ -114,6 +114,7 @@ export interface User {
   id: string
   username: string
   display_name: string
+  role?: 'student' | 'teacher' | 'admin'
   is_admin?: boolean
   summary_memory?: string
   profile_memory?: string

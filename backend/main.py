@@ -26,10 +26,12 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from api.deep_research import router as deep_research_router
+from api.deep_solve import router as deep_solve_router
 from api.question import router as question_router
 from api.question_notebook import router as question_notebook_router
 from api.llama_rag import router as llama_rag_router
 from api.admin import router as admin_router
+from api.teacher import router as teacher_router
 from api.auth import router as auth_router
 from api.chat import router as chat_router
 from api.courses import router as courses_router
@@ -94,6 +96,7 @@ Instrumentator(
 app.include_router(question_router, prefix="/api")
 app.include_router(question_notebook_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
+app.include_router(teacher_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(llama_rag_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
@@ -104,6 +107,7 @@ app.include_router(sessions_router, prefix="/api")
 app.include_router(sse_router, prefix="/api")
 app.include_router(memory_router, prefix="/api")
 app.include_router(deep_research_router, prefix="/api")
+app.include_router(deep_solve_router, prefix="/api")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(KB_STORE_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")

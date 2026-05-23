@@ -20,6 +20,7 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from api.auth import ws_authenticate
 from config import TEXT_MODEL
 from core.research import ResearchPipeline
 
@@ -47,7 +48,9 @@ def _build_runtime_config(*, language: str, kb_name: str | None) -> dict[str, An
 
 @router.websocket("/run")
 async def websocket_deep_research(websocket: WebSocket) -> None:
-    await websocket.accept()
+    user = await ws_authenticate(websocket)
+    if user is None:
+        return
 
     async def send(msg: dict[str, Any]) -> None:
         try:

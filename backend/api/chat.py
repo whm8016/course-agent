@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 
@@ -8,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
+from api.courses import check_course_access
 from core.db.database import get_db
 from core.memory.learner_profile import build_memory_context, update_learner_memory
 from core.db.limiter import limiter
@@ -36,6 +38,8 @@ async def chat(
     session_id: str | None = body.get("session_id")
     mode: str = normalize_mode(body.get("chat_mode", "chat"))
 
+    await check_course_access(db, course_id, user)
+
     if len(message) > MAX_MESSAGE_LENGTH:
         message = message[:MAX_MESSAGE_LENGTH]
     if len(history) > MAX_HISTORY_LENGTH:
@@ -49,23 +53,46 @@ async def chat(
     async def event_generator():
         answer_content = ""
         final_mode = mode
+        queue: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=200)
+
+        async def _producer() -> None:
+            try:
+                async for event in run_agent_stream(
+                    course_id,
+                    message,
+                    history,
+                    image_path,
+                    mode=mode,
+                    memory_context=build_memory_context(user),
+                ):
+                    await queue.put(event)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.exception("Agent pipeline error")
+                await queue.put({"type": "error", "content": str(e)})
+            finally:
+                await queue.put(None)  # sentinel
+
+        producer_task = asyncio.create_task(_producer())
         try:
-            async for event in run_agent_stream(
-                course_id,
-                message,
-                history,
-                image_path,
-                mode=mode,
-                memory_context=build_memory_context(user),
-            ):
-                if await request.is_disconnected():
-                    logger.info(
-                        "Client disconnected, stop stream user=%s course=%s session=%s",
-                        user["id"],
-                        course_id,
-                        session_id,
-                    )
-                    return
+            while True:
+                # 每 0.3 s 检查一次断开，不依赖 LLM 何时 yield 事件
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=0.3)
+                except asyncio.TimeoutError:
+                    if await request.is_disconnected():
+                        logger.info(
+                            "Client disconnected, cancel stream user=%s course=%s session=%s",
+                            user["id"], course_id, session_id,
+                        )
+                        producer_task.cancel()
+                        return
+                    continue
+
+                if event is None:
+                    break
+
                 if event.get("type") == "answer":
                     answer_content += str(event.get("content") or "")
                 if event.get("type") == "done":
@@ -81,10 +108,8 @@ async def chat(
                     )
                 data = json.dumps(event, ensure_ascii=False)
                 yield f"data: {data}\n\n"
-        except Exception as e:
-            logger.exception("Agent pipeline error")
-            error_data = json.dumps({"type": "error", "content": str(e)}, ensure_ascii=False)
-            yield f"data: {error_data}\n\n"
+        finally:
+            producer_task.cancel()
 
     return StreamingResponse(
         event_generator(),

@@ -16,7 +16,7 @@ from api.auth import get_current_admin
 from api.courses import invalidate_courses_cache
 from config import FAQ_CACHE_THRESHOLD, KB_STORE_DIR, MAX_KB_UPLOAD_MB
 from core.llm.prompts import invalidate_course_prompt_cache
-from core.db.database import AsyncSessionLocal, KBFile, KnowledgeBase, User, get_db
+from core.db.database import AsyncSessionLocal, KBFile, KnowledgeBase, TeacherInvite, User, get_db
 from core.db.cache import faq_top
 from core.rag.ingestion import (
     IndexingAborted,
@@ -62,6 +62,8 @@ def _kb_to_dict(kb: KnowledgeBase) -> dict:
         "created_at": kb.created_at,
         "updated_at": kb.updated_at,
         "is_visible": bool(kb.is_visible),
+        "owner_id": kb.owner_id,
+        "join_code": kb.join_code,
     }
 
 
@@ -576,10 +578,88 @@ async def list_users(
             "id": u.id,
             "username": u.username,
             "display_name": u.display_name,
+            "role": u.role,
             "is_admin": bool(u.is_admin),
             "created_at": u.created_at,
         }
         for u in users
+    ]
+
+
+class ChangeRoleBody(BaseModel):
+    role: str = Field(..., pattern=r"^(student|teacher|admin)$")
+
+
+@router.put("/users/{user_id}/role")
+async def change_user_role(
+    user_id: str,
+    body: ChangeRoleBody,
+    _: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """管理员直接修改用户角色。"""
+    result = await db.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="用户不存在")
+
+    user.role = body.role
+    user.is_admin = (body.role == "admin")
+    await db.flush()
+    logger.info("管理员修改用户角色 user=%s role=%s", user_id, body.role)
+    return {"id": user.id, "username": user.username, "role": user.role}
+
+
+class CreateInviteBody(BaseModel):
+    count: int = Field(1, ge=1, le=50)
+    expires_hours: float | None = Field(None, ge=1)
+
+
+@router.post("/invite-codes", status_code=201)
+async def create_invite_codes(
+    body: CreateInviteBody,
+    admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """批量生成教师邀请码。"""
+    codes: list[str] = []
+    now = time.time()
+    expires_at = now + body.expires_hours * 3600 if body.expires_hours else None
+
+    for _ in range(body.count):
+        code = uuid.uuid4().hex[:8].upper()
+        invite = TeacherInvite(
+            code=code,
+            created_by=admin["id"],
+            expires_at=expires_at,
+        )
+        db.add(invite)
+        codes.append(code)
+
+    await db.flush()
+    logger.info("管理员生成 %d 个邀请码", body.count)
+    return {"codes": codes, "expires_at": expires_at}
+
+
+@router.get("/invite-codes")
+async def list_invite_codes(
+    _: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """列出所有邀请码。"""
+    result = await db.execute(
+        select(TeacherInvite).order_by(TeacherInvite.created_at.desc())
+    )
+    invites = result.scalars().all()
+    return [
+        {
+            "id": inv.id,
+            "code": inv.code,
+            "used_by": inv.used_by,
+            "expires_at": inv.expires_at,
+            "created_at": inv.created_at,
+        }
+        for inv in invites
     ]
 
 

@@ -59,13 +59,22 @@ def decode_token(token: str) -> dict | None:
 # User CRUD (async)
 # ---------------------------------------------------------------------------
 
-async def create_user(db: AsyncSession, username: str, password: str, display_name: str = "") -> dict:
+async def create_user(
+    db: AsyncSession,
+    username: str,
+    password: str,
+    display_name: str = "",
+    role: str = "student",
+) -> dict:
+    if username == ADMIN_USERNAME:
+        role = "admin"
     user = User(
         id=uuid.uuid4().hex[:12],
         username=username,
         password_hash=hash_password(password),
         display_name=display_name or username,
-        is_admin=(username == ADMIN_USERNAME),
+        role=role,
+        is_admin=(role == "admin"),
         created_at=time.time(),
     )
     db.add(user)
@@ -74,7 +83,13 @@ async def create_user(db: AsyncSession, username: str, password: str, display_na
     except IntegrityError:
         await db.rollback()
         raise ValueError("用户名已存在")
-    return {"id": user.id, "username": user.username, "display_name": user.display_name, "is_admin": user.is_admin}
+    return {
+        "id": user.id,
+        "username": user.username,
+        "display_name": user.display_name,
+        "role": user.role,
+        "is_admin": user.is_admin,
+    }
 
 
 async def authenticate_user(db: AsyncSession, username: str, password: str) -> dict | None:
@@ -88,6 +103,7 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> d
         "id": user.id,
         "username": user.username,
         "display_name": user.display_name,
+        "role": user.role,
         "is_admin": bool(user.is_admin),
         "summary_memory": user.summary_memory or "",
         "profile_memory": user.profile_memory or "",
@@ -100,6 +116,7 @@ async def get_user_by_id(db: AsyncSession, user_id: str) -> dict | None:
             User.id,
             User.username,
             User.display_name,
+            User.role,
             User.is_admin,
             User.summary_memory,
             User.profile_memory,
@@ -112,6 +129,7 @@ async def get_user_by_id(db: AsyncSession, user_id: str) -> dict | None:
         "id": row.id,
         "username": row.username,
         "display_name": row.display_name,
+        "role": row.role,
         "is_admin": bool(row.is_admin),
         "summary_memory": row.summary_memory or "",
         "profile_memory": row.profile_memory or "",

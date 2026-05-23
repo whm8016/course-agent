@@ -11,7 +11,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.auth import get_current_user
+from api.auth import get_current_teacher, get_current_user
+from api.courses import check_course_access
 from config import AGENTIC_RAG_BACKEND, FAQ_CACHE_THRESHOLD, LIGHTRAG_TIMEOUT_SEC
 from core.db.database import get_db
 from core.memory.learner_profile import build_memory_context, update_learner_memory
@@ -107,6 +108,8 @@ async def chat_with_lightrag(
 
     def elapsed_ms() -> int:
         return int((time.perf_counter() - t0) * 1000)
+
+    await check_course_access(db, course_id, user)
 
     if len(message) > MAX_MESSAGE_LENGTH:
         message = message[:MAX_MESSAGE_LENGTH]
@@ -348,7 +351,7 @@ async def chat_with_lightrag(
 
 @router.post("/chat/lightrag/index")
 @limiter.limit("10/minute")
-async def index_lightrag(request: Request, body: IndexBody, user: dict = Depends(get_current_user)):
+async def index_lightrag(request: Request, body: IndexBody, user: dict = Depends(get_current_teacher)):
     ok, reason = is_lightrag_available()
     if not ok:
         raise HTTPException(status_code=503, detail=reason)

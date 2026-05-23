@@ -11,6 +11,7 @@ export default function LoginPage({ onLogin }: Props) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
+  const [inviteCode, setInviteCode] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -32,7 +33,12 @@ export default function LoginPage({ onLogin }: Props) {
           setLoading(false)
           return
         }
-        const data = await register(username.trim(), password, displayName.trim())
+        const data = await register(
+          username.trim(),
+          password,
+          displayName.trim(),
+          inviteCode.trim() || undefined,
+        )
         onLogin(data.user)
       }
     } catch (err: unknown) {
@@ -67,16 +73,31 @@ export default function LoginPage({ onLogin }: Props) {
           </div>
 
           {mode === 'register' && (
-            <div>
-              <label className="block text-sm font-medium text-slate-600 mb-1">显示名称（可选）</label>
-              <input
-                type="text"
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition"
-                placeholder="显示在界面上的名字"
-              />
-            </div>
+            <>
+              <div>
+                <label className="block text-sm font-medium text-slate-600 mb-1">显示名称（可选）</label>
+                <input
+                  type="text"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition"
+                  placeholder="显示在界面上的名字"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-slate-600 mb-1">
+                  教师邀请码（可选）
+                </label>
+                <input
+                  type="text"
+                  value={inviteCode}
+                  onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
+                  className="w-full rounded-lg border border-slate-200 px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition font-mono tracking-wider"
+                  placeholder="填写后注册为教师"
+                  maxLength={16}
+                />
+              </div>
+            </>
           )}
 
           <div>

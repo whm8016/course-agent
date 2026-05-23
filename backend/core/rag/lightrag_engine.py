@@ -20,6 +20,7 @@ from config import (
     LIGHTRAG_ENABLE_RERANK,
     LIGHTRAG_AUTO_INDEX_TTL_SEC,
     LIGHTRAG_AGENTIC_RAG_MAX_CHARS,
+    LIGHTRAG_MAX_ASYNC,
     LIGHTRAG_QUERY_MODE,
     LIGHTRAG_STREAM_CONTEXT_LIMIT,
     LIGHTRAG_STREAM_CONTEXT_MAX_CHARS,
@@ -221,11 +222,17 @@ async def _get_instance(course_id: str):
 
         os.makedirs(LIGHTRAG_WORKDIR, exist_ok=True)
         assert LightRAG is not None
+        _extra_kwargs: dict[str, Any] = {}
+        import inspect
+        _sig = inspect.signature(LightRAG.__init__)
+        if "llm_model_max_async" in _sig.parameters:
+            _extra_kwargs["llm_model_max_async"] = LIGHTRAG_MAX_ASYNC
         rag = LightRAG(
             working_dir=LIGHTRAG_WORKDIR,
             workspace=_workspace_name(course_id),
             llm_model_func=_llm_model_func,
             embedding_func=_embedding_func,
+            **_extra_kwargs,
         )
         await rag.initialize_storages()
         _instances[course_id] = rag

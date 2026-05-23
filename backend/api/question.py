@@ -14,6 +14,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from api.auth import ws_authenticate
 from config import QUESTION_LOG_DIR
 from core.question.coordinator import AgentCoordinator
 from core.question.exam_mimic import mimic_exam_questions
@@ -57,7 +58,9 @@ def _task_id_for_question_gen(kb_name: str, requirement: object) -> str:
 
 @router.websocket("/generate")
 async def websocket_question_generate(websocket: WebSocket):
-    await websocket.accept()
+    user = await ws_authenticate(websocket)
+    if user is None:
+        return
     log_queue: asyncio.Queue = asyncio.Queue()
     pusher: asyncio.Task | None = None
 
@@ -166,7 +169,9 @@ async def websocket_question_generate(websocket: WebSocket):
 
 @router.websocket("/followup")
 async def websocket_question_followup(websocket: WebSocket):
-    await websocket.accept()
+    user = await ws_authenticate(websocket)
+    if user is None:
+        return
     try:
         data = await websocket.receive_json()
     except WebSocketDisconnect:
@@ -216,7 +221,9 @@ async def websocket_question_followup(websocket: WebSocket):
 
 @router.websocket("/mimic")
 async def websocket_mimic_generate(websocket: WebSocket):
-    await websocket.accept()
+    user = await ws_authenticate(websocket)
+    if user is None:
+        return
     log_queue: asyncio.Queue | None = asyncio.Queue()
     pusher_task: asyncio.Task | None = None
     original_stdout = sys.stdout

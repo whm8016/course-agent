@@ -36,11 +36,21 @@ export function authHeaders(): Record<string, string> {
   return token ? { Authorization: `Bearer ${token}` } : {}
 }
 
-export async function register(username: string, password: string, displayName?: string): Promise<AuthResponse> {
+export async function register(
+  username: string,
+  password: string,
+  displayName?: string,
+  inviteCode?: string,
+): Promise<AuthResponse> {
   const res = await fetch('/api/auth/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ username, password, display_name: displayName || '' }),
+    body: JSON.stringify({
+      username,
+      password,
+      display_name: displayName || '',
+      invite_code: inviteCode || undefined,
+    }),
   })
   if (!res.ok) {
     const data = await res.json().catch(() => ({}))

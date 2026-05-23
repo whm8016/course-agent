@@ -61,4 +61,4 @@ async def upload_image(file: UploadFile, user: dict = Depends(get_current_user))
         f.write(content)
 
     logger.info("Upload by user=%s file=%s size=%d", user["id"], filename, len(content))
-    return {"filename": filename, "path": filepath}
+    return {"filename": filename, "path": f"/uploads/{filename}"}

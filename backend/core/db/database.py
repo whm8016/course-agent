@@ -56,6 +56,7 @@ class User(Base):
     display_name = Column(String(64), nullable=False, default="")
     summary_memory = Column(Text, nullable=False, default="")
     profile_memory = Column(Text, nullable=False, default="{}")
+    role = Column(String(16), nullable=False, default="student")
     is_admin = Column(Boolean, nullable=False, default=False)
     created_at = Column(Float, nullable=False, default=time.time)
 
@@ -120,6 +121,8 @@ class KnowledgeBase(Base):
     created_at = Column(Float, nullable=False, default=time.time)
     updated_at = Column(Float, nullable=False, default=time.time)
     is_visible = Column(Boolean, nullable=False, default=True)
+    owner_id = Column(String(32), ForeignKey("users.id"), nullable=True)
+    join_code = Column(String(16), unique=True, nullable=True, index=True)
     files = relationship("KBFile", back_populates="kb", cascade="all, delete-orphan")
 
 
@@ -193,6 +196,36 @@ class NotebookEntryCategory(Base):
     entry_id = Column(Integer, ForeignKey("notebook_entries.id", ondelete="CASCADE"), primary_key=True)
     category_id = Column(
         Integer, ForeignKey("notebook_categories.id", ondelete="CASCADE"), primary_key=True
+    )
+
+
+class TeacherInvite(Base):
+    """One-time invite codes for teacher registration."""
+
+    __tablename__ = "teacher_invites"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(12))
+    code = Column(String(16), unique=True, nullable=False, index=True)
+    created_by = Column(String(32), ForeignKey("users.id"), nullable=False)
+    used_by = Column(String(32), ForeignKey("users.id"), nullable=True)
+    expires_at = Column(Float, nullable=True)
+    created_at = Column(Float, nullable=False, default=time.time)
+
+
+class Enrollment(Base):
+    """Student ↔ Course enrollment (managed by teacher / admin)."""
+
+    __tablename__ = "enrollments"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(12))
+    student_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    course_id = Column(String(64), nullable=False)
+    created_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        UniqueConstraint("student_id", "course_id", name="uq_enrollment_student_course"),
+        Index("idx_enrollment_student", "student_id"),
+        Index("idx_enrollment_course", "course_id"),
     )
 
 
@@ -308,6 +341,34 @@ async def init_db():
             "knowledge_bases",
             "is_visible",
             "ALTER TABLE knowledge_bases ADD COLUMN is_visible BOOLEAN NOT NULL DEFAULT TRUE",
+        )
+        await _ensure_column(
+            conn,
+            "users",
+            "role",
+            "ALTER TABLE users ADD COLUMN role VARCHAR(16) NOT NULL DEFAULT 'student'",
+        )
+        await _ensure_column(
+            conn,
+            "knowledge_bases",
+            "owner_id",
+            "ALTER TABLE knowledge_bases ADD COLUMN owner_id VARCHAR(32) REFERENCES users(id)",
+        )
+        await _ensure_column(
+            conn,
+            "knowledge_bases",
+            "join_code",
+            "ALTER TABLE knowledge_bases ADD COLUMN join_code VARCHAR(16)",
+        )
+        # 唯一索引（_ensure_column 只管列，索引单独建）
+        await conn.execute(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS ix_kb_join_code
+            ON knowledge_bases (join_code)
+            WHERE join_code IS NOT NULL
+        """))
+        # Sync role ← is_admin for pre-existing admin users
+        await conn.execute(
+            text("UPDATE users SET role = 'admin' WHERE is_admin = TRUE AND role = 'student'")
         )
 
     # 将硬编码课程一次性 seed 进数据库（幂等：已存在则跳过）

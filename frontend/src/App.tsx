@@ -3,6 +3,7 @@ import Sidebar from './components/layout/Sidebar'
 import ChatWindow from './components/chat/ChatWindow'
 import LoginPage from './components/pages/LoginPage'
 import AdminPage from './components/pages/AdminPage'
+import TeacherPage from './components/pages/TeacherPage'
 import { fetchCourses, fetchSessions, createSession, deleteSession } from './services/api'
 import { isLoggedIn, getUser, logout } from './services/auth'
 import type { Course, Session, User } from './types'
@@ -11,11 +12,13 @@ import './index.css'
 export default function App() {
   const [user, setUser] = useState<User | null>(getUser())
   const [showAdmin, setShowAdmin] = useState(() => sessionStorage.getItem('_admin') === '1')
+  const [showTeacher, setShowTeacher] = useState(() => sessionStorage.getItem('_teacher') === '1')
   const [courses, setCourses] = useState<Course[]>([])
   const [activeCourseId, setActiveCourseId] = useState<string>('')
   const [sessions, setSessions] = useState<Session[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string>('')
+  const [coursesLoading, setCoursesLoading] = useState(false)
 
   const handleLogin = useCallback((u: User) => {
     setUser(u)
@@ -23,6 +26,7 @@ export default function App() {
 
   const reloadCourses = useCallback(
     async (preserveActive: boolean = true) => {
+      setCoursesLoading(true)
       try {
         const list = await fetchCourses()
         setCourses(list)
@@ -42,6 +46,8 @@ export default function App() {
         const message = err instanceof Error ? err.message : '加载课程失败'
         setLoadError(message)
         return [] as Course[]
+      } finally {
+        setCoursesLoading(false)
       }
     },
     [],
@@ -121,7 +127,23 @@ export default function App() {
     return <LoginPage onLogin={handleLogin} />
   }
 
-  if (showAdmin && user.is_admin) {
+  const role = user.role ?? (user.is_admin ? 'admin' : 'student')
+  const isTeacherOrAdmin = role === 'teacher' || role === 'admin'
+
+  if (showTeacher && isTeacherOrAdmin) {
+    return (
+      <TeacherPage
+        user={user}
+        onBack={() => {
+          sessionStorage.removeItem('_teacher')
+          setShowTeacher(false)
+          void reloadCourses(true)
+        }}
+      />
+    )
+  }
+
+  if (showAdmin && role === 'admin') {
     return (
       <AdminPage
         user={user}
@@ -150,7 +172,9 @@ export default function App() {
         onDeleteSession={handleDeleteSession}
         user={user}
         onLogout={logout}
-        onAdmin={user.is_admin ? () => { sessionStorage.setItem('_admin', '1'); setShowAdmin(true) } : undefined}
+        onAdmin={role === 'admin' ? () => { sessionStorage.setItem('_admin', '1'); setShowAdmin(true) } : undefined}
+        onTeacher={isTeacherOrAdmin ? () => { sessionStorage.setItem('_teacher', '1'); setShowTeacher(true) } : undefined}
+        onCoursesRefresh={() => void reloadCourses(false)}
       />
       <main className="flex-1 h-full overflow-hidden">
         {activeCourse ? (
@@ -167,9 +191,14 @@ export default function App() {
           <div className="flex items-center justify-center h-full text-red-500 px-8 text-center">
             {loadError}
           </div>
-        ) : (
+        ) : coursesLoading ? (
           <div className="flex items-center justify-center h-full text-slate-400">
             加载中...
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-2">
+            <span className="text-4xl">📭</span>
+            <p className="text-sm">暂无课程，请联系管理员或教师选课</p>
           </div>
         )}
       </main>

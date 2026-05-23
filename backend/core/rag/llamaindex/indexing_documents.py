@@ -1,6 +1,6 @@
 """LightRAG 摄入与 LlamaIndex 建库共用的文档加载与切块常量。
 
-file_paths_to_llama_documents：统一 PDF（PyMuPDF）/ 文本 / DOCX（H1 章节）→ LlamaIndex Document 列表。
+file_paths_to_llama_documents：统一 PDF（PyMuPDF）/ 文本 / DOCX（H1 章节）/ PPTX（逐页）→ LlamaIndex Document 列表。
 """
 from __future__ import annotations
 
@@ -86,6 +86,26 @@ def file_paths_to_llama_documents(
             lg.info("Loaded: %s → %d sections", file_path.name, len(sections))
         else:
             lg.warning("Skipped empty or unreadable DOCX: %s", file_path.name)
+
+    for file_path_str in classification.pptx_files:
+        file_path = Path(file_path_str).resolve()
+        lg.info("Parsing PPTX (slide-aware): %s", file_path.name)
+        sections = FileTypeRouter.extract_pptx_sections(str(file_path))
+        if sections:
+            for sec in sections:
+                documents.append(
+                    Document(
+                        text=sec["content"],
+                        metadata={
+                            "file_name": file_path.name,
+                            "file_path": str(file_path),
+                            "section": sec["title"],
+                        },
+                    )
+                )
+            lg.info("Loaded: %s → %d slides", file_path.name, len(sections))
+        else:
+            lg.warning("Skipped empty or unreadable PPTX: %s", file_path.name)
 
     for file_path_str in classification.unsupported:
         lg.warning("Skipped unsupported file: %s", Path(file_path_str).name)

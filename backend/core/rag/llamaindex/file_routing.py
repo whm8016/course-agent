@@ -24,6 +24,7 @@ class DocumentType(Enum):
     TEXT = "text"
     MARKDOWN = "markdown"
     DOCX = "docx"
+    PPTX = "pptx"
     IMAGE = "image"
     UNKNOWN = "unknown"
 
@@ -35,6 +36,8 @@ class FileClassification:
     parser_files: List[str]
     text_files: List[str]
     docx_files: List[str]
+    pptx_files: List[str]
+    image_files: List[str]
     unsupported: List[str]
 
 
@@ -103,7 +106,8 @@ class FileTypeRouter:
         ".properties",
     }
 
-    DOCX_EXTENSIONS = {".docx", ".doc"}
+    DOCX_EXTENSIONS = {".docx"}
+    PPTX_EXTENSIONS = {".pptx"}
     IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
 
     @classmethod
@@ -117,6 +121,8 @@ class FileTypeRouter:
             return DocumentType.TEXT
         elif ext in cls.DOCX_EXTENSIONS:
             return DocumentType.DOCX
+        elif ext in cls.PPTX_EXTENSIONS:
+            return DocumentType.PPTX
         elif ext in cls.IMAGE_EXTENSIONS:
             return DocumentType.IMAGE
         else:
@@ -145,6 +151,8 @@ class FileTypeRouter:
         parser_files = []
         text_files = []
         docx_files = []
+        pptx_files = []
+        image_files = []
         unsupported = []
 
         for path in file_paths:
@@ -155,25 +163,26 @@ class FileTypeRouter:
             elif doc_type in (DocumentType.TEXT, DocumentType.MARKDOWN):
                 text_files.append(path)
             elif doc_type == DocumentType.DOCX:
-                ext = Path(path).suffix.lower()
-                if ext == ".docx":
-                    docx_files.append(path)
-                else:
-                    # legacy binary .doc — not supported by python-docx; keep explicit
-                    unsupported.append(path)
+                docx_files.append(path)
+            elif doc_type == DocumentType.PPTX:
+                pptx_files.append(path)
+            elif doc_type == DocumentType.IMAGE:
+                image_files.append(path)
             else:
                 unsupported.append(path)
 
         logger.debug(
             f"Classified {len(file_paths)} files: "
             f"{len(parser_files)} parser, {len(text_files)} text, {len(docx_files)} docx, "
-            f"{len(unsupported)} unsupported"
+            f"{len(pptx_files)} pptx, {len(image_files)} image, {len(unsupported)} unsupported"
         )
 
         return FileClassification(
             parser_files=parser_files,
             text_files=text_files,
             docx_files=docx_files,
+            pptx_files=pptx_files,
+            image_files=image_files,
             unsupported=unsupported,
         )
 
@@ -342,6 +351,99 @@ class FileTypeRouter:
         return sections
 
     @classmethod
+    def _serialize_pptx_table(cls, table) -> str:
+        """Serialize a python-pptx table (same header-row logic as DOCX)."""
+        rows = table.rows
+        if not rows:
+            return ""
+        first_cells = [c.text.strip() for c in rows[0].cells]
+        has_header = any(first_cells)
+        headers = first_cells if has_header else []
+        lines: list[str] = []
+        start = 1 if has_header else 0
+        if has_header:
+            lines.append(" | ".join(h for h in headers if h))
+        for row in rows[start:]:
+            cells = [c.text.strip() for c in row.cells]
+            if not any(cells):
+                continue
+            if headers:
+                pairs = []
+                for h, v in zip(headers, cells):
+                    if h and v:
+                        pairs.append(f"{h}: {v}")
+                    elif v:
+                        pairs.append(v)
+                lines.append(" | ".join(pairs))
+            else:
+                lines.append(" | ".join(c for c in cells if c))
+        return "\n".join(lines)
+
+    @classmethod
+    def extract_pptx_sections(cls, file_path: str) -> list[dict]:
+        """Parse a .pptx and split it into one section per slide.
+
+        Each returned dict has:
+          - title   : slide title (or "Slide N")
+          - content : title + body text and tables for that slide
+          - metadata: {"section": title, "file_name": basename}
+        """
+        p = Path(file_path)
+        if p.suffix.lower() != ".pptx":
+            return []
+        try:
+            from pptx import Presentation
+        except ImportError:
+            logger.warning("python-pptx is not installed; cannot read .pptx")
+            return []
+
+        try:
+            prs = Presentation(str(p))
+        except Exception as exc:
+            logger.warning("Failed to open .pptx %s: %s", p.name, exc)
+            return []
+
+        sections: list[dict] = []
+        for i, slide in enumerate(prs.slides):
+            title_shape = slide.shapes.title
+            title = ""
+            if title_shape is not None and title_shape.has_text_frame:
+                title = (title_shape.text or "").strip()
+            if not title:
+                title = f"Slide {i + 1}"
+
+            body_parts: list[str] = []
+            for shape in slide.shapes:
+                if shape.has_table:
+                    serialized = cls._serialize_pptx_table(shape.table)
+                    if serialized:
+                        body_parts.append(serialized)
+                    continue
+                if not shape.has_text_frame:
+                    continue
+                if title_shape is not None and shape is title_shape:
+                    continue
+                for para in shape.text_frame.paragraphs:
+                    t = (para.text or "").strip()
+                    if t and t != title:
+                        body_parts.append(t)
+
+            if not body_parts:
+                continue
+
+            content = "\n\n".join(body_parts)
+            sections.append({
+                "title": title,
+                "content": (f"{title}\n\n{content}").strip(),
+                "metadata": {"section": title, "file_name": p.name},
+            })
+
+        logger.info(
+            "extract_pptx_sections: %s → %d sections", p.name, len(sections)
+        )
+        return sections
+
+    @classmethod
     def read_text_file_sync(cls, file_path: str) -> str:
         """Read a text file with automatic encoding detection (sync; 与 LightRAG 线程池解析共用)."""
         encodings = ["utf-8", "utf-8-sig", "gbk", "gb2312", "gb18030", "latin-1", "cp1252"]
@@ -384,7 +486,12 @@ class FileTypeRouter:
     def needs_parser(cls, file_path: str) -> bool:
         """Quick check if a single file needs parser processing."""
         doc_type = cls.get_document_type(file_path)
-        return doc_type in (DocumentType.PDF, DocumentType.DOCX, DocumentType.IMAGE)
+        return doc_type in (
+            DocumentType.PDF,
+            DocumentType.DOCX,
+            DocumentType.PPTX,
+            DocumentType.IMAGE,
+        )
 
     @classmethod
     def is_text_readable(cls, file_path: str) -> bool:
@@ -395,7 +502,12 @@ class FileTypeRouter:
     @classmethod
     def get_supported_extensions(cls) -> set[str]:
         """Get the set of all supported file extensions."""
-        return cls.PARSER_EXTENSIONS | cls.TEXT_EXTENSIONS
+        return (
+            cls.PARSER_EXTENSIONS
+            | cls.TEXT_EXTENSIONS
+            | cls.DOCX_EXTENSIONS
+            | cls.PPTX_EXTENSIONS
+        )
 
     @classmethod
     def get_glob_patterns(cls) -> list[str]:

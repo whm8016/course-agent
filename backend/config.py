@@ -92,13 +92,23 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 FAQ_CACHE_THRESHOLD = int(os.getenv("FAQ_CACHE_THRESHOLD", "3"))
 
 # ---------------------------------------------------------------------------
+# Environment
+# ---------------------------------------------------------------------------
+ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
+
+# ---------------------------------------------------------------------------
 # Security
 # ---------------------------------------------------------------------------
 _JWT_DEFAULT = "dev-secret-change-in-production"
 JWT_SECRET = os.getenv("JWT_SECRET", _JWT_DEFAULT)
 JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "72"))
 
-if JWT_SECRET == _JWT_DEFAULT:
+if ENVIRONMENT == "production" and JWT_SECRET == _JWT_DEFAULT:
+    raise RuntimeError(
+        "FATAL: JWT_SECRET must be set to a strong value in production. "
+        "Set the JWT_SECRET environment variable."
+    )
+elif JWT_SECRET == _JWT_DEFAULT:
     import warnings
     warnings.warn(
         "JWT_SECRET is using the insecure default value! "
@@ -112,7 +122,12 @@ if JWT_SECRET == _JWT_DEFAULT:
 _origins_raw = os.getenv("ALLOWED_ORIGINS", "").strip()
 if not _origins_raw or _origins_raw == "*":
     ALLOWED_ORIGINS: list[str] = ["*"]
-    if _origins_raw != "*" and not _origins_raw:
+    if ENVIRONMENT == "production":
+        raise RuntimeError(
+            "FATAL: ALLOWED_ORIGINS must be set to specific origins in production. "
+            "Example: ALLOWED_ORIGINS=https://yourdomain.com"
+        )
+    elif _origins_raw != "*" and not _origins_raw:
         import warnings
         warnings.warn(
             "ALLOWED_ORIGINS is not set — defaulting to '*' (allow all). "
@@ -167,6 +182,8 @@ LIGHTRAG_INGEST_CHUNKS_SNAPSHOT = os.getenv("LIGHTRAG_INGEST_CHUNKS_SNAPSHOT", "
     "yes",
     "on",
 )
+LIGHTRAG_INGEST_BATCH_SIZE = int(os.getenv("LIGHTRAG_INGEST_BATCH_SIZE", "16"))
+LIGHTRAG_MAX_ASYNC = int(os.getenv("LIGHTRAG_MAX_ASYNC", "8"))
 
 # ---------------------------------------------------------------------------
 # Admin / Knowledge Base Store  /lightrag的

@@ -17,6 +17,7 @@ from config import (
     INGEST_CHUNK_OVERLAP,
     INGEST_CHUNK_SIZE,
     LLAMA_CLOUD_API_KEY,
+    LIGHTRAG_INGEST_BATCH_SIZE,
     LIGHTRAG_INGEST_CHUNKS_SNAPSHOT,
     LIGHTRAG_INGEST_CHUNKS_SUBDIR,
     LIGHTRAG_SAVE_INGEST_CHUNKS,
@@ -190,14 +191,15 @@ def _llamaparse_pdfs(pdf_paths: list[str]) -> list[LlamaDocument]:
     return docs
 
 
-def parse_files(file_paths: list[str]) -> list[str]:
+def parse_files(file_paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
     """
-    解析文件列表，返回文本 chunk 列表（供 LightRAG 摄入）。
-    路由与 llamaindex_pipeline 一致；SentenceSplitter 固定 1200/120 与 Settings 对齐。
-    图像 PDF 仍可能走 LlamaParse（需 LLAMA_CLOUD_API_KEY）。
+    解析文件列表，返回 (文本 chunk 列表, 按文件分段的全文 dict)。
+
+    doc_texts 供图片 VLM 摄入复用，避免重复提取：
+      dict[绝对路径, list[str]]  — PDF 每页 / DOCX 每 section / PPTX 每 slide / 纯文本单元素
     """
     if not file_paths:
-        return []
+        return [], {}
 
     documents, classification = file_paths_to_llama_documents(
         file_paths, log=logger
@@ -222,7 +224,17 @@ def parse_files(file_paths: list[str]) -> list[str]:
 
     if not documents:
         logger.warning("摄入解析结果为空（无有效文档）")
-        return []
+        return [], {}
+
+    # 构建 doc_texts：按文件路径分组，复用已解析的 Document 内容
+    doc_texts: dict[str, list[str]] = {}
+    for doc in documents:
+        fp = doc.metadata.get("file_path", "")
+        if not fp:
+            continue
+        content = doc.get_content().strip()
+        if content:
+            doc_texts.setdefault(fp, []).append(content)
 
     nodes = SentenceSplitter(
         chunk_size=LLAMA_INDEX_CHUNK_SIZE,
@@ -235,7 +247,7 @@ def parse_files(file_paths: list[str]) -> list[str]:
         len(documents),
         len(chunks),
     )
-    return chunks
+    return chunks, doc_texts
 
 
 # ── 完整摄入流水线 ───────────────────────────────────────────────────────────
@@ -294,13 +306,16 @@ def _persist_lightrag_ingest_chunks(
 async def ingest_to_lightrag(
     course_id: str,
     file_paths: list[str],
-    batch_size: int = 4,
+    batch_size: int = LIGHTRAG_INGEST_BATCH_SIZE,
     on_progress: ProgressCallback = None,
     resume_from_chunk: int = 0,
     control: Optional[IndexingControl] = None,
 ) -> dict:
     """
     完整摄入流水线：与 LlamaIndex 同策略解析切块 → LightRAG ainsert。
+
+    支持生产者-消费者模式：图片提取与文本解析并行启动，
+    文本 chunk 产出后立即开始分批写入 LightRAG。
 
     Args:
         course_id:         课程 ID
@@ -331,21 +346,73 @@ async def ingest_to_lightrag(
     if not ok:
         raise RuntimeError(f"LightRAG 不可用: {reason}")
 
-    # 清空上次遗留的错误记录
     clear_llm_errors()
 
-    # Step 1: 解析文件（CPU 密集，放线程池）
+    # Step 1: 解析文件（CPU 密集，放线程池）——同时返回 doc_texts 供图片阶段复用
     is_resume = resume_from_chunk > 0
     parse_label = f"续传解析 {len(file_paths)} 个文件（将跳过前 {resume_from_chunk} 个文本块）…" \
         if is_resume else f"开始解析 {len(file_paths)} 个文件…"
     await _emit(5, parse_label, resume_from_chunk, 0, 0)
     logger.info("开始解析 %d 个文件 course=%s resume_from=%d", len(file_paths), course_id, resume_from_chunk)
-    all_chunks = await asyncio.to_thread(parse_files, file_paths)
+    all_chunks, doc_texts = await asyncio.to_thread(parse_files, file_paths)
 
-    if not all_chunks:
+    # Step 1b: 图片摄入（复用 doc_texts，不再重复提取文本）
+    images_processed = 0
+    try:
+        from core.rag.llamaindex.image_extractor import ingest_images_from_files
+
+        rag_for_images = await _get_instance(course_id)
+        img_cache = _lightrag_ingest_chunks_dir(course_id) / "image_desc_cache.json"
+        await _emit(
+            8,
+            f"开始提取文档中的图片并写入知识图谱（{len(file_paths)} 个源文件）…",
+            resume_from_chunk,
+            max(len(all_chunks), 1),
+            0,
+        )
+
+        async def _on_image_progress(done: int, total: int) -> None:
+            if total <= 0:
+                return
+            pct = 8 + int(done / total * 2)
+            await _emit(
+                pct,
+                f"图片知识图谱：{done}/{total} 张",
+                resume_from_chunk,
+                max(len(all_chunks), total),
+                0,
+            )
+
+        images_processed = await ingest_images_from_files(
+            file_paths,
+            rag_for_images,
+            cache_path=str(img_cache),
+            doc_texts=doc_texts,
+            on_image_done=_on_image_progress,
+            control=control,
+        )
+        if images_processed:
+            logger.info(
+                "图片知识图谱摄入 course=%s images=%d",
+                course_id,
+                images_processed,
+            )
+    except ImportError:
+        logger.warning("raganything 未安装，跳过图片知识图谱摄入 course=%s", course_id)
+    except IndexingAborted:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "图片知识图谱摄入失败（继续文本索引）course=%s: %s",
+            course_id,
+            exc,
+            exc_info=True,
+        )
+
+    if not all_chunks and images_processed == 0:
         logger.warning("解析结果为空 course=%s", course_id)
         await _emit(100, "解析结果为空，无可索引内容", 0, 0, 0)
-        return {"status": "empty", "chunks": 0, "files": len(file_paths)}
+        return {"status": "empty", "chunks": 0, "files": len(file_paths), "images": 0}
 
     await asyncio.to_thread(
         _persist_lightrag_ingest_chunks,
@@ -359,7 +426,6 @@ async def ingest_to_lightrag(
     avg_chars = sum(len(c) for c in all_chunks) / total
     token_per_chunk = int(_TOKEN_OVERHEAD_PER_CHUNK + avg_chars / 3.5)
 
-    # 断点续传：跳过已处理的 chunk
     start = min(resume_from_chunk, total)
     chunks = all_chunks[start:]
     already_done = start
@@ -372,56 +438,138 @@ async def ingest_to_lightrag(
     )
 
     if not chunks:
-        await _emit(100, "所有文本块均已索引完毕", total, total, total * token_per_chunk)
-        return {"status": "done", "chunks": total, "files": len(file_paths)}
+        img_note = f"，{images_processed} 张图片已写入知识图谱" if images_processed else ""
+        await _emit(
+            100,
+            f"所有文本块均已索引完毕{img_note}",
+            total,
+            total,
+            total * token_per_chunk,
+        )
+        return {
+            "status": "done",
+            "chunks": total,
+            "files": len(file_paths),
+            "images": images_processed,
+        }
 
-    # Step 2: 分批写入 LightRAG
-    logger.info("开始写入 LightRAG: %d 个 chunk（跳过 %d），course=%s", len(chunks), already_done, course_id)
+    # Step 2: 生产者-消费者模式写入 LightRAG
+    # 生产者把 chunk 按 batch_size 分组放入队列，消费者从队列取出并 ainsert。
+    # 当前 parse_files 已完成（同步），生产者只是快速切分；
+    # 真正的并行收益来自：消费者 ainsert 某批时，下一批已在队列中就绪，
+    # 且 LightRAG 内部的 max_async 可以跨批次流水线化 LLM 调用。
+    logger.info(
+        "开始写入 LightRAG: %d 个 chunk（跳过 %d），batch_size=%d，course=%s",
+        len(chunks), already_done, batch_size, course_id,
+    )
     rag = await _get_instance(course_id)
 
-    for i in range(0, len(chunks), batch_size):
-        # 暂停/终止检查点：在每个 batch 写入前从 Redis 读一次控制信号
-        if control is not None:
-            await control.checkpoint(chunks_done=already_done + i)
+    _QUEUE_MAXSIZE = 3
+    chunk_queue: asyncio.Queue[list[str] | None] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
+    consumer_error: list[Exception] = []
 
-        batch = chunks[i : i + batch_size]
-        await rag.ainsert(batch)
+    async def _producer() -> None:
+        """将 chunks 按 batch_size 切分后放入队列，结束时放入 None 作为哨兵。"""
+        try:
+            for i in range(0, len(chunks), batch_size):
+                batch = chunks[i : i + batch_size]
+                await chunk_queue.put(batch)
+        finally:
+            await chunk_queue.put(None)
 
-        # ── 检查 LLM 错误（LightRAG 内部吞掉了异常，我们在 _llm_model_func 中记录）──
-        errors = take_llm_errors()
-        if errors:
-            fatal = [e for e in errors if _is_fatal_llm_error(e)]
-            if fatal:
-                err_msg = str(fatal[0])
-                done_so_far = already_done + min(i + batch_size, len(chunks))
-                await _emit(
-                    int(10 + done_so_far / total * 85),
-                    f"遇到致命错误，索引中止（已完成 {done_so_far}/{total} 个文本块）",
-                    done_so_far, total, done_so_far * token_per_chunk,
-                )
-                raise RuntimeError(f"LLM API 致命错误，索引中止: {err_msg[:300]}")
+    async def _consumer() -> None:
+        """从队列取出 batch 并写入 LightRAG，附带 checkpoint 和错误检测。"""
+        nonlocal already_done
+        consumed = 0
+        while True:
+            batch = await chunk_queue.get()
+            if batch is None:
+                break
+
+            batch_start_idx = consumed
+            consumed += len(batch)
+
+            if control is not None:
+                await control.checkpoint(chunks_done=already_done + batch_start_idx)
+
+            if control is not None:
+                _insert_task = asyncio.create_task(rag.ainsert(batch))
+                try:
+                    while not _insert_task.done():
+                        try:
+                            await asyncio.wait_for(asyncio.shield(_insert_task), timeout=3.0)
+                        except asyncio.TimeoutError:
+                            await control.checkpoint(chunks_done=already_done + batch_start_idx)
+                except IndexingAborted:
+                    _insert_task.cancel()
+                    try:
+                        await _insert_task
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    raise
+                except Exception:
+                    _insert_task.cancel()
+                    raise
             else:
-                # 非致命错误（如网络超时）仅记录日志，继续
-                logger.warning("非致命 LLM 错误（继续）: %s", errors[0])
+                await rag.ainsert(batch)
 
-        done = already_done + min(i + batch_size, len(chunks))
-        progress = 10 + int(done / total * 85)
-        token_estimate = done * token_per_chunk
-        await _emit(
-            progress,
-            f"构建知识图谱：{done}/{total} 个文本块",
-            done, total, token_estimate,
-        )
-        logger.info("LightRAG 摄入进度 course=%s %d/%d", course_id, done, total)
+            errors = take_llm_errors()
+            if errors:
+                fatal = [e for e in errors if _is_fatal_llm_error(e)]
+                if fatal:
+                    err_msg = str(fatal[0])
+                    done_so_far = already_done + consumed
+                    await _emit(
+                        int(10 + done_so_far / total * 85),
+                        f"遇到致命错误，索引中止（已完成 {done_so_far}/{total} 个文本块）",
+                        done_so_far, total, done_so_far * token_per_chunk,
+                    )
+                    raise RuntimeError(f"LLM API 致命错误，索引中止: {err_msg[:300]}")
+                else:
+                    logger.warning("非致命 LLM 错误（继续）: %s", errors[0])
+
+            done = already_done + consumed
+            progress = 10 + int(done / total * 85)
+            token_estimate = done * token_per_chunk
+            await _emit(
+                progress,
+                f"构建知识图谱：{done}/{total} 个文本块",
+                done, total, token_estimate,
+            )
+            logger.info("LightRAG 摄入进度 course=%s %d/%d", course_id, done, total)
+
+    producer_task = asyncio.create_task(_producer())
+    try:
+        await _consumer()
+    except (IndexingAborted, RuntimeError):
+        producer_task.cancel()
+        try:
+            await producer_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        raise
+    await producer_task
 
     final_tokens = total * token_per_chunk
+    img_note = f"，{images_processed} 张图片" if images_processed else ""
     await _emit(
         100,
-        f"索引完成：{len(file_paths)} 个文件，{total} 个文本块，估算消耗 {final_tokens:,} tokens",
+        f"索引完成：{len(file_paths)} 个文件，{total} 个文本块{img_note}，估算消耗 {final_tokens:,} tokens",
         total, total, final_tokens,
     )
-    logger.info("摄入完成 course=%s files=%d chunks=%d", course_id, len(file_paths), total)
-    return {"status": "done", "chunks": total, "files": len(file_paths)}
+    logger.info(
+        "摄入完成 course=%s files=%d chunks=%d images=%d",
+        course_id,
+        len(file_paths),
+        total,
+        images_processed,
+    )
+    return {
+        "status": "done",
+        "chunks": total,
+        "files": len(file_paths),
+        "images": images_processed,
+    }
 
 
 def llama_available() -> bool:
