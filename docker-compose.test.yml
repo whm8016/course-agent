@@ -1,0 +1,21 @@
+version: "3.9"
+# Run backend integration tests inside a dedicated container.
+# Usage:
+#   docker compose -f docker-compose.test.yml run --rm backend-test
+services:
+  backend-test:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: "sqlite+aiosqlite:///:memory:"
+      REDIS_URL: "memory://"
+      JWT_SECRET: "test-secret-pytest-only-32chars!!"
+      ENVIRONMENT: "development"
+      DASHSCOPE_API_KEY: "sk-test"
+      ALLOWED_ORIGINS: "*"
+      TESTING: "1"
+    working_dir: /app
+    command: ["python", "-m", "pytest", "tests", "-q", "--tb=short"]
+    volumes:
+      - ./backend:/app

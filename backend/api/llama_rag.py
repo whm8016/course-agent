@@ -162,7 +162,12 @@ async def build_llamaindex_index(
     await db.commit()
     await invalidate_courses_cache()
 
-    background_tasks.add_task(_run_llamaindex_build, kb.id, course_id, file_paths)
+    from core.arq_pool import get_arq_pool
+    arq_pool = await get_arq_pool()
+    if arq_pool is not None:
+        await arq_pool.enqueue_job("run_llamaindex_build", kb.id, course_id, file_paths)
+    else:
+        background_tasks.add_task(_run_llamaindex_build, kb.id, course_id, file_paths)
 
     return {
         "accepted": True,

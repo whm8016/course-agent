@@ -12,9 +12,11 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from api.auth import ws_authenticate
+from api.courses import check_course_access
+from core.db.database import AsyncSessionLocal
 from config import QUESTION_LOG_DIR
 from core.question.coordinator import AgentCoordinator
 from core.question.exam_mimic import mimic_exam_questions
@@ -78,6 +80,14 @@ async def websocket_question_generate(websocket: WebSocket):
         return
     if not kb_name:
         await websocket.send_json({"type": "error", "content": "kb_name 或 course_id 必填"})
+        return
+
+    try:
+        async with AsyncSessionLocal() as db:
+            await check_course_access(db, str(kb_name), user)
+    except HTTPException as exc:
+        await websocket.send_json({"type": "error", "content": exc.detail})
+        await websocket.close()
         return
 
     task_id = _task_id_for_question_gen(str(kb_name), requirement)
@@ -237,6 +247,14 @@ async def websocket_mimic_generate(websocket: WebSocket):
 
         if not kb_name:
             await websocket.send_json({"type": "error", "content": "kb_name 或 course_id 必填"})
+            return
+
+        try:
+            async with AsyncSessionLocal() as db:
+                await check_course_access(db, str(kb_name), user)
+        except HTTPException as exc:
+            await websocket.send_json({"type": "error", "content": exc.detail})
+            await websocket.close()
             return
 
         loop = asyncio.get_running_loop()

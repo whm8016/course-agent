@@ -127,3 +127,45 @@ async def faq_answer_set(course_id: str, question: str, answer: str) -> None:
         await _get_pool().set(key, answer)
     except Exception:
         logger.debug("faq_answer_set failed course=%s", course_id, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# 用户课程访问权限缓存（TTL 5 分钟）
+# ---------------------------------------------------------------------------
+
+_ACCESS_TTL = 300  # 秒
+
+
+async def course_access_get(user_id: str, course_id: str) -> bool | None:
+    """返回缓存的权限决策：True=允许, False=拒绝, None=未命中。"""
+    try:
+        raw = await _get_pool().get(f"access:{user_id}:{course_id}")
+        if raw is None:
+            return None
+        return raw == "1"
+    except Exception:
+        logger.debug("course_access_get failed user=%s course=%s", user_id, course_id, exc_info=True)
+        return None
+
+
+async def course_access_set(user_id: str, course_id: str, allowed: bool) -> None:
+    """缓存权限决策，TTL 5 分钟。"""
+    try:
+        await _get_pool().set(
+            f"access:{user_id}:{course_id}",
+            "1" if allowed else "0",
+            ex=_ACCESS_TTL,
+        )
+    except Exception:
+        logger.debug("course_access_set failed user=%s course=%s", user_id, course_id, exc_info=True)
+
+
+async def course_access_invalidate(user_id: str, course_id: str | None = None) -> None:
+    """使某用户的权限缓存失效（指定课程或全部）。"""
+    try:
+        if course_id:
+            await _get_pool().delete(f"access:{user_id}:{course_id}")
+        else:
+            await cache_delete_pattern(f"access:{user_id}:*")
+    except Exception:
+        logger.debug("course_access_invalidate failed user=%s", user_id, exc_info=True)

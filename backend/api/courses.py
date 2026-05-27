@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
-from core.db.cache import cache_delete, cache_get, cache_set
+from core.db.cache import cache_delete, cache_get, cache_set, course_access_get, course_access_set, course_access_invalidate
 from core.db.database import Enrollment, KnowledgeBase, get_db
 
 router = APIRouter()
@@ -79,28 +79,46 @@ async def list_courses(
 
 
 async def check_course_access(db: AsyncSession, course_id: str, user: dict) -> None:
-    """Raise 403 if the user has no access to this course."""
+    """Raise 403 if the user has no access to this course.
+
+    管理员直接放行；教师/学生先查 Redis 缓存（TTL 5 min），未命中才走 DB。
+    """
     role = user.get("role", "student")
+    user_id: str = user["id"]
+
     if role == "admin":
         return
+
+    # 从缓存快速判断
+    cached = await course_access_get(user_id, course_id)
+    if cached is True:
+        return
+    if cached is False:
+        raise HTTPException(status_code=403, detail="未选此课程，无法访问")
+
+    # 缓存未命中，走 DB
     if role == "teacher":
         result = await db.execute(
             select(KnowledgeBase.id).where(
                 KnowledgeBase.course_id == course_id,
-                KnowledgeBase.owner_id == user["id"],
+                KnowledgeBase.owner_id == user_id,
             )
         )
-        if result.first():
-            return
-        raise HTTPException(status_code=403, detail="无权访问此课程")
+        allowed = result.first() is not None
+        await course_access_set(user_id, course_id, allowed)
+        if not allowed:
+            raise HTTPException(status_code=403, detail="无权访问此课程")
+        return
 
     result = await db.execute(
         select(Enrollment.id).where(
-            Enrollment.student_id == user["id"],
+            Enrollment.student_id == user_id,
             Enrollment.course_id == course_id,
         )
     )
-    if not result.first():
+    allowed = result.first() is not None
+    await course_access_set(user_id, course_id, allowed)
+    if not allowed:
         raise HTTPException(status_code=403, detail="未选此课程，无法访问")
 
 
@@ -143,6 +161,7 @@ async def join_course_by_code(
     enrollment = Enrollment(student_id=user["id"], course_id=kb.course_id)
     db.add(enrollment)
     await db.commit()
-    # 让学生课程列表缓存失效
+    # 让学生课程列表缓存失效，并写入权限缓存（True，避免下次查 DB）
     await cache_delete(_user_courses_cache_key(user["id"]))
+    await course_access_set(user["id"], kb.course_id, True)
     return {"course_id": kb.course_id, "name": kb.name, "already_enrolled": False}

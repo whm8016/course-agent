@@ -17,10 +17,9 @@ logging.basicConfig(level=logging.INFO, handlers=[_log_handler])
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -43,6 +42,7 @@ from api.sse import router as sse_router
 from config import UPLOAD_DIR, ALLOWED_ORIGINS, REDIS_URL, KB_STORE_DIR
 from core.db.database import init_db, close_db
 from core.db.limiter import limiter
+from core.arq_pool import get_arq_pool, close_arq_pool
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +52,12 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     logger.info("Application startup – initializing database tables")
     await init_db()
+    # 尝试初始化 ARQ 任务队列连接池（Redis 不可用时跳过，降级为 BackgroundTasks）
+    await get_arq_pool()
     yield
     logger.info("Application shutdown – closing database pool")
     await close_db()
+    await close_arq_pool()
 
 
 app = FastAPI(
@@ -80,6 +83,25 @@ def _custom_openapi():
 app.openapi = _custom_openapi
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "服务器内部错误"},
+    )
+
+
 app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
@@ -110,7 +132,6 @@ app.include_router(deep_research_router, prefix="/api")
 app.include_router(deep_solve_router, prefix="/api")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(KB_STORE_DIR, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
 
 @app.get("/api/health")
@@ -137,7 +158,17 @@ async def health():
     except Exception as exc:
         checks["redis"] = f"error: {exc}"
 
-    all_ok = all(v == "ok" for v in checks.values())
+    # LLM check：仅验证 API key 已配置；不做实际调用（避免消耗 token / 拖慢探针）
+    try:
+        from config import DASHSCOPE_API_KEY
+        if DASHSCOPE_API_KEY:
+            checks["llm"] = "ok (api_key configured)"
+        else:
+            checks["llm"] = "error: DASHSCOPE_API_KEY not set"
+    except Exception as exc:
+        checks["llm"] = f"error: {exc}"
+
+    all_ok = all(v.startswith("ok") for v in checks.values())
     return JSONResponse(
         status_code=200 if all_ok else 503,
         content={"status": "ok" if all_ok else "degraded", "checks": checks},

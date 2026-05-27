@@ -1,6 +1,6 @@
 from __future__ import annotations
 import asyncio
-
+from collections import OrderedDict
 import logging
 import os
 import time
@@ -13,6 +13,8 @@ import numpy as np
 from config import (
     DASHSCOPE_API_KEY,
     DASHSCOPE_BASE_URL,
+    EMBEDDING_API_KEY,
+    EMBEDDING_BASE_URL,
     EMBEDDING_MODEL,
     KNOWLEDGE_DIR,
     LIGHTRAG_EMBEDDING_DIM,
@@ -20,6 +22,7 @@ from config import (
     LIGHTRAG_ENABLE_RERANK,
     LIGHTRAG_AUTO_INDEX_TTL_SEC,
     LIGHTRAG_AGENTIC_RAG_MAX_CHARS,
+    LIGHTRAG_LRU_CAPACITY,
     LIGHTRAG_MAX_ASYNC,
     LIGHTRAG_QUERY_MODE,
     LIGHTRAG_STREAM_CONTEXT_LIMIT,
@@ -47,9 +50,18 @@ except Exception as exc:  # pragma: no cover - import availability branch
     wrap_embedding_func_with_attrs = None  # type: ignore[assignment]
     LIGHTRAG_IMPORT_ERROR = exc
 
-_instances: dict[str, Any] = {}
-_init_locks: dict[str, asyncio.Lock] = {}
+_instances: OrderedDict[str, Any] = OrderedDict()
+_instances_lock: asyncio.Lock | None = None   # 懒初始化，避免 import 时无 event loop
 _index_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_instances_lock() -> asyncio.Lock:
+    global _instances_lock
+    if _instances_lock is None:
+        _instances_lock = asyncio.Lock()
+    return _instances_lock
+
+
 _index_signatures: dict[str, tuple[str, ...]] = {}
 _last_auto_index_at: dict[str, float] = {}
 _AUTO_INDEX_STATE_DIR = Path(LIGHTRAG_WORKDIR) / ".auto_index_state"
@@ -129,7 +141,9 @@ async def _llm_model_func(
             prompt,
             system_prompt=safe_system_prompt,
             history_messages=history_messages or [],
-            keyword_extraction=keyword_extraction,
+            # DeepSeek API 不支持 response_format 结构化输出（400 invalid_request_error）。
+            # LightRAG 已用 json_repair.loads() 解析返回文本，无需 structured output。
+            keyword_extraction=False,
             api_key=DASHSCOPE_API_KEY,
             base_url=DASHSCOPE_BASE_URL,
             **kwargs,
@@ -152,8 +166,8 @@ if wrap_embedding_func_with_attrs is not None and openai_embed is not None:
         return await openai_embed.func(
             texts,
             model=EMBEDDING_MODEL,
-            api_key=DASHSCOPE_API_KEY,
-            base_url=DASHSCOPE_BASE_URL,
+            api_key=EMBEDDING_API_KEY,
+            base_url=EMBEDDING_BASE_URL,
         )
 
 else:
@@ -212,13 +226,24 @@ async def _get_instance(course_id: str):
     if not ok:
         raise RuntimeError(reason)
 
-    if course_id in _instances:
-        return _instances[course_id]
-
-    lock = _init_locks.setdefault(course_id, asyncio.Lock())
+    lock = _get_instances_lock()
     async with lock:
         if course_id in _instances:
+            _instances.move_to_end(course_id)        # LRU hit：标记为最近访问
             return _instances[course_id]
+
+        # 淘汰最旧的实例，直到容量满足要求
+        while len(_instances) >= LIGHTRAG_LRU_CAPACITY:
+            evicted_id, evicted_rag = _instances.popitem(last=False)
+            if hasattr(evicted_rag, "finalize_storages"):
+                try:
+                    await evicted_rag.finalize_storages()
+                except Exception:
+                    pass
+            logger.info(
+                "LightRAG LRU evict course=%s capacity=%d",
+                evicted_id, LIGHTRAG_LRU_CAPACITY,
+            )
 
         os.makedirs(LIGHTRAG_WORKDIR, exist_ok=True)
         assert LightRAG is not None
@@ -236,7 +261,10 @@ async def _get_instance(course_id: str):
         )
         await rag.initialize_storages()
         _instances[course_id] = rag
-        logger.info("LightRAG initialized for course=%s workspace=%s", course_id, _workspace_name(course_id))
+        logger.info(
+            "LightRAG LRU load course=%s slots=%d/%d workspace=%s",
+            course_id, len(_instances), LIGHTRAG_LRU_CAPACITY, _workspace_name(course_id),
+        )
         return rag
 
 

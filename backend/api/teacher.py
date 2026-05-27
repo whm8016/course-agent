@@ -203,7 +203,13 @@ async def index_course(
     if resume and kb.status in ("error", "paused") and kb.chunks_done > 0:
         resume_from = kb.chunks_done
 
-    background_tasks.add_task(_run_indexing, kb.id, course_id, file_paths, resume_from)
+    from core.arq_pool import get_arq_pool
+    arq_pool = await get_arq_pool()
+    if arq_pool is not None:
+        await arq_pool.enqueue_job("run_indexing", kb.id, course_id, file_paths, resume_from)
+    else:
+        background_tasks.add_task(_run_indexing, kb.id, course_id, file_paths, resume_from)
+
     return {
         "message": "索引任务已启动" if resume_from == 0 else f"续传（从第 {resume_from} 块）",
         "course_id": course_id,

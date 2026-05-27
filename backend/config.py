@@ -58,6 +58,9 @@ DASHSCOPE_BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs
 TEXT_MODEL = os.getenv("TEXT_MODEL", "qwen-plus")
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-plus")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
+# 嵌入 / 视觉可与对话 LLM 使用不同 provider（例如对话 DeepSeek、嵌入仍走 DashScope）
+EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY") or DASHSCOPE_API_KEY
+EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL") or DASHSCOPE_BASE_URL
 
 # ---------------------------------------------------------------------------
 # RAG tuning
@@ -95,6 +98,7 @@ FAQ_CACHE_THRESHOLD = int(os.getenv("FAQ_CACHE_THRESHOLD", "3"))
 # Environment
 # ---------------------------------------------------------------------------
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
+LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "120"))
 
 # ---------------------------------------------------------------------------
 # Security
@@ -184,6 +188,8 @@ LIGHTRAG_INGEST_CHUNKS_SNAPSHOT = os.getenv("LIGHTRAG_INGEST_CHUNKS_SNAPSHOT", "
 )
 LIGHTRAG_INGEST_BATCH_SIZE = int(os.getenv("LIGHTRAG_INGEST_BATCH_SIZE", "16"))
 LIGHTRAG_MAX_ASYNC = int(os.getenv("LIGHTRAG_MAX_ASYNC", "8"))
+# 同时驻留内存的最大 LightRAG 实例数（LRU 淘汰）；10 门课 × ~2GB ≈ 20GB 峰值
+LIGHTRAG_LRU_CAPACITY = int(os.getenv("LIGHTRAG_LRU_CAPACITY", "10"))
 
 # ---------------------------------------------------------------------------
 # Admin / Knowledge Base Store  /lightrag的

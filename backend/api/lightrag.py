@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_teacher, get_current_user
 from api.courses import check_course_access
+from api.upload import resolve_upload_path
 from config import AGENTIC_RAG_BACKEND, FAQ_CACHE_THRESHOLD, LIGHTRAG_TIMEOUT_SEC
 from core.db.database import get_db
 from core.memory.learner_profile import build_memory_context, update_learner_memory
@@ -102,7 +103,7 @@ async def chat_with_lightrag(
         AGENTIC_RAG_BACKEND,
         enabled_tools,
     )
-    image_path: str | None = body.get("image_path")
+    image_path: str | None = resolve_upload_path(body.get("image_path"))
     trace_id = request.headers.get("x-trace-id") or uuid.uuid4().hex[:8]
     t0 = time.perf_counter()
 
@@ -333,9 +334,12 @@ async def chat_with_lightrag(
             logger.warning("[trace=%s] timeout t=%dms", trace_id, elapsed_ms())
             error_data = json.dumps({"type": "error", "content": "LightRAG 查询超时"}, ensure_ascii=False)
             yield f"data: {error_data}\n\n"
-        except Exception as exc:
+        except Exception:
             logger.exception("[trace=%s] LightRAG pipeline error t=%dms", trace_id, elapsed_ms())
-            error_data = json.dumps({"type": "error", "content": str(exc)}, ensure_ascii=False)
+            error_data = json.dumps(
+                {"type": "error", "content": "对话处理失败，请稍后重试"},
+                ensure_ascii=False,
+            )
             yield f"data: {error_data}\n\n"
 
     return StreamingResponse(

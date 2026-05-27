@@ -39,9 +39,11 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/course_agent
       REDIS_URL: redis://redis:6379/0
-      DB_POOL_SIZE: "${DB_POOL_SIZE:-5}"
-      DB_MAX_OVERFLOW: "${DB_MAX_OVERFLOW:-10}"
+      DB_POOL_SIZE: "${DB_POOL_SIZE:-10}"
+      DB_MAX_OVERFLOW: "${DB_MAX_OVERFLOW:-20}"
       ENVIRONMENT: "${ENVIRONMENT:-development}"
+      BACKEND_WORKERS: "${BACKEND_WORKERS:-4}"
+      LLM_TIMEOUT_SEC: "${LLM_TIMEOUT_SEC:-120}"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
     depends_on:
       postgres:
@@ -58,6 +60,32 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+
+  # ARQ 后台任务 worker：索引/研究/解题均在此进程中执行
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/course_agent
+      REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      LLM_TIMEOUT_SEC: "${LLM_TIMEOUT_SEC:-120}"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - backend_uploads:/app/uploads
+    command: ["python", "-m", "arq", "worker.WorkerSettings"]
 
   frontend:
     build:

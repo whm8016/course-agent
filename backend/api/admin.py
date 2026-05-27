@@ -484,8 +484,15 @@ async def index_kb(
         resume_from = kb.chunks_done
         logger.info("断点续传 course_id=%s 从 chunk %d 继续", course_id, resume_from)
 
-    background_tasks.add_task(_run_indexing, kb.id, course_id, file_paths, resume_from)
-    logger.info("启动索引任务 course_id=%s files=%d resume_from=%d", course_id, len(file_paths), resume_from)
+    # 优先使用 ARQ 持久化队列；Redis 不可用时降级为 BackgroundTasks
+    from core.arq_pool import get_arq_pool
+    arq_pool = await get_arq_pool()
+    if arq_pool is not None:
+        await arq_pool.enqueue_job("run_indexing", kb.id, course_id, file_paths, resume_from)
+        logger.info("ARQ 索引任务已入队 course_id=%s files=%d", course_id, len(file_paths))
+    else:
+        background_tasks.add_task(_run_indexing, kb.id, course_id, file_paths, resume_from)
+        logger.info("BackgroundTasks 索引任务已启动 course_id=%s files=%d", course_id, len(file_paths))
 
     return {
         "message": "索引任务已启动" if resume_from == 0 else f"续传任务已启动（从第 {resume_from} 个文本块）",

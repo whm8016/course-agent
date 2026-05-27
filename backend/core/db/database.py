@@ -1,6 +1,7 @@
-"""Async database layer: SQLAlchemy 2.0 + asyncpg connection pool."""
+﻿"""Async database layer: SQLAlchemy 2.0 + asyncpg connection pool."""
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
@@ -28,13 +29,20 @@ from sqlalchemy.orm import DeclarativeBase, relationship
 
 from config import DATABASE_URL
 
-engine = create_async_engine(
-    DATABASE_URL,
-    pool_size=int(__import__("os").getenv("DB_POOL_SIZE", "10")),
-    max_overflow=int(__import__("os").getenv("DB_MAX_OVERFLOW", "15")),
-    pool_pre_ping=True,
-    pool_recycle=1800,
-)
+logger = logging.getLogger(__name__)
+
+def _engine_kwargs() -> dict:
+    if DATABASE_URL.startswith("sqlite"):
+        return {"connect_args": {"check_same_thread": False}}
+    return {
+        "pool_size": int(__import__("os").getenv("DB_POOL_SIZE", "10")),
+        "max_overflow": int(__import__("os").getenv("DB_MAX_OVERFLOW", "15")),
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+    }
+
+
+engine = create_async_engine(DATABASE_URL, **_engine_kwargs())
 
 AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -230,21 +238,24 @@ class Enrollment(Base):
 
 
 async def _ensure_column(conn, table_name: str, column_name: str, ddl: str):
-    exists_sql = text(
-        """
-        SELECT 1
-        FROM information_schema.columns
-        WHERE table_name = :table_name AND column_name = :column_name
-        LIMIT 1
-        """
-    )
-    result = await conn.execute(
-        exists_sql, {"table_name": table_name, "column_name": column_name}
-    )
-    if result.first() is None:
-        await conn.execute(text(ddl))
-# text(...)（SQLAlchemy）
-#把多行字符串包成“可执行的 SQL 文本对象”，便于 conn.execute 使用。
+    """Add a column only if it does not already exist (dialect-aware)."""
+    dialect = conn.dialect.name
+    if dialect == "sqlite":
+        rows = await conn.execute(text(f"PRAGMA table_info({table_name})"))
+        cols = {row[1] for row in rows}
+        if column_name in cols:
+            return
+    else:
+        result = await conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.columns "
+                "WHERE table_name = :tn AND column_name = :cn LIMIT 1"
+            ),
+            {"tn": table_name, "cn": column_name},
+        )
+        if result.first() is not None:
+            return
+    await conn.execute(text(ddl))
 
 # Serialize DDL on PostgreSQL so multiple uvicorn workers cannot race on create_all
 # (each worker runs lifespan startup; without a lock several processes may emit CREATE TABLE).
@@ -253,7 +264,16 @@ _PG_INIT_LOCK_KEY2 = 3_291_021
 
 
 async def init_db():
-    """Create all tables if they don't exist (idempotent)."""
+    """Create all tables if they don't exist (idempotent).
+
+    Production relies on ``alembic upgrade head``; skip create_all / column patches.
+    """
+    from config import ENVIRONMENT
+
+    if ENVIRONMENT == "production":
+        logger.info("ENVIRONMENT=production: skipping create_all (use Alembic migrations)")
+        return
+
     async with engine.begin() as conn:
         if engine.dialect.name == "postgresql":
             await conn.execute(
@@ -413,3 +433,4 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
+

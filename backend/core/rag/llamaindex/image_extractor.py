@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
-from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, VISION_MODEL
+from config import EMBEDDING_API_KEY, EMBEDDING_BASE_URL, VISION_MODEL
 from core.rag.llamaindex.file_routing import FileTypeRouter
 
 if TYPE_CHECKING:
@@ -259,7 +259,7 @@ def _make_vision_caption_func(
 
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
+        client = AsyncOpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_BASE_URL)
         max_tokens = int(kwargs.pop("max_tokens", 2048))
 
         if messages:

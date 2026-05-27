@@ -8,11 +8,15 @@ from pathlib import Path
 
 from openai import AsyncOpenAI
 
-from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, TEXT_MODEL, VISION_MODEL
+from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, LLM_TIMEOUT_SEC, TEXT_MODEL, VISION_MODEL
 
 logger = logging.getLogger(__name__)
 
-_client = AsyncOpenAI(api_key=DASHSCOPE_API_KEY, base_url=DASHSCOPE_BASE_URL)
+_client = AsyncOpenAI(
+    api_key=DASHSCOPE_API_KEY,
+    base_url=DASHSCOPE_BASE_URL,
+    timeout=LLM_TIMEOUT_SEC,
+)
 _tracing_flag = os.getenv("LANGSMITH_TRACING", "").strip().lower()
 _has_ls_key = bool(os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY"))
 if _tracing_flag in ("1", "true", "yes") and _has_ls_key:

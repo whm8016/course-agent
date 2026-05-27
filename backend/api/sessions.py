@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
+from api.courses import check_course_access
 from core.db.cache import cache_delete, cache_get, cache_set
 from core.db.database import get_db
 from core.memory.memory import (
@@ -80,6 +81,7 @@ async def api_create_session(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    await check_course_access(db, body.course_id, user)
     session = await create_session(
         db,
         body.course_id,

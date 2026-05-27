@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
 from api.courses import check_course_access
+from api.upload import resolve_upload_path
 from core.db.database import get_db
 from core.memory.learner_profile import build_memory_context, update_learner_memory
 from core.db.limiter import limiter
@@ -34,7 +35,7 @@ async def chat(
     course_id: str = body.get("course_id", "stamp")
     message: str = body.get("message", "")
     history: list[dict] = body.get("history", [])
-    image_path: str | None = body.get("image_path")
+    image_path: str | None = resolve_upload_path(body.get("image_path"))
     session_id: str | None = body.get("session_id")
     mode: str = normalize_mode(body.get("chat_mode", "chat"))
 
@@ -68,9 +69,9 @@ async def chat(
                     await queue.put(event)
             except asyncio.CancelledError:
                 pass
-            except Exception as e:
+            except Exception:
                 logger.exception("Agent pipeline error")
-                await queue.put({"type": "error", "content": str(e)})
+                await queue.put({"type": "error", "content": "对话处理失败，请稍后重试"})
             finally:
                 await queue.put(None)  # sentinel
 
