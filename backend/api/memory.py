@@ -22,6 +22,10 @@ from core.memory.learner_profile import (
     refresh_from_source,
     write_file,
 )
+from core.memory.graph_memory import (
+    delete_graph_node,
+    load_graphs,
+)
 from core.memory.memory import get_messages, get_session
 
 router = APIRouter(prefix="/memory")
@@ -113,3 +117,64 @@ async def clear_memory_endpoint(
         raise HTTPException(status_code=400, detail=f"Invalid file: {target}")
     snap = await clear_memory(db, user["id"], target)
     return {**snap, "cleared": True}
+
+
+# ---------------------------------------------------------------------------
+# 知识图谱 / 错题图谱
+# ---------------------------------------------------------------------------
+
+@router.get("/graph")
+async def get_graphs(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    kg, eg = await load_graphs(db, user["id"])
+    return {"knowledge_graph": kg, "error_graph": eg}
+
+
+class GraphDeleteRequest(BaseModel):
+    node_id: str
+
+
+@router.post("/graph/delete")
+async def delete_node(
+    payload: GraphDeleteRequest,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not payload.node_id:
+        raise HTTPException(status_code=400, detail="node_id is required")
+    result = await delete_graph_node(db, user["id"], payload.node_id)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 学生仪表盘
+# ---------------------------------------------------------------------------
+
+@router.get("/dashboard")
+async def get_dashboard(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    snap = await read_snapshot(db, user["id"])
+    kg, eg = await load_graphs(db, user["id"])
+
+    high_risk = sorted(
+        [n for n in (kg.get("nodes") or []) if n.get("status") == "active"],
+        key=lambda n: -(n.get("risk") or 0),
+    )[:5]
+
+    frequent_errors = sorted(
+        [n for n in (eg.get("nodes") or []) if (n.get("error_count") or 0) > 1],
+        key=lambda n: -(n.get("error_count") or 0),
+    )[:5]
+
+    return {
+        "summary": snap.get("summary", ""),
+        "profile": snap.get("profile", ""),
+        "high_risk_points": high_risk,
+        "frequent_errors": frequent_errors,
+        "knowledge_node_count": len(kg.get("nodes") or []),
+        "error_node_count": len(eg.get("nodes") or []),
+    }

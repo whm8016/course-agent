@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { FiSend, FiSquare, FiChevronDown, FiDatabase, FiGlobe } from 'react-icons/fi'
+import { FiSend, FiSquare, FiChevronDown, FiDatabase, FiGlobe, FiMenu } from 'react-icons/fi'
 import { BrainCircuit, MessageSquare, Microscope, PenLine } from 'lucide-react'
 import MessageBubble from './MessageBubble'
 import ImageUpload from './ImageUpload'
@@ -22,6 +22,7 @@ interface Props {
   ragEnabled?: boolean
   kbStatus?: KBStatus | null
   onSessionCreated: (session: Session) => void
+  onOpenSidebar?: () => void
 }
 
 type ApiMessageRow = {
@@ -154,7 +155,7 @@ function QuizStreamingBubble({ traces, questions, done, error }: QuizStreamingBu
   const lastTrace = traces[traces.length - 1]
   return (
     <div className="flex justify-start mb-4">
-      <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-white border border-slate-200 text-slate-800 rounded-bl-md shadow-sm space-y-2">
+      <div className="max-w-[95%] md:max-w-[80%] rounded-2xl px-4 py-3 bg-white border border-slate-200 text-slate-800 rounded-bl-md shadow-sm space-y-2">
         {/* 小字过程 */}
         {!done && !error && (
           <div className="space-y-1">
@@ -195,6 +196,7 @@ export default function ChatWindow({
   ragEnabled = false,
   kbStatus = null,
   onSessionCreated,
+  onOpenSidebar,
 }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
@@ -226,6 +228,7 @@ export default function ChatWindow({
   const quizCloseRef = useRef<(() => void) | null>(null)
   const researchCloseRef = useRef<(() => void) | null>(null)
   const capMenuRef = useRef<HTMLDivElement>(null)
+  const capMenuMobileRef = useRef<HTMLDivElement>(null)
 
   // 深度研究流式状态
   const [researchStreaming, setResearchStreaming] = useState(false)
@@ -274,9 +277,10 @@ export default function ChatWindow({
   useEffect(() => {
     if (!capMenuOpen) return
     const handler = (e: MouseEvent) => {
-      if (capMenuRef.current && !capMenuRef.current.contains(e.target as Node)) {
-        setCapMenuOpen(false)
-      }
+      const target = e.target as Node
+      const inDesktop = capMenuRef.current?.contains(target)
+      const inMobile = capMenuMobileRef.current?.contains(target)
+      if (!inDesktop && !inMobile) setCapMenuOpen(false)
     }
     document.addEventListener('mousedown', handler)
     return () => document.removeEventListener('mousedown', handler)
@@ -736,6 +740,19 @@ export default function ChatWindow({
           case 'quiz':
             quizData = event.quiz
             break
+          case 'skill_output':
+            if (event.content) {
+              const skillTitle = (event as unknown as Record<string, unknown>).title as string || '补充'
+              answerContent += `\n\n---\n**${skillTitle}**\n\n${event.content}`
+              setMessages((prev) => {
+                const last = prev[prev.length - 1]
+                if (last?.role === 'assistant') {
+                  return [...prev.slice(0, -1), { ...last, content: answerContent }]
+                }
+                return prev
+              })
+            }
+            break
           case 'done':
             intent = event.metadata?.intent || ''
             intentConfidence = event.metadata?.intent_confidence || 0
@@ -879,9 +896,12 @@ export default function ChatWindow({
   return (
     <div className="flex flex-col h-full">
       {/* 顶部标题栏 */}
-      <div className="border-b border-slate-200 px-6 py-3 bg-white/80 backdrop-blur-sm">
+      <div className="border-b border-slate-200 px-3 md:px-6 py-3 bg-white/80 backdrop-blur-sm">
         <div className="flex items-center gap-2">
-          <h1 className="text-base font-semibold text-slate-800">{courseName}</h1>
+          <button onClick={onOpenSidebar} className="md:hidden p-1 -ml-1 text-slate-500 hover:text-slate-700 transition">
+            <FiMenu size={20} />
+          </button>
+          <h1 className="text-base font-semibold text-slate-800 truncate">{courseName}</h1>
           {ragEnabled ? (
             <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700">
               RAG 就绪
@@ -899,7 +919,7 @@ export default function ChatWindow({
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-6 py-4 bg-slate-50/50"
+        className="flex-1 overflow-y-auto px-3 md:px-6 py-4 bg-slate-50/50"
       >
         {messages.length === 0 && !quizStreaming && (
           <div className="flex flex-col items-center justify-center h-full text-slate-400">
@@ -937,7 +957,7 @@ export default function ChatWindow({
         {/* 深度研究流式进度气泡 */}
         {researchStreaming && (
           <div className="flex justify-start mb-4">
-            <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-white border border-indigo-200 text-slate-800 rounded-bl-md shadow-sm space-y-1.5">
+            <div className="max-w-[95%] md:max-w-[80%] rounded-2xl px-4 py-3 bg-white border border-indigo-200 text-slate-800 rounded-bl-md shadow-sm space-y-1.5">
               {researchTraces.map((t, i) => (
                 <p
                   key={i}
@@ -975,7 +995,7 @@ export default function ChatWindow({
       </div>
 
       {/* 底部输入区 */}
-      <div className="border-t border-slate-200 bg-white px-4 pt-3 pb-4">
+      <div className="border-t border-slate-200 bg-white px-3 md:px-4 pt-2 md:pt-3 pb-3 md:pb-4">
         {/* 出题配置面板（quiz 模式时展开） */}
         {isQuizMode && (
           <QuizConfigPanel value={quizConfig} onChange={setQuizConfig} />
@@ -984,7 +1004,6 @@ export default function ChatWindow({
         {/* 深度研究配置条（research 模式时展开） */}
         {isResearchMode && (
           <div className="flex flex-wrap gap-2 mb-2 px-1 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs">
-            {/* 研究模式 */}
             <div className="flex items-center gap-1 flex-wrap">
               <span className="text-slate-400 shrink-0">模式</span>
               {(
@@ -1012,7 +1031,6 @@ export default function ChatWindow({
 
             <div className="w-px bg-slate-200 self-stretch hidden sm:block" />
 
-            {/* 深度 */}
             <div className="flex items-center gap-1 flex-wrap">
               <span className="text-slate-400 shrink-0">深度</span>
               {(
@@ -1039,7 +1057,6 @@ export default function ChatWindow({
 
             <div className="w-px bg-slate-200 self-stretch hidden sm:block" />
 
-            {/* 资料来源（多选） */}
             <div className="flex items-center gap-1 flex-wrap">
               <span className="text-slate-400 shrink-0">资料</span>
               {(
@@ -1073,9 +1090,85 @@ export default function ChatWindow({
           </div>
         )}
 
+        {/* 工具行 — 移动端独立成行 */}
+        <div className="flex items-center gap-1.5 mb-2 md:hidden">
+          <div className="relative shrink-0" ref={capMenuMobileRef}>
+            <button
+              type="button"
+              onClick={() => setCapMenuOpen((v) => !v)}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white text-slate-600 hover:border-indigo-300 hover:text-indigo-600 transition text-xs font-medium"
+              title="切换能力"
+            >
+              <CapIcon size={14} strokeWidth={1.8} className="text-indigo-500" />
+              {activeCapDef.label}
+              <FiChevronDown size={12} />
+            </button>
+            {capMenuOpen && (
+              <div className="absolute bottom-full left-0 mb-1.5 w-[220px] rounded-xl border border-slate-200 bg-white shadow-lg py-1.5 z-50">
+                {CAPABILITIES.map((cap) => {
+                  const Icon = cap.icon
+                  const selected = activeCap === cap.value
+                  return (
+                    <button
+                      key={cap.value}
+                      type="button"
+                      onClick={() => void handleSelectCap(cap.value)}
+                      className={`flex w-full items-center gap-3 px-3.5 py-2 text-left transition-colors ${
+                        selected ? 'bg-slate-50' : 'hover:bg-slate-50/60'
+                      }`}
+                    >
+                      <Icon
+                        size={15}
+                        strokeWidth={1.6}
+                        className={selected ? 'text-indigo-500' : 'text-slate-400'}
+                      />
+                      <div className="min-w-0 flex-1">
+                        <div className="text-xs font-medium text-slate-800">{cap.label}</div>
+                        <div className="text-[11px] text-slate-400 truncate">{cap.description}</div>
+                      </div>
+                      {selected && (
+                        <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-500" />
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setUseKb((v) => !v)}
+            title="知识库检索"
+            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-xl border text-xs transition ${
+              useKb || ragEnabled
+                ? 'border-indigo-400 bg-indigo-50 text-indigo-600'
+                : 'border-slate-200 text-slate-400 hover:border-slate-300'
+            }`}
+          >
+            <FiDatabase size={14} />
+            <span className="text-[11px]">知识库</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setUseWebSearch((v) => !v)}
+            title="网络搜索"
+            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-xl border text-xs transition ${
+              useWebSearch
+                ? 'border-indigo-400 bg-indigo-50 text-indigo-600'
+                : 'border-slate-200 text-slate-400 hover:border-slate-300'
+            }`}
+          >
+            <FiGlobe size={14} />
+            <span className="text-[11px]">搜索</span>
+          </button>
+          {!isQuizMode && (
+            <ImageUpload preview={imagePreview} onSelect={handleImageSelect} onClear={clearImage} />
+          )}
+        </div>
+
         <div className="flex items-end gap-2">
-          {/* 能力菜单 */}
-          <div className="relative shrink-0" ref={capMenuRef}>
+          {/* 桌面端工具按钮 — 移动端隐藏 */}
+          <div className="relative shrink-0 hidden md:block" ref={capMenuRef}>
             <button
               type="button"
               onClick={() => setCapMenuOpen((v) => !v)}
@@ -1118,13 +1211,11 @@ export default function ChatWindow({
               </div>
             )}
           </div>
-
-          {/* 工具开关 */}
           <button
             type="button"
             onClick={() => setUseKb((v) => !v)}
             title="知识库检索"
-            className={`inline-flex items-center gap-1 px-2 py-2 rounded-xl border text-xs transition ${
+            className={`hidden md:inline-flex items-center gap-1 px-2 py-2 rounded-xl border text-xs transition ${
               useKb || ragEnabled
                 ? 'border-indigo-400 bg-indigo-50 text-indigo-600'
                 : 'border-slate-200 text-slate-400 hover:border-slate-300'
@@ -1137,7 +1228,7 @@ export default function ChatWindow({
             type="button"
             onClick={() => setUseWebSearch((v) => !v)}
             title="网络搜索"
-            className={`inline-flex items-center gap-1 px-2 py-2 rounded-xl border text-xs transition ${
+            className={`hidden md:inline-flex items-center gap-1 px-2 py-2 rounded-xl border text-xs transition ${
               useWebSearch
                 ? 'border-indigo-400 bg-indigo-50 text-indigo-600'
                 : 'border-slate-200 text-slate-400 hover:border-slate-300'
@@ -1146,10 +1237,10 @@ export default function ChatWindow({
             <FiGlobe size={14} />
             <span className="hidden sm:inline text-[11px]">搜索</span>
           </button>
-
-          {/* 图片上传（非 quiz 模式） */}
           {!isQuizMode && (
-            <ImageUpload preview={imagePreview} onSelect={handleImageSelect} onClear={clearImage} />
+            <div className="hidden md:block">
+              <ImageUpload preview={imagePreview} onSelect={handleImageSelect} onClear={clearImage} />
+            </div>
           )}
 
           {/* 输入框 */}
@@ -1160,7 +1251,7 @@ export default function ChatWindow({
               onKeyDown={handleKeyDown}
               placeholder={
                 isQuizMode
-                  ? '输入知识点直接出题，或在上方配置面板填写详细参数…'
+                  ? '输入知识点直接出题…'
                   : activeCap === 'deep_solve'
                   ? '输入题目，深度推理求解…'
                   : activeCap === 'research'
@@ -1169,7 +1260,7 @@ export default function ChatWindow({
               }
               rows={1}
               disabled={isRunning}
-              className="w-full resize-none rounded-xl border border-slate-200 px-4 py-2.5 pr-12 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition disabled:opacity-50"
+              className="w-full resize-none rounded-xl border border-slate-200 px-3 md:px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition disabled:opacity-50"
               style={{ minHeight: '42px', maxHeight: '120px' }}
               onInput={(e) => {
                 const target = e.target as HTMLTextAreaElement
@@ -1190,7 +1281,7 @@ export default function ChatWindow({
               isStopping ||
               (!isRunning && !input.trim() && !imageFile && !(isQuizMode && quizConfig.topic.trim()))
             }
-            className={`p-2.5 rounded-xl text-white disabled:opacity-40 disabled:cursor-not-allowed transition ${
+            className={`p-2.5 rounded-xl text-white disabled:opacity-40 disabled:cursor-not-allowed transition shrink-0 ${
               isRunning ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'
             }`}
             title={isRunning ? '停止' : isQuizMode ? '开始出题' : '发送'}

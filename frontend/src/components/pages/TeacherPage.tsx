@@ -296,7 +296,7 @@ export default function TeacherPage({ user, onBack }: Props) {
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
       {/* Header */}
-      <header className="bg-white border-b border-slate-200 px-6 py-4 flex items-center justify-between">
+      <header className="bg-white border-b border-slate-200 px-4 md:px-6 py-3 md:py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <button onClick={onBack} className="text-slate-400 hover:text-slate-700 text-sm transition">
             ← 返回
@@ -315,15 +315,15 @@ export default function TeacherPage({ user, onBack }: Props) {
       </header>
 
       {error && (
-        <div className="mx-6 mt-4 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg text-sm flex justify-between">
+        <div className="mx-4 md:mx-6 mt-4 px-4 py-2 bg-blue-50 text-blue-700 rounded-lg text-sm flex justify-between">
           <span>{error}</span>
           <button onClick={() => setError('')} className="ml-2 text-blue-400 hover:text-blue-600">✕</button>
         </div>
       )}
 
-      <div className="flex flex-1 overflow-hidden p-6 gap-6">
+      <div className="flex flex-col md:flex-row flex-1 overflow-hidden p-4 md:p-6 gap-4 md:gap-6">
         {/* 课程列表 */}
-        <aside className="w-72 flex-shrink-0 flex flex-col gap-3">
+        <aside className="w-full md:w-72 flex-shrink-0 flex flex-col gap-3 max-h-48 md:max-h-none overflow-y-auto">
           <h2 className="text-sm font-semibold text-slate-500 uppercase tracking-wide">我的课程</h2>
           {loadingCourses ? (
             <p className="text-sm text-slate-400">加载中...</p>

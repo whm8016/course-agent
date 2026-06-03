@@ -85,7 +85,7 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
     const userContent = renderedContent
     return (
       <div className="flex justify-end mb-4">
-        <div className="max-w-[75%] rounded-2xl px-4 py-3 bg-indigo-600 text-white rounded-br-md">
+        <div className="max-w-[92%] md:max-w-[75%] rounded-2xl px-4 py-3 bg-indigo-600 text-white rounded-br-md">
           {message.image && (
             <img src={message.image} alt="上传的图片" className="max-w-[280px] rounded-lg mb-2" />
           )}
@@ -101,7 +101,7 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
 
   return (
     <div className="flex justify-start mb-4">
-      <div className="max-w-[80%] rounded-2xl px-4 py-3 bg-white border border-slate-200 text-slate-800 rounded-bl-md shadow-sm">
+      <div className="max-w-[95%] md:max-w-[80%] rounded-2xl px-4 py-3 bg-white border border-slate-200 text-slate-800 rounded-bl-md shadow-sm">
         {thinkingSteps && thinkingSteps.length > 0 && (
           <ThinkingProcess steps={thinkingSteps} isStreaming={isStreaming} />
         )}

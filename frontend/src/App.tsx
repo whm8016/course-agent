@@ -4,6 +4,8 @@ import ChatWindow from './components/chat/ChatWindow'
 import LoginPage from './components/pages/LoginPage'
 import AdminPage from './components/pages/AdminPage'
 import TeacherPage from './components/pages/TeacherPage'
+import GraphPage from './components/pages/GraphPage'
+import DashboardPanel from './components/pages/DashboardPanel'
 import { fetchCourses, fetchSessions, createSession, deleteSession } from './services/api'
 import { isLoggedIn, getUser, logout } from './services/auth'
 import type { Course, Session, User } from './types'
@@ -13,6 +15,9 @@ export default function App() {
   const [user, setUser] = useState<User | null>(getUser())
   const [showAdmin, setShowAdmin] = useState(() => sessionStorage.getItem('_admin') === '1')
   const [showTeacher, setShowTeacher] = useState(() => sessionStorage.getItem('_teacher') === '1')
+  const [showGraph, setShowGraph] = useState(false)
+  const [showDashboard, setShowDashboard] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
   const [courses, setCourses] = useState<Course[]>([])
   const [activeCourseId, setActiveCourseId] = useState<string>('')
   const [sessions, setSessions] = useState<Session[]>([])
@@ -156,26 +161,56 @@ export default function App() {
     )
   }
 
+  if (showGraph) {
+    return <GraphPage onBack={() => setShowGraph(false)} />
+  }
+
+  if (showDashboard) {
+    return (
+      <DashboardPanel
+        onBack={() => setShowDashboard(false)}
+        onGraph={() => { setShowDashboard(false); setShowGraph(true) }}
+      />
+    )
+  }
+
   const activeCourse = courses.find((c) => c.id === activeCourseId)
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null
 
+  const closeSidebar = () => setSidebarOpen(false)
+
   return (
     <div className="flex h-screen bg-slate-50">
-      <Sidebar
-        courses={courses}
-        activeCourseId={activeCourseId}
-        onSelectCourse={handleSelectCourse}
-        sessions={sessions}
-        activeSessionId={activeSessionId}
-        onSelectSession={setActiveSessionId}
-        onCreateSession={handleCreateSession}
-        onDeleteSession={handleDeleteSession}
-        user={user}
-        onLogout={logout}
-        onAdmin={role === 'admin' ? () => { sessionStorage.setItem('_admin', '1'); setShowAdmin(true) } : undefined}
-        onTeacher={isTeacherOrAdmin ? () => { sessionStorage.setItem('_teacher', '1'); setShowTeacher(true) } : undefined}
-        onCoursesRefresh={() => void reloadCourses(false)}
-      />
+      {sidebarOpen && (
+        <div
+          className="fixed inset-0 bg-black/40 z-40 md:hidden"
+          onClick={closeSidebar}
+        />
+      )}
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 w-64 transition-transform duration-200 md:relative md:translate-x-0 ${
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
+      >
+        <Sidebar
+          courses={courses}
+          activeCourseId={activeCourseId}
+          onSelectCourse={handleSelectCourse}
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          onSelectSession={setActiveSessionId}
+          onCreateSession={handleCreateSession}
+          onDeleteSession={handleDeleteSession}
+          user={user}
+          onLogout={logout}
+          onAdmin={role === 'admin' ? () => { sessionStorage.setItem('_admin', '1'); setShowAdmin(true) } : undefined}
+          onTeacher={isTeacherOrAdmin ? () => { sessionStorage.setItem('_teacher', '1'); setShowTeacher(true) } : undefined}
+          onCoursesRefresh={() => void reloadCourses(false)}
+          onDashboard={() => setShowDashboard(true)}
+          onGraph={() => setShowGraph(true)}
+          onCloseMobile={closeSidebar}
+        />
+      </aside>
       <main className="flex-1 h-full overflow-hidden">
         {activeCourse ? (
           <ChatWindow
@@ -186,6 +221,7 @@ export default function App() {
             ragEnabled={Boolean(activeCourse.rag_enabled)}
             kbStatus={activeCourse.kb_status ?? null}
             onSessionCreated={handleSessionCreated}
+            onOpenSidebar={() => setSidebarOpen(true)}
           />
         ) : loadError ? (
           <div className="flex items-center justify-center h-full text-red-500 px-8 text-center">

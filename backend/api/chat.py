@@ -13,6 +13,7 @@ from api.courses import check_course_access
 from api.upload import resolve_upload_path
 from core.db.database import get_db
 from core.memory.learner_profile import build_memory_context, update_learner_memory
+from core.memory.graph_memory import update_graphs_from_conversation
 from core.db.limiter import limiter
 from core.agent.orchestrator import normalize_mode, run_agent_stream
 
@@ -104,6 +105,13 @@ async def chat(
                         user["id"],
                         course_id=course_id,
                         mode=final_mode,
+                        user_message=message,
+                        assistant_answer=answer_content,
+                    )
+                    await update_graphs_from_conversation(
+                        db,
+                        user["id"],
+                        course_id=course_id,
                         user_message=message,
                         assistant_answer=answer_content,
                     )

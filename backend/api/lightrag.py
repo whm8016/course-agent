@@ -17,6 +17,8 @@ from api.upload import resolve_upload_path
 from config import AGENTIC_RAG_BACKEND, FAQ_CACHE_THRESHOLD, LIGHTRAG_TIMEOUT_SEC
 from core.db.database import get_db
 from core.memory.learner_profile import build_memory_context, update_learner_memory
+from core.memory.graph_memory import update_graphs_from_conversation
+from core.skills.output_skills import generate_skill_outputs
 from core.rag.lightrag_engine import (
     index_course_with_lightrag,
     is_lightrag_available,
@@ -320,6 +322,13 @@ async def chat_with_lightrag(
                 user_message=message,
                 assistant_answer=answer,
             )
+            await update_graphs_from_conversation(
+                db,
+                user["id"],
+                course_id=course_id,
+                user_message=message,
+                assistant_answer=answer,
+            )
 
             # ── FAQ 答案写缓存（阈值达到且本次未命中）──────────────────
             if FAQ_CACHE_THRESHOLD > 0 and faq_count >= FAQ_CACHE_THRESHOLD and answer:
@@ -328,6 +337,18 @@ async def chat_with_lightrag(
                     "[trace=%s] FAQ answer cached course=%s count=%d question=%s",
                     trace_id, course_id, faq_count, message[:60],
                 )
+
+            # ── Custom Output Skills 补充框 ──────────────────────────
+            try:
+                skill_outputs = await generate_skill_outputs(
+                    course_id=course_id,
+                    user_message=message,
+                    assistant_answer=answer,
+                )
+                for so in skill_outputs:
+                    yield f"data: {json.dumps({'type': 'skill_output', **so}, ensure_ascii=False)}\n\n"
+            except Exception:
+                logger.debug("Skill output generation failed", exc_info=True)
 
             yield f"data: {json.dumps({'type': 'done', 'metadata': metadata}, ensure_ascii=False)}\n\n"
         except asyncio.TimeoutError:

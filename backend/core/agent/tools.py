@@ -8,6 +8,7 @@ from langchain_core.tools import tool
 
 from core.rag.rag import retrieve
 from core.llm.llm import _image_to_data_url
+from core.agent.tools.web_search import web_search, web_fetch
 from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, VISION_MODEL
 
 logger = logging.getLogger(__name__)
@@ -72,5 +73,5 @@ def analyze_image(
     return json.dumps({"analysis": result}, ensure_ascii=False)
 
 
-ALL_TOOLS = [search_knowledge, generate_quiz, analyze_image]
+ALL_TOOLS = [search_knowledge, generate_quiz, analyze_image, web_search, web_fetch]
 TOOL_MAP = {t.name: t for t in ALL_TOOLS}

@@ -62,3 +62,40 @@ async def admin_headers(client: AsyncClient):
     assert r.status_code == 200, r.text
     token = r.json()["token"]
     return {"Authorization": f"Bearer {token}"}
+
+
+@pytest.fixture
+async def course_with_code(client: AsyncClient, admin_headers: dict):
+    """管理员创建测试课程并生成课程码，供 courses/sessions 相关测试使用。"""
+    course_id = f"tc_{os.urandom(3).hex()}"
+    r = await client.post(
+        "/api/admin/kb",
+        headers=admin_headers,
+        json={"course_id": course_id, "name": "测试课程", "is_visible": True},
+    )
+    assert r.status_code == 201, r.text
+    r2 = await client.post(
+        f"/api/teacher/courses/{course_id}/join-code",
+        headers=admin_headers,
+    )
+    assert r2.status_code == 200, r2.text
+    return {"course_id": course_id, "join_code": r2.json()["join_code"], "name": "测试课程"}
+
+
+@pytest.fixture
+async def enrolled_user_headers(client: AsyncClient, course_with_code: dict):
+    """注册学生并凭课程码入课，返回该学生的 auth headers。"""
+    username = f"stu_{os.urandom(3).hex()}"
+    r = await client.post(
+        "/api/auth/register",
+        json={"username": username, "password": "testpass123", "display_name": "Student"},
+    )
+    assert r.status_code == 200, r.text
+    headers = {"Authorization": f"Bearer {r.json()['token']}"}
+    r2 = await client.post(
+        "/api/courses/join",
+        headers=headers,
+        json={"join_code": course_with_code["join_code"]},
+    )
+    assert r2.status_code == 200, r2.text
+    return headers

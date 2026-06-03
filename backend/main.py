@@ -39,10 +39,13 @@ from api.memory import router as memory_router
 from api.upload import router as upload_router
 from api.sessions import router as sessions_router
 from api.sse import router as sse_router
+from api.skills import router as skills_router
 from config import UPLOAD_DIR, ALLOWED_ORIGINS, REDIS_URL, KB_STORE_DIR
 from core.db.database import init_db, close_db
 from core.db.limiter import limiter
 from core.arq_pool import get_arq_pool, close_arq_pool
+from core.rag.cache import init_rag_cache, get_cache_stats as get_rag_cache_stats
+from core.llm.llm import get_llm_circuit_state, reset_llm_circuit_breaker
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +57,12 @@ async def lifespan(app: FastAPI):
     await init_db()
     # 尝试初始化 ARQ 任务队列连接池（Redis 不可用时跳过，降级为 BackgroundTasks）
     await get_arq_pool()
+    # 初始化 RAG 缓存
+    try:
+        await init_rag_cache(REDIS_URL, ttl_seconds=3600)
+        logger.info("RAG cache initialized")
+    except Exception as e:
+        logger.warning(f"RAG cache initialization failed: {e}")
     yield
     logger.info("Application shutdown – closing database pool")
     await close_db()
@@ -130,6 +139,7 @@ app.include_router(sse_router, prefix="/api")
 app.include_router(memory_router, prefix="/api")
 app.include_router(deep_research_router, prefix="/api")
 app.include_router(deep_solve_router, prefix="/api")
+app.include_router(skills_router, prefix="/api")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(KB_STORE_DIR, exist_ok=True)
 
@@ -173,3 +183,69 @@ async def health():
         status_code=200 if all_ok else 503,
         content={"status": "ok" if all_ok else "degraded", "checks": checks},
     )
+
+
+@app.get("/api/health/detailed")
+async def health_detailed():
+    """
+    详细健康检查（包含熔断器和缓存状态）
+
+    用于运维监控和调试
+    """
+    checks: dict[str, str] = {}
+    details: dict = {}
+
+    # DB check
+    try:
+        from core.db.database import engine
+        from sqlalchemy import text as sa_text
+        async with engine.connect() as conn:
+            await conn.execute(sa_text("SELECT 1"))
+        checks["db"] = "ok"
+    except Exception as exc:
+        checks["db"] = f"error: {exc}"
+
+    # Redis check
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(REDIS_URL, socket_connect_timeout=2)
+        await r.ping()
+        await r.aclose()
+        checks["redis"] = "ok"
+    except Exception as exc:
+        checks["redis"] = f"error: {exc}"
+
+    # LLM check
+    try:
+        from config import DASHSCOPE_API_KEY
+        if DASHSCOPE_API_KEY:
+            checks["llm"] = "ok (api_key configured)"
+            details["llm_circuit_breaker"] = get_llm_circuit_state()
+        else:
+            checks["llm"] = "error: DASHSCOPE_API_KEY not set"
+    except Exception as exc:
+        checks["llm"] = f"error: {exc}"
+
+    # RAG 缓存状态
+    details["rag_cache"] = get_rag_cache_stats().to_dict()
+
+    all_ok = all(v.startswith("ok") for v in checks.values())
+    return JSONResponse(
+        status_code=200 if all_ok else 503,
+        content={
+            "status": "ok" if all_ok else "degraded",
+            "checks": checks,
+            "details": details,
+        },
+    )
+
+
+@app.post("/api/admin/circuit-breaker/reset")
+async def reset_circuit_breaker():
+    """
+    重置 LLM 熔断器（运维操作）
+
+    当熔断器长时间处于 OPEN 状态时，可以手动重置
+    """
+    reset_llm_circuit_breaker()
+    return {"message": "LLM circuit breaker reset successfully", "state": get_llm_circuit_state()}

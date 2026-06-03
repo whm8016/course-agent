@@ -50,7 +50,7 @@ export default function LoginPage({ onLogin }: Props) {
 
   return (
     <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-indigo-50 via-white to-slate-100">
-      <div className="w-full max-w-md px-8 py-10 bg-white rounded-2xl shadow-xl border border-slate-100">
+      <div className="w-full max-w-md px-5 md:px-8 py-8 md:py-10 mx-4 md:mx-0 bg-white rounded-2xl shadow-xl border border-slate-100">
         <div className="text-center mb-8">
           <div className="text-4xl mb-3">📚</div>
           <h1 className="text-2xl font-bold text-slate-800">课程学习 Agent</h1>

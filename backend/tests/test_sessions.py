@@ -56,3 +56,81 @@ async def test_session_ownership_isolation(client: AsyncClient):
 
     forbidden = await client.get(f"/api/sessions/{session_id}", headers=h1)
     assert forbidden.status_code == 403
+
+
+# ── Happy-path: admin 创建/查询/修改/删除 ─────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_create_session_returns_id(client: AsyncClient, admin_headers: dict):
+    """管理员可为任意 course_id 创建会话（admin 绕过课程权限），响应含 id 字段。"""
+    r = await client.post(
+        "/api/sessions",
+        headers=admin_headers,
+        json={"course_id": "tc_happy", "title": "Happy Session"},
+    )
+    assert r.status_code == 200
+    data = r.json()
+    assert "id" in data
+    assert data["title"] == "Happy Session"
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_after_create(client: AsyncClient, admin_headers: dict):
+    """创建会话后，GET /api/sessions?course_id=... 列表中可见该会话。"""
+    await client.post(
+        "/api/sessions",
+        headers=admin_headers,
+        json={"course_id": "tc_list", "title": "Listed"},
+    )
+    r = await client.get("/api/sessions", headers=admin_headers, params={"course_id": "tc_list"})
+    assert r.status_code == 200
+    sessions = r.json()["sessions"]
+    assert any(s["title"] == "Listed" for s in sessions)
+
+
+@pytest.mark.asyncio
+async def test_get_session_by_id(client: AsyncClient, admin_headers: dict):
+    """GET /api/sessions/{id} 返回对应会话详情。"""
+    cr = await client.post(
+        "/api/sessions",
+        headers=admin_headers,
+        json={"course_id": "tc_get", "title": "GetMe"},
+    )
+    sid = cr.json()["id"]
+    r = await client.get(f"/api/sessions/{sid}", headers=admin_headers)
+    assert r.status_code == 200
+    assert r.json()["id"] == sid
+
+
+@pytest.mark.asyncio
+async def test_patch_session_title(client: AsyncClient, admin_headers: dict):
+    """PATCH /api/sessions/{id} 修改标题后返回 ok=true。"""
+    cr = await client.post(
+        "/api/sessions",
+        headers=admin_headers,
+        json={"course_id": "tc_patch", "title": "OldTitle"},
+    )
+    sid = cr.json()["id"]
+    r = await client.patch(
+        f"/api/sessions/{sid}",
+        headers=admin_headers,
+        json={"title": "NewTitle"},
+    )
+    assert r.status_code == 200
+    assert r.json().get("ok") is True
+
+
+@pytest.mark.asyncio
+async def test_delete_session(client: AsyncClient, admin_headers: dict):
+    """DELETE 会话后再 GET 返回 404。"""
+    cr = await client.post(
+        "/api/sessions",
+        headers=admin_headers,
+        json={"course_id": "tc_del", "title": "ToDelete"},
+    )
+    sid = cr.json()["id"]
+    dr = await client.delete(f"/api/sessions/{sid}", headers=admin_headers)
+    assert dr.status_code == 200
+    assert dr.json().get("ok") is True
+    gr = await client.get(f"/api/sessions/{sid}", headers=admin_headers)
+    assert gr.status_code == 404

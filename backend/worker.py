@@ -191,6 +191,22 @@ async def run_deep_solve(
 
 
 # ---------------------------------------------------------------------------
+# 任务 5 & 6：定时学习总结
+# ---------------------------------------------------------------------------
+
+async def daily_summary_job(ctx) -> None:
+    """每日学习总结（ARQ cron 触发）。"""
+    from core.memory.scheduled_summaries import run_daily_summary
+    await run_daily_summary(ctx)
+
+
+async def weekly_summary_job(ctx) -> None:
+    """每周学习总结（ARQ cron 触发）。"""
+    from core.memory.scheduled_summaries import run_weekly_summary
+    await run_weekly_summary(ctx)
+
+
+# ---------------------------------------------------------------------------
 # WorkerSettings
 # ---------------------------------------------------------------------------
 
@@ -215,3 +231,9 @@ class WorkerSettings:
     max_jobs = 10
     job_timeout = 3600   # 单个任务最长 1 小时
     keep_result = 300    # 任务结果保留 5 分钟
+
+    from arq.cron import cron
+    cron_jobs = [
+        cron(daily_summary_job, hour=22, minute=0),
+        cron(weekly_summary_job, weekday=4, hour=22, minute=10),
+    ]

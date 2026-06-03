@@ -55,7 +55,7 @@ export interface AgentMetadata {
 }
 
 export interface SSEEvent {
-  type: 'thinking' | 'thinking_chunk' | 'tool_call' | 'tool_result' | 'answer' | 'quiz' | 'done' | 'error' | 'token'
+  type: 'thinking' | 'thinking_chunk' | 'tool_call' | 'tool_result' | 'answer' | 'quiz' | 'done' | 'error' | 'token' | 'skill_output'
   content?: string
   tool?: string
   input?: Record<string, unknown>

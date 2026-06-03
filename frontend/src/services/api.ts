@@ -297,6 +297,126 @@ export async function chatStream(
 
 
 
+// ---------------------------------------------------------------------------
+// Memory Graph / Dashboard
+// ---------------------------------------------------------------------------
+
+export interface GraphNode {
+  id: string
+  type: string
+  label: string
+  risk?: number
+  mastery?: number
+  importance?: number
+  severity?: number
+  error_count?: number
+  status?: string
+  notes?: string
+  examples?: string[]
+  related_points?: string[]
+  correction_suggestions?: string[]
+  updated_at?: string
+}
+
+export interface GraphData {
+  nodes: GraphNode[]
+  edges: { source: string; target: string; relation: string }[]
+}
+
+export interface GraphsResponse {
+  knowledge_graph: GraphData
+  error_graph: GraphData
+}
+
+export async function fetchGraphs(): Promise<GraphsResponse> {
+  const res = await fetch('/api/memory/graph', { headers: authHeaders() })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  return res.json()
+}
+
+export async function deleteGraphNode(nodeId: string): Promise<GraphsResponse> {
+  const res = await fetch('/api/memory/graph/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ node_id: nodeId }),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  return res.json()
+}
+
+export interface DashboardData {
+  summary: string
+  profile: string
+  high_risk_points: GraphNode[]
+  frequent_errors: GraphNode[]
+  knowledge_node_count: number
+  error_node_count: number
+}
+
+export async function fetchDashboard(): Promise<DashboardData> {
+  const res = await fetch('/api/memory/dashboard', { headers: authHeaders() })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  return res.json()
+}
+
+// ---------------------------------------------------------------------------
+// Output Skills
+// ---------------------------------------------------------------------------
+
+export interface OutputSkill {
+  id: string
+  title: string
+  description: string
+  instruction: string
+  enabled: boolean
+  course_id: string
+}
+
+export async function fetchSkills(): Promise<OutputSkill[]> {
+  const res = await fetch('/api/skills', { headers: authHeaders() })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  const data = await res.json()
+  return data.skills || []
+}
+
+export async function createSkill(skill: { title: string; description: string; instruction: string; course_id?: string }): Promise<OutputSkill> {
+  const res = await fetch('/api/skills', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(skill),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  const data = await res.json()
+  return data.skill
+}
+
+export async function toggleSkill(skillId: string, enabled: boolean): Promise<OutputSkill> {
+  const res = await fetch(`/api/skills/${skillId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ enabled }),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  const data = await res.json()
+  return data.skill
+}
+
+export async function deleteSkill(skillId: string): Promise<void> {
+  const res = await fetch(`/api/skills/${skillId}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+}
+
+// ---------------------------------------------------------------------------
 //练习用SSE
 
 export type SseTokenHandler = (word: string) => void

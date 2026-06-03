@@ -18,6 +18,9 @@ interface Props {
   onAdmin?: () => void
   onTeacher?: () => void
   onCoursesRefresh?: () => void
+  onDashboard?: () => void
+  onGraph?: () => void
+  onCloseMobile?: () => void
 }
 
 export default function Sidebar({
@@ -34,6 +37,9 @@ export default function Sidebar({
   onAdmin,
   onTeacher,
   onCoursesRefresh,
+  onDashboard,
+  onGraph,
+  onCloseMobile,
 }: Props) {
   const [joinCode, setJoinCode] = useState('')
   const [joinMsg, setJoinMsg] = useState('')
@@ -66,13 +72,31 @@ export default function Sidebar({
     }
   }
 
+  const handleSelectCourse = (id: string) => {
+    onSelectCourse(id)
+    onCloseMobile?.()
+  }
+
+  const handleSelectSession = (id: string) => {
+    onSelectSession(id)
+    onCloseMobile?.()
+  }
+
   return (
     <aside className="w-64 h-full bg-white border-r border-slate-200 flex flex-col">
       <div className="px-4 py-5 border-b border-slate-100">
-        <h1 className="text-base font-bold text-slate-800 flex items-center gap-2">
-          <span className="text-xl">📚</span>
-          课程学习 Agent
-        </h1>
+        <div className="flex items-center justify-between">
+          <h1 className="text-base font-bold text-slate-800 flex items-center gap-2">
+            <span className="text-xl">📚</span>
+            课程学习 Agent
+          </h1>
+          <button
+            onClick={onCloseMobile}
+            className="md:hidden p-1 text-slate-400 hover:text-slate-600 transition"
+          >
+            ✕
+          </button>
+        </div>
         <p className="text-xs text-slate-400 mt-1">LangGraph 多 Agent 编排</p>
       </div>
 
@@ -80,7 +104,7 @@ export default function Sidebar({
         <CourseSelector
           courses={courses}
           activeCourseId={activeCourseId}
-          onSelect={onSelectCourse}
+          onSelect={handleSelectCourse}
         />
       </div>
 
@@ -130,7 +154,7 @@ export default function Sidebar({
         <SessionList
           sessions={sessions}
           activeSessionId={activeSessionId}
-          onSelect={onSelectSession}
+          onSelect={handleSelectSession}
           onCreate={onCreateSession}
           onDelete={onDeleteSession}
         />
@@ -164,6 +188,22 @@ export default function Sidebar({
             className="w-full text-xs text-center text-indigo-600 hover:text-indigo-800 py-1 rounded hover:bg-indigo-50 transition mb-1"
           >
             管理后台
+          </button>
+        )}
+        {onDashboard && (
+          <button
+            onClick={onDashboard}
+            className="w-full text-xs text-center text-teal-600 hover:text-teal-800 py-1 rounded hover:bg-teal-50 transition mb-1"
+          >
+            学习仪表盘
+          </button>
+        )}
+        {onGraph && (
+          <button
+            onClick={onGraph}
+            className="w-full text-xs text-center text-blue-600 hover:text-blue-800 py-1 rounded hover:bg-blue-50 transition mb-1"
+          >
+            知识图谱
           </button>
         )}
         <div className="text-xs text-slate-400 space-y-0.5">

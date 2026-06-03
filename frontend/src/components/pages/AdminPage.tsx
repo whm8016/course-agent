@@ -246,14 +246,14 @@ export default function AdminPage({ user, onBack }: Props) {
   }
 
   return (
-    <div className="flex h-screen bg-slate-50">
+    <div className="flex flex-col md:flex-row h-screen bg-slate-50">
       {/* 侧边栏 */}
-      <aside className="w-52 bg-white border-r border-slate-200 flex flex-col">
+      <aside className="w-full md:w-52 bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col md:h-full">
         <div className="px-4 py-5 border-b border-slate-100">
           <h1 className="text-sm font-bold text-slate-800">管理后台</h1>
           <p className="text-xs text-slate-400 mt-0.5">{user.display_name}</p>
         </div>
-        <nav className="flex-1 p-3 space-y-1">
+        <nav className="flex md:flex-col md:flex-1 p-2 md:p-3 gap-1 md:space-y-1 overflow-x-auto">
           {(['kb', 'users', 'invites', 'faq'] as const).map(t => (
             <button
               key={t}
@@ -261,7 +261,7 @@ export default function AdminPage({ user, onBack }: Props) {
                 setTab(t)
                 if (t === 'faq') loadFaq(faqCourseId || undefined)
               }}
-              className={`w-full text-left px-3 py-2 rounded-lg text-sm transition ${
+              className={`whitespace-nowrap md:w-full text-left px-3 py-2 rounded-lg text-sm transition ${
                 tab === t
                   ? 'bg-indigo-50 text-indigo-700 font-medium'
                   : 'text-slate-600 hover:bg-slate-50'
@@ -270,8 +270,14 @@ export default function AdminPage({ user, onBack }: Props) {
               {t === 'kb' ? '知识库管理' : t === 'users' ? '用户管理' : t === 'invites' ? '教师邀请码' : '高频问题'}
             </button>
           ))}
+          <button
+            onClick={onBack}
+            className="whitespace-nowrap md:hidden text-left px-3 py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-50 transition"
+          >
+            返回
+          </button>
         </nav>
-        <div className="p-3 border-t border-slate-100">
+        <div className="hidden md:block p-3 border-t border-slate-100">
           <button
             onClick={onBack}
             className="w-full text-left px-3 py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-50 transition"
@@ -282,11 +288,11 @@ export default function AdminPage({ user, onBack }: Props) {
       </aside>
 
       {/* 主内容 */}
-      <main className="flex-1 flex overflow-hidden">
+      <main className="flex-1 flex flex-col md:flex-row overflow-hidden">
         {tab === 'kb' ? (
           <>
             {/* KB 列表 */}
-            <div className="w-80 border-r border-slate-200 bg-white flex flex-col">
+            <div className="w-full md:w-80 border-b md:border-b-0 md:border-r border-slate-200 bg-white flex flex-col max-h-48 md:max-h-none">
               <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
                 <span className="font-medium text-sm text-slate-700">知识库列表</span>
                 <button

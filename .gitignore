@@ -54,3 +54,12 @@ Thumbs.db
 # --- Optional: keep local VS Code shared snippets ---
 # .vscode/*
 # !.vscode/extensions.json
+
+# --- Local scripts & personal files (do not commit) ---
+_preview_resumes.py
+gen_budget_doc.py
+blisubs.py
+pdf_extract.txt
+*_preview.png
+backend/subs/
+subtitles/

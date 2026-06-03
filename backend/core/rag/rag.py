@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+from typing import TYPE_CHECKING
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
@@ -17,6 +18,9 @@ from config import (
     TOP_K,
     VECTORSTORE_DIR,
 )
+
+if TYPE_CHECKING:
+    from core.rag.cache import RAGCache
 
 logger = logging.getLogger(__name__)
 
@@ -225,6 +229,43 @@ def retrieve_chroma(course_id: str, query: str, top_k: int = TOP_K) -> list[dict
 
 
 # ---------------------------------------------------------------------------
+# 缓存配置
+# ---------------------------------------------------------------------------
+
+_rag_cache: "RAGCache | None" = None
+
+
+def set_rag_cache(cache: "RAGCache | None"):
+    """设置 RAG 缓存实例"""
+    global _rag_cache
+    _rag_cache = cache
+
+
+def get_rag_cache() -> "RAGCache | None":
+    """获取 RAG 缓存实例"""
+    return _rag_cache
+
+
+def invalidate_rag_cache(course_id: str | None = None) -> int:
+    """失效 RAG 缓存"""
+    if _rag_cache is None:
+        return 0
+    import asyncio
+    return asyncio.get_event_loop().run_until_complete(
+        _rag_cache.invalidate(course_id)
+    )
+
+
+def get_cache_stats() -> dict:
+    """获取缓存统计"""
+    if _rag_cache is None:
+        return {"enabled": False}
+    from core.rag.cache import get_cache_stats as _get_stats
+    stats = _get_stats()
+    return {"enabled": True, **stats.to_dict()}
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -233,6 +274,30 @@ def index_course(course_id: str) -> int:
     if RAG_BACKEND == "chroma":
         return index_course_chroma(course_id)
     return index_course_fs(course_id)
+
+
+async def retrieve_async(course_id: str, query: str, top_k: int = TOP_K) -> list[dict]:
+    """
+    异步检索（支持缓存）
+
+    原理：
+    1. 先尝试从缓存获取结果
+    2. 如果缓存命中，直接返回
+    3. 如果未命中，执行实际检索并存入缓存
+    """
+    if _rag_cache is not None:
+        cached = await _rag_cache.get(course_id, query, top_k)
+        if cached is not None:
+            return cached
+
+    # 执行实际检索
+    results = retrieve(course_id, query, top_k)
+
+    # 存入缓存
+    if _rag_cache is not None and results:
+        await _rag_cache.set(course_id, query, top_k, results)
+
+    return results
 
 
 def retrieve(course_id: str, query: str, top_k: int = TOP_K) -> list[dict]:

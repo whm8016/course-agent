@@ -64,6 +64,8 @@ class User(Base):
     display_name = Column(String(64), nullable=False, default="")
     summary_memory = Column(Text, nullable=False, default="")
     profile_memory = Column(Text, nullable=False, default="{}")
+    knowledge_graph = Column(JSON, nullable=False, default=lambda: {"nodes": [], "edges": []})
+    error_graph = Column(JSON, nullable=False, default=lambda: {"nodes": [], "edges": []})
     role = Column(String(16), nullable=False, default="student")
     is_admin = Column(Boolean, nullable=False, default=False)
     created_at = Column(Float, nullable=False, default=time.time)
@@ -306,6 +308,18 @@ async def init_db():
             "users",
             "is_admin",
             "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE",
+        )
+        await _ensure_column(
+            conn,
+            "users",
+            "knowledge_graph",
+            "ALTER TABLE users ADD COLUMN knowledge_graph JSON NOT NULL DEFAULT '{\"nodes\":[],\"edges\":[]}'",
+        )
+        await _ensure_column(
+            conn,
+            "users",
+            "error_graph",
+            "ALTER TABLE users ADD COLUMN error_graph JSON NOT NULL DEFAULT '{\"nodes\":[],\"edges\":[]}'",
         )
         # 知识库进度字段（向已有表追加）
         await _ensure_column(
