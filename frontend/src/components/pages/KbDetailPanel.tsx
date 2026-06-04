@@ -74,6 +74,57 @@ async function apiFetch(path: string, init?: RequestInit) {
   return res.json()
 }
 
+// ── 确认对话框 ───────────────────────────────────────────────────────────────
+
+interface ConfirmState {
+  action: () => void
+  title: string
+  message: string
+  confirmLabel: string
+  variant: 'danger' | 'warning'
+}
+
+function ConfirmDialog({
+  state,
+  onClose,
+}: {
+  state: ConfirmState
+  onClose: () => void
+}) {
+  const isDanger = state.variant === 'danger'
+  return (
+    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center gap-3 mb-4">
+          <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${isDanger ? 'bg-red-100' : 'bg-amber-100'}`}>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={isDanger ? 'text-red-600' : 'text-amber-600'}>
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+              <line x1="12" y1="9" x2="12" y2="13" />
+              <line x1="12" y1="17" x2="12.01" y2="17" />
+            </svg>
+          </div>
+          <h3 className="text-base font-semibold text-slate-800">{state.title}</h3>
+        </div>
+        <p className="text-sm text-slate-600 mb-6 leading-relaxed">{state.message}</p>
+        <div className="flex gap-3">
+          <button
+            onClick={onClose}
+            className="flex-1 py-2 rounded-lg border border-slate-200 text-slate-600 text-sm hover:bg-slate-50 transition"
+          >
+            取消
+          </button>
+          <button
+            onClick={() => { state.action(); onClose() }}
+            className={`flex-1 py-2 rounded-lg text-white text-sm font-medium transition ${isDanger ? 'bg-red-600 hover:bg-red-700' : 'bg-amber-500 hover:bg-amber-600'}`}
+          >
+            {state.confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 // ── 组件 ─────────────────────────────────────────────────────────────────────
 
 interface Props {
@@ -116,9 +167,13 @@ export default function KbDetailPanel({
   const [editLoading, setEditLoading] = useState(false)
   const [editError, setEditError] = useState('')
 
+  const [confirmState, setConfirmState] = useState<ConfirmState | null>(null)
+
   const llamaIndexBuildComplete =
     kb.status === 'ready' && (kb.progress_msg || '').includes('LlamaIndex 索引已完成')
   const hasLightRagIngested = (kb.chunks_total ?? 0) > 0
+
+  const requestConfirm = (state: ConfirmState) => setConfirmState(state)
 
   const handleEditSave = async () => {
     setEditLoading(true)
@@ -201,7 +256,13 @@ export default function KbDetailPanel({
               刷新
             </button>
             <button
-              onClick={() => onDelete(kb.course_id)}
+              onClick={() => requestConfirm({
+                action: () => onDelete(kb.course_id),
+                title: '删除知识库',
+                message: `确认删除课程「${kb.name}」（${kb.course_id}）？此操作不可恢复，所有文件和索引数据将被永久删除。`,
+                confirmLabel: '确认删除',
+                variant: 'danger',
+              })}
               className="text-xs text-red-400 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50"
             >
               删除知识库
@@ -354,20 +415,30 @@ export default function KbDetailPanel({
         )}
 
         <div className="mt-4 flex items-center flex-wrap gap-2">
-          {/* ready：重新构建 LightRAG */}
-          {kb.status === 'ready' && kb.file_count > 0 && (
+          {/* ready + 已构建：显示完成徽章 */}
+          {kb.status === 'ready' && kb.file_count > 0 && hasLightRagIngested && (
+            <span className="inline-flex items-center gap-1.5 text-sm font-medium text-indigo-800 bg-indigo-100/80 border border-indigo-200/80 px-3 py-1.5 rounded-lg">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-indigo-600">
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
+              LightRAG 已构建
+            </span>
+          )}
+
+          {/* ready + 未构建：首次摄入按钮 */}
+          {kb.status === 'ready' && kb.file_count > 0 && !hasLightRagIngested && (
             <button
               type="button"
               onClick={() => onIndex(kb.course_id, false, false)}
               className="flex items-center gap-1.5 text-sm bg-indigo-600 text-white px-3 py-1.5 rounded-lg hover:bg-indigo-700 transition"
-              title={hasLightRagIngested ? '重新构建将清空当前图谱后，按现有文件重新摄入 LightRAG' : '首次摄入 LightRAG 知识图谱'}
+              title="首次摄入 LightRAG 知识图谱"
             >
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <polyline points="23 4 23 10 17 10" />
                 <polyline points="1 20 1 14 7 14" />
                 <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
               </svg>
-              {hasLightRagIngested ? '重新构建 LightRAG' : '启动 LightRAG 摄入'}
+              启动 LightRAG 摄入
             </button>
           )}
 
@@ -407,7 +478,13 @@ export default function KbDetailPanel({
                 暂停
               </button>
               <button
-                onClick={() => onStop(kb.course_id)}
+                onClick={() => requestConfirm({
+                  action: () => onStop(kb.course_id),
+                  title: '终止索引',
+                  message: '确认终止索引？已完成的进度将被清除（暂停状态可保留进度）。',
+                  confirmLabel: '确认终止',
+                  variant: 'danger',
+                })}
                 className="flex items-center gap-1 text-sm text-red-600 border border-red-300 bg-red-50 px-3 py-1.5 rounded-lg hover:bg-red-100 transition"
                 title="终止索引（清空进度）"
               >
@@ -433,7 +510,13 @@ export default function KbDetailPanel({
                 继续{kb.chunks_done > 0 && kb.chunks_total > 0 ? `（${kb.chunks_done}/${kb.chunks_total}）` : ''}
               </button>
               <button
-                onClick={() => onStop(kb.course_id)}
+                onClick={() => requestConfirm({
+                  action: () => onStop(kb.course_id),
+                  title: '终止索引',
+                  message: '确认终止索引？已完成的进度将被清除（暂停状态可保留进度）。',
+                  confirmLabel: '确认终止',
+                  variant: 'danger',
+                })}
                 className="flex items-center gap-1 text-sm text-red-600 border border-red-300 bg-red-50 px-3 py-1.5 rounded-lg hover:bg-red-100 transition"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -465,56 +548,99 @@ export default function KbDetailPanel({
             </>
           )}
 
-          {/* LlamaIndex 按钮（仅传了回调时显示） */}
-          {onLlamaIndexBuild && kb.status !== 'indexing' && kb.file_count > 0 && (
-            llamaIndexBuildComplete ? (
-              <div className="flex items-center flex-wrap gap-2">
-                <span className="inline-flex items-center gap-1.5 text-sm font-medium text-teal-800 bg-teal-100/80 border border-teal-200/80 px-3 py-1.5 rounded-lg">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-teal-600">
-                    <path d="M20 6L9 17l-5-5" />
+          {/* LlamaIndex 完成徽章 */}
+          {onLlamaIndexBuild && kb.status !== 'indexing' && kb.file_count > 0 && llamaIndexBuildComplete && (
+            <span className="inline-flex items-center gap-1.5 text-sm font-medium text-teal-800 bg-teal-100/80 border border-teal-200/80 px-3 py-1.5 rounded-lg">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-teal-600">
+                <path d="M20 6L9 17l-5-5" />
+              </svg>
+              LlamaIndex 索引已完成
+            </span>
+          )}
+
+          {/* LlamaIndex 首次构建按钮 */}
+          {onLlamaIndexBuild && kb.status !== 'indexing' && kb.file_count > 0 && !llamaIndexBuildComplete && (
+            <button
+              type="button"
+              onClick={() => onLlamaIndexBuild(kb.course_id)}
+              disabled={llamaIndexSubmitting}
+              className="flex items-center gap-1.5 text-sm text-teal-700 border border-teal-300 bg-teal-50 px-3 py-1.5 rounded-lg hover:bg-teal-100 transition disabled:opacity-50"
+            >
+              {llamaIndexSubmitting ? (
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                    className="animate-spin" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
                   </svg>
-                  LlamaIndex 构建索引完成
-                </span>
-                <button
-                  type="button"
-                  onClick={() => onLlamaIndexBuild(kb.course_id)}
-                  disabled={llamaIndexSubmitting}
-                  className="flex items-center gap-1.5 text-sm text-teal-800 border border-teal-300 bg-white px-3 py-1.5 rounded-lg hover:bg-teal-50 transition disabled:opacity-50"
-                >
-                  {llamaIndexSubmitting ? '正在提交…' : '重新构建 LlamaIndex'}
-                </button>
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => onLlamaIndexBuild(kb.course_id)}
-                disabled={llamaIndexSubmitting}
-                className="flex items-center gap-1.5 text-sm text-teal-700 border border-teal-300 bg-teal-50 px-3 py-1.5 rounded-lg hover:bg-teal-100 transition disabled:opacity-50"
-              >
-                {llamaIndexSubmitting ? (
-                  <>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-                      className="animate-spin" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                    </svg>
-                    正在提交…
-                  </>
-                ) : (
-                  <>
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-                    </svg>
-                    LlamaIndex 构建索引
-                  </>
-                )}
-              </button>
-            )
+                  正在提交…
+                </>
+              ) : (
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                  </svg>
+                  LlamaIndex 构建索引
+                </>
+              )}
+            </button>
           )}
 
           <p className="text-xs text-slate-400 ml-1">
             {kb.file_count} 个文件 · 更新于 {formatTime(kb.updated_at)}
           </p>
         </div>
+
+        {/* 高级操作（重建索引） */}
+        {kb.status === 'ready' && kb.file_count > 0 && (hasLightRagIngested || llamaIndexBuildComplete) && (
+          <details className="mt-3 border-t border-slate-100 pt-3">
+            <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-600 select-none">
+              高级操作（重建索引）
+            </summary>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {hasLightRagIngested && (
+                <button
+                  type="button"
+                  onClick={() => requestConfirm({
+                    action: () => onIndex(kb.course_id, false, false),
+                    title: '重新构建 LightRAG',
+                    message: '重新构建将清空当前知识图谱，按现有文件重新摄入 LightRAG。此过程可能需要较长时间，确定继续？',
+                    confirmLabel: '确认重建',
+                    variant: 'warning',
+                  })}
+                  className="flex items-center gap-1.5 text-sm text-amber-700 border border-amber-300 bg-amber-50 px-3 py-1.5 rounded-lg hover:bg-amber-100 transition"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="23 4 23 10 17 10" />
+                    <polyline points="1 20 1 14 7 14" />
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                  </svg>
+                  重新构建 LightRAG
+                </button>
+              )}
+              {onLlamaIndexBuild && llamaIndexBuildComplete && (
+                <button
+                  type="button"
+                  disabled={llamaIndexSubmitting}
+                  onClick={() => requestConfirm({
+                    action: () => onLlamaIndexBuild!(kb.course_id),
+                    title: '重新构建 LlamaIndex',
+                    message: '重新构建将清空当前 LlamaIndex 索引数据并重新生成。此过程可能需要较长时间，确定继续？',
+                    confirmLabel: '确认重建',
+                    variant: 'warning',
+                  })}
+                  className="flex items-center gap-1.5 text-sm text-amber-700 border border-amber-300 bg-amber-50 px-3 py-1.5 rounded-lg hover:bg-amber-100 transition disabled:opacity-50"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="23 4 23 10 17 10" />
+                    <polyline points="1 20 1 14 7 14" />
+                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                  </svg>
+                  {llamaIndexSubmitting ? '正在提交…' : '重新构建 LlamaIndex'}
+                </button>
+              )}
+            </div>
+          </details>
+        )}
       </div>
 
       {/* 文件上传区 */}
@@ -584,7 +710,13 @@ export default function KbDetailPanel({
                   <td className="px-4 py-2 text-slate-400">{formatTime(f.created_at)}</td>
                   <td className="px-4 py-2">
                     <button
-                      onClick={() => onDeleteFile(kb.course_id, f.id)}
+                      onClick={() => requestConfirm({
+                        action: () => onDeleteFile(kb.course_id, f.id),
+                        title: '删除文件',
+                        message: `确认删除文件「${f.original_name}」？删除后需要重新构建索引。`,
+                        confirmLabel: '确认删除',
+                        variant: 'danger',
+                      })}
                       className="text-xs text-red-400 hover:text-red-600"
                     >
                       删除
@@ -595,6 +727,10 @@ export default function KbDetailPanel({
             </tbody>
           </table>
         </div>
+      )}
+
+      {confirmState && (
+        <ConfirmDialog state={confirmState} onClose={() => setConfirmState(null)} />
       )}
     </div>
   )

@@ -16,6 +16,38 @@ interface Student {
   enrolled_at: number
 }
 
+interface OverviewData {
+  total_students: number
+  total_sessions: number
+  total_messages: number
+  today_questions: number
+  today_active_students: number
+  daily_trend: { date: string; count: number }[]
+}
+
+interface FreqQuestion {
+  question: string
+  count: number
+  last_asked: number | null
+}
+
+interface ChatSession {
+  session_id: string
+  title: string
+  student: { id: string; username: string; display_name: string }
+  message_count: number
+  last_message_at: number | null
+  created_at: number
+}
+
+interface ChatMessage {
+  id: string
+  role: string
+  content: string
+  msg_type: string
+  created_at: number
+}
+
 async function apiFetch(path: string, init?: RequestInit) {
   const res = await fetch(`/api${path}`, {
     ...init,
@@ -40,6 +72,16 @@ export default function TeacherPage({ user, onBack }: Props) {
   const [error, setError] = useState('')
   const [joinCodeInput, setJoinCodeInput] = useState('')
   const [joiningCourse, setJoiningCourse] = useState(false)
+
+  // Analytics state
+  const [overview, setOverview] = useState<OverviewData | null>(null)
+  const [freqQuestions, setFreqQuestions] = useState<FreqQuestion[]>([])
+  const [expandedQ, setExpandedQ] = useState<number | null>(null)
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([])
+  const [chatPage, setChatPage] = useState(1)
+  const [chatFilterStudent, setChatFilterStudent] = useState<string>('')
+  const [viewingMessages, setViewingMessages] = useState<ChatMessage[] | null>(null)
+  const [viewingSessionTitle, setViewingSessionTitle] = useState('')
 
   const [showCreate, setShowCreate] = useState(false)
   const [newId, setNewId] = useState('')
@@ -112,8 +154,18 @@ export default function TeacherPage({ user, onBack }: Props) {
 
   const selectCourse = (c: KB) => {
     setStudents([])
+    setOverview(null)
+    setFreqQuestions([])
+    setChatSessions([])
+    setChatPage(1)
+    setChatFilterStudent('')
+    setViewingMessages(null)
+    setExpandedQ(null)
     void loadKBDetail(c.course_id)
     void loadStudents(c.course_id)
+    void loadOverview(c.course_id)
+    void loadFreqQuestions(c.course_id)
+    void loadChatSessions(c.course_id)
   }
 
   const loadStudents = async (courseId: string) => {
@@ -128,10 +180,42 @@ export default function TeacherPage({ user, onBack }: Props) {
     }
   }
 
+  // ── Analytics loaders ──────────────────────────────────────────────────────────
+
+  const loadOverview = async (courseId: string) => {
+    try {
+      const data = await apiFetch(`/teacher/courses/${courseId}/analytics/overview`) as OverviewData
+      setOverview(data)
+    } catch { setOverview(null) }
+  }
+
+  const loadFreqQuestions = async (courseId: string) => {
+    try {
+      const data = await apiFetch(`/teacher/courses/${courseId}/analytics/frequent-questions`) as { questions: FreqQuestion[] }
+      setFreqQuestions(data.questions ?? [])
+    } catch { setFreqQuestions([]) }
+  }
+
+  const loadChatSessions = async (courseId: string, studentId?: string, page = 1) => {
+    try {
+      const params = new URLSearchParams({ page: String(page), page_size: '20' })
+      if (studentId) params.set('student_id', studentId)
+      const data = await apiFetch(`/teacher/courses/${courseId}/analytics/student-chats?${params}`) as { sessions: ChatSession[] }
+      setChatSessions(data.sessions ?? [])
+    } catch { setChatSessions([]) }
+  }
+
+  const loadSessionMessages = async (courseId: string, sessionId: string, title: string) => {
+    try {
+      const data = await apiFetch(`/teacher/courses/${courseId}/analytics/sessions/${sessionId}/messages`) as { messages: ChatMessage[] }
+      setViewingMessages(data.messages ?? [])
+      setViewingSessionTitle(title)
+    } catch { setViewingMessages(null) }
+  }
+
   // ── KbDetailPanel 回调 ────────────────────────────────────────────────────────
 
   const handleDeleteKB = async (courseId: string) => {
-    if (!confirm(`确认删除课程「${courseId}」？此操作不可恢复。`)) return
     try {
       await apiFetch(`/teacher/courses/${courseId}`, { method: 'DELETE' })
       setCourses(prev => prev.filter(c => c.course_id !== courseId))
@@ -142,7 +226,6 @@ export default function TeacherPage({ user, onBack }: Props) {
   }
 
   const handleDeleteFile = async (courseId: string, fileId: string) => {
-    if (!confirm('确认删除此文件？')) return
     try {
       const res = await apiFetch(`/teacher/courses/${courseId}/files/${fileId}`, { method: 'DELETE' }) as { remaining_files: number }
       // 立即从本地 files 中移除，不等后端全量刷新
@@ -181,7 +264,6 @@ export default function TeacherPage({ user, onBack }: Props) {
   }
 
   const handleStopIndex = async (courseId: string) => {
-    if (!confirm('确认终止索引？已完成的进度将被清除（暂停状态可保留进度）。')) return
     try {
       await apiFetch(`/teacher/courses/${courseId}/index/stop`, { method: 'POST' })
       await loadCourses()
@@ -380,6 +462,154 @@ export default function TeacherPage({ user, onBack }: Props) {
                 onUpdated={async () => { await loadKBDetail(selectedKB.course_id); await loadCourses() }}
               />
 
+              {/* ── 活跃度概览 ────────────────────────────────────────────── */}
+              {overview && (
+                <section className="bg-white rounded-2xl border border-slate-200 p-6">
+                  <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
+                    <span>📊</span> 活跃度概览
+                  </h3>
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                    {[
+                      { label: '总学生', value: overview.total_students, color: 'bg-blue-50 text-blue-700' },
+                      { label: '总会话', value: overview.total_sessions, color: 'bg-emerald-50 text-emerald-700' },
+                      { label: '今日提问', value: overview.today_questions, color: 'bg-amber-50 text-amber-700' },
+                      { label: '今日活跃', value: overview.today_active_students, color: 'bg-purple-50 text-purple-700' },
+                    ].map(card => (
+                      <div key={card.label} className={`rounded-xl p-4 ${card.color}`}>
+                        <p className="text-xs opacity-70 mb-1">{card.label}</p>
+                        <p className="text-2xl font-bold">{card.value}</p>
+                      </div>
+                    ))}
+                  </div>
+                  {overview.daily_trend.length > 0 && (
+                    <div>
+                      <p className="text-xs text-slate-500 mb-2">近 7 天提问趋势</p>
+                      <div className="flex items-end gap-1 h-24">
+                        {(() => {
+                          const maxC = Math.max(...overview.daily_trend.map(d => d.count), 1)
+                          return overview.daily_trend.map(d => (
+                            <div key={d.date} className="flex-1 flex flex-col items-center gap-1">
+                              <span className="text-[10px] text-slate-500">{d.count}</span>
+                              <div
+                                className="w-full bg-indigo-400 rounded-t"
+                                style={{ height: `${(d.count / maxC) * 100}%`, minHeight: d.count > 0 ? 4 : 1 }}
+                              />
+                              <span className="text-[10px] text-slate-400">{d.date.slice(5)}</span>
+                            </div>
+                          ))
+                        })()}
+                      </div>
+                    </div>
+                  )}
+                </section>
+              )}
+
+              {/* ── 高频问题 ──────────────────────────────────────────────── */}
+              {freqQuestions.length > 0 && (
+                <section className="bg-white rounded-2xl border border-slate-200 p-6">
+                  <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
+                    <span>🔥</span> 高频问题
+                    <span className="text-xs bg-slate-100 text-slate-500 px-2 py-0.5 rounded-full">{freqQuestions.length} 条</span>
+                  </h3>
+                  <div className="divide-y divide-slate-100">
+                    {freqQuestions.map((q, i) => (
+                      <div key={i} className="py-2.5">
+                        <div className="flex items-center justify-between cursor-pointer" onClick={() => setExpandedQ(expandedQ === i ? null : i)}>
+                          <span className="text-sm text-slate-700 truncate flex-1 mr-3">
+                            {expandedQ === i ? q.question : q.question.length > 60 ? q.question.slice(0, 60) + '…' : q.question}
+                          </span>
+                          <div className="flex items-center gap-3 flex-shrink-0">
+                            <span className="text-xs font-medium bg-red-50 text-red-600 px-2 py-0.5 rounded-full">{q.count} 次</span>
+                            {q.last_asked && (
+                              <span className="text-[11px] text-slate-400">{new Date(q.last_asked * 1000).toLocaleDateString()}</span>
+                            )}
+                          </div>
+                        </div>
+                        {expandedQ === i && q.question.length > 60 && (
+                          <p className="mt-1 text-sm text-slate-600 bg-slate-50 rounded-lg p-3">{q.question}</p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              {/* ── 学生问答记录 ──────────────────────────────────────────── */}
+              <section className="bg-white rounded-2xl border border-slate-200 p-6">
+                <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
+                  <span>💬</span> 学生问答记录
+                </h3>
+
+                {/* 学生筛选 */}
+                {students.length > 0 && (
+                  <div className="mb-4 flex flex-wrap items-center gap-2">
+                    <button
+                      onClick={() => { setChatFilterStudent(''); setChatPage(1); void loadChatSessions(selectedKB.course_id) }}
+                      className={`px-3 py-1.5 text-xs rounded-lg transition ${!chatFilterStudent ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                    >
+                      全部
+                    </button>
+                    {students.map(s => (
+                      <button
+                        key={s.id}
+                        onClick={() => { setChatFilterStudent(s.id); setChatPage(1); void loadChatSessions(selectedKB.course_id, s.id) }}
+                        className={`px-3 py-1.5 text-xs rounded-lg transition ${chatFilterStudent === s.id ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                      >
+                        {s.display_name || s.username}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {chatSessions.length === 0 ? (
+                  <p className="text-sm text-slate-400">暂无问答记录</p>
+                ) : (
+                  <>
+                    <div className="divide-y divide-slate-100">
+                      {chatSessions.map(cs => (
+                        <div key={cs.session_id} className="py-3 flex items-center justify-between">
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-xs bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">
+                                {cs.student.display_name || cs.student.username || '匿名'}
+                              </span>
+                              <span className="text-sm font-medium text-slate-700 truncate">{cs.title}</span>
+                            </div>
+                            <div className="flex items-center gap-3 text-[11px] text-slate-400">
+                              <span>{cs.message_count} 条消息</span>
+                              {cs.last_message_at && <span>{new Date(cs.last_message_at * 1000).toLocaleString()}</span>}
+                            </div>
+                          </div>
+                          <button
+                            onClick={() => void loadSessionMessages(selectedKB.course_id, cs.session_id, cs.title)}
+                            className="ml-3 px-3 py-1.5 text-xs bg-indigo-50 text-indigo-600 rounded-lg hover:bg-indigo-100 transition flex-shrink-0"
+                          >
+                            查看对话
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex items-center gap-3 mt-4">
+                      <button
+                        disabled={chatPage <= 1}
+                        onClick={() => { const p = chatPage - 1; setChatPage(p); void loadChatSessions(selectedKB.course_id, chatFilterStudent || undefined, p) }}
+                        className="px-3 py-1 text-xs bg-slate-100 rounded-lg hover:bg-slate-200 disabled:opacity-40 transition"
+                      >
+                        上一页
+                      </button>
+                      <span className="text-xs text-slate-500">第 {chatPage} 页</span>
+                      <button
+                        disabled={chatSessions.length < 20}
+                        onClick={() => { const p = chatPage + 1; setChatPage(p); void loadChatSessions(selectedKB.course_id, chatFilterStudent || undefined, p) }}
+                        className="px-3 py-1 text-xs bg-slate-100 rounded-lg hover:bg-slate-200 disabled:opacity-40 transition"
+                      >
+                        下一页
+                      </button>
+                    </div>
+                  </>
+                )}
+              </section>
+
               {/* 课程码区 */}
               <section className="bg-white rounded-2xl border border-slate-200 p-6">
                 <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
@@ -521,6 +751,36 @@ export default function TeacherPage({ user, onBack }: Props) {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* 查看对话 Modal */}
+      {viewingMessages && (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={() => setViewingMessages(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h2 className="text-base font-bold text-slate-800 truncate">{viewingSessionTitle || '对话详情'}</h2>
+              <button onClick={() => setViewingMessages(null)} className="text-slate-400 hover:text-slate-600 text-lg">✕</button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-6 space-y-3">
+              {viewingMessages.length === 0 ? (
+                <p className="text-sm text-slate-400 text-center">暂无消息</p>
+              ) : viewingMessages.map(m => (
+                <div key={m.id} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[80%] rounded-2xl px-4 py-3 text-sm whitespace-pre-wrap ${
+                    m.role === 'user'
+                      ? 'bg-indigo-600 text-white rounded-br-md'
+                      : 'bg-slate-100 text-slate-800 rounded-bl-md'
+                  }`}>
+                    {m.content}
+                    <div className={`text-[10px] mt-1 ${m.role === 'user' ? 'text-indigo-200' : 'text-slate-400'}`}>
+                      {new Date(m.created_at * 1000).toLocaleString()}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       )}

@@ -12,6 +12,9 @@ from openai import AsyncOpenAI
 from config import (
     DASHSCOPE_API_KEY,
     DASHSCOPE_BASE_URL,
+    FALLBACK_API_KEY,
+    FALLBACK_BASE_URL,
+    FALLBACK_MODEL,
     LLM_TIMEOUT_SEC,
     TEXT_MODEL,
     VISION_MODEL,
@@ -60,6 +63,16 @@ else:
     )
 
 client = _client
+
+# Fallback LLM 客户端（主模型熔断时兜底）
+_fallback_client: AsyncOpenAI | None = None
+if FALLBACK_API_KEY:
+    _fallback_client = AsyncOpenAI(
+        api_key=FALLBACK_API_KEY,
+        base_url=FALLBACK_BASE_URL,
+        timeout=LLM_TIMEOUT_SEC,
+    )
+    logger.info("Fallback LLM client initialized (model=%s)", FALLBACK_MODEL)
 
 # ============================================================
 # 熔断器配置
@@ -210,12 +223,26 @@ async def chat_stream(
             if delta.content:
                 yield delta.content
 
-    except CircuitOpenError as e:
-        logger.error(f"LLM circuit breaker OPEN: {e}")
+    except (CircuitOpenError, LLMRetryError) as e:
+        logger.warning(f"Primary LLM failed: {e}, trying fallback...")
+        if _fallback_client:
+            try:
+                fb_model = FALLBACK_MODEL
+                fb_stream = await _fallback_client.chat.completions.create(
+                    model=fb_model,
+                    messages=messages,
+                    stream=True,
+                    temperature=0.7,
+                    max_tokens=8192,
+                )
+                async for chunk in fb_stream:
+                    delta = chunk.choices[0].delta
+                    if delta.content:
+                        yield delta.content
+                return
+            except Exception as fb_e:
+                logger.error(f"Fallback LLM also failed: {fb_e}")
         yield "⚠️ AI 服务暂时不可用（服务繁忙），请稍后重试。"
-    except LLMRetryError as e:
-        logger.error(f"LLM retry failed after all retries: {e}")
-        yield "⚠️ AI 服务暂时不可用，请稍后重试。"
     except Exception as e:
         logger.exception("LLM stream error")
         yield "⚠️ AI 服务发生错误，请稍后重试。"
@@ -256,11 +283,20 @@ async def chat_complete(
         )
         return response.choices[0].message.content or ""
 
-    except CircuitOpenError as e:
-        logger.error(f"LLM circuit breaker OPEN: {e}")
-        raise RuntimeError("AI 服务暂时不可用，请稍后重试。") from e
-    except LLMRetryError as e:
-        logger.error(f"LLM retry failed: {e}")
+    except (CircuitOpenError, LLMRetryError) as e:
+        logger.warning(f"Primary LLM failed: {e}, trying fallback...")
+        if _fallback_client:
+            try:
+                fb_resp = await _fallback_client.chat.completions.create(
+                    model=FALLBACK_MODEL,
+                    messages=messages,
+                    stream=False,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                return fb_resp.choices[0].message.content or ""
+            except Exception as fb_e:
+                logger.error(f"Fallback LLM also failed: {fb_e}")
         raise RuntimeError("AI 服务暂时不可用，请稍后重试。") from e
 
 

@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
+import { FiMenu } from 'react-icons/fi'
 import Sidebar from './components/layout/Sidebar'
 import ChatWindow from './components/chat/ChatWindow'
 import LoginPage from './components/pages/LoginPage'
@@ -223,18 +224,34 @@ export default function App() {
             onSessionCreated={handleSessionCreated}
             onOpenSidebar={() => setSidebarOpen(true)}
           />
-        ) : loadError ? (
-          <div className="flex items-center justify-center h-full text-red-500 px-8 text-center">
-            {loadError}
-          </div>
-        ) : coursesLoading ? (
-          <div className="flex items-center justify-center h-full text-slate-400">
-            加载中...
-          </div>
         ) : (
-          <div className="flex flex-col items-center justify-center h-full text-slate-400 gap-2">
-            <span className="text-4xl">📭</span>
-            <p className="text-sm">暂无课程，请联系管理员或教师选课</p>
+          <div className="flex flex-col h-full">
+            <div className="md:hidden px-3 py-3">
+              <button onClick={() => setSidebarOpen(true)} className="p-1 text-slate-500 hover:text-slate-700 transition">
+                <FiMenu size={20} />
+              </button>
+            </div>
+            {loadError ? (
+              <div className="flex items-center justify-center flex-1 text-red-500 px-8 text-center">
+                {loadError}
+              </div>
+            ) : coursesLoading ? (
+              <div className="flex items-center justify-center flex-1 text-slate-400">
+                加载中...
+              </div>
+            ) : (
+              <div className="flex flex-col items-center justify-center flex-1 text-slate-400 gap-2">
+                <span className="text-4xl">📭</span>
+                <p className="text-sm">暂无课程</p>
+                <button
+                  onClick={() => setSidebarOpen(true)}
+                  className="md:hidden mt-2 px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition"
+                >
+                  输入课程码加入
+                </button>
+                <p className="hidden md:block text-sm">请在左侧输入课程码加入课程</p>
+              </div>
+            )}
           </div>
         )}
       </main>

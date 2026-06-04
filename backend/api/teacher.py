@@ -1,13 +1,14 @@
-"""Teacher API: course CRUD, KB upload/index, student enrollment."""
+"""Teacher API: course CRUD, KB upload/index, student enrollment, analytics."""
 from __future__ import annotations
 
+import datetime
 import logging
 import shutil
 import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +17,10 @@ from api.auth import get_current_teacher
 from api.admin import _kb_to_dict, _run_indexing, _ALLOWED_EXT, _MAX_BYTES
 from api.courses import invalidate_courses_cache
 from config import KB_STORE_DIR, MAX_KB_UPLOAD_MB
-from core.db.database import AsyncSessionLocal, Enrollment, KBFile, KnowledgeBase, User, get_db
+from core.db.cache import faq_top
+from core.db.database import (
+    AsyncSessionLocal, Enrollment, KBFile, KnowledgeBase, Message, Session, User, get_db,
+)
 from core.rag.ingestion import IndexingControl
 
 logger = logging.getLogger(__name__)
@@ -501,3 +505,231 @@ async def build_llamaindex_index(
     background_tasks.add_task(_run_llamaindex_build, kb.id, course_id, file_paths)
 
     return {"accepted": True, "message": "LlamaIndex 构建已提交后台", "course_id": course_id}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Analytics endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _today_start() -> float:
+    """Return timestamp of 00:00 today (local timezone)."""
+    today = datetime.date.today()
+    return datetime.datetime(today.year, today.month, today.day).timestamp()
+
+
+@router.get("/courses/{course_id}/analytics/overview")
+async def analytics_overview(
+    course_id: str,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """Activity overview for a course: totals + 7-day trend."""
+    await _get_owned_kb(db, course_id, teacher)
+
+    today_ts = _today_start()
+    week_ago_ts = today_ts - 86400 * 7
+
+    total_students = (await db.execute(
+        select(func.count()).select_from(Enrollment).where(Enrollment.course_id == course_id)
+    )).scalar_one()
+
+    total_sessions = (await db.execute(
+        select(func.count()).select_from(Session).where(Session.course_id == course_id)
+    )).scalar_one()
+
+    total_messages = (await db.execute(
+        select(func.count()).select_from(Message)
+        .join(Session, Message.session_id == Session.id)
+        .where(Session.course_id == course_id, Message.role == "user")
+    )).scalar_one()
+
+    today_questions = (await db.execute(
+        select(func.count()).select_from(Message)
+        .join(Session, Message.session_id == Session.id)
+        .where(Session.course_id == course_id, Message.role == "user",
+               Message.created_at >= today_ts)
+    )).scalar_one()
+
+    today_active = (await db.execute(
+        select(func.count(func.distinct(Session.user_id)))
+        .where(Session.course_id == course_id, Session.updated_at >= today_ts)
+    )).scalar_one()
+
+    # 7-day daily trend
+    recent_msgs = (await db.execute(
+        select(Message.created_at)
+        .join(Session, Message.session_id == Session.id)
+        .where(Session.course_id == course_id, Message.role == "user",
+               Message.created_at >= week_ago_ts)
+    )).scalars().all()
+
+    buckets: dict[str, int] = {}
+    for i in range(7):
+        d = datetime.date.today() - datetime.timedelta(days=6 - i)
+        buckets[d.isoformat()] = 0
+    for ts in recent_msgs:
+        d = datetime.date.fromtimestamp(ts).isoformat()
+        if d in buckets:
+            buckets[d] += 1
+
+    return {
+        "total_students": total_students,
+        "total_sessions": total_sessions,
+        "total_messages": total_messages,
+        "today_questions": today_questions,
+        "today_active_students": today_active,
+        "daily_trend": [{"date": d, "count": c} for d, c in buckets.items()],
+    }
+
+
+@router.get("/courses/{course_id}/analytics/frequent-questions")
+async def analytics_frequent_questions(
+    course_id: str,
+    top_n: int = Query(20, ge=1, le=100),
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """Top-N most asked questions (Redis FAQ + SQL fallback)."""
+    await _get_owned_kb(db, course_id, teacher)
+
+    redis_items = await faq_top(course_id, top_n)
+
+    # SQL complement: recent user messages grouped by content prefix
+    thirty_days_ago = time.time() - 86400 * 30
+    sql_rows = (await db.execute(
+        select(
+            func.left(Message.content, 80).label("q"),
+            func.count().label("cnt"),
+            func.max(Message.created_at).label("last_ts"),
+        )
+        .join(Session, Message.session_id == Session.id)
+        .where(
+            Session.course_id == course_id,
+            Message.role == "user",
+            Message.created_at >= thirty_days_ago,
+            func.length(Message.content) > 4,
+        )
+        .group_by(func.left(Message.content, 80))
+        .having(func.count() >= 2)
+        .order_by(func.count().desc())
+        .limit(top_n)
+    )).all()
+
+    # Merge: Redis items take priority, SQL fills gaps
+    seen = {item["question"].strip().lower()[:80] for item in redis_items}
+    merged = [
+        {"question": item["question"], "count": item["count"], "last_asked": None}
+        for item in redis_items
+    ]
+    for row in sql_rows:
+        key = row.q.strip().lower()[:80]
+        if key not in seen:
+            merged.append({"question": row.q, "count": row.cnt, "last_asked": row.last_ts})
+            seen.add(key)
+        if len(merged) >= top_n:
+            break
+
+    merged.sort(key=lambda x: -x["count"])
+    return {"questions": merged[:top_n]}
+
+
+@router.get("/courses/{course_id}/analytics/student-chats")
+async def analytics_student_chats(
+    course_id: str,
+    student_id: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(20, ge=1, le=100),
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """Student session list with message counts."""
+    await _get_owned_kb(db, course_id, teacher)
+
+    base = (
+        select(
+            Session.id.label("session_id"),
+            Session.title,
+            Session.user_id,
+            Session.created_at.label("session_created"),
+            Session.updated_at.label("session_updated"),
+            func.count(Message.id).label("message_count"),
+            func.max(Message.created_at).label("last_message_at"),
+        )
+        .outerjoin(Message, Message.session_id == Session.id)
+        .where(Session.course_id == course_id)
+    )
+    if student_id:
+        base = base.where(Session.user_id == student_id)
+
+    base = (
+        base.group_by(Session.id, Session.title, Session.user_id,
+                       Session.created_at, Session.updated_at)
+        .order_by(Session.updated_at.desc())
+        .offset((page - 1) * page_size)
+        .limit(page_size)
+    )
+
+    rows = (await db.execute(base)).all()
+
+    user_ids = list({r.user_id for r in rows if r.user_id})
+    user_map: dict[str, dict] = {}
+    if user_ids:
+        users = (await db.execute(
+            select(User.id, User.username, User.display_name).where(User.id.in_(user_ids))
+        )).all()
+        user_map = {u.id: {"id": u.id, "username": u.username, "display_name": u.display_name} for u in users}
+
+    return {
+        "sessions": [
+            {
+                "session_id": r.session_id,
+                "title": r.title,
+                "student": user_map.get(r.user_id, {"id": r.user_id, "username": "", "display_name": ""}),
+                "message_count": r.message_count,
+                "last_message_at": r.last_message_at,
+                "created_at": r.session_created,
+            }
+            for r in rows
+        ],
+        "page": page,
+        "page_size": page_size,
+    }
+
+
+@router.get("/courses/{course_id}/analytics/sessions/{session_id}/messages")
+async def analytics_session_messages(
+    course_id: str,
+    session_id: str,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """Full message history of a single student session."""
+    await _get_owned_kb(db, course_id, teacher)
+
+    session = (await db.execute(
+        select(Session).where(Session.id == session_id, Session.course_id == course_id)
+    )).scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="会话不存在或不属于此课程")
+
+    msgs = (await db.execute(
+        select(Message)
+        .where(Message.session_id == session_id)
+        .order_by(Message.created_at.asc())
+    )).scalars().all()
+
+    return {
+        "session_id": session_id,
+        "title": session.title,
+        "user_id": session.user_id,
+        "messages": [
+            {
+                "id": m.id,
+                "role": m.role,
+                "content": m.content,
+                "msg_type": m.msg_type,
+                "created_at": m.created_at,
+            }
+            for m in msgs
+        ],
+    }

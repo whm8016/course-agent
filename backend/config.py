@@ -62,6 +62,11 @@ EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
 EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY") or DASHSCOPE_API_KEY
 EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL") or DASHSCOPE_BASE_URL
 
+# Fallback LLM（主模型熔断时自动切换）
+FALLBACK_API_KEY = os.getenv("FALLBACK_API_KEY", "")
+FALLBACK_BASE_URL = os.getenv("FALLBACK_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "qwen-plus")
+
 # ---------------------------------------------------------------------------
 # RAG tuning
 # ---------------------------------------------------------------------------

@@ -175,7 +175,6 @@ export default function AdminPage({ user, onBack }: Props) {
   // ── 操作 ──────────────────────────────────────────────────────────────────
 
   const handleDeleteKB = async (courseId: string) => {
-    if (!confirm(`确认删除知识库 "${courseId}"？此操作不可恢复。`)) return
     try {
       await apiFetch(`/admin/kb/${courseId}`, { method: 'DELETE' })
       setKbs(prev => prev.filter(k => k.course_id !== courseId))
@@ -186,7 +185,6 @@ export default function AdminPage({ user, onBack }: Props) {
   }
 
   const handleDeleteFile = async (courseId: string, fileId: string) => {
-    if (!confirm('确认删除此文件？')) return
     try {
       await apiFetch(`/admin/kb/${courseId}/files/${fileId}`, { method: 'DELETE' })
       await loadKBDetail(courseId)
@@ -221,7 +219,6 @@ export default function AdminPage({ user, onBack }: Props) {
   }
 
   const handleStopIndex = async (courseId: string) => {
-    if (!confirm('确认终止索引？已完成的进度将被清除（暂停状态可保留进度）。')) return
     try {
       await apiFetch(`/admin/kb/${courseId}/index/stop`, { method: 'POST' })
       await loadKBs()
