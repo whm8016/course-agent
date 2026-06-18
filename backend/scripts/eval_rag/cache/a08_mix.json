@@ -1,0 +1,6 @@
+{
+  "answer": "示波器的触发系统是其核心功能之一，主要用于确定示波器开始采集数据和显示波形的时刻。通过正确设定触发条件，它能够将原本不稳定的显示转换为稳定、有意义的波形，从而使用户能够清晰地观察和分析信号的特征。\n\n常见的触发类型包括以下几种：\n- **边沿触发**：当触发输入信号沿给定方向（上升沿或下降沿）通过某一设定的电平时发生。\n- **脉宽触发**：通过设定脉冲的宽度条件来捕捉特定的脉冲信号。\n- **斜率触发**：根据信号的上升或下降速率进行触发。\n- **视频触发**：用于对标准视频信号进行场同步或行同步的触发。\n- **交替触发**：能够稳定地触发两个不同步的通道信号，便于双通道显示。\n\n### References\n\n- [1] Trigger System (Knowledge Graph)\n- [2] Edge Trigger (Knowledge Graph)\n- [3] Pulse Width Trigger (Knowledge Graph)\n- [4] Slope Trigger (Knowledge Graph)\n- [5] Video Trigger (Knowledge Graph)",
+  "contexts": [
+    "示波器的触发系统是其核心功能之一，主要用于确定示波器开始采集数据和显示波形的时刻。通过正确设定触发条件，它能够将原本不稳定的显示转换为稳定、有意义的波形，从而使用户能够清晰地观察和分析信号的特征。\n\n常见的触发类型包括以下几种：\n- **边沿触发**：当触发输入信号沿给定方向（上升沿或下降沿）通过某一设定的电平时发生。\n- **脉宽触发**：通过设定脉冲的宽度条件来捕捉特定的脉冲信号。\n- **斜率触发**：根据信号的上升或下降速率进行触发。\n- **视频触发**：用于对标准视频信号进行场同步或行同步的触发。\n- **交替触发**：能够稳定地触发两个不同步的通道信号，便于双通道显示。\n\n### References\n\n- [1] Trigger System (Knowledge Graph)\n- [2] Edge Trigger (Knowledge Graph)\n- [3] Pulse Width Trigger (Knowledge Graph)\n- [4] Slope Trigger (Knowledge Graph)\n- [5] Video Trigger (Knowledge Graph)"
+  ]
+}

@@ -56,6 +56,7 @@ DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
 DASHSCOPE_BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
 TEXT_MODEL = os.getenv("TEXT_MODEL", "qwen-plus")
+FAST_MODEL = os.getenv("FAST_MODEL", "qwen-turbo")
 VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-plus")
 EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
 # 嵌入 / 视觉可与对话 LLM 使用不同 provider（例如对话 DeepSeek、嵌入仍走 DashScope）
@@ -265,3 +266,37 @@ LANGSMITH_TRACING=os.getenv("LANGSMITH_TRACING", "False").strip().lower() in (
 )
 LANGSMITH_API_KEY=os.getenv("LANGSMITH_API_KEY", "")
 LANGSMITH_PROJECT=os.getenv("LANGSMITH_PROJECT", "")
+
+# ---------------------------------------------------------------------------
+# TutorBot 社交平台集成
+# ---------------------------------------------------------------------------
+TUTORBOT_ENABLED = os.getenv("TUTORBOT_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+TUTORBOT_WORKSPACE_DIR = os.getenv(
+    "TUTORBOT_WORKSPACE_DIR", os.path.join(BASE_DIR, "data", "tutorbot")
+)
+
+# QQ Bot (botpy SDK)
+QQ_BOT_ENABLED = os.getenv("QQ_BOT_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+QQ_APP_ID = os.getenv("QQ_APP_ID", "")
+QQ_SECRET = os.getenv("QQ_SECRET", "")
+QQ_ALLOW_FROM = os.getenv("QQ_ALLOW_FROM", "*")
+
+# Feishu Bot (lark-oapi SDK, WebSocket)
+FEISHU_BOT_ENABLED = os.getenv("FEISHU_BOT_ENABLED", "false").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")
+FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
+FEISHU_ENCRYPT_KEY = os.getenv("FEISHU_ENCRYPT_KEY", "")
+FEISHU_VERIFICATION_TOKEN = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
+FEISHU_ALLOW_FROM = os.getenv("FEISHU_ALLOW_FROM", "*")
+
+# Heartbeat
+TUTORBOT_HEARTBEAT_ENABLED = os.getenv("TUTORBOT_HEARTBEAT_ENABLED", "true").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+TUTORBOT_HEARTBEAT_INTERVAL_SEC = int(os.getenv("TUTORBOT_HEARTBEAT_INTERVAL_SEC", "1800"))

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func
+from sqlalchemy import Integer, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_teacher
@@ -19,7 +19,8 @@ from api.courses import invalidate_courses_cache
 from config import KB_STORE_DIR, MAX_KB_UPLOAD_MB
 from core.db.cache import faq_top
 from core.db.database import (
-    AsyncSessionLocal, Enrollment, KBFile, KnowledgeBase, Message, Session, User, get_db,
+    AsyncSessionLocal, Enrollment, KBFile, KnowledgeBase, Message,
+    NotebookEntry, Session, User, get_db,
 )
 from core.rag.ingestion import IndexingControl
 
@@ -732,4 +733,263 @@ async def analytics_session_messages(
             }
             for m in msgs
         ],
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Student-learning stats (per-course aggregate + per-student detail)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def _parse_graph_counts(knowledge_graph: dict | None, error_graph: dict | None):
+    """Extract node-level stats from JSON graph columns."""
+    kg = knowledge_graph or {}
+    eg = error_graph or {}
+    nodes = kg.get("nodes", []) if isinstance(kg, dict) else []
+    error_nodes = eg.get("nodes", []) if isinstance(eg, dict) else []
+    knowledge_node_count = len(nodes)
+    error_node_count = len(error_nodes)
+    high_risk_count = sum(1 for n in nodes if (n.get("risk") or 0) > 0.6)
+    return knowledge_node_count, error_node_count, high_risk_count
+
+
+@router.get("/courses/{course_id}/analytics/student-stats")
+async def analytics_student_stats(
+    course_id: str,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """Per-course student learning stats aggregate."""
+    kb = await _get_owned_kb(db, course_id, teacher)
+
+    today_ts = _today_start()
+    week_ago_ts = today_ts - 86400 * 7
+
+    # 1. All enrolled students with their graph data
+    enroll_rows = (await db.execute(
+        select(Enrollment.student_id, User.username, User.display_name,
+               User.knowledge_graph, User.error_graph)
+        .join(User, User.id == Enrollment.student_id)
+        .where(Enrollment.course_id == course_id)
+    )).all()
+
+    if not enroll_rows:
+        return {
+            "course_name": kb.name,
+            "total_students": 0,
+            "student_summaries": [],
+            "accuracy_distribution": {},
+            "high_risk_students": [],
+            "daily_active_trend": [],
+        }
+
+    student_ids = [r.student_id for r in enroll_rows]
+
+    # 2. Session counts per student
+    session_rows = (await db.execute(
+        select(Session.user_id, func.count(Session.id).label("cnt"))
+        .where(Session.course_id == course_id, Session.user_id.in_(student_ids))
+        .group_by(Session.user_id)
+    )).all()
+    session_map: dict[str, int] = {r.user_id: r.cnt for r in session_rows}
+
+    # 3. Message counts per student (user-role only)
+    msg_rows = (await db.execute(
+        select(Session.user_id, func.count(Message.id).label("cnt"))
+        .join(Session, Message.session_id == Session.id)
+        .where(Session.course_id == course_id, Message.role == "user",
+               Session.user_id.in_(student_ids))
+        .group_by(Session.user_id)
+    )).all()
+    msg_map: dict[str, int] = {r.user_id: r.cnt for r in msg_rows}
+
+    # 4. Last active per student
+    last_active_rows = (await db.execute(
+        select(Session.user_id, func.max(Session.updated_at).label("last"))
+        .where(Session.course_id == course_id, Session.user_id.in_(student_ids))
+        .group_by(Session.user_id)
+    )).all()
+    last_active_map: dict[str, float] = {r.user_id: r.last for r in last_active_rows}
+
+    # 5. Quiz stats per student (NotebookEntry via session → course)
+    quiz_rows = (await db.execute(
+        select(NotebookEntry.user_id,
+               func.count(NotebookEntry.id).label("total"),
+               func.sum(func.cast(NotebookEntry.is_correct, Integer)).label("correct"))
+        .where(NotebookEntry.user_id.in_(student_ids))
+        .group_by(NotebookEntry.user_id)
+    )).all()
+    quiz_map: dict[str, dict] = {r.user_id: {"total": r.total, "correct": r.correct or 0} for r in quiz_rows}
+
+    # 6. Build per-student summaries
+    student_summaries = []
+    for r in enroll_rows:
+        kn_cnt, err_cnt, hr_cnt = _parse_graph_counts(r.knowledge_graph, r.error_graph)
+        q = quiz_map.get(r.student_id, {"total": 0, "correct": 0})
+        acc = q["correct"] / q["total"] if q["total"] > 0 else 0.5
+        risk_score = 0.5 * (hr_cnt / max(kn_cnt, 1)) + 0.5 * (1 - acc)
+        student_summaries.append({
+            "student_id": r.student_id,
+            "username": r.username,
+            "display_name": r.display_name,
+            "total_sessions": session_map.get(r.student_id, 0),
+            "total_messages": msg_map.get(r.student_id, 0),
+            "total_questions": q["total"],
+            "correct_count": q["correct"],
+            "accuracy_rate": round(acc, 3),
+            "last_active_at": last_active_map.get(r.student_id),
+            "knowledge_node_count": kn_cnt,
+            "high_risk_count": hr_cnt,
+            "error_node_count": err_cnt,
+            "risk_score": round(risk_score, 3),
+        })
+
+    # 7. Accuracy distribution (5 buckets)
+    buckets = {"0_20": 0, "20_40": 0, "40_60": 0, "60_80": 0, "80_100": 0}
+    for s in student_summaries:
+        pct = s["accuracy_rate"] * 100
+        if pct < 20:
+            buckets["0_20"] += 1
+        elif pct < 40:
+            buckets["20_40"] += 1
+        elif pct < 60:
+            buckets["40_60"] += 1
+        elif pct < 80:
+            buckets["60_80"] += 1
+        else:
+            buckets["80_100"] += 1
+
+    # 8. High-risk students (risk_score > 0.6)
+    high_risk_students = []
+    for s in student_summaries:
+        if s["risk_score"] > 0.6:
+            reasons = []
+            if s["high_risk_count"] > 0:
+                reasons.append(f"高风险知识点 {s['high_risk_count']} 个")
+            if s["accuracy_rate"] < 0.5:
+                reasons.append(f"答题正确率 {int(s['accuracy_rate'] * 100)}%")
+            if s["total_sessions"] == 0:
+                reasons.append("无学习记录")
+            high_risk_students.append({
+                "student_id": s["student_id"],
+                "display_name": s["display_name"] or s["username"],
+                "risk_score": s["risk_score"],
+                "reasons": reasons or ["综合风险较高"],
+            })
+
+    # 9. 7-day active student trend
+    recent_sessions = (await db.execute(
+        select(Session.user_id, Session.updated_at)
+        .where(Session.course_id == course_id, Session.updated_at >= week_ago_ts)
+    )).all()
+    day_buckets: dict[str, set] = {}
+    for i in range(7):
+        d = (datetime.date.today() - datetime.timedelta(days=6 - i)).isoformat()
+        day_buckets[d] = set()
+    for uid, ts in recent_sessions:
+        d = datetime.date.fromtimestamp(ts).isoformat()
+        if d in day_buckets:
+            day_buckets[d].add(uid)
+    daily_active_trend = [{"date": d, "active_count": len(uids)} for d, uids in day_buckets.items()]
+
+    return {
+        "course_name": kb.name,
+        "total_students": len(student_summaries),
+        "student_summaries": student_summaries,
+        "accuracy_distribution": buckets,
+        "high_risk_students": high_risk_students,
+        "daily_active_trend": daily_active_trend,
+    }
+
+
+@router.get("/courses/{course_id}/analytics/student/{student_id}/detail")
+async def analytics_student_detail(
+    course_id: str,
+    student_id: str,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """Detailed learning data for a single student in a course."""
+    await _get_owned_kb(db, course_id, teacher)
+
+    # Verify student is enrolled
+    enrolled = (await db.execute(
+        select(Enrollment).where(
+            Enrollment.course_id == course_id, Enrollment.student_id == student_id
+        )
+    )).scalar_one_or_none()
+    if not enrolled:
+        raise HTTPException(status_code=404, detail="该学生未选此课程")
+
+    # Student basic info + graphs
+    user = (await db.execute(
+        select(User).where(User.id == student_id)
+    )).scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="学生不存在")
+
+    # Session & message counts for this course
+    session_count = (await db.execute(
+        select(func.count()).select_from(Session)
+        .where(Session.course_id == course_id, Session.user_id == student_id)
+    )).scalar_one()
+
+    message_count = (await db.execute(
+        select(func.count()).select_from(Message)
+        .join(Session, Message.session_id == Session.id)
+        .where(Session.course_id == course_id, Session.user_id == student_id, Message.role == "user")
+    )).scalar_one()
+
+    # Quiz stats for this course (via session)
+    course_session_ids = (await db.execute(
+        select(Session.id).where(Session.course_id == course_id, Session.user_id == student_id)
+    )).scalars().all()
+
+    questions_total = 0
+    questions_correct = 0
+    recent_questions: list[dict] = []
+    if course_session_ids:
+        quiz_stats = (await db.execute(
+            select(func.count(NotebookEntry.id).label("total"),
+                   func.sum(func.cast(NotebookEntry.is_correct, Integer)).label("correct"))
+            .where(NotebookEntry.session_id.in_(course_session_ids))
+        )).one()
+        questions_total = quiz_stats.total or 0
+        questions_correct = quiz_stats.correct or 0
+
+        recent = (await db.execute(
+            select(NotebookEntry)
+            .where(NotebookEntry.session_id.in_(course_session_ids))
+            .order_by(NotebookEntry.created_at.desc())
+            .limit(10)
+        )).scalars().all()
+        recent_questions = [
+            {
+                "question": q.question[:200],
+                "is_correct": q.is_correct,
+                "difficulty": q.difficulty,
+                "created_at": q.created_at,
+            }
+            for q in recent
+        ]
+
+    accuracy_rate = questions_correct / questions_total if questions_total > 0 else None
+
+    # Graph data
+    kg = user.knowledge_graph if isinstance(user.knowledge_graph, dict) else {"nodes": [], "edges": []}
+    eg = user.error_graph if isinstance(user.error_graph, dict) else {"nodes": [], "edges": []}
+
+    return {
+        "student": {
+            "id": user.id,
+            "username": user.username,
+            "display_name": user.display_name,
+        },
+        "sessions": session_count,
+        "messages": message_count,
+        "questions_total": questions_total,
+        "questions_correct": questions_correct,
+        "accuracy_rate": round(accuracy_rate, 3) if accuracy_rate is not None else None,
+        "knowledge_graph": kg,
+        "error_graph": eg,
+        "recent_questions": recent_questions,
     }

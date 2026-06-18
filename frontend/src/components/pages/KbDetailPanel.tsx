@@ -33,6 +33,7 @@ export interface KB {
   updated_at: number
   join_code?: string | null
   owner_id?: string
+  llamaindex_built?: boolean
   files?: KBFile[]
 }
 
@@ -169,8 +170,7 @@ export default function KbDetailPanel({
 
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null)
 
-  const llamaIndexBuildComplete =
-    kb.status === 'ready' && (kb.progress_msg || '').includes('LlamaIndex 索引已完成')
+  const llamaIndexBuildComplete = !!kb.llamaindex_built
   const hasLightRagIngested = (kb.chunks_total ?? 0) > 0
 
   const requestConfirm = (state: ConfirmState) => setConfirmState(state)

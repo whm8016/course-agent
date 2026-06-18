@@ -14,11 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.auth import get_current_teacher, get_current_user
 from api.courses import check_course_access
 from api.upload import resolve_upload_path
-from config import AGENTIC_RAG_BACKEND, FAQ_CACHE_THRESHOLD, LIGHTRAG_TIMEOUT_SEC
+from config import AGENTIC_RAG_BACKEND, FAQ_CACHE_THRESHOLD, FAST_MODEL, LIGHTRAG_TIMEOUT_SEC
 from core.db.database import get_db
 from core.memory.learner_profile import build_memory_context, update_learner_memory
 from core.memory.graph_memory import update_graphs_from_conversation
-from core.skills.output_skills import generate_skill_outputs
 from core.rag.lightrag_engine import (
     index_course_with_lightrag,
     is_lightrag_available,
@@ -198,6 +197,7 @@ async def chat_with_lightrag(
                     history=safe_history,
                     user_message=message,
                     image_path=image_path,
+                    model_override=FAST_MODEL,
                 ):
                     if await request.is_disconnected():
                         return
@@ -215,25 +215,6 @@ async def chat_with_lightrag(
                     "[trace=%s] ▶ route=knowledge (agentic pipeline) t=%dms",
                     trace_id, elapsed_ms(),
                 )
-                # yield f"data: {json.dumps({'type': 'thinking', 'content': '正在分析问题、检索证据并整理回答...'}, ensure_ascii=False)}\n\n"
-
-                # answer_parts: list[str] = []
-                # first_token_logged = False
-                # async for token in agentic_pipeline(
-                #     course_id=course_id,
-                #     message=message,
-                #     history=history,
-                #     mode=mode,
-                # ):
-                #     if await request.is_disconnected():
-                #         logger.info("[trace=%s] client disconnected during agentic stream", trace_id)
-                #         return
-                #     if not first_token_logged:
-                #         logger.info("[trace=%s] first_token t=%dms (agentic)", trace_id, elapsed_ms())
-                #         first_token_logged = True
-                #     answer_parts.append(token)
-                #     yield f"data: {json.dumps({'type': 'token', 'content': token}, ensure_ascii=False)}\n\n"
-                # answer = "".join(answer_parts)
                 answer_parts: list[str] = []
                 first_token_logged = False
                 agentic_contexts: list = []
@@ -314,43 +295,26 @@ async def chat_with_lightrag(
             if hallucination_dict:
                 metadata["hallucination"] = hallucination_dict
 
-            await update_learner_memory(
-                db,
-                user["id"],
-                course_id=course_id,
-                mode=chat_mode,
-                user_message=message,
-                assistant_answer=answer,
-            )
-            await update_graphs_from_conversation(
-                db,
-                user["id"],
-                course_id=course_id,
-                user_message=message,
-                assistant_answer=answer,
-            )
-
-            # ── FAQ 答案写缓存（阈值达到且本次未命中）──────────────────
-            if FAQ_CACHE_THRESHOLD > 0 and faq_count >= FAQ_CACHE_THRESHOLD and answer:
-                await faq_answer_set(course_id, message, answer)
-                logger.info(
-                    "[trace=%s] FAQ answer cached course=%s count=%d question=%s",
-                    trace_id, course_id, faq_count, message[:60],
-                )
-
-            # ── Custom Output Skills 补充框 ──────────────────────────
-            try:
-                skill_outputs = await generate_skill_outputs(
-                    course_id=course_id,
-                    user_message=message,
-                    assistant_answer=answer,
-                )
-                for so in skill_outputs:
-                    yield f"data: {json.dumps({'type': 'skill_output', **so}, ensure_ascii=False)}\n\n"
-            except Exception:
-                logger.debug("Skill output generation failed", exc_info=True)
-
             yield f"data: {json.dumps({'type': 'done', 'metadata': metadata}, ensure_ascii=False)}\n\n"
+
+            # ── 后台写库（不阻塞 done 事件）──────────────────────────
+            async def _post_done_tasks():
+                try:
+                    await update_learner_memory(
+                        db, user["id"], course_id=course_id,
+                        mode=chat_mode, user_message=message, assistant_answer=answer,
+                    )
+                    await update_graphs_from_conversation(
+                        db, user["id"], course_id=course_id,
+                        user_message=message, assistant_answer=answer,
+                    )
+                    if FAQ_CACHE_THRESHOLD > 0 and faq_count >= FAQ_CACHE_THRESHOLD and answer:
+                        await faq_answer_set(course_id, message, answer)
+                        logger.info("[trace=%s] FAQ answer cached course=%s", trace_id, course_id)
+                except Exception:
+                    logger.warning("[trace=%s] post-done background tasks failed", trace_id, exc_info=True)
+
+            asyncio.create_task(_post_done_tasks())
         except asyncio.TimeoutError:
             logger.warning("[trace=%s] timeout t=%dms", trace_id, elapsed_ms())
             error_data = json.dumps({"type": "error", "content": "LightRAG 查询超时"}, ensure_ascii=False)

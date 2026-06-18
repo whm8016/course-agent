@@ -40,11 +40,13 @@ from api.upload import router as upload_router
 from api.sessions import router as sessions_router
 from api.sse import router as sse_router
 from api.skills import router as skills_router
-from config import UPLOAD_DIR, ALLOWED_ORIGINS, REDIS_URL, KB_STORE_DIR
+from api.bot import router as bot_router
+from config import UPLOAD_DIR, ALLOWED_ORIGINS, REDIS_URL, KB_STORE_DIR, TUTORBOT_ENABLED
 from core.db.database import init_db, close_db
 from core.db.limiter import limiter
 from core.arq_pool import get_arq_pool, close_arq_pool
 from core.rag.cache import init_rag_cache, get_cache_stats as get_rag_cache_stats
+from core.rag.rag import set_rag_cache
 from core.llm.llm import get_llm_circuit_state, reset_llm_circuit_breaker
 
 logger = logging.getLogger(__name__)
@@ -57,13 +59,30 @@ async def lifespan(app: FastAPI):
     await init_db()
     # 尝试初始化 ARQ 任务队列连接池（Redis 不可用时跳过，降级为 BackgroundTasks）
     await get_arq_pool()
-    # 初始化 RAG 缓存
+    # 初始化 RAG 缓存并注入到 rag.py 检索路径
     try:
-        await init_rag_cache(REDIS_URL, ttl_seconds=3600)
-        logger.info("RAG cache initialized")
+        rag_cache = await init_rag_cache(REDIS_URL, ttl_seconds=3600)
+        set_rag_cache(rag_cache)
+        logger.info("RAG cache initialized and wired to retrieve path")
     except Exception as e:
         logger.warning(f"RAG cache initialization failed: {e}")
+    # TutorBot 社交平台集成
+    if TUTORBOT_ENABLED:
+        try:
+            from core.bot.manager import get_bot_manager
+            bot_mgr = get_bot_manager()
+            await bot_mgr.auto_start_bots()
+            logger.info("TutorBot manager initialized (auto-started configured bots)")
+        except Exception as e:
+            logger.warning(f"TutorBot startup failed (non-fatal): {e}")
     yield
+    # Stop TutorBot if running
+    if TUTORBOT_ENABLED:
+        try:
+            from core.bot.manager import get_bot_manager
+            await get_bot_manager().stop_all()
+        except Exception:
+            pass
     logger.info("Application shutdown – closing database pool")
     await close_db()
     await close_arq_pool()
@@ -140,6 +159,7 @@ app.include_router(memory_router, prefix="/api")
 app.include_router(deep_research_router, prefix="/api")
 app.include_router(deep_solve_router, prefix="/api")
 app.include_router(skills_router, prefix="/api")
+app.include_router(bot_router, prefix="/api")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(KB_STORE_DIR, exist_ok=True)
 

@@ -195,7 +195,7 @@ export default function Sidebar({
             onClick={onDashboard}
             className="w-full text-xs text-center text-teal-600 hover:text-teal-800 py-1 rounded hover:bg-teal-50 transition mb-1"
           >
-            学习仪表盘
+            {isTeacher ? '学生学情统计' : '学习仪表盘'}
           </button>
         )}
         {onGraph && (

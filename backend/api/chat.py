@@ -100,21 +100,22 @@ async def chat(
                 if event.get("type") == "done":
                     metadata = event.get("metadata") or {}
                     final_mode = str(metadata.get("mode") or final_mode)
-                    await update_learner_memory(
-                        db,
-                        user["id"],
-                        course_id=course_id,
-                        mode=final_mode,
-                        user_message=message,
-                        assistant_answer=answer_content,
-                    )
-                    await update_graphs_from_conversation(
-                        db,
-                        user["id"],
-                        course_id=course_id,
-                        user_message=message,
-                        assistant_answer=answer_content,
-                    )
+
+                    async def _bg_memory():
+                        try:
+                            await update_learner_memory(
+                                db, user["id"], course_id=course_id,
+                                mode=final_mode, user_message=message,
+                                assistant_answer=answer_content,
+                            )
+                            await update_graphs_from_conversation(
+                                db, user["id"], course_id=course_id,
+                                user_message=message, assistant_answer=answer_content,
+                            )
+                        except Exception:
+                            logger.warning("chat post-done memory update failed", exc_info=True)
+
+                    asyncio.create_task(_bg_memory())
                 data = json.dumps(event, ensure_ascii=False)
                 yield f"data: {data}\n\n"
         finally:

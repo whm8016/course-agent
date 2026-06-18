@@ -239,6 +239,25 @@ class Enrollment(Base):
     )
 
 
+class UserSocialBinding(Base):
+    """User ↔ social platform binding (QQ / Feishu)."""
+
+    __tablename__ = "user_social_bindings"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(12))
+    user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    platform = Column(String(16), nullable=False)  # "qq" | "feishu"
+    platform_user_id = Column(String(128), nullable=False)
+    chat_id = Column(String(128), nullable=False, default="")
+    display_name = Column(String(128), nullable=False, default="")
+    created_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        UniqueConstraint("platform", "platform_user_id", name="uq_social_binding"),
+        Index("idx_social_binding_user", "user_id"),
+    )
+
+
 async def _ensure_column(conn, table_name: str, column_name: str, ddl: str):
     """Add a column only if it does not already exist (dialect-aware)."""
     dialect = conn.dialect.name

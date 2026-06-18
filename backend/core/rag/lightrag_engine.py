@@ -605,24 +605,11 @@ async def agentic_pipeline(
         try:
             rag = await _get_instance(course_id)
             query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
-            # 先尝试 only_need_context=True 拿纯 context 文本
             context_param = _build_query_param(query_mode, history, only_need_context=True)
             if hasattr(context_param, "stream"):
                 context_param.stream = False
             raw = await rag.aquery(message, param=context_param)
-            content = raw.strip() if isinstance(raw, str) else ""
-            # 如果 only_need_context 模式返回的不是字符串（部分 LightRAG 版本返回结构体），
-            # 则退回完整查询，用返回的答案文本作为证据
-            if not content:
-                full_param = _build_query_param(query_mode, history, only_need_context=False)
-                if hasattr(full_param, "stream"):
-                    full_param.stream = False
-                raw2 = await rag.aquery(message, param=full_param)
-                content = raw2.strip() if isinstance(raw2, str) else str(raw2 or "").strip()
-                logger.info(
-                    "agentic_pipeline [rag] only_need_context returned empty, fallback to full query chars=%d",
-                    len(content),
-                )
+            content = raw.strip() if isinstance(raw, str) else str(raw or "").strip()
             if len(content) > _AGENTIC_RAG_MAX_CHARS:
                 content = content[:_AGENTIC_RAG_MAX_CHARS] + "\n...(truncated)"
             _preview = (content[:800] + "…") if len(content) > 800 else content

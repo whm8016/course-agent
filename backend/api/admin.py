@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.auth import get_current_admin
 from api.courses import invalidate_courses_cache
 from config import FAQ_CACHE_THRESHOLD, KB_STORE_DIR, MAX_KB_UPLOAD_MB
+from core.rag.rag_llama import llamaindex_index_path
 from core.llm.prompts import invalidate_course_prompt_cache
 from core.db.database import AsyncSessionLocal, KBFile, KnowledgeBase, TeacherInvite, User, get_db
 from core.db.cache import faq_top
@@ -64,6 +65,7 @@ def _kb_to_dict(kb: KnowledgeBase) -> dict:
         "is_visible": bool(kb.is_visible),
         "owner_id": kb.owner_id,
         "join_code": kb.join_code,
+        "llamaindex_built": (llamaindex_index_path(kb.course_id) / "docstore.json").exists(),
     }
 
 

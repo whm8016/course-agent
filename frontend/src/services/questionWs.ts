@@ -1,4 +1,5 @@
 /** WebSocket 出题 & 深度研究服务 */
+import { getToken } from './auth'
 
 export interface QuestionRequirement {
   knowledge_point: string
@@ -41,6 +42,11 @@ function wsBaseUrl(): string {
   return `${proto}//${window.location.host}`
 }
 
+function withToken(url: string): string {
+  const token = getToken()
+  return token ? `${url}?token=${encodeURIComponent(token)}` : url
+}
+
 // ============================================================
 // Deep Research
 // ============================================================
@@ -80,7 +86,7 @@ export interface DeepResearchHandlers {
 }
 
 function deepResearchWsUrl(): string {
-  return `${wsBaseUrl()}/api/deep-research/run`
+  return withToken(`${wsBaseUrl()}/api/deep-research/run`)
 }
 
 export function connectDeepResearch(
@@ -120,15 +126,15 @@ export function connectDeepResearch(
 }
 
 function questionGenerateWsUrl(): string {
-  return `${wsBaseUrl()}/api/question/generate`
+  return withToken(`${wsBaseUrl()}/api/question/generate`)
 }
 
 function questionMimicWsUrl(): string {
-  return `${wsBaseUrl()}/api/question/mimic`
+  return withToken(`${wsBaseUrl()}/api/question/mimic`)
 }
 
 function questionFollowupWsUrl(): string {
-  return `${wsBaseUrl()}/api/question/followup`
+  return withToken(`${wsBaseUrl()}/api/question/followup`)
 }
 
 export interface QuestionGenHandlers {

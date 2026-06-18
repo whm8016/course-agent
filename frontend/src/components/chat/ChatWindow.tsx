@@ -320,13 +320,14 @@ export default function ChatWindow({
 
   // ---------- 出题 ----------
   const handleQuizStart = useCallback(async () => {
-    if (!quizConfig.topic.trim() || !courseId) return
+    const topic = (quizConfig.topic.trim() || input.trim())
+    if (!topic || !courseId) return
     if (loading || quizStreaming) return
 
     let activeSessionId = currentSessionRef.current
     if (!activeSessionId) {
       try {
-        const session = await createSession(courseId, `出题: ${quizConfig.topic.slice(0, 20)}`, 'quiz')
+        const session = await createSession(courseId, `出题: ${topic.slice(0, 20)}`, 'quiz')
         activeSessionId = session.id
         currentSessionRef.current = session.id
         onSessionCreated(session)
@@ -338,9 +339,10 @@ export default function ChatWindow({
     // 先把「用户请求」推入消息列表
     const userMsg: Message = {
       role: 'user',
-      content: `出题：${quizConfig.topic}（${quizConfig.count} 道，${quizConfig.difficulty || '自动难度'}，${quizConfig.questionType || '自动题型'}）${quizConfig.preference ? `，偏好：${quizConfig.preference}` : ''}`,
+      content: `出题：${topic}（${quizConfig.count} 道，${quizConfig.difficulty || '自动难度'}，${quizConfig.questionType || '自动题型'}）${quizConfig.preference ? `，偏好：${quizConfig.preference}` : ''}`,
     }
     isUserNearBottomRef.current = true
+    setInput('')
     setMessages((prev) => [...prev, userMsg])
     setQuizStreaming(true)
     setQuizTraces([{ text: '连接中…', kind: 'status' }])
@@ -355,7 +357,7 @@ export default function ChatWindow({
         count: quizConfig.count,
         language: 'zh',
         requirement: {
-          knowledge_point: quizConfig.topic.trim(),
+          knowledge_point: topic,
           preference: quizConfig.preference.trim() || undefined,
           difficulty: quizConfig.difficulty || undefined,
           question_type: quizConfig.questionType || undefined,
@@ -423,7 +425,7 @@ export default function ChatWindow({
       },
     )
     quizCloseRef.current = close
-  }, [quizConfig, courseId, loading, quizStreaming, onSessionCreated])
+  }, [quizConfig, input, courseId, loading, quizStreaming, onSessionCreated])
 
   // ---------- 深度研究 ----------
   const handleResearchStart = useCallback(async (topic: string) => {
@@ -509,9 +511,7 @@ export default function ChatWindow({
 
     // quiz 模式不走聊天，改为出题
     if (isQuizMode) {
-      if (text) setQuizConfig((c) => ({ ...c, topic: text }))
       await handleQuizStart()
-      setInput('')
       return
     }
 
@@ -1279,7 +1279,10 @@ export default function ChatWindow({
             }}
             disabled={
               isStopping ||
-              (!isRunning && !input.trim() && !imageFile && !(isQuizMode && quizConfig.topic.trim()))
+              (!isRunning &&
+                !input.trim() &&
+                !imageFile &&
+                !(isQuizMode && (quizConfig.topic.trim() || input.trim())))
             }
             className={`p-2.5 rounded-xl text-white disabled:opacity-40 disabled:cursor-not-allowed transition shrink-0 ${
               isRunning ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'

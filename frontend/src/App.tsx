@@ -7,6 +7,7 @@ import AdminPage from './components/pages/AdminPage'
 import TeacherPage from './components/pages/TeacherPage'
 import GraphPage from './components/pages/GraphPage'
 import DashboardPanel from './components/pages/DashboardPanel'
+import StudentStatsPage from './components/pages/StudentStatsPage'
 import { fetchCourses, fetchSessions, createSession, deleteSession } from './services/api'
 import { isLoggedIn, getUser, logout } from './services/auth'
 import type { Course, Session, User } from './types'
@@ -167,6 +168,15 @@ export default function App() {
   }
 
   if (showDashboard) {
+    const role = user.role ?? (user.is_admin ? 'admin' : 'student')
+    if (role === 'teacher' || role === 'admin') {
+      return (
+        <StudentStatsPage
+          user={user}
+          onBack={() => setShowDashboard(false)}
+        />
+      )
+    }
     return (
       <DashboardPanel
         onBack={() => setShowDashboard(false)}

@@ -176,6 +176,7 @@ async def chat_stream(
     user_message: str,
     image_path: str | None = None,
     use_reliability: bool = True,
+    model_override: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """
     流式 LLM 对话（带可靠性增强）
@@ -186,13 +187,14 @@ async def chat_stream(
         user_message: 用户消息
         image_path: 图片路径（可选）
         use_reliability: 是否使用重试和熔断机制
+        model_override: 指定模型（不传则自动选 TEXT_MODEL/VISION_MODEL）
 
     原理：
     - 构造消息后调用 LLM
     - 使用流式响应逐字返回
     - 失败时使用指数退避重试
     """
-    model = VISION_MODEL if image_path else TEXT_MODEL
+    model = model_override or (VISION_MODEL if image_path else TEXT_MODEL)
     messages = _build_messages(system_prompt, history, user_message, image_path)
 
     logger.info(
