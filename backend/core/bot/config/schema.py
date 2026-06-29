@@ -1,6 +1,6 @@
 """Configuration schema for TutorBot channels and tools."""
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 
 class ChannelsConfig(BaseModel):

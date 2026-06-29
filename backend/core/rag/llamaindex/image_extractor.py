@@ -9,9 +9,18 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional
+from typing import TYPE_CHECKING, Any, Callable
 
-from config import EMBEDDING_API_KEY, EMBEDDING_BASE_URL, VISION_MODEL
+from config import (
+    EMBEDDING_API_KEY,
+    EMBEDDING_BASE_URL,
+    VISION_MODEL,
+    IMAGE_INGEST_MIN_PX,
+    IMAGE_INGEST_MIN_AREA,
+    IMAGE_INGEST_MAX_PER_FILE,
+    IMAGE_INGEST_SEMAPHORE,
+    IMAGE_INGEST_WMF_MIN_BLOB,
+)
 from core.rag.llamaindex.file_routing import FileTypeRouter
 
 if TYPE_CHECKING:
@@ -20,12 +29,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 # Word 教案会把公式拆成大量 11×12 小图；默认过滤后约几十张「真图」/文件
-_MIN_IMAGE_PX = int(os.getenv("IMAGE_INGEST_MIN_PX", "80"))
-_MIN_IMAGE_AREA = int(os.getenv("IMAGE_INGEST_MIN_AREA", "15000"))
-_MAX_IMAGES_PER_FILE = int(os.getenv("IMAGE_INGEST_MAX_PER_FILE", "120"))
-_SEMAPHORE_LIMIT = int(os.getenv("IMAGE_INGEST_SEMAPHORE", "5"))
+_MIN_IMAGE_PX = IMAGE_INGEST_MIN_PX
+_MIN_IMAGE_AREA = IMAGE_INGEST_MIN_AREA
+_MAX_IMAGES_PER_FILE = IMAGE_INGEST_MAX_PER_FILE
+_SEMAPHORE_LIMIT = IMAGE_INGEST_SEMAPHORE
 # WMF blob < 此字节数视为公式碎片，跳过（有意义的电路图通常 > 2000B）
-_WMF_MIN_BLOB_SIZE = int(os.getenv("IMAGE_INGEST_WMF_MIN_BLOB", "2000"))
+_WMF_MIN_BLOB_SIZE = IMAGE_INGEST_WMF_MIN_BLOB
 
 
 def _image_meets_threshold(width: int, height: int) -> bool:

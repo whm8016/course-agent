@@ -11,7 +11,7 @@ import argparse
 import asyncio
 import json
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import aiohttp
 
@@ -263,7 +263,7 @@ async def main():
                 print(f"  WARNING: student {i:02d} auth failed, skipping")
             # register rate limit = 10/min, login = 15/min; be conservative
             if i % 8 == 0:
-                print(f"  (等待 65s 避免注册限流...)")
+                print("  (等待 65s 避免注册限流...)")
                 await asyncio.sleep(65)
             else:
                 await asyncio.sleep(0.3)

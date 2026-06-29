@@ -18,7 +18,7 @@ from core.question.idea_agent import BATCH_SIZE, IdeaAgent
 from core.question.generator import Generator
 
 from core.question.models import QAPair, QuestionTemplate
-from config import QUESTION_DEFAULT_TOOL_FLAGS, QUESTION_LOG_DIR
+from config import QUESTION_DEFAULT_TOOL_FLAGS
 
 import logging
 from core.question.exam_stubs import extract_questions_from_paper, parse_pdf_with_mineru

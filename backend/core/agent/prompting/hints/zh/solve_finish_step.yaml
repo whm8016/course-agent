@@ -1,0 +1,6 @@
+short_description: "标记当前步骤完成并前进，传入该步结论的简短摘要。"
+when_to_use: "每完成一个解题步骤后调用，记录该步关键结果（数值/结论），并取得下一步。"
+input_format: '{"step_id": "solve_plan 返回的步骤 id（如 S1）", "summary": "该步结果简短摘要"}'
+guideline: "step_id 必须用 solve_plan 返回的真实 id（如 S1），不要自造。summary 作为该步记录保留，中间工具输出会被折叠。"
+note: "全部步骤完成后返回 all_done，此时写出最终答案。"
+phase: "synthesis"

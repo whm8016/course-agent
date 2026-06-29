@@ -1,16 +1,14 @@
 """Shared rate-limiter instance used by all routers."""
 from __future__ import annotations
 
-import os
-
 from starlette.requests import Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from config import REDIS_URL
+from config import REDIS_URL, TESTING
 
 # TESTING=1 disables rate-limiting so tests don't hit 429 on rapid registrations.
-_TESTING = os.getenv("TESTING", "").strip().lower() in ("1", "true", "yes")
+_TESTING = TESTING
 
 
 def _key_func(request: Request) -> str:

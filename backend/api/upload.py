@@ -17,14 +17,22 @@ router = APIRouter()
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 
 ALLOWED_MIME_TYPES = {
+    # 图片
     "image/jpeg",
     "image/png",
     "image/gif",
     "image/webp",
     "image/bmp",
+    # 文档
+    "application/pdf",
+    "text/plain",
+    "text/markdown",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/msword",
 }
 
-ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
+                      ".pdf", ".txt", ".md", ".docx", ".doc"}
 
 
 def _safe_ext(filename: str | None) -> str:
@@ -52,6 +60,17 @@ def _upload_owner(filename: str) -> str | None:
     return base.split("_", 1)[0]
 
 
+def assert_upload_owner(filename: str, user: dict) -> None:
+    """校验上传文件归属：仅 owner 或 admin 可访问，否则 403。
+
+    供 chat 等需要引用已上传图片的入口做多租户归属校验，避免越权读取他人图片。
+    """
+    safe_name = _safe_basename(filename)
+    owner = _upload_owner(safe_name)
+    if owner is None or (owner != str(user["id"]) and not user.get("is_admin")):
+        raise HTTPException(status_code=403, detail="无权访问此文件")
+
+
 def resolve_upload_path(path_or_url: str | None) -> str | None:
     """Map client path (/api/uploads/... or /uploads/...) to server filesystem path."""
     if not path_or_url:
@@ -72,7 +91,7 @@ def resolve_upload_path(path_or_url: str | None) -> str | None:
 @router.post("/upload")
 async def upload_image(file: UploadFile, user: dict = Depends(get_current_user)):
     if file.content_type and file.content_type not in ALLOWED_MIME_TYPES:
-        raise HTTPException(status_code=400, detail=f"不支持的文件类型: {file.content_type}，仅允许图片")
+        raise HTTPException(status_code=400, detail=f"不支持的文件类型: {file.content_type}，支持图片与 PDF/Word/文本")
 
     content = await file.read()
 
@@ -99,12 +118,8 @@ async def upload_image(file: UploadFile, user: dict = Depends(get_current_user))
 
 @router.get("/uploads/{filename}")
 async def get_upload(filename: str, user: dict = Depends(get_current_user)):
+    assert_upload_owner(filename, user)
     safe_name = _safe_basename(filename)
-    owner = _upload_owner(safe_name)
-    if owner is None:
-        raise HTTPException(status_code=403, detail="无权访问此文件")
-    if owner != user["id"] and not user.get("is_admin"):
-        raise HTTPException(status_code=403, detail="无权访问此文件")
 
     filepath = os.path.join(UPLOAD_DIR, safe_name)
     if not os.path.isfile(filepath):

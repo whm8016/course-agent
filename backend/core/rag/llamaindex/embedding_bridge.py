@@ -15,20 +15,14 @@ from __future__ import annotations
 
 import logging
 import math
-import os
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Any
 
 # ── 复用项目已有的 OpenAI 客户端和配置 ────────────────────────────────────────
 from core.llm.llm import client as _async_openai_client   # AsyncOpenAI 实例
-from config import EMBEDDING_MODEL                     # 例如 "text-embedding-v3"
+from config import EMBEDDING_MODEL, EMBEDDING_DIM, EMBEDDING_BATCH_SIZE
 
 logger = logging.getLogger("EmbeddingBridge")
-
-# DashScope text-embedding-v3 / v2 默认 1024 维，可在 .env 里覆盖
-EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIM", "1024"))
-# 每批最多发多少条文本（避免单次请求 token 超限）
-EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "16"))
 
 
 # ── 配置对象（对应 DeepTutor 的 EmbeddingConfig）─────────────────────────────

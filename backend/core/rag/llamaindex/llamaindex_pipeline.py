@@ -11,7 +11,6 @@ from typing import Any, Dict, List, Optional
 import os
 import config
 from llama_index.core import (
-    Document,
     Settings,
     StorageContext,
     VectorStoreIndex,

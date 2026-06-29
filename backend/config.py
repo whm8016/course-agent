@@ -1,234 +1,129 @@
-import os
-import sys
+"""配置兼容 shim —— 全部导出名保留，读取自 settings（单一事实源）。
 
-from dotenv import load_dotenv
+本文件已从「平铺全局变量 + os.getenv」降级为薄 shim：真实配置在 backend/settings/
+（pydantic-settings，含类型校验 / SecretStr / catalog 拍平 / prod 安全门）。
 
-BASE_DIR = os.path.dirname(__file__)
-load_dotenv(os.path.join(BASE_DIR, ".env"))
+存量 `from config import XXX` 无需任何改动；新增配置请去 settings/base.py 加字段。
+历史名（DASHSCOPE_* 等）作别名保留以维持向后兼容。
+"""
+from __future__ import annotations
 
+import os as _os
+from settings import BASE_DIR, get_settings
 
-def _sync_langsmith_env() -> None:
-    """Align with langsmith.utils.tracing_is_enabled(): value must be exactly 'true' (lowercase)."""
-    truthy = ("1", "true", "yes", "on")
-    for key in (
-        "LANGSMITH_TRACING",
-        "LANGCHAIN_TRACING",
-        "LANGSMITH_TRACING_V2",
-        "LANGCHAIN_TRACING_V2",
-    ):
-        raw = os.getenv(key)
-        if raw is None or str(raw).strip() == "":
-            continue
-        if str(raw).strip().lower() in truthy:
-            os.environ[key] = "true"
-    # Many docs use LANGSMITH_TRACING; SDK also checks *_TRACING_V2 first.
-    if os.getenv("LANGSMITH_TRACING") == "true" or os.getenv("LANGCHAIN_TRACING") == "true":
-        os.environ.setdefault("LANGSMITH_TRACING_V2", "true")
-    ls_key = os.getenv("LANGSMITH_API_KEY", "").strip()
-    lc_key = os.getenv("LANGCHAIN_API_KEY", "").strip()
-    if ls_key and not lc_key:
-        os.environ["LANGCHAIN_API_KEY"] = ls_key
-    if lc_key and not ls_key:
-        os.environ["LANGSMITH_API_KEY"] = lc_key
-    try:
-        from langsmith.utils import get_env_var  # type: ignore[import-untyped]
+_s = get_settings()
 
-        get_env_var.cache_clear()
-    except Exception:
-        pass
-
-
-_sync_langsmith_env()
 
 # ---------------------------------------------------------------------------
-# RAG backend selection
+# 日志 / 环境
 # ---------------------------------------------------------------------------
-_raw_rag = os.getenv("RAG_BACKEND", "").strip().lower()
-if _raw_rag in ("chroma", "fs"):
-    RAG_BACKEND: str = _raw_rag
-else:
-    RAG_BACKEND = "fs" if sys.platform == "win32" else "chroma"
+LOG_LEVEL: str = _s.log_level
+ENVIRONMENT: str = _s.environment
+LLM_TIMEOUT_SEC: int = _s.llm_timeout_sec
+FAQ_CACHE_THRESHOLD: int = _s.faq_cache_threshold
 
 # ---------------------------------------------------------------------------
-# LLM / DashScope
+# RAG backend
 # ---------------------------------------------------------------------------
-DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "")
-DASHSCOPE_BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+RAG_BACKEND: str = _s.rag_backend
 
-TEXT_MODEL = os.getenv("TEXT_MODEL", "qwen-plus")
-FAST_MODEL = os.getenv("FAST_MODEL", "qwen-turbo")
-VISION_MODEL = os.getenv("VISION_MODEL", "qwen-vl-plus")
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "text-embedding-v3")
-# 嵌入 / 视觉可与对话 LLM 使用不同 provider（例如对话 DeepSeek、嵌入仍走 DashScope）
-EMBEDDING_API_KEY = os.getenv("EMBEDDING_API_KEY") or DASHSCOPE_API_KEY
-EMBEDDING_BASE_URL = os.getenv("EMBEDDING_BASE_URL") or DASHSCOPE_BASE_URL
+# ---------------------------------------------------------------------------
+# LLM / 多供应商（catalog 优先 → env 兜底）
+# ---------------------------------------------------------------------------
+LLM_BINDING: str = _s.llm_binding
+DASHSCOPE_API_KEY: str = _s.dashscope_api_key.get_secret_value()
+DASHSCOPE_BASE_URL: str = _s.dashscope_base_url
+LLM_API_VERSION: str = _s.llm_api_version
+TEXT_MODEL: str = _s.text_model
+FAST_MODEL: str = _s.fast_model
+VISION_MODEL: str = _s.vision_model
+EMBEDDING_MODEL: str = _s.embedding_model
+EMBEDDING_API_KEY: str = _s.embedding_api_key.get_secret_value()
+EMBEDDING_BASE_URL: str = _s.embedding_base_url
+FALLBACK_API_KEY: str = _s.fallback_api_key.get_secret_value()
+FALLBACK_BASE_URL: str = _s.fallback_base_url
+FALLBACK_MODEL: str = _s.fallback_model
 
-# Fallback LLM（主模型熔断时自动切换）
-FALLBACK_API_KEY = os.getenv("FALLBACK_API_KEY", "")
-FALLBACK_BASE_URL = os.getenv("FALLBACK_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-FALLBACK_MODEL = os.getenv("FALLBACK_MODEL", "qwen-plus")
+# ---------------------------------------------------------------------------
+# LightRAG 分角色 LLM（1.5.4+）
+# ---------------------------------------------------------------------------
+EXTRACT_MODEL: str = _s.extract_model
+KEYWORD_MODEL: str = _s.keyword_model
 
 # ---------------------------------------------------------------------------
 # RAG tuning
 # ---------------------------------------------------------------------------
-CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "500"))
-CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "80"))
-TOP_K = int(os.getenv("TOP_K", "4"))
-INGEST_CHUNK_SIZE = int(os.getenv("INGEST_CHUNK_SIZE", "900"))
-INGEST_CHUNK_OVERLAP = int(os.getenv("INGEST_CHUNK_OVERLAP", "60"))
+CHUNK_SIZE: int = _s.chunk_size
+CHUNK_OVERLAP: int = _s.chunk_overlap
+TOP_K: int = _s.top_k
+INGEST_CHUNK_SIZE: int = _s.ingest_chunk_size
+INGEST_CHUNK_OVERLAP: int = _s.ingest_chunk_over_lap
 
 # ---------------------------------------------------------------------------
 # Paths
 # ---------------------------------------------------------------------------
-UPLOAD_DIR = os.getenv("UPLOAD_DIR", os.path.join(BASE_DIR, "uploads"))
-KNOWLEDGE_DIR = os.getenv("KNOWLEDGE_DIR", os.path.join(BASE_DIR, "knowledge"))
-VECTORSTORE_DIR = os.getenv("VECTORSTORE_DIR", os.path.join(BASE_DIR, "vectorstore"))
-DB_PATH = os.getenv("DB_PATH", os.path.join(BASE_DIR, "data", "sessions.db"))
+UPLOAD_DIR: str = _s.upload_dir
+KNOWLEDGE_DIR: str = _s.knowledge_dir
+VECTORSTORE_DIR: str = _s.vectorstore_dir
+DB_PATH: str = _s.db_path
 
 # ---------------------------------------------------------------------------
-# PostgreSQL + Redis (high-concurrency stack)
+# PostgreSQL + Redis
 # ---------------------------------------------------------------------------
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql+asyncpg://postgres:postgres@localhost:5432/course_agent",
-)
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-
-# ---------------------------------------------------------------------------
-# FAQ 高频问题
-# ---------------------------------------------------------------------------
-# 问题被问到达此次数后，开始缓存答案（0 = 不缓存）
-FAQ_CACHE_THRESHOLD = int(os.getenv("FAQ_CACHE_THRESHOLD", "3"))
-
-# ---------------------------------------------------------------------------
-# Environment
-# ---------------------------------------------------------------------------
-ENVIRONMENT = os.getenv("ENVIRONMENT", "development").strip().lower()
-LLM_TIMEOUT_SEC = int(os.getenv("LLM_TIMEOUT_SEC", "120"))
+DATABASE_URL: str = _s.database_url.get_secret_value()
+REDIS_URL: str = _s.redis_url.get_secret_value()
+DB_POOL_SIZE: int = _s.db_pool_size
+DB_MAX_OVERFLOW: int = _s.db_max_overflow
 
 # ---------------------------------------------------------------------------
 # Security
 # ---------------------------------------------------------------------------
-_JWT_DEFAULT = "dev-secret-change-in-production"
-JWT_SECRET = os.getenv("JWT_SECRET", _JWT_DEFAULT)
-JWT_EXPIRE_HOURS = int(os.getenv("JWT_EXPIRE_HOURS", "72"))
-
-if ENVIRONMENT == "production" and JWT_SECRET == _JWT_DEFAULT:
-    raise RuntimeError(
-        "FATAL: JWT_SECRET must be set to a strong value in production. "
-        "Set the JWT_SECRET environment variable."
-    )
-elif JWT_SECRET == _JWT_DEFAULT:
-    import warnings
-    warnings.warn(
-        "JWT_SECRET is using the insecure default value! "
-        "Set a strong JWT_SECRET environment variable before deploying to production.",
-        stacklevel=1,
-    )
-
-# ---------------------------------------------------------------------------
-# CORS
-# ---------------------------------------------------------------------------
-_origins_raw = os.getenv("ALLOWED_ORIGINS", "").strip()
-if not _origins_raw or _origins_raw == "*":
-    ALLOWED_ORIGINS: list[str] = ["*"]
-    if ENVIRONMENT == "production":
-        raise RuntimeError(
-            "FATAL: ALLOWED_ORIGINS must be set to specific origins in production. "
-            "Example: ALLOWED_ORIGINS=https://yourdomain.com"
-        )
-    elif _origins_raw != "*" and not _origins_raw:
-        import warnings
-        warnings.warn(
-            "ALLOWED_ORIGINS is not set — defaulting to '*' (allow all). "
-            "Set explicit origins (e.g. 'https://example.com') for production.",
-            stacklevel=1,
-        )
-else:
-    ALLOWED_ORIGINS = [o.strip() for o in _origins_raw.split(",") if o.strip()]
+JWT_SECRET: str = _s.jwt_secret.get_secret_value()
+JWT_EXPIRE_HOURS: int = _s.jwt_expire_hours
+ALLOWED_ORIGINS: list[str] = _s.allowed_origins
+ADMIN_USERNAME: str = _s.admin_username
 
 # ---------------------------------------------------------------------------
 # Upload limits
 # ---------------------------------------------------------------------------
-MAX_UPLOAD_MB = int(os.getenv("MAX_UPLOAD_MB", "10"))
+MAX_UPLOAD_MB: int = _s.max_upload_mb
 
 # ---------------------------------------------------------------------------
 # LightRAG
 # ---------------------------------------------------------------------------
-LIGHTRAG_ENABLED = os.getenv("LIGHTRAG_ENABLED", "false").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-LIGHTRAG_WORKDIR = os.getenv("LIGHTRAG_WORKDIR", os.path.join(BASE_DIR, "lightrag_store"))
-LIGHTRAG_QUERY_MODE = os.getenv("LIGHTRAG_QUERY_MODE", "mix")
-LIGHTRAG_TOP_K = int(os.getenv("LIGHTRAG_TOP_K", "20"))
-LIGHTRAG_TIMEOUT_SEC = int(os.getenv("LIGHTRAG_TIMEOUT_SEC", "120"))
-LIGHTRAG_EMBEDDING_DIM = int(os.getenv("LIGHTRAG_EMBEDDING_DIM", "1024"))
-LIGHTRAG_AUTO_INDEX_TTL_SEC = int(os.getenv("LIGHTRAG_AUTO_INDEX_TTL_SEC", "120"))
-LIGHTRAG_STREAM_CONTEXT_LIMIT = int(os.getenv("LIGHTRAG_STREAM_CONTEXT_LIMIT", "4"))
-LIGHTRAG_STREAM_CONTEXT_MAX_CHARS = int(os.getenv("LIGHTRAG_STREAM_CONTEXT_MAX_CHARS", "800"))
-# agentic_pipeline._run_rag：aquery 返回文本写入 tool trace 前的最大字符数（过长会截断）
-LIGHTRAG_AGENTIC_RAG_MAX_CHARS = int(os.getenv("LIGHTRAG_AGENTIC_RAG_MAX_CHARS", "10000"))
-# LightRAG 默认会开 rerank；未配置 rerank 模型时会告警且可能长时间阻塞，故默认关闭
-LIGHTRAG_ENABLE_RERANK = os.getenv("LIGHTRAG_ENABLE_RERANK", "false").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-# 管理端 LightRAG 摄入时，将 SentenceSplitter 后的文本块落盘（与 LightRAG workspace 并列子目录）
-LIGHTRAG_SAVE_INGEST_CHUNKS = os.getenv("LIGHTRAG_SAVE_INGEST_CHUNKS", "true").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-LIGHTRAG_INGEST_CHUNKS_SUBDIR = os.getenv("LIGHTRAG_INGEST_CHUNKS_SUBDIR", "ingest_chunks")
-LIGHTRAG_INGEST_CHUNKS_SNAPSHOT = os.getenv("LIGHTRAG_INGEST_CHUNKS_SNAPSHOT", "false").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-LIGHTRAG_INGEST_BATCH_SIZE = int(os.getenv("LIGHTRAG_INGEST_BATCH_SIZE", "16"))
-LIGHTRAG_MAX_ASYNC = int(os.getenv("LIGHTRAG_MAX_ASYNC", "8"))
-# 同时驻留内存的最大 LightRAG 实例数（LRU 淘汰）；10 门课 × ~2GB ≈ 20GB 峰值
-LIGHTRAG_LRU_CAPACITY = int(os.getenv("LIGHTRAG_LRU_CAPACITY", "10"))
+LIGHTRAG_ENABLED: bool = _s.lightrag_enabled
+LIGHTRAG_WORKDIR: str = _s.lightrag_workdir
+LIGHTRAG_QUERY_MODE: str = _s.lightrag_query_mode
+LIGHTRAG_TOP_K: int = _s.lightrag_top_k
+LIGHTRAG_TIMEOUT_SEC: int = _s.lightrag_timeout_sec
+LIGHTRAG_EMBEDDING_DIM: int = _s.lightrag_embedding_dim
+LIGHTRAG_AUTO_INDEX_TTL_SEC: int = _s.lightrag_auto_index_ttl_sec
+LIGHTRAG_STREAM_CONTEXT_LIMIT: int = _s.lightrag_stream_context_limit
+LIGHTRAG_STREAM_CONTEXT_MAX_CHARS: int = _s.lightrag_stream_context_max_chars
+LIGHTRAG_AGENTIC_RAG_MAX_CHARS: int = _s.lightrag_agentic_rag_max_chars
+LIGHTRAG_ENABLE_RERANK: bool = _s.lightrag_enable_rerank
+LIGHTRAG_SAVE_INGEST_CHUNKS: bool = _s.lightrag_save_ingest_chunks
+LIGHTRAG_INGEST_CHUNKS_SUBDIR: str = _s.lightrag_ingest_chunks_subdir
+LIGHTRAG_INGEST_CHUNKS_SNAPSHOT: bool = _s.lightrag_ingest_chunks_snapshot
+LIGHTRAG_INGEST_BATCH_SIZE: int = _s.lightrag_ingest_batch_size
+LIGHTRAG_MAX_ASYNC: int = _s.lightrag_max_async
+# 多 worker 下调整 LRU 缓存容量: 总容量 / worker 数
+_WORKERS = int(_os.getenv("BACKEND_WORKERS", "4"))
+LIGHTRAG_LRU_CAPACITY: int = max(2, _s.lightrag_lru_capacity // _WORKERS)
 
 # ---------------------------------------------------------------------------
-# Admin / Knowledge Base Store  /lightrag的
+# Admin / Knowledge Base Store
 # ---------------------------------------------------------------------------
-KB_STORE_DIR = os.getenv("KB_STORE_DIR", os.path.join(BASE_DIR, "kb_store"))
-ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
-MAX_KB_UPLOAD_MB = int(os.getenv("MAX_KB_UPLOAD_MB", "50"))
+KB_STORE_DIR: str = _s.kb_store_dir
+MAX_KB_UPLOAD_MB: int = _s.max_kb_upload_mb
 
 # ---------------------------------------------------------------------------
 # Question coordinator (AgentCoordinator)
 # ---------------------------------------------------------------------------
-QUESTION_LOG_DIR = os.getenv(
-    "QUESTION_LOG_DIR",
-    os.path.join(BASE_DIR, "logs", "question"),
-)
-QUESTION_TOOL_WEB_SEARCH = os.getenv("QUESTION_TOOL_WEB_SEARCH", "true").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-QUESTION_TOOL_RAG = os.getenv("QUESTION_TOOL_RAG", "true").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
-QUESTION_TOOL_CODE_EXECUTION = os.getenv("QUESTION_TOOL_CODE_EXECUTION", "true").strip().lower() in (
-    "1",
-    "true",
-    "yes",
-    "on",
-)
+QUESTION_LOG_DIR: str = _s.question_log_dir
+QUESTION_TOOL_WEB_SEARCH: bool = _s.question_tool_web_search
+QUESTION_TOOL_RAG: bool = _s.question_tool_rag
+QUESTION_TOOL_CODE_EXECUTION: bool = _s.question_tool_code_execution
 QUESTION_DEFAULT_TOOL_FLAGS: dict[str, bool] = {
     "web_search": QUESTION_TOOL_WEB_SEARCH,
     "rag": QUESTION_TOOL_RAG,
@@ -238,65 +133,94 @@ QUESTION_DEFAULT_TOOL_FLAGS: dict[str, bool] = {
 # ---------------------------------------------------------------------------
 # LlamaParse（图像 PDF / 扫描件解析）
 # ---------------------------------------------------------------------------
-LLAMA_CLOUD_API_KEY = os.getenv("LLAMA_CLOUD_API_KEY") or os.getenv("LLAMAPARSE_API_KEY", "")
+LLAMA_CLOUD_API_KEY: str = _s.llama_cloud_api_key.get_secret_value()
+LLAMA_INDEX_KB_ROOT: str = _s.llama_index_kb_root
+AGENTIC_RAG_BACKEND: str = _s.agentic_rag_backend
+QUESTION_USE_LLAMAINDEX: bool = _s.question_use_llamaindex
 
-# LlamaIndex 向量库根目录（每个 course 一个子目录，其下 llamaindex_storage/）
-LLAMA_INDEX_KB_ROOT = os.getenv(
-    "LLAMA_INDEX_KB_ROOT",
-    os.path.join(BASE_DIR, "data", "knowledge_bases")
-)
-# POST /api/chat/lightrag → agentic_pipeline 里「知识检索」用哪套引擎（与 body tools 里的 rag/llamaindex_rag 对齐）
-#   lightrag   — 使用 LightRAG（默认）
-#   llamaindex — 使用 LlamaIndex 向量库（需已对该 course_id 建 llamaindex 索引）
-# 兼容旧变量：AGENTIC_KB_TOOL=llamaindex_rag 等价于 AGENTIC_RAG_BACKEND=llamaindex
-_arg_backend = os.getenv("AGENTIC_RAG_BACKEND", "").strip().lower()
-_legacy_kb = os.getenv("AGENTIC_KB_TOOL", "").strip().lower()
-if _arg_backend in ("lightrag", "llamaindex"):
-    AGENTIC_RAG_BACKEND: str = _arg_backend
-elif _legacy_kb == "llamaindex_rag":
-    AGENTIC_RAG_BACKEND = "llamaindex"
-else:
-    AGENTIC_RAG_BACKEND = "lightrag"
-QUESTION_USE_LLAMAINDEX = os.getenv("QUESTION_USE_LLAMAINDEX", "True").strip().lower() in (
-    "1", "true", "yes", "on",
-)
-
-LANGSMITH_TRACING=os.getenv("LANGSMITH_TRACING", "False").strip().lower() in (
-    "1", "true", "yes", "on",
-)
-LANGSMITH_API_KEY=os.getenv("LANGSMITH_API_KEY", "")
-LANGSMITH_PROJECT=os.getenv("LANGSMITH_PROJECT", "")
+LANGSMITH_TRACING: bool = _s.langsmith_tracing
+LANGSMITH_API_KEY: str = _s.langsmith_api_key.get_secret_value()
+LANGSMITH_PROJECT: str = _s.langsmith_project
 
 # ---------------------------------------------------------------------------
 # TutorBot 社交平台集成
 # ---------------------------------------------------------------------------
-TUTORBOT_ENABLED = os.getenv("TUTORBOT_ENABLED", "false").strip().lower() in (
-    "1", "true", "yes", "on",
-)
-TUTORBOT_WORKSPACE_DIR = os.getenv(
-    "TUTORBOT_WORKSPACE_DIR", os.path.join(BASE_DIR, "data", "tutorbot")
-)
+TUTORBOT_ENABLED: bool = _s.tutorbot_enabled
+TUTORBOT_WORKSPACE_DIR: str = _s.tutorbot_workspace_dir
 
 # QQ Bot (botpy SDK)
-QQ_BOT_ENABLED = os.getenv("QQ_BOT_ENABLED", "false").strip().lower() in (
-    "1", "true", "yes", "on",
-)
-QQ_APP_ID = os.getenv("QQ_APP_ID", "")
-QQ_SECRET = os.getenv("QQ_SECRET", "")
-QQ_ALLOW_FROM = os.getenv("QQ_ALLOW_FROM", "*")
+QQ_BOT_ENABLED: bool = _s.qq_bot_enabled
+QQ_APP_ID: str = _s.qq_app_id.get_secret_value()
+QQ_SECRET: str = _s.qq_secret.get_secret_value()
+QQ_ALLOW_FROM: str = _s.qq_allow_from
 
 # Feishu Bot (lark-oapi SDK, WebSocket)
-FEISHU_BOT_ENABLED = os.getenv("FEISHU_BOT_ENABLED", "false").strip().lower() in (
-    "1", "true", "yes", "on",
-)
-FEISHU_APP_ID = os.getenv("FEISHU_APP_ID", "")
-FEISHU_APP_SECRET = os.getenv("FEISHU_APP_SECRET", "")
-FEISHU_ENCRYPT_KEY = os.getenv("FEISHU_ENCRYPT_KEY", "")
-FEISHU_VERIFICATION_TOKEN = os.getenv("FEISHU_VERIFICATION_TOKEN", "")
-FEISHU_ALLOW_FROM = os.getenv("FEISHU_ALLOW_FROM", "*")
+FEISHU_BOT_ENABLED: bool = _s.feishu_bot_enabled
+FEISHU_APP_ID: str = _s.feishu_app_id.get_secret_value()
+FEISHU_APP_SECRET: str = _s.feishu_app_secret.get_secret_value()
+FEISHU_ENCRYPT_KEY: str = _s.feishu_encrypt_key.get_secret_value()
+FEISHU_VERIFICATION_TOKEN: str = _s.feishu_verification_token.get_secret_value()
+FEISHU_ALLOW_FROM: str = _s.feishu_allow_from
 
 # Heartbeat
-TUTORBOT_HEARTBEAT_ENABLED = os.getenv("TUTORBOT_HEARTBEAT_ENABLED", "true").strip().lower() in (
-    "1", "true", "yes", "on",
-)
-TUTORBOT_HEARTBEAT_INTERVAL_SEC = int(os.getenv("TUTORBOT_HEARTBEAT_INTERVAL_SEC", "1800"))
+TUTORBOT_HEARTBEAT_ENABLED: bool = _s.tutorbot_heartbeat_enabled
+TUTORBOT_HEARTBEAT_INTERVAL_SEC: int = _s.tutorbot_heartbeat_interval_sec
+
+# ---------------------------------------------------------------------------
+# Search（web search 服务）
+# ---------------------------------------------------------------------------
+SEARCH_ENABLED: bool = _s.search_enabled
+SEARCH_PROVIDER: str = _s.search_provider
+SEARCH_API_KEY: str = _s.search_api_key.get_secret_value()
+SEARCH_BASE_URL: str = _s.search_base_url
+SEARCH_MAX_RESULTS: int = _s.search_max_results
+SEARCH_PROXY: str = _s.search_proxy
+SEARCH_CONFIG_PATH: str = _s.search_config_path
+
+# ---------------------------------------------------------------------------
+# MCP（Model Context Protocol）
+# ---------------------------------------------------------------------------
+MCP_CONFIG_PATH: str = _s.mcp_config_path
+MCP_SESSIONS_DIR: str = _s.mcp_sessions_dir
+
+# ---------------------------------------------------------------------------
+# Image ingestion（LLamaIndex 图片提取）
+# ---------------------------------------------------------------------------
+IMAGE_INGEST_MIN_PX: int = _s.image_ingest_min_px
+IMAGE_INGEST_MIN_AREA: int = _s.image_ingest_min_area
+IMAGE_INGEST_MAX_PER_FILE: int = _s.image_ingest_max_per_file
+IMAGE_INGEST_SEMAPHORE: int = _s.image_ingest_semaphore
+IMAGE_INGEST_WMF_MIN_BLOB: int = _s.image_ingest_wmf_min_blob
+
+# ---------------------------------------------------------------------------
+# Embedding bridge
+# ---------------------------------------------------------------------------
+EMBEDDING_DIM: int = _s.embedding_dim
+EMBEDDING_BATCH_SIZE: int = _s.embedding_batch_size
+
+# ---------------------------------------------------------------------------
+# LightRAG SAFE_* 参数
+# ---------------------------------------------------------------------------
+LIGHTRAG_SAFE_TOP_K: int = _s.lightrag_safe_top_k
+LIGHTRAG_CHUNK_TOP_K: int = _s.lightrag_chunk_top_k
+LIGHTRAG_MAX_TOTAL_TOKENS: int = _s.lightrag_max_total_tokens
+LIGHTRAG_MAX_ENTITY_TOKENS: int = _s.lightrag_max_entity_tokens
+LIGHTRAG_MAX_RELATION_TOKENS: int = _s.lightrag_max_relation_tokens
+LIGHTRAG_MAX_HISTORY_MESSAGES: int = _s.lightrag_max_history_messages
+LIGHTRAG_MAX_HISTORY_CHARS: int = _s.lightrag_max_history_chars
+LIGHTRAG_LLM_SYSTEM_MAX_CHARS: int = _s.lightrag_llm_system_max_chars
+
+# ---------------------------------------------------------------------------
+# Output cards
+# ---------------------------------------------------------------------------
+OUTPUT_CARDS_PATH: str = _s.output_cards_path
+
+# ---------------------------------------------------------------------------
+# Testing
+# ---------------------------------------------------------------------------
+TESTING: bool = _s.testing
+
+# ---------------------------------------------------------------------------
+# BASE_DIR（向后兼容：旧 config.py 有此导出）
+# ---------------------------------------------------------------------------
+BASE_DIR = BASE_DIR  # noqa: F811  (从 settings 导入的同一对象)

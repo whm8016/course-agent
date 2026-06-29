@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, type ReactNode } from 'react'
 import { FiMenu } from 'react-icons/fi'
 import Sidebar from './components/layout/Sidebar'
 import ChatWindow from './components/chat/ChatWindow'
@@ -8,7 +8,14 @@ import TeacherPage from './components/pages/TeacherPage'
 import GraphPage from './components/pages/GraphPage'
 import DashboardPanel from './components/pages/DashboardPanel'
 import StudentStatsPage from './components/pages/StudentStatsPage'
-import { fetchCourses, fetchSessions, createSession, deleteSession } from './services/api'
+import SkillKnowledgePage from './components/pages/SkillKnowledgePage'
+import McpSettingsPage from './components/pages/McpSettingsPage'
+import LlmProviderPage from './components/pages/LlmProviderPage'
+import SearchProviderAdminPage from './components/pages/SearchProviderAdminPage'
+import UserSearchSettingsPage from './components/pages/UserSearchSettingsPage'
+import NotebookPage from './components/pages/NotebookPage'
+import BotPage from './components/pages/BotPage'
+import { fetchCourses, fetchSessions, createSession, deleteSession, fetchNotifications, markNotificationRead, type BotNotificationItem } from './services/api'
 import { isLoggedIn, getUser, logout } from './services/auth'
 import type { Course, Session, User } from './types'
 import './index.css'
@@ -19,6 +26,16 @@ export default function App() {
   const [showTeacher, setShowTeacher] = useState(() => sessionStorage.getItem('_teacher') === '1')
   const [showGraph, setShowGraph] = useState(false)
   const [showDashboard, setShowDashboard] = useState(false)
+  const [showSkillKnowledge, setShowSkillKnowledge] = useState(false)
+  const [showMcpSettings, setShowMcpSettings] = useState(false)
+  const [showLlmProvider, setShowLlmProvider] = useState(false)
+  const [showSearchAdmin, setShowSearchAdmin] = useState(false)
+  const [showUserSearchSettings, setShowUserSearchSettings] = useState(false)
+  const [showNotebook, setShowNotebook] = useState(false)
+  const [showBots, setShowBots] = useState(false)
+  const [showNotif, setShowNotif] = useState(false)
+  const [notifList, setNotifList] = useState<BotNotificationItem[]>([])
+  const [notifUnread, setNotifUnread] = useState(0)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [courses, setCourses] = useState<Course[]>([])
   const [activeCourseId, setActiveCourseId] = useState<string>('')
@@ -30,6 +47,36 @@ export default function App() {
   const handleLogin = useCallback((u: User) => {
     setUser(u)
   }, [])
+
+  const loadNotifList = useCallback(async () => {
+    try {
+      const data = await fetchNotifications()
+      setNotifList(data.notifications)
+      setNotifUnread(data.unread_count)
+    } catch {
+      // ignore
+    }
+  }, [])
+
+  // 轮询未读通知数（30s），驱动侧边栏铃铛 badge
+  useEffect(() => {
+    if (!user) return
+    let active = true
+    const poll = async () => {
+      try {
+        const data = await fetchNotifications()
+        if (active) setNotifUnread(data.unread_count)
+      } catch {
+        // ignore
+      }
+    }
+    void poll()
+    const t = setInterval(poll, 30000)
+    return () => {
+      active = false
+      clearInterval(t)
+    }
+  }, [user])
 
   const reloadCourses = useCallback(
     async (preserveActive: boolean = true) => {
@@ -137,8 +184,9 @@ export default function App() {
   const role = user.role ?? (user.is_admin ? 'admin' : 'student')
   const isTeacherOrAdmin = role === 'teacher' || role === 'admin'
 
+  let overlay: ReactNode = null
   if (showTeacher && isTeacherOrAdmin) {
-    return (
+    overlay = (
       <TeacherPage
         user={user}
         onBack={() => {
@@ -148,10 +196,8 @@ export default function App() {
         }}
       />
     )
-  }
-
-  if (showAdmin && role === 'admin') {
-    return (
+  } else if (showAdmin && role === 'admin') {
+    overlay = (
       <AdminPage
         user={user}
         onBack={() => {
@@ -161,26 +207,59 @@ export default function App() {
         }}
       />
     )
-  }
-
-  if (showGraph) {
-    return <GraphPage onBack={() => setShowGraph(false)} />
-  }
-
-  if (showDashboard) {
-    const role = user.role ?? (user.is_admin ? 'admin' : 'student')
-    if (role === 'teacher' || role === 'admin') {
-      return (
+  } else if (showGraph) {
+    overlay = <GraphPage onBack={() => setShowGraph(false)} />
+  } else if (showDashboard) {
+    if (isTeacherOrAdmin) {
+      overlay = (
         <StudentStatsPage
           user={user}
           onBack={() => setShowDashboard(false)}
         />
       )
+    } else {
+      overlay = (
+        <DashboardPanel
+          onBack={() => setShowDashboard(false)}
+          onGraph={() => { setShowDashboard(false); setShowGraph(true) }}
+        />
+      )
     }
-    return (
-      <DashboardPanel
-        onBack={() => setShowDashboard(false)}
-        onGraph={() => { setShowDashboard(false); setShowGraph(true) }}
+  } else if (showSkillKnowledge) {
+    overlay = (
+      <SkillKnowledgePage
+        courseId={activeCourseId}
+        onBack={() => setShowSkillKnowledge(false)}
+      />
+    )
+  } else if (showMcpSettings) {
+    overlay = <McpSettingsPage onBack={() => setShowMcpSettings(false)} />
+  } else if (showLlmProvider) {
+    overlay = <LlmProviderPage onBack={() => setShowLlmProvider(false)} />
+  } else if (showSearchAdmin) {
+    overlay = <SearchProviderAdminPage onBack={() => setShowSearchAdmin(false)} />
+  } else if (showUserSearchSettings) {
+    overlay = <UserSearchSettingsPage onBack={() => setShowUserSearchSettings(false)} />
+  } else if (showNotebook) {
+    overlay = <NotebookPage onBack={() => setShowNotebook(false)} />
+  } else if (showBots) {
+    overlay = <BotPage onBack={() => setShowBots(false)} />
+  } else if (showNotif) {
+    overlay = (
+      <NotificationPanel
+        items={notifList}
+        unread={notifUnread}
+        onClose={() => setShowNotif(false)}
+        onRead={async (id) => {
+          try {
+            await markNotificationRead(id)
+            setNotifList((prev) => prev.map((n) => (n.id === id ? { ...n, read: true } : n)))
+            setNotifUnread((u) => Math.max(0, u - 1))
+          } catch {
+            // ignore
+          }
+        }}
+        onRefresh={() => void loadNotifList()}
       />
     )
   }
@@ -219,6 +298,18 @@ export default function App() {
           onCoursesRefresh={() => void reloadCourses(false)}
           onDashboard={() => setShowDashboard(true)}
           onGraph={() => setShowGraph(true)}
+          onSkillKnowledge={() => setShowSkillKnowledge(true)}
+          onMcpSettings={() => setShowMcpSettings(true)}
+          onLlmProvider={() => setShowLlmProvider(true)}
+          onSearchAdmin={() => setShowSearchAdmin(true)}
+          onUserSearchSettings={() => setShowUserSearchSettings(true)}
+          onNotebook={() => setShowNotebook(true)}
+          onBots={() => setShowBots(true)}
+          onNotifications={() => {
+            setShowNotif(true)
+            void loadNotifList()
+          }}
+          notifUnread={notifUnread}
           onCloseMobile={closeSidebar}
         />
       </aside>
@@ -265,6 +356,78 @@ export default function App() {
           </div>
         )}
       </main>
+      {overlay && (
+        <div className="fixed inset-0 z-50 bg-slate-50">{overlay}</div>
+      )}
+    </div>
+  )
+}
+
+function NotificationPanel({
+  items,
+  unread,
+  onClose,
+  onRead,
+  onRefresh,
+}: {
+  items: BotNotificationItem[]
+  unread: number
+  onClose: () => void
+  onRead: (id: string) => Promise<void>
+  onRefresh: () => void
+}) {
+  return (
+    <div className="h-full flex flex-col bg-slate-50">
+      <header className="px-6 py-4 bg-white border-b border-slate-200 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-sm">
+            ← 返回
+          </button>
+          <h1 className="text-lg font-semibold text-slate-800">🔔 通知</h1>
+          {unread > 0 && (
+            <span className="text-xs bg-red-500 text-white px-2 py-0.5 rounded-full">{unread}</span>
+          )}
+          <button onClick={onRefresh} className="text-xs text-slate-400 hover:text-slate-600">
+            刷新
+          </button>
+        </div>
+      </header>
+      <div className="flex-1 overflow-y-auto p-6">
+        {items.length === 0 ? (
+          <div className="text-center text-slate-400 py-16">
+            <span className="text-4xl">📭</span>
+            <p className="text-sm mt-2">暂无通知</p>
+            <p className="text-xs mt-1">Bot 定时提醒到点后会出现在这里</p>
+          </div>
+        ) : (
+          <div className="max-w-2xl mx-auto space-y-3">
+            {items.map((n) => (
+              <div
+                key={n.id}
+                className={`p-4 rounded-lg border ${
+                  n.read ? 'bg-white border-slate-200' : 'bg-indigo-50/50 border-indigo-200'
+                }`}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs text-slate-400">
+                    {n.bot_id ? `🤖 ${n.bot_id}` : '通知'} ·{' '}
+                    {new Date(n.created_at * 1000).toLocaleString('zh-CN')}
+                  </span>
+                  {!n.read && (
+                    <button
+                      onClick={() => void onRead(n.id)}
+                      className="text-xs text-indigo-600 hover:underline"
+                    >
+                      标为已读
+                    </button>
+                  )}
+                </div>
+                <p className="text-sm text-slate-700 whitespace-pre-wrap">{n.content}</p>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   )
 }

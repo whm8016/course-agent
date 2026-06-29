@@ -76,7 +76,18 @@ class CircuitBreaker:
 
     def __init__(self, name: str, config: CircuitBreakerConfig | None = None):
         self.name = name
-        self.config = config or CircuitBreakerConfig()
+
+        # 多 worker 下调整阈值: 总阈值 / worker 数 (轻量方案)
+        _workers = int(__import__("os").getenv("BACKEND_WORKERS", "4"))
+        _default_config = CircuitBreakerConfig()
+        if config is None:
+            config = CircuitBreakerConfig(
+                failure_threshold=max(2, _default_config.failure_threshold // _workers),
+                success_threshold=_default_config.success_threshold,
+                open_timeout=_default_config.open_timeout,
+                half_open_max_calls=_default_config.half_open_max_calls,
+            )
+        self.config = config
         self.state = CircuitState.CLOSED
         self.failure_count = 0
         self.success_count = 0
@@ -111,7 +122,7 @@ class CircuitBreaker:
             result = await func(*args, **kwargs)
             await self._on_success()
             return result
-        except Exception as e:
+        except Exception:
             await self._on_failure()
             raise
 
@@ -273,14 +284,30 @@ _llm_circuit_breakers: dict[str, CircuitBreaker] = {}
 
 
 def get_llm_circuit_breaker(name: str = "default") -> CircuitBreaker:
-    """获取指定名称的 LLM 熔断器"""
+    """获取指定名称的 LLM 熔断器
+
+    阈值从 settings 读取（llm_circuit_*），settings 不可用时回退默认值。
+    传给 CircuitBreaker 的 failure_threshold 仍会经其 __init__ 内的
+    BACKEND_WORKERS 除法调整，以适配多 worker 场景。
+    """
     if name not in _llm_circuit_breakers:
+        # 从 settings 读取阈值；失败则回退硬编码默认值（避免循环导入 / 启动期 settings 缺失）
+        try:
+            from settings.base import get_settings
+
+            _s = get_settings()
+            _fail = _s.llm_circuit_failure_threshold
+            _succ = _s.llm_circuit_success_threshold
+            _open = _s.llm_circuit_open_timeout
+        except Exception:  # pragma: no cover
+            _fail, _succ, _open = 5, 2, 30.0
+
         _llm_circuit_breakers[name] = CircuitBreaker(
             name=f"llm_{name}",
             config=CircuitBreakerConfig(
-                failure_threshold=5,
-                success_threshold=2,
-                open_timeout=30.0,
+                failure_threshold=_fail,
+                success_threshold=_succ,
+                open_timeout=_open,
             )
         )
     return _llm_circuit_breakers[name]

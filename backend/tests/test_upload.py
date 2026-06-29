@@ -15,8 +15,9 @@ async def test_upload_requires_auth(client: AsyncClient):
 
 
 @pytest.mark.asyncio
-async def test_upload_rejects_non_image(client: AsyncClient, auth_headers: dict):
-    files = {"file": ("x.txt", io.BytesIO(b"hello"), "text/plain")}
+async def test_upload_rejects_unsupported_type(client: AsyncClient, auth_headers: dict):
+    # upload 现支持图片 + PDF/Word/文本；真正不支持的类型（如可执行文件）才拒绝
+    files = {"file": ("x.exe", io.BytesIO(b"hello"), "application/x-msdownload")}
     r = await client.post("/api/upload", files=files, headers=auth_headers)
     assert r.status_code == 400
 

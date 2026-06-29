@@ -1,0 +1,6 @@
+short_description: "制定解题计划：简短分析 + 有序步骤列表。"
+when_to_use: "解题（deep_solve）回合的第一步必须调用，提交你的解题思路和步骤。"
+input_format: '{"analysis": "一两句话思路", "steps": [{"goal": "简短祈使句"}]}'
+guideline: "计划保持精简（2-6 步，简单题 1 步即可）。steps 每项只需 {goal}，goal 是简短祈使句。必须最先调用，之后逐步用工具求解。"
+note: "仅在解题会话中可用。"
+phase: "synthesis"

@@ -306,7 +306,7 @@ async def run(args: argparse.Namespace) -> None:
     total = len(questions)
 
     print(f"\n{'='*60}")
-    print(f"  电路分析 FAQ 预缓存脚本")
+    print("  电路分析 FAQ 预缓存脚本")
     print(f"  课程 ID: {args.course_id}")
     print(f"  问题数量: {total}")
     print(f"  并发数: {args.concurrency}")
@@ -343,7 +343,7 @@ async def run(args: argparse.Namespace) -> None:
     print(f"\n{'='*60}")
     print(f"  完成！成功: {success}  失败: {failed}  耗时: {elapsed:.1f}s")
     if args.dry_run:
-        print(f"  （预览模式，未写入 Redis）")
+        print("  （预览模式，未写入 Redis）")
     else:
         print(f"  已写入课程 {args.course_id} 的 FAQ 缓存")
     print(f"{'='*60}\n")

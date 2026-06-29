@@ -9,10 +9,15 @@ export interface QuestionRequirement {
 }
 
 export interface QuestionGeneratePayload {
-  kb_name: string
-  count: number
+  /** 统一 WS /api/run/quiz 协议（首条消息默认 start_turn） */
+  course_id: string
+  question: string
+  metadata?: {
+    count?: number
+    requirement?: string
+    [key: string]: unknown
+  }
   language?: string
-  requirement: QuestionRequirement
 }
 
 export interface QuestionMimicPayload {
@@ -61,15 +66,14 @@ export type DeepResearchDepth = 'quick' | 'standard' | 'deep' | 'manual'
 export type DeepResearchSource = 'kb' | 'web' | 'papers'
 
 export interface DeepResearchPayload {
-  type: 'start'
-  topic: string
-  config?: {
+  /** 统一 WS /api/run/deep_research 协议（首条消息默认 start_turn） */
+  course_id: string
+  question: string
+  metadata?: {
     mode?: DeepResearchMode
     depth?: DeepResearchDepth
     sources?: DeepResearchSource[]
   }
-  kb_name?: string
-  research_id?: string
   language?: string
 }
 
@@ -86,7 +90,7 @@ export interface DeepResearchHandlers {
 }
 
 function deepResearchWsUrl(): string {
-  return withToken(`${wsBaseUrl()}/api/deep-research/run`)
+  return withToken(`${wsBaseUrl()}/api/run/deep_research`)
 }
 
 export function connectDeepResearch(
@@ -126,7 +130,7 @@ export function connectDeepResearch(
 }
 
 function questionGenerateWsUrl(): string {
-  return withToken(`${wsBaseUrl()}/api/question/generate`)
+  return withToken(`${wsBaseUrl()}/api/run/quiz`)
 }
 
 function questionMimicWsUrl(): string {

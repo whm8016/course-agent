@@ -19,7 +19,7 @@ from api.courses import invalidate_courses_cache
 from config import KB_STORE_DIR, MAX_KB_UPLOAD_MB
 from core.db.cache import faq_top
 from core.db.database import (
-    AsyncSessionLocal, Enrollment, KBFile, KnowledgeBase, Message,
+    Enrollment, KBFile, KnowledgeBase, Message,
     NotebookEntry, Session, User, get_db,
 )
 from core.rag.ingestion import IndexingControl

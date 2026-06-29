@@ -1,0 +1,146 @@
+# Course Agent Backend - 现代依赖管理配置
+# 使用 uv 进行依赖管理：uv sync 安装依赖，uv lock 生成锁定文件
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "course-agent-backend"
+version = "0.1.0"
+description = "Course Agent Backend - AI-powered tutoring system with RAG and multi-tenant support"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+keywords = ["fastapi", "ai", "llm", "rag", "agent", "tutoring"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Hatch 构建：flat-layout，根目录即包源
+[tool.hatch.build.targets.wheel]
+packages = ["api", "core", "services", "settings"]
+
+# ============================================================
+# 核心依赖 - 生产环境必须
+# ============================================================
+dependencies = [
+    # ── Web framework ────────────────────────────────────────
+    "fastapi",
+    "uvicorn[standard]",
+    "gunicorn",
+    "websockets",
+    "python-multipart",
+
+    # ── LLM / LangChain ecosystem ────────────────────────────
+    "langchain>=0.3,<1.0",
+    "langchain-community>=0.3,<1.0",
+    "langchain-openai>=0.3,<1.0",
+    "langchain-text-splitters>=0.3,<1.0",
+    "langgraph>=0.2,<1.0",
+    "langsmith",
+    "openai",
+
+    # ── RAG / Document processing ───────────────────────────
+    "llama-index-core>=0.12",
+    "llama-index-readers-file>=0.3",
+    "llama-parse",
+    "lightrag-hku==1.5.4",  # 精确锁定，API 不稳定
+
+    # ── Document extractors ──────────────────────────────────
+    "pypdf>=4.0",
+    "python-docx>=1.0",
+    "python-pptx>=0.6",
+    "pymupdf>=1.24.0",
+    "docx2txt",
+    "openpyxl",
+    "pillow",
+    "readability-lxml",
+
+    # ── Database ─────────────────────────────────────────────
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg",
+    "pgvector",
+    "aiosqlite",
+    "alembic",
+    "redis",
+
+    # ── Auth / Security ──────────────────────────────────────
+    "pyjwt[crypto]",
+    "bcrypt",
+    "cryptography>=42",
+
+    # ── Config / Utils ───────────────────────────────────────
+    "python-dotenv",
+    "pydantic>=2",
+    "pydantic-settings>=2.2,<3",
+    "pyyaml>=6.0",
+    "python-json-logger",
+    "jinja2",
+    "defusedxml",
+    "httpx",
+    "requests",
+
+    # ── Rate limiting / Observability ────────────────────────
+    "slowapi",
+    "prometheus-fastapi-instrumentator",
+
+    # ── Background tasks ─────────────────────────────────────
+    "arq",
+
+    # ── Memory ───────────────────────────────────────────────
+    "mem0ai",
+
+    # ── Database drivers ─────────────────────────────────────
+    "psycopg[binary,pool]",
+
+    # ── Search / Tools ───────────────────────────────────────
+    "duckduckgo-search",
+    "mcp",
+    "croniter>=1.3",
+    "json-repair",
+
+    # ── Integrations ─────────────────────────────────────────
+    "qq-botpy>=1.0",
+    "lark-oapi>=1.4",
+]
+
+[project.optional-dependencies]
+# ── 开发依赖 - 测试、Lint ──────────────────────────────────
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/course-agent"
+Repository = "https://github.com/your-org/course-agent"
+
+# ============================================================
+# Ruff 配置（从 ruff.toml 迁移）
+# 仅检查致命问题（pyflakes F + 语法错误 E9）
+# 刻意不启用格式/风格规则，避免对历史代码做大面积改造
+# ============================================================
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+# F  = pyflakes（未用 import/变量、未定义名、重复定义等真错误）
+# E9 = 语法/缩进错误（基本无法运行的代码）
+select = ["F", "E9"]
+
+[tool.ruff.lint.per-file-ignores]
+# 手动调试脚本（已集中到 scripts/debug/，非业务代码）不强制 lint
+"scripts/debug/*" = ["F"]
+
+# ============================================================
+# Pytest 配置（从 pytest.ini 迁移）
+# ============================================================
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -20,6 +20,15 @@ interface Props {
   onCoursesRefresh?: () => void
   onDashboard?: () => void
   onGraph?: () => void
+  onSkillKnowledge?: () => void
+  onMcpSettings?: () => void
+  onLlmProvider?: () => void
+  onSearchAdmin?: () => void
+  onUserSearchSettings?: () => void
+  onNotebook?: () => void
+  onBots?: () => void
+  onNotifications?: () => void
+  notifUnread?: number
   onCloseMobile?: () => void
 }
 
@@ -39,6 +48,15 @@ export default function Sidebar({
   onCoursesRefresh,
   onDashboard,
   onGraph,
+  onSkillKnowledge,
+  onMcpSettings,
+  onLlmProvider,
+  onSearchAdmin,
+  onUserSearchSettings,
+  onNotebook,
+  onBots,
+  onNotifications,
+  notifUnread,
   onCloseMobile,
 }: Props) {
   const [joinCode, setJoinCode] = useState('')
@@ -190,6 +208,19 @@ export default function Sidebar({
             管理后台
           </button>
         )}
+        {onNotifications && (
+          <button
+            onClick={onNotifications}
+            className="w-full text-xs text-center text-rose-600 hover:text-rose-800 py-1 rounded hover:bg-rose-50 transition mb-1"
+          >
+            🔔 通知
+            {(notifUnread ?? 0) > 0 && (
+              <span className="ml-1 inline-flex items-center justify-center min-w-[16px] h-4 px-1 text-[10px] bg-red-500 text-white rounded-full align-middle">
+                {notifUnread! > 99 ? '99+' : notifUnread}
+              </span>
+            )}
+          </button>
+        )}
         {onDashboard && (
           <button
             onClick={onDashboard}
@@ -204,6 +235,62 @@ export default function Sidebar({
             className="w-full text-xs text-center text-blue-600 hover:text-blue-800 py-1 rounded hover:bg-blue-50 transition mb-1"
           >
             知识图谱
+          </button>
+        )}
+        {onSkillKnowledge && (
+          <button
+            onClick={onSkillKnowledge}
+            className="w-full text-xs text-center text-purple-600 hover:text-purple-800 py-1 rounded hover:bg-purple-50 transition mb-1"
+          >
+            技能知识包
+          </button>
+        )}
+        {onMcpSettings && (
+          <button
+            onClick={onMcpSettings}
+            className="w-full text-xs text-center text-cyan-600 hover:text-cyan-800 py-1 rounded hover:bg-cyan-50 transition mb-1"
+          >
+            MCP 服务器配置
+          </button>
+        )}
+        {role === 'admin' && onLlmProvider && (
+          <button
+            onClick={onLlmProvider}
+            className="w-full text-xs text-center text-fuchsia-600 hover:text-fuchsia-800 py-1 rounded hover:bg-fuchsia-50 transition mb-1"
+          >
+            🤖 模型供应商
+          </button>
+        )}
+        {role === 'admin' && onSearchAdmin && (
+          <button
+            onClick={onSearchAdmin}
+            className="w-full text-xs text-center text-fuchsia-600 hover:text-fuchsia-800 py-1 rounded hover:bg-fuchsia-50 transition mb-1"
+          >
+            🔍 搜索引擎（默认）
+          </button>
+        )}
+        {onUserSearchSettings && (
+          <button
+            onClick={onUserSearchSettings}
+            className="w-full text-xs text-center text-cyan-600 hover:text-cyan-800 py-1 rounded hover:bg-cyan-50 transition mb-1"
+          >
+            🔍 我的搜索设置
+          </button>
+        )}
+        {onNotebook && (
+          <button
+            onClick={onNotebook}
+            className="w-full text-xs text-center text-amber-600 hover:text-amber-800 py-1 rounded hover:bg-amber-50 transition mb-1"
+          >
+            题目笔记本
+          </button>
+        )}
+        {onBots && (
+          <button
+            onClick={onBots}
+            className="w-full text-xs text-center text-orange-600 hover:text-orange-800 py-1 rounded hover:bg-orange-50 transition mb-1"
+          >
+            Bot 管理
           </button>
         )}
         <div className="text-xs text-slate-400 space-y-0.5">

@@ -13,7 +13,6 @@ os.environ.setdefault("TESTING", "1")
 
 import pytest
 from starlette.testclient import TestClient
-from starlette.websockets import WebSocketDisconnect
 
 
 @pytest.fixture(scope="module")

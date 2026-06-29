@@ -34,6 +34,9 @@ backend/lightrag_store/
 *.db
 *.sqlite3
 
+# --- Secrets in data files (real keys should use .env) ---
+backend/data/model_catalog.json
+
 # --- Logs & debug ---
 *.log
 logs/

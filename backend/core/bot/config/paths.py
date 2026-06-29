@@ -1,13 +1,11 @@
 """Path helpers for TutorBot workspace."""
 
-import os
 from pathlib import Path
 
 
 def get_bot_workspace_root() -> Path:
-    from config import BASE_DIR
-    default = os.path.join(BASE_DIR, "data", "tutorbot")
-    return Path(os.getenv("TUTORBOT_WORKSPACE_DIR", default))
+    from config import TUTORBOT_WORKSPACE_DIR
+    return Path(TUTORBOT_WORKSPACE_DIR)
 
 
 def get_media_dir(channel: str = "") -> Path:

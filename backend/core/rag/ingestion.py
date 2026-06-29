@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -30,6 +31,8 @@ from core.rag.llamaindex.indexing_documents import (
 )
 
 logger = logging.getLogger(__name__)
+
+from core.observability import log_flow  # noqa: E402
 
 
 # ── 索引控制（暂停/终止）─────────────────────────────────────────────────────
@@ -342,6 +345,9 @@ async def ingest_to_lightrag(
                 token_estimate=token_estimate,
             )
 
+    _t0 = time.perf_counter()
+    log_flow("index.start", course_id=course_id, files=len(file_paths),
+             resume_from_chunk=resume_from_chunk)
     ok, reason = is_lightrag_available()
     if not ok:
         raise RuntimeError(f"LightRAG 不可用: {reason}")
@@ -466,7 +472,6 @@ async def ingest_to_lightrag(
 
     _QUEUE_MAXSIZE = 3
     chunk_queue: asyncio.Queue[list[str] | None] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
-    consumer_error: list[Exception] = []
 
     async def _producer() -> None:
         """将 chunks 按 batch_size 切分后放入队列，结束时放入 None 作为哨兵。"""
@@ -564,6 +569,9 @@ async def ingest_to_lightrag(
         total,
         images_processed,
     )
+    log_flow("index.complete", course_id=course_id,
+             elapsed_ms=int((time.perf_counter() - _t0) * 1000),
+             chunks=total, files=len(file_paths), images=images_processed)
     return {
         "status": "done",
         "chunks": total,

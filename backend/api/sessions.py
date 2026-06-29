@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
 from api.courses import check_course_access
-from core.db.cache import cache_delete, cache_get, cache_set
+from core.db.cache import cache_get, cache_set
 from core.db.database import get_db
 from core.memory.memory import (
     add_message,
@@ -44,6 +44,7 @@ class AddMessageBody(BaseModel):
     content: str
     msg_type: str = "text"
     metadata: dict | None = None
+    attachments: list[dict] | None = None
 
 
 async def _check_session_owner(db: AsyncSession, session_id: str, user_id: str) -> dict:
@@ -160,5 +161,11 @@ async def api_add_message(
     db: AsyncSession = Depends(get_db),
 ):
     await _check_session_owner(db, session_id, user["id"])
-    msg = await add_message(db, session_id, body.role, body.content, body.msg_type, body.metadata)
+    meta = dict(body.metadata or {})
+    if body.attachments:
+        # 清 base64（对标 DeepTutor 铁律：持久化只存元数据，省 DB 空间 + 不泄露原文字节）
+        meta["attachments"] = [
+            {k: v for k, v in a.items() if k != "base64"} for a in body.attachments
+        ]
+    msg = await add_message(db, session_id, body.role, body.content, body.msg_type, meta)
     return msg

@@ -66,10 +66,18 @@ export interface SSEEvent {
   call_state?: string
 }
 
+export interface AttachmentInfo {
+  type: 'image' | 'file' | 'pdf'
+  url: string
+  filename?: string
+  mime_type?: string
+}
+
 export interface Message {
   role: 'user' | 'assistant'
   content: string
   image?: string
+  attachments?: AttachmentInfo[]
   type?: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'quiz'
   metadata?: {
     intent?: string

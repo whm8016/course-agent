@@ -13,7 +13,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
-from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, TEXT_MODEL, FAST_MODEL
+from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, FAST_MODEL
 
 logger = logging.getLogger(__name__)
 

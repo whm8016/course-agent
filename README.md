@@ -6,10 +6,12 @@
 
 - **多课程 / 多知识库**：管理员/教师创建课程，上传文档建立知识库；学生用课程码自助入课
 - **RAG 对话**：基于 LightRAG 图谱检索 + LlamaIndex 向量检索，支持知识溯源
-- **Deep Research**：多阶段自动研究 Pipeline（Planning → Searching → Reporting），进度实时推送
-- **Deep Solve**：Plan → ReAct → Write 三阶段解题，支持 RAG 工具调用
-- **智能出题**：从知识库自动生成题目，支持仿题与答题交互
-- **流式响应**：SSE + WebSocket 双通道推送 thinking / trace / progress / result 等事件
+- **四大能力**（统一通过 `chat_mode` 或 WS `/api/run/{cap}` 触发）：
+  - **Chat**：tool_calls 驱动的 Agent Loop，安全护栏 + RAG/web 工具
+  - **Deep Solve**：单 loop + `solve_plan/finish_step/replan` 工具 + `SolveSession` 状态机
+  - **Deep Research**：rephrase → decompose → research(队列+并行) → reporting(带引用)
+  - **Quiz**：explore → plan → quiz，6 类题型 + JSON schema 校验
+- **流式响应**：SSE + WebSocket 双通道推送 thinking / tool_call / token / answer 等事件（真流式）
 - **会话持久化**：PostgreSQL 存储多会话历史，支持对话模式切换
 
 ## 技术栈
@@ -30,44 +32,32 @@
 ## 架构
 
 ```
-                    ┌─────────────────────────────────────────┐
-                    │            Nginx (反向代理)               │
-                    └──────────┬──────────────────────────────┘
-                               │
-               ┌───────────────┴───────────────┐
-               │     FastAPI (4 workers)        │
-               │  /api/chat   SSE流式对话       │
-               │  /api/deep-research  WS        │
-               │  /api/deep-solve     WS        │
-               │  /api/question       WS        │
-               │  /api/admin  /api/teacher      │
-               └──────┬────────────┬────────────┘
-                      │            │
-          ┌───────────┘     ┌──────┘
-          │                 │
-    ┌─────▼─────┐    ┌──────▼──────┐
-    │PostgreSQL  │    │   Redis      │
-    │(会话/用户  │    │(缓存/限流/   │
-    │ /知识库)   │    │ ARQ 任务队列)│
-    └───────────┘    └──────┬──────┘
-                            │ RPUSH job:*:events
-                     ┌──────▼──────┐
-                     │ ARQ Worker  │
-                     │(索引/研究/  │
-                     │  解题任务)  │
-                     └─────────────┘
+┌───────────────────────────────────────────────────────┐
+│  入口                                                  │
+│  POST /api/chat?chat_mode=...  (SSE 流式)             │
+│  WS   /api/run/{capability}     (统一 WS)             │
+│  Bot  QQ / 飞书                 (共享同一引擎)         │
+└────────────────────────┬──────────────────────────────┘
+                         │
+┌────────────────────────▼──────────────────────────────┐
+│  TurnRuntimeManager  →  CourseOrchestrator            │
+│  (按 mode 选 Capability，StreamBus fan-out 事件)       │
+│   ChatCapability / DeepSolve / DeepResearch / Quiz     │
+│   → run_agent_loop (tool_calls 多轮，真流式)           │
+└──────┬────────────────────────────────┬───────────────┘
+       │ 工具面                          │ 双引擎 RAG
+┌──────▼──────────────┐    ┌────────────▼──────────────┐
+│ rag / web_search    │    │ LightRAG(图谱+向量)        │
+│ ask_user / solve_*  │    │ LlamaIndex(多模态文档)     │
+└─────────────────────┘    └───────────────────────────┘
+       │
+┌──────▼──────────────────────────────────────────────┐
+│  PostgreSQL（用户/会话/KB）│ Redis（缓存/队列）        │
+│  ARQ Worker（索引/解题/研究/定时总结）               │
+└─────────────────────────────────────────────────────┘
 ```
 
-### 长任务执行路径
-
-```
-客户端 WS ──► FastAPI enqueue_job ──► Redis 任务队列
-                     │
-                     └─► WS 轮询 LRANGE job:{id}:events
-                                          ▲
-                                          │ RPUSH 进度事件
-                              ARQ Worker 运行 Pipeline
-```
+事件经 `StreamBus` 统一 fan-out 给 SSE / WebSocket 消费者（含断线回放）。详见 [`backend/docs/ARCHITECTURE.md`](backend/docs/ARCHITECTURE.md)。
 
 ## 快速开始
 
@@ -138,43 +128,56 @@ npm test
 ```
 backend/
 ├── main.py                  # FastAPI 入口、lifespan、全局异常处理
-├── worker.py                # ARQ Worker：索引/研究/解题任务
+├── worker.py                # ARQ Worker：索引/解题/研究/定时总结
 ├── config.py                # 环境变量统一配置
 ├── api/
 │   ├── auth.py              # /api/auth  注册/登录/JWT
-│   ├── chat.py              # /api/chat  SSE 流式对话（LightRAG / 普通）
+│   ├── chat.py              # /api/chat  SSE 流式对话（chat_mode 选能力）
+│   ├── run.py               # WS /api/run/{capability}  统一 WS 入口
 │   ├── courses.py           # /api/courses  课程列表 + 入课
 │   ├── sessions.py          # /api/sessions  会话 CRUD
-│   ├── upload.py            # /api/upload  图片上传（鉴权）
+│   ├── upload.py            # /api/upload  文件上传（鉴权）
 │   ├── admin.py             # /api/admin  知识库管理（仅管理员）
 │   ├── teacher.py           # /api/teacher  课程 CRUD + 索引（教师）
 │   ├── llama_rag.py         # /api/admin/kb/../llamaindex  向量索引
-│   ├── deep_research.py     # /api/deep-research/run  WS
-│   ├── deep_solve.py        # /api/deep-solve/run  WS
-│   ├── question.py          # /api/question  出题 WS
+│   ├── question.py          # /api/question  出题
 │   ├── lightrag.py          # /api/lightrag  LightRAG 查询接口
 │   ├── memory.py            # /api/memory  用户记忆管理
-│   └── sse.py               # /api/sse  SSE 示例
+│   └── bot.py               # IM Bot webhook（QQ / 飞书）
 ├── core/
-│   ├── arq_pool.py          # ARQ 连接池单例
+│   ├── orchestrator.py      # CourseOrchestrator：按 mode 选 Capability
+│   ├── registry.py          # CapabilityRegistry（chat/solve/research/quiz）
+│   ├── capability_protocol.py  # BaseCapability 协议
+│   ├── context.py           # UnifiedContext（单轮上下文）
+│   ├── stream_bus.py        # StreamBus 事件总线（fan-out + 回放）
+│   ├── prompt_loader.py     # YAML 提示词加载（四能力共用）
+│   ├── agentic/
+│   │   ├── loop.py          # run_agent_loop：tool_calls 调度内核
+│   │   └── tool_dispatch.py # 并行工具执行（≤8 并发）
+│   ├── capabilities/        # chat_pipeline + 各 capability 薄壳
+│   ├── solve/               # deep_solve：pipeline + SolveSession + 工具
+│   ├── research/            # deep_research：pipeline + 动态队列 + CitationManager
+│   ├── question/            # quiz：explore → plan → quiz pipeline
+│   ├── agent/               # tool_registry（rag/web_search/ask_user/solve_*）
 │   ├── db/
 │   │   ├── database.py      # SQLAlchemy 模型 + 异步引擎
 │   │   ├── cache.py         # Redis 缓存工具（FAQ / 课程 / 权限）
 │   │   └── limiter.py       # slowapi 限流器（测试环境可禁用）
 │   ├── llm/
-│   │   ├── llm.py           # AsyncOpenAI 客户端封装
-│   │   └── prompts.py       # 系统提示词管理
+│   │   ├── llm.py           # AsyncOpenAI 客户端封装 + 14 provider 注册表
+│   │   └── reliability.py   # 熔断器 + 重试 + fallback
 │   └── rag/
 │       ├── lightrag_engine.py       # LightRAG 检索引擎
 │       ├── ingestion.py             # 文档摄入（LlamaIndex → LightRAG）
 │       └── llamaindex/              # LlamaIndex Pipeline
+├── services/session/        # TurnRuntimeManager（单回合生命周期）
 ├── tests/
 │   ├── conftest.py          # pytest fixtures（SQLite / httpx / 认证头）
-│   ├── test_auth.py         # 注册/登录/鉴权测试
-│   ├── test_sessions.py     # 会话 CRUD 测试
-│   ├── test_admin.py        # 管理员权限测试
-│   ├── test_upload.py       # 文件上传/访问鉴权测试
-│   ├── test_chat.py         # 对话接口测试
+│   ├── test_chat_happy.py   # 对话接口测试
+│   ├── test_capabilities.py # Capability 注册测试
+│   ├── test_orchestrator.py # 编排选路测试
+│   ├── test_agent_loop.py   # Agent Loop 单测
+│   ├── test_solve_session.py / test_quiz_pipeline.py / test_research_pipeline.py
 │   └── test_websocket.py    # WS 鉴权测试
 
 frontend/src/

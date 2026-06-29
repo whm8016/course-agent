@@ -18,18 +18,12 @@ async def test_create_session_requires_course_access(client: AsyncClient, auth_h
 @pytest.mark.asyncio
 async def test_session_ownership_isolation(client: AsyncClient):
     u1 = f"sess_u1_{__import__('os').urandom(3).hex()}"
-    u2 = f"sess_u2_{__import__('os').urandom(3).hex()}"
 
     r1 = await client.post(
         "/api/auth/register",
         json={"username": u1, "password": "pass1234"},
     )
-    r2 = await client.post(
-        "/api/auth/register",
-        json={"username": u2, "password": "pass1234"},
-    )
     h1 = {"Authorization": f"Bearer {r1.json()['token']}"}
-    h2 = {"Authorization": f"Bearer {r2.json()['token']}"}
 
     # Admin can create session on builtin course (seeded stamp/circuit)
     admin_reg = await client.post(
@@ -134,3 +128,43 @@ async def test_delete_session(client: AsyncClient, admin_headers: dict):
     assert dr.json().get("ok") is True
     gr = await client.get(f"/api/sessions/{sid}", headers=admin_headers)
     assert gr.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_message_attachments_persisted_and_echoed(client: AsyncClient, admin_headers: dict):
+    """POST /messages 带 attachments → GET 回显 metadata.attachments 且 base64 被清。
+
+    验证附件随消息持久化（对标 DeepTutor attachments_json），且持久化层剥掉
+    base64（省 DB 空间 + 不泄露原文字节）。
+    """
+    cr = await client.post(
+        "/api/sessions",
+        headers=admin_headers,
+        json={"course_id": "tc_att", "title": "Attachments"},
+    )
+    sid = cr.json()["id"]
+
+    await client.post(
+        f"/api/sessions/{sid}/messages",
+        headers=admin_headers,
+        json={
+            "role": "user",
+            "content": "看这张图",
+            "attachments": [
+                {
+                    "type": "image",
+                    "url": "/api/uploads/1_abc.png",
+                    "filename": "abc.png",
+                    "base64": "SHOULD_BE_STRIPPED",
+                },
+            ],
+        },
+    )
+
+    r = await client.get(f"/api/sessions/{sid}/messages", headers=admin_headers)
+    msgs = r.json()["messages"]
+    assert len(msgs) >= 1
+    atts = msgs[-1].get("metadata", {}).get("attachments")
+    assert atts and len(atts) == 1
+    assert atts[0]["url"] == "/api/uploads/1_abc.png"
+    assert "base64" not in atts[0]  # DeepTutor 铁律：持久化清 base64

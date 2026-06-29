@@ -5,7 +5,6 @@ import csv
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 from . import config
 
@@ -90,7 +89,7 @@ def generate_markdown(
     cat_counts: dict[str, int] = {}
     for item in qa_items:
         cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
-    lines.append(f"  - " + " / ".join(f"{k}{v}条" for k, v in cat_counts.items()))
+    lines.append("  - " + " / ".join(f"{k}{v}条" for k, v in cat_counts.items()))
     lines.append(f"- RAG 模式：{' / '.join(modes)}")
     lines.append(f"- 评测指标：{' / '.join(metric_names)}")
     lines.append("")

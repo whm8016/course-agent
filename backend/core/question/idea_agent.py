@@ -5,7 +5,6 @@ IdeaAgent - Generate candidate question directions from topic and preference.
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 from config import QUESTION_USE_LLAMAINDEX
@@ -16,7 +15,6 @@ from core.question.json_parser import parse_json_response
 from core.question.models import QuestionTemplate
 from core.question.trace import build_trace_metadata, new_call_id
 
-from core.rag.rag import retrieve_context
 
 
 BATCH_SIZE = 5

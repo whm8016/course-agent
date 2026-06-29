@@ -18,7 +18,6 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     text,
-    func,
 )
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
@@ -64,6 +63,8 @@ class User(Base):
     display_name = Column(String(64), nullable=False, default="")
     summary_memory = Column(Text, nullable=False, default="")
     profile_memory = Column(Text, nullable=False, default="{}")
+    scope_memory = Column(Text, nullable=False, default="")
+    preferences_memory = Column(Text, nullable=False, default="")
     knowledge_graph = Column(JSON, nullable=False, default=lambda: {"nodes": [], "edges": []})
     error_graph = Column(JSON, nullable=False, default=lambda: {"nodes": [], "edges": []})
     role = Column(String(16), nullable=False, default="student")
@@ -81,6 +82,11 @@ class Session(Base):
     mode = Column(String(32), nullable=False, default="chat")
     created_at = Column(Float, nullable=False, default=time.time)
     updated_at = Column(Float, nullable=False, default=time.time)
+
+    # L2 摘要层字段
+    summary = Column(Text, nullable=False, default="")  # 压缩后的摘要文本
+    summary_up_to_msg_id = Column(String(32), nullable=True)  # 摘要覆盖到哪条消息
+    summary_updated_at = Column(Float, nullable=True)  # 摘要最后更新时间
 
     messages = relationship("Message", back_populates="session", cascade="all, delete-orphan")
 
@@ -258,6 +264,89 @@ class UserSocialBinding(Base):
     )
 
 
+class BotNotification(Base):
+    """Bot 定时提醒/通知触达 web 端的离线存储（按 user_id 隔离）。
+
+    cron 到点触发 bot 生成提醒内容后落库，前端轮询拉取——补齐 web 渠道「定时通知」
+    的最后一公里（IM 渠道 QQ/飞书仍走 channel.send 实时推送，不落此表）。
+    """
+
+    __tablename__ = "bot_notifications"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(12))
+    user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    bot_id = Column(String(64), nullable=False, default="")
+    content = Column(Text, nullable=False, default="")
+    read = Column(Boolean, nullable=False, default=False)
+    created_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (Index("idx_bot_notif_user", "user_id", "read", "created_at"),)
+
+
+class UserMCPEnrollment(Base):
+    """用户 ↔ MCP server 启用关系（server 进程系统级共享，此表仅控用户级可见性）。
+
+    对标 Enrollment 范式。无记录 = 未配置 → 运行时默认全部可用（向后兼容）；
+    有记录 = 用户已自定义 → 仅启用集合内的 server 工具对该用户可见。
+    """
+
+    __tablename__ = "user_mcp_enrollments"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(12))
+    user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    server_name = Column(String(64), nullable=False)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "server_name", name="uq_user_mcp_enrollment"),
+        Index("idx_user_mcp_enrollment_user", "user_id"),
+    )
+
+
+class UserSearchConfig(Base):
+    """用户级联网搜索配置覆盖（admin 配全局默认 data/search_config.json，此表存用户自定义）。
+
+    无记录 = 用 admin 默认（+env）；有记录 = 字段级覆盖（user 非空字段优先于 admin/env）。
+    user_id 唯一（一个用户一条）。对标 UserMCPEnrollment 的 per-user 范式。
+    """
+
+    __tablename__ = "user_search_configs"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(12))
+    user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    provider = Column(String(32), nullable=False, default="")  # 空=不覆盖，用 admin/env
+    api_key = Column(String(256), nullable=False, default="")
+    base_url = Column(String(512), nullable=False, default="")
+    max_results = Column(Integer, nullable=False, default=0)  # 0=不覆盖
+    proxy = Column(String(512), nullable=False, default="")
+    created_at = Column(Float, nullable=False, default=time.time)
+
+
+class UserLLMProvider(Base):
+    """用户级 LLM provider 配置（多租户：每个用户可配自己的 API key + 模型，key 加密存储）。
+
+    无记录 = 用平台默认（model_catalog.json active profile / .env）。
+    有记录 = 覆盖（用户自配 provider 优先于平台）。
+    user_id 唯一（一个用户一条活跃配置）。
+    对标 UserSearchConfig / UserMCPEnrollment 的 per-user 范式。
+    """
+
+    __tablename__ = "user_llm_providers"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(12))
+    user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, unique=True)
+    binding = Column(String(32), nullable=False, default="")  # 供应商标识，如 "deepseek" / "dashscope"
+    api_key_encrypted = Column(String(512), nullable=False, default="")  # Fernet 加密后的密文
+    base_url = Column(String(512), nullable=False, default="")
+    api_version = Column(String(32), nullable=False, default="")
+    text_model = Column(String(64), nullable=False, default="")
+    fast_model = Column(String(64), nullable=False, default="")
+    vision_model = Column(String(64), nullable=False, default="")
+    updated_at = Column(Float, nullable=False, default=time.time)
+    created_at = Column(Float, nullable=False, default=time.time)
+
+
 async def _ensure_column(conn, table_name: str, column_name: str, ddl: str):
     """Add a column only if it does not already exist (dialect-aware)."""
     dialect = conn.dialect.name
@@ -327,6 +416,18 @@ async def init_db():
             "users",
             "is_admin",
             "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE",
+        )
+        await _ensure_column(
+            conn,
+            "users",
+            "scope_memory",
+            "ALTER TABLE users ADD COLUMN scope_memory TEXT NOT NULL DEFAULT ''",
+        )
+        await _ensure_column(
+            conn,
+            "users",
+            "preferences_memory",
+            "ALTER TABLE users ADD COLUMN preferences_memory TEXT NOT NULL DEFAULT ''",
         )
         await _ensure_column(
             conn,

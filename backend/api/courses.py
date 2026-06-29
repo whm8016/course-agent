@@ -1,4 +1,3 @@
-import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -6,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
-from core.db.cache import cache_delete, cache_get, cache_set, course_access_get, course_access_set, course_access_invalidate
+from core.db.cache import cache_delete, cache_get, cache_set, course_access_get, course_access_set
 from core.db.database import Enrollment, KnowledgeBase, get_db
 
 router = APIRouter()

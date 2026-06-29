@@ -1,0 +1,6 @@
+short_description: "当前思路卡住或被证伪时替换计划。"
+when_to_use: "仅当解题方向确实需要修正时使用，不是小调整。给出失败原因和新的有序步骤。"
+input_format: '{"reason": "当前计划为何失败、要怎么改", "steps": [{"goal": "新的简短步骤"}]}'
+guideline: "有次数上限，仅用于真正的方向修正，不要反复 replan。预算耗尽则基于已有材料收尾，不要再 replan。"
+note: "仅在解题会话中可用。"
+phase: "synthesis"

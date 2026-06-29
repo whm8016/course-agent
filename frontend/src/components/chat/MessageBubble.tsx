@@ -83,11 +83,28 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
 
   if (isUser) {
     const userContent = renderedContent
+    const docAtts = (message.attachments || []).filter((a) => a.type !== 'image')
+    // 无 blob 预览（历史回显）时图片以文件名 chip 呈现：/api/uploads 需鉴权，不能直接 <img>
+    const imageChips = message.image ? [] : (message.attachments || []).filter((a) => a.type === 'image')
     return (
       <div className="flex justify-end mb-4">
         <div className="max-w-[92%] md:max-w-[75%] rounded-2xl px-4 py-3 bg-indigo-600 text-white rounded-br-md">
           {message.image && (
             <img src={message.image} alt="上传的图片" className="max-w-[280px] rounded-lg mb-2" />
+          )}
+          {(imageChips.length > 0 || docAtts.length > 0) && (
+            <div className="flex flex-wrap gap-1.5 mb-2">
+              {imageChips.map((a, i) => (
+                <span key={`img-${i}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white/15 text-xs">
+                  📷 {a.filename || '图片'}
+                </span>
+              ))}
+              {docAtts.map((a, i) => (
+                <span key={`doc-${i}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white/15 text-xs">
+                  📎 {a.filename || '文档'}
+                </span>
+              ))}
+            </div>
           )}
           <div className="text-sm leading-relaxed markdown-body markdown-user">
             <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>

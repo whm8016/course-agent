@@ -2,11 +2,10 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 import logging
-import os
 import time
 from collections.abc import AsyncGenerator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -16,6 +15,8 @@ from config import (
     EMBEDDING_API_KEY,
     EMBEDDING_BASE_URL,
     EMBEDDING_MODEL,
+    EXTRACT_MODEL,
+    KEYWORD_MODEL,
     KNOWLEDGE_DIR,
     LIGHTRAG_EMBEDDING_DIM,
     LIGHTRAG_ENABLED,
@@ -29,10 +30,23 @@ from config import (
     LIGHTRAG_STREAM_CONTEXT_MAX_CHARS,
     LIGHTRAG_TOP_K,
     LIGHTRAG_WORKDIR,
+    LIGHTRAG_SAFE_TOP_K,
+    LIGHTRAG_CHUNK_TOP_K,
+    LIGHTRAG_MAX_TOTAL_TOKENS,
+    LIGHTRAG_MAX_ENTITY_TOKENS,
+    LIGHTRAG_MAX_RELATION_TOKENS,
+    LIGHTRAG_MAX_HISTORY_MESSAGES,
+    LIGHTRAG_MAX_HISTORY_CHARS,
+    LIGHTRAG_LLM_SYSTEM_MAX_CHARS,
     TEXT_MODEL,
 )
 from core.llm.llm import chat_stream
 from core.llm.prompts import get_course_prompt
+from core.observability import log_flow
+from core.observability.langsmith_trace import safe_traceable
+
+if TYPE_CHECKING:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +54,8 @@ try:
     from lightrag import LightRAG, QueryParam
     from lightrag.llm.openai import openai_complete_if_cache, openai_embed
     from lightrag.utils import wrap_embedding_func_with_attrs
-
+    from lightrag.llm_roles import RoleLLMConfig  # 1.5.4+
+    _HAS_ROLE_CONFIG = True
     LIGHTRAG_IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # pragma: no cover - import availability branch
     LightRAG = None  # type: ignore[assignment]
@@ -48,6 +63,8 @@ except Exception as exc:  # pragma: no cover - import availability branch
     openai_complete_if_cache = None  # type: ignore[assignment]
     openai_embed = None  # type: ignore[assignment]
     wrap_embedding_func_with_attrs = None  # type: ignore[assignment]
+    RoleLLMConfig = None  # type: ignore[assignment]
+    _HAS_ROLE_CONFIG = False
     LIGHTRAG_IMPORT_ERROR = exc
 
 _instances: OrderedDict[str, Any] = OrderedDict()
@@ -98,13 +115,13 @@ def _is_fatal_llm_error(exc: Exception) -> bool:
 
 # DashScope compatible API rejects oversized input (>30720).
 # Use conservative hard caps even if .env config is too aggressive.
-_SAFE_TOP_K = min(LIGHTRAG_TOP_K, int(os.getenv("LIGHTRAG_SAFE_TOP_K", "10")))
-_SAFE_CHUNK_TOP_K = min(int(os.getenv("LIGHTRAG_CHUNK_TOP_K", "8")), _SAFE_TOP_K)
-_SAFE_MAX_TOTAL_TOKENS = min(int(os.getenv("LIGHTRAG_MAX_TOTAL_TOKENS", "22000")), 26000)
-_SAFE_MAX_ENTITY_TOKENS = min(int(os.getenv("LIGHTRAG_MAX_ENTITY_TOKENS", "4000")), 6000)
-_SAFE_MAX_RELATION_TOKENS = min(int(os.getenv("LIGHTRAG_MAX_RELATION_TOKENS", "4000")), 6000)
-_SAFE_MAX_HISTORY_MESSAGES = int(os.getenv("LIGHTRAG_MAX_HISTORY_MESSAGES", "8"))
-_SAFE_MAX_HISTORY_CHARS = int(os.getenv("LIGHTRAG_MAX_HISTORY_CHARS", "8000"))
+_SAFE_TOP_K = min(LIGHTRAG_TOP_K, LIGHTRAG_SAFE_TOP_K)
+_SAFE_CHUNK_TOP_K = min(LIGHTRAG_CHUNK_TOP_K, _SAFE_TOP_K)
+_SAFE_MAX_TOTAL_TOKENS = min(LIGHTRAG_MAX_TOTAL_TOKENS, 26000)
+_SAFE_MAX_ENTITY_TOKENS = min(LIGHTRAG_MAX_ENTITY_TOKENS, 6000)
+_SAFE_MAX_RELATION_TOKENS = min(LIGHTRAG_MAX_RELATION_TOKENS, 6000)
+_SAFE_MAX_HISTORY_MESSAGES = LIGHTRAG_MAX_HISTORY_MESSAGES
+_SAFE_MAX_HISTORY_CHARS = LIGHTRAG_MAX_HISTORY_CHARS
 
 _AUTO_INDEX_TTL_SEC = max(0, LIGHTRAG_AUTO_INDEX_TTL_SEC)
 
@@ -123,6 +140,7 @@ def is_lightrag_available() -> tuple[bool, str]:
     return True, ""
 
 
+@safe_traceable(name="lightrag.llm", run_type="llm")
 async def _llm_model_func(
     prompt: str,
     system_prompt: str | None = None,
@@ -131,7 +149,7 @@ async def _llm_model_func(
     **kwargs: Any,
 ) -> str:
     assert openai_complete_if_cache is not None
-    max_sys_chars = int(os.getenv("LIGHTRAG_LLM_SYSTEM_MAX_CHARS", "24000"))
+    max_sys_chars = LIGHTRAG_LLM_SYSTEM_MAX_CHARS
     safe_system_prompt = system_prompt
     if max_sys_chars > 0 and safe_system_prompt and len(safe_system_prompt) > max_sys_chars:
         safe_system_prompt = safe_system_prompt[:max_sys_chars]
@@ -152,6 +170,57 @@ async def _llm_model_func(
         # LightRAG 内部会捕获此异常并继续，但我们在此先记录
         _llm_error_log.append(exc)
         logger.error("LLM 调用失败（已记录）: %s", exc)
+        raise
+
+
+@safe_traceable(name="lightrag.extract_llm", run_type="llm")
+async def _extract_llm_func(
+    prompt: str,
+    system_prompt: str | None = None,
+    history_messages: list[dict] | None = None,
+    **kwargs: Any,
+) -> str:
+    """EXTRACT 角色专用：使用低成本模型（qwen-turbo）进行实体提取。"""
+    assert openai_complete_if_cache is not None
+    max_sys_chars = LIGHTRAG_LLM_SYSTEM_MAX_CHARS
+    safe_system_prompt = system_prompt
+    if max_sys_chars > 0 and safe_system_prompt and len(safe_system_prompt) > max_sys_chars:
+        safe_system_prompt = safe_system_prompt[:max_sys_chars]
+    try:
+        return await openai_complete_if_cache(
+            EXTRACT_MODEL,
+            prompt,
+            system_prompt=safe_system_prompt,
+            history_messages=history_messages or [],
+            keyword_extraction=False,
+            api_key=DASHSCOPE_API_KEY,
+            base_url=DASHSCOPE_BASE_URL,
+            **kwargs,
+        )
+    except Exception as exc:
+        _llm_error_log.append(exc)
+        logger.error("EXTRACT LLM 调用失败（已记录）: %s", exc)
+        raise
+
+
+@safe_traceable(name="lightrag.keyword_llm", run_type="llm")
+async def _keyword_llm_func(
+    prompt: str,
+    **kwargs: Any,
+) -> str:
+    """KEYWORD 角色专用：使用低成本模型（qwen-turbo）进行关键词提取。"""
+    assert openai_complete_if_cache is not None
+    try:
+        return await openai_complete_if_cache(
+            KEYWORD_MODEL,
+            prompt,
+            api_key=DASHSCOPE_API_KEY,
+            base_url=DASHSCOPE_BASE_URL,
+            **kwargs,
+        )
+    except Exception as exc:
+        _llm_error_log.append(exc)
+        logger.error("KEYWORD LLM 调用失败（已记录）: %s", exc)
         raise
 
 
@@ -245,13 +314,27 @@ async def _get_instance(course_id: str):
                 evicted_id, LIGHTRAG_LRU_CAPACITY,
             )
 
-        os.makedirs(LIGHTRAG_WORKDIR, exist_ok=True)
+        Path(LIGHTRAG_WORKDIR).mkdir(parents=True, exist_ok=True)
         assert LightRAG is not None
         _extra_kwargs: dict[str, Any] = {}
         import inspect
         _sig = inspect.signature(LightRAG.__init__)
         if "llm_model_max_async" in _sig.parameters:
             _extra_kwargs["llm_model_max_async"] = LIGHTRAG_MAX_ASYNC
+
+        # 1.5.4+ 分角色 LLM 配置：EXTRACT/KEYWORD 用低成本模型
+        if _HAS_ROLE_CONFIG and "role_llm_configs" in _sig.parameters:
+            assert RoleLLMConfig is not None
+            _extra_kwargs["role_llm_configs"] = {
+                "extract": RoleLLMConfig(func=_extract_llm_func),
+                "keyword": RoleLLMConfig(func=_keyword_llm_func),
+                # query 和 vlm 不配置，回退到主 llm_model_func（TEXT_MODEL）
+            }
+            logger.info(
+                "LightRAG role_llm_configs enabled: extract=%s, keyword=%s, query=%s",
+                EXTRACT_MODEL, KEYWORD_MODEL, TEXT_MODEL,
+            )
+
         rag = LightRAG(
             working_dir=LIGHTRAG_WORKDIR,
             workspace=_workspace_name(course_id),
@@ -266,6 +349,140 @@ async def _get_instance(course_id: str):
             course_id, len(_instances), LIGHTRAG_LRU_CAPACITY, _workspace_name(course_id),
         )
         return rag
+
+
+async def get_course_entities(course_id: str) -> list[dict]:
+    """返回该课程 LightRAG 图谱中的所有实体节点。
+
+    用于 graph_memory.py 的知识点目录映射，避免重复 LLM 提取。
+
+    Returns:
+        实体列表，每个实体包含 {"id": str, "label": str, "type": str}
+    """
+    ok, reason = is_lightrag_available()
+    if not ok:
+        logger.warning("get_course_entities skipped: %s", reason)
+        return []
+
+    try:
+        rag = await _get_instance(course_id)
+    except RuntimeError as e:
+        logger.warning("get_course_entities failed to get instance: %s", e)
+        return []
+
+    # LightRAG 内部存储结构：chunk_entity_relation_graph 是 NetworkX 图
+    entities: list[dict] = []
+    if hasattr(rag, "chunk_entity_relation_graph"):
+        graph = rag.chunk_entity_relation_graph
+        if hasattr(graph, "get_all_nodes"):
+            try:
+                nodes = await graph.get_all_nodes()
+                for node in nodes or []:
+                    # 节点格式可能是字符串或 dict
+                    if isinstance(node, dict):
+                        entity_id = node.get("id") or node.get("entity_name") or str(node)
+                        label = node.get("label") or node.get("entity_name") or str(node)
+                        entity_type = node.get("type", "unknown")
+                    else:
+                        entity_id = str(node)
+                        label = str(node)
+                        entity_type = "unknown"
+                    entities.append({
+                        "id": entity_id,
+                        "label": label,
+                        "type": entity_type,
+                    })
+                logger.info(
+                    "get_course_entities course=%s count=%d",
+                    course_id, len(entities)
+                )
+            except Exception as e:
+                logger.warning("get_course_entities get_all_nodes failed: %s", e)
+        else:
+            # 降级：直接读取 NetworkX 图的节点
+            try:
+                import networkx as nx
+                if isinstance(graph, nx.Graph):
+                    for node_id, node_data in graph.nodes(data=True):
+                        label = node_data.get("entity_name") or node_data.get("label") or str(node_id)
+                        entity_type = node_data.get("type", "unknown")
+                        entities.append({
+                            "id": str(node_id),
+                            "label": label,
+                            "type": entity_type,
+                        })
+                    logger.info(
+                        "get_course_entities (NetworkX fallback) course=%s count=%d",
+                        course_id, len(entities)
+                    )
+            except Exception as e:
+                logger.warning("get_course_entities NetworkX fallback failed: %s", e)
+
+    return entities
+
+
+async def get_course_relations(course_id: str) -> list[dict]:
+    """返回该课程 LightRAG 图谱中的所有关系（边）。
+
+    用于 graph_memory.py 继承先修/相关边关系。
+
+    Returns:
+        关系列表，每个关系包含 {"source": str, "target": str, "relation": str}
+    """
+    ok, reason = is_lightrag_available()
+    if not ok:
+        logger.warning("get_course_relations skipped: %s", reason)
+        return []
+
+    try:
+        rag = await _get_instance(course_id)
+    except RuntimeError as e:
+        logger.warning("get_course_relations failed to get instance: %s", e)
+        return []
+
+    relations: list[dict] = []
+    if hasattr(rag, "chunk_entity_relation_graph"):
+        graph = rag.chunk_entity_relation_graph
+        if hasattr(graph, "get_all_edges"):
+            try:
+                edges = await graph.get_all_edges()
+                for edge in edges or []:
+                    if isinstance(edge, dict):
+                        source = edge.get("source") or edge.get("src_id") or ""
+                        target = edge.get("target") or edge.get("tgt_id") or ""
+                        relation = edge.get("relation") or edge.get("edge_type") or "related"
+                        if source and target:
+                            relations.append({
+                                "source": source,
+                                "target": target,
+                                "relation": relation,
+                            })
+                logger.info(
+                    "get_course_relations course=%s count=%d",
+                    course_id, len(relations)
+                )
+            except Exception as e:
+                logger.warning("get_course_relations get_all_edges failed: %s", e)
+        else:
+            # 降级：直接读取 NetworkX 图的边
+            try:
+                import networkx as nx
+                if isinstance(graph, nx.Graph):
+                    for src, tgt, edge_data in graph.edges(data=True):
+                        relation = edge_data.get("relation") or edge_data.get("edge_type") or "related"
+                        relations.append({
+                            "source": str(src),
+                            "target": str(tgt),
+                            "relation": relation,
+                        })
+                    logger.info(
+                        "get_course_relations (NetworkX fallback) course=%s count=%d",
+                        course_id, len(relations)
+                    )
+            except Exception as e:
+                logger.warning("get_course_relations NetworkX fallback failed: %s", e)
+
+    return relations
 
 
 async def index_course_with_lightrag(
@@ -434,7 +651,11 @@ async def query_with_lightrag(
 
     query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
     param = _build_query_param(query_mode, history, only_need_context=False)
-    result = await rag.aquery(message, param=param) 
+    _t0 = time.perf_counter()
+    result = await rag.aquery(message, param=param)
+    log_flow("rag.query", course_id=course_id, query_mode=query_mode,
+             elapsed_ms=int((time.perf_counter() - _t0) * 1000),
+             query=message[:60])
 
     logger.info('query_with_lightrag result', result)
 
@@ -495,7 +716,6 @@ async def retrieve_with_lightrag(
         course_id, mode, message[:80],
     )
     rag = await _get_instance(course_id)
-    idx_lock = _index_locks.setdefault(course_id, asyncio.Lock())
     # async with idx_lock:
     #     now = time.monotonic()
     #     last_index = _last_auto_index_at.get(course_id, 0.0)
@@ -537,201 +757,17 @@ async def retrieve_with_lightrag(
         param.stream = True
 
     logger.info("QueryParam: %s", param)
+    _t_r = time.perf_counter()
     try:
         result: Any = await rag.aquery(message, param=param, system_prompt=lightrag_system_prompt)
     except TypeError:
         # 旧版 LightRAG 不接受 system_prompt 参数，退回默认
         result = await rag.aquery(message, param=param)
+    log_flow("rag.retrieve", course_id=course_id, query_mode=query_mode,
+             elapsed_ms=int((time.perf_counter() - _t_r) * 1000), query=message[:60])
     return result
 
-async def agentic_pipeline(
-    course_id: str,
-    message: str,
-    history: list[dict] | None = None,
-    mode: str | None = None,
-    enabled_tools: list[str] | None = None,
-    image_path: str | None = None,
-    memory_context: str = "",
-) -> AsyncGenerator[dict, None]:
-    """
-    四阶段 pipeline（对标 DeepTutor）：
-      Thinking → Acting（执行用户选定工具） → Observing → Responding
-    yield dict：
-      {'type': 'stage', 'stage': 'thinking'|'retrieving'|'observing'|'responding',
-       'state': 'start'|'done', 'content': str}
-      {'type': 'stage_chunk', 'stage': str, 'content': str}
-      {'type': 'token', 'content': str}
-    """
-    from core.llm.prompts import (
-        THINKING_PROMPT, THINKING_KB_HINT, THINKING_TOOL_LIST_PREFIX,
-        OBSERVING_PROMPT, RESPONDING_PROMPT, _CONCISE_SUFFIX,
-    )
 
-    course_prompt = await get_course_prompt(course_id)
-    safe_history = _cap_history(_normalize_history(history))
-    _tools = enabled_tools or []
-
-    # 动态拼 thinking prompt：有 rag 工具时注入 kb_hint，同时附上启用工具列表
-    _kb_hint = THINKING_KB_HINT if "rag" in _tools else ""
-    _tool_list_text = (THINKING_TOOL_LIST_PREFIX + "\n".join(f"- {t}" for t in _tools)) if _tools else ""
-    _thinking_prompt = THINKING_PROMPT.replace("{kb_hint}", _kb_hint)
-    if _tool_list_text:
-        _thinking_prompt += "\n\n" + _tool_list_text
-
-    # ── Stage 1: Thinking ────────────────────────────────────────────
-    logger.info("agentic_pipeline [thinking] start course=%s tools=%s", course_id, _tools)
-    yield {"type": "stage", "stage": "thinking", "state": "start", "content": ""}
-    await asyncio.sleep(0)
-    thinking_chunks: list[str] = []
-    async for token in chat_stream(
-        system_prompt=course_prompt + "\n\n" + _thinking_prompt,
-        history=safe_history,
-        user_message=message,
-        image_path=image_path,
-    ):
-        thinking_chunks.append(token)
-        yield {"type": "stage_chunk", "stage": "thinking", "content": token}
-    thinking = "".join(thinking_chunks).strip()
-    logger.info("agentic_pipeline [thinking] done chars=%d", len(thinking))
-    yield {"type": "stage", "stage": "thinking", "state": "done", "content": ""}
-    await asyncio.sleep(0)
-
-    # ── Stage 2: Acting（执行用户选定的工具）──────────────────────────
-    logger.info("agentic_pipeline [acting] start course=%s tools=%s", course_id, _tools)
-    yield {"type": "stage", "stage": "retrieving", "state": "start", "content": ""}
-    await asyncio.sleep(0)
-
-    async def _run_rag() -> dict:
-        try:
-            rag = await _get_instance(course_id)
-            query_mode = (mode or LIGHTRAG_QUERY_MODE).strip() or "mix"
-            context_param = _build_query_param(query_mode, history, only_need_context=True)
-            if hasattr(context_param, "stream"):
-                context_param.stream = False
-            raw = await rag.aquery(message, param=context_param)
-            content = raw.strip() if isinstance(raw, str) else str(raw or "").strip()
-            if len(content) > _AGENTIC_RAG_MAX_CHARS:
-                content = content[:_AGENTIC_RAG_MAX_CHARS] + "\n...(truncated)"
-            _preview = (content[:800] + "…") if len(content) > 800 else content
-            logger.info(
-                "agentic_pipeline [rag] course=%s mode=%s query_chars=%d retrieved_chars=%d empty=%s\n"
-                "--- RAG 检索结果预览（前 800 字）---\n%s\n--- end preview ---",
-                course_id,
-                query_mode,
-                len(message),
-                len(content),
-                not bool(content),
-                _preview or "（空）",
-            )
-            if content:
-                logger.debug("agentic_pipeline [rag] full retrieved_context chars=%d:\n%s", len(content), content)
-            return {"name": "rag", "query": message, "content": content, "success": bool(content)}
-        except Exception:
-            logger.exception("agentic_pipeline rag failed")
-            return {"name": "rag", "query": message, "content": "（知识库检索失败）", "success": False}
-
-    async def _run_llamaindex_rag() -> dict:
-        try:
-            from core.rag.rag_llama import retrieve_chunks_llamaindex
-            content = await retrieve_chunks_llamaindex(course_id, message)
-            logger.info(
-                "agentic_pipeline [llamaindex_rag] course=%s query_chars=%d result_chars=%d",
-                course_id, len(message), len(content),
-            )
-            return {"name": "llamaindex_rag", "query": message, "content": content, "success": bool(content.strip())}
-        except Exception:
-            logger.exception("agentic_pipeline llamaindex_rag failed")
-            return {"name": "llamaindex_rag", "query": message, "content": "（LlamaIndex 检索失败）", "success": False}
-
-    async def _run_web_search() -> dict:
-        try:
-            from core.agent.tool_registry import _execute_web_search
-            result = await _execute_web_search(query=message)
-            return {"name": "web_search", "query": message, "content": result.content, "success": result.success}
-        except Exception:
-            logger.exception("agentic_pipeline web_search failed")
-            return {"name": "web_search", "query": message, "content": "（网络搜索失败）", "success": False}
-
-    tasks = []
-    if "rag" in _tools:
-        yield {"type": "stage_chunk", "stage": "retrieving", "content": "检索知识库..."}
-        tasks.append(_run_rag())
-    if "llamaindex_rag" in _tools:
-        yield {"type": "stage_chunk", "stage": "retrieving", "content": "检索 LlamaIndex 向量库..."}
-        tasks.append(_run_llamaindex_rag())
-    if "web_search" in _tools:
-        yield {"type": "stage_chunk", "stage": "retrieving", "content": "搜索网络..."}
-        tasks.append(_run_web_search())
-
-    if tasks:
-        results = await asyncio.gather(*tasks)
-        tool_traces: list[dict] = list(results)
-    else:
-        tool_traces = []
-
-    logger.info("agentic_pipeline [acting] done traces=%d", len(tool_traces))
-    yield {"type": "stage", "stage": "retrieving", "state": "done",
-           "content": f"完成 {len(tool_traces)} 个工具"}
-    await asyncio.sleep(0)
-
-    def _fmt_traces(traces: list[dict]) -> str:
-        if not traces:
-            return "（本轮未使用任何工具）"
-        parts = []
-        for t in traces:
-            parts.append(f"[工具: {t['name']}]\n查询: {t['query']}\n结果:\n{t['content']}")
-        return "\n\n---\n\n".join(parts)
-
-    tool_trace_text = _fmt_traces(tool_traces)
-
-    # ── Stage 3: Observing ───────────────────────────────────────────
-    logger.info("agentic_pipeline [observing] start")
-    yield {"type": "stage", "stage": "observing", "state": "start", "content": ""}
-    await asyncio.sleep(0)
-    obs_user = (
-        f"[Thinking]\n{thinking}\n\n"
-        f"[Tool Traces]\n{tool_trace_text}\n\n"
-        f"用户问题：{message}\n\n"
-        "请输出观察总结。"
-    )
-    obs_chunks: list[str] = []
-    async for token in chat_stream(
-        system_prompt=course_prompt + "\n\n" + OBSERVING_PROMPT,
-        history=[],
-        user_message=obs_user,
-        image_path=image_path,
-    ):
-        obs_chunks.append(token)
-        yield {"type": "stage_chunk", "stage": "observing", "content": token}
-    observation = "".join(obs_chunks).strip()
-    logger.info("agentic_pipeline [observing] done chars=%d", len(observation))
-    yield {"type": "stage", "stage": "observing", "state": "done", "content": ""}
-    await asyncio.sleep(0)
-
-    # ── Stage 4: Responding（流式 token）────────────────────────────
-    logger.info("agentic_pipeline [responding] start")
-    yield {"type": "stage", "stage": "responding", "state": "start", "content": ""}
-    await asyncio.sleep(0)
-    resp_user = (
-        f"[Thinking]\n{thinking}\n\n"
-        f"[Tool Traces]\n{tool_trace_text}\n\n"
-        f"[Observation]\n{observation}\n\n"
-        f"用户问题：{message}\n\n"
-        "请给出正式回答。"
-    )
-    _responding_system = course_prompt + "\n\n" + RESPONDING_PROMPT + _CONCISE_SUFFIX
-    if memory_context:
-        _responding_system += f"\n\n{memory_context}"
-    async for token in chat_stream(
-        system_prompt=_responding_system,
-        history=safe_history,
-        user_message=resp_user,
-        image_path=image_path,
-    ):
-        yield {"type": "token", "content": token}
-    logger.info("agentic_pipeline [responding] done")
-    # 把本轮工具检索结果回传，供调用方做 hallucination check
-    yield {"type": "contexts", "contexts": tool_traces}
 
 async def stream_answer_with_contexts(
     course_id: str,

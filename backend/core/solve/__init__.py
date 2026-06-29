@@ -1,3 +1,3 @@
-from .main_solver import MainSolver
+from .pipeline import DeepSolvePipeline
 
-__all__ = ["MainSolver"]
+__all__ = ["DeepSolvePipeline"]

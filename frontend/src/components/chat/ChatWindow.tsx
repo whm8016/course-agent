@@ -2,9 +2,10 @@ import { useState, useRef, useEffect, useCallback } from 'react'
 import { FiSend, FiSquare, FiChevronDown, FiDatabase, FiGlobe, FiMenu } from 'react-icons/fi'
 import { BrainCircuit, MessageSquare, Microscope, PenLine } from 'lucide-react'
 import MessageBubble from './MessageBubble'
-import ImageUpload from './ImageUpload'
+import ImageUpload, { type PendingFile, isImage } from './ImageUpload'
 import QuizConfigPanel, { DEFAULT_QUIZ_CONFIG, type QuizConfig } from '../quiz/QuizConfigPanel'
-import { chatStream, uploadImage, fetchMessages, saveMessage, createSession, updateSessionMode } from '../../services/api'
+import { chatStream, uploadImage, fetchMessages, saveMessage, createSession, updateSessionMode, fetchLlmProfilesSelectable } from '../../services/api'
+import type { LlmProfileSelectable } from '../../services/api'
 import {
   connectQuestionGenerate,
   connectDeepResearch,
@@ -12,7 +13,7 @@ import {
   type DeepResearchMode,
   type DeepResearchSource,
 } from '../../services/questionWs'
-import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode, GuardrailInfo, HallucinationInfo, KBStatus, QuizQuestion } from '../../types'
+import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode, GuardrailInfo, HallucinationInfo, KBStatus, QuizQuestion, AttachmentInfo } from '../../types'
 
 interface Props {
   courseId: string
@@ -29,7 +30,7 @@ type ApiMessageRow = {
   role: string
   content: string
   msg_type?: string
-  metadata?: Message['metadata']
+  metadata?: Message['metadata'] & { attachments?: AttachmentInfo[] }
 }
 
 function rowToMessage(row: ApiMessageRow): Message {
@@ -39,6 +40,7 @@ function rowToMessage(row: ApiMessageRow): Message {
     content: row.content,
     type: mt !== 'text' ? (mt as Message['type']) : undefined,
     metadata: row.metadata,
+    attachments: row.metadata?.attachments,
   }
 }
 
@@ -210,6 +212,10 @@ export default function ChatWindow({
   const [useKb, setUseKb] = useState(false)
   const [useWebSearch, setUseWebSearch] = useState(false)
 
+  // 模型供应商（对标 DeepTutor：用户对话时可临时切换 provider/model）
+  const [llmProfiles, setLlmProfiles] = useState<LlmProfileSelectable[]>([])
+  const [selectedProfileId, setSelectedProfileId] = useState('')
+
   // 出题配置面板
   const [quizConfig, setQuizConfig] = useState<QuizConfig>({ ...DEFAULT_QUIZ_CONFIG })
   // 出题流式状态（用于在消息列表内渲染）
@@ -218,12 +224,13 @@ export default function ChatWindow({
   const [quizStreamQuestions, setQuizStreamQuestions] = useState<QuizQuestion[]>([])
   const [quizError, setQuizError] = useState('')
 
-  const [imageFile, setImageFile] = useState<File | null>(null)
-  const [imagePreview, setImagePreview] = useState<string | null>(null)
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const isUserNearBottomRef = useRef(true)
   const currentSessionRef = useRef<string | null>(sessionId)
+  // 标记“下一次 sessionId 变化是内部首次创建会话”（非用户切换），供切换 effect 跳过中止与重拉
+  const suppressSwitchRef = useRef(false)
   const abortControllerRef = useRef<AbortController | null>(null)
   const quizCloseRef = useRef<(() => void) | null>(null)
   const researchCloseRef = useRef<(() => void) | null>(null)
@@ -254,7 +261,18 @@ export default function ChatWindow({
     }
   }, [sessionMode, sessionId])
 
+  // 加载可选的模型供应商 profile（admin 预配的 provider 池；空则下拉隐藏）
   useEffect(() => {
+    fetchLlmProfilesSelectable()
+      .then((data) => setLlmProfiles(data.profiles || []))
+      .catch(() => { /* 静默：未配置时不阻塞对话 */ })
+  }, [])
+
+  useEffect(() => {
+    if (suppressSwitchRef.current) {
+      // 内部首次创建会话：发起方正在写入消息，跳过重拉历史（避免覆盖刚写入的消息）
+      return
+    }
     if (!sessionId) {
       setMessages([])
       return
@@ -271,6 +289,31 @@ export default function ChatWindow({
     return () => {
       cancelled = true
     }
+  }, [sessionId])
+
+  // 用户切换对话/课程：中止旧会话进行中的流并重置生成 UI，避免串到新会话。
+  // 内部首次创建会话时 suppressSwitchRef 为 true，这里消费并跳过（同一对话初始化，无流可中止）。
+  useEffect(() => {
+    if (suppressSwitchRef.current) {
+      suppressSwitchRef.current = false
+      return
+    }
+    abortControllerRef.current?.abort()
+    abortControllerRef.current = null
+    quizCloseRef.current?.()
+    quizCloseRef.current = null
+    researchCloseRef.current?.()
+    researchCloseRef.current = null
+    setLoading(false)
+    setStreamingStarted(false)
+    setIsStopping(false)
+    setQuizStreaming(false)
+    setQuizTraces([])
+    setQuizStreamQuestions([])
+    setQuizError('')
+    setResearchStreaming(false)
+    setResearchTraces([])
+    setResearchError('')
   }, [sessionId])
 
   // 关闭能力菜单（点外部）
@@ -307,15 +350,25 @@ export default function ChatWindow({
     }
   }, [])
 
-  const handleImageSelect = (file: File) => {
-    setImageFile(file)
-    setImagePreview(URL.createObjectURL(file))
+  const handleFileSelect = (file: File) => {
+    const kind: 'image' | 'doc' = isImage(file) ? 'image' : 'doc'
+    const preview = kind === 'image' ? URL.createObjectURL(file) : ''
+    setPendingFiles((prev) => [...prev, { file, preview, kind, name: file.name }])
   }
 
-  const clearImage = () => {
-    setImageFile(null)
-    if (imagePreview) URL.revokeObjectURL(imagePreview)
-    setImagePreview(null)
+  const removeFile = (index: number) => {
+    setPendingFiles((prev) => {
+      const target = prev[index]
+      if (target?.preview) URL.revokeObjectURL(target.preview)
+      return prev.filter((_, i) => i !== index)
+    })
+  }
+
+  const clearFiles = () => {
+    pendingFiles.forEach((pf) => {
+      if (pf.preview) URL.revokeObjectURL(pf.preview)
+    })
+    setPendingFiles([])
   }
 
   // ---------- 出题 ----------
@@ -330,10 +383,16 @@ export default function ChatWindow({
         const session = await createSession(courseId, `出题: ${topic.slice(0, 20)}`, 'quiz')
         activeSessionId = session.id
         currentSessionRef.current = session.id
+        suppressSwitchRef.current = true
         onSessionCreated(session)
       } catch {
         // ignore
       }
+    }
+
+    const mySession = activeSessionId
+    const update = (updater: (prev: Message[]) => Message[]) => {
+      setMessages((prev) => (currentSessionRef.current === mySession ? updater(prev) : prev))
     }
 
     // 先把「用户请求」推入消息列表
@@ -343,7 +402,7 @@ export default function ChatWindow({
     }
     isUserNearBottomRef.current = true
     setInput('')
-    setMessages((prev) => [...prev, userMsg])
+    update((prev) => [...prev, userMsg])
     setQuizStreaming(true)
     setQuizTraces([{ text: '连接中…', kind: 'status' }])
     setQuizStreamQuestions([])
@@ -351,68 +410,76 @@ export default function ChatWindow({
 
     const collectedQuestions: QuizQuestion[] = []
 
+    const reqParts = [topic]
+    if (quizConfig.difficulty) reqParts.push(`难度:${quizConfig.difficulty}`)
+    if (quizConfig.questionType) reqParts.push(`题型:${quizConfig.questionType}`)
+    if (quizConfig.preference.trim()) reqParts.push(quizConfig.preference.trim())
+    const requirement = reqParts.join('，')
+
     const close = connectQuestionGenerate(
       {
-        kb_name: courseId,
-        count: quizConfig.count,
+        course_id: courseId,
+        question: requirement,
         language: 'zh',
-        requirement: {
-          knowledge_point: topic,
-          preference: quizConfig.preference.trim() || undefined,
-          difficulty: quizConfig.difficulty || undefined,
-          question_type: quizConfig.questionType || undefined,
-        },
+        metadata: { count: quizConfig.count, requirement },
       },
       {
         onOpen: () =>
           setQuizTraces((prev) => [...prev, { text: '已连接，出题中…', kind: 'status' }]),
         onMessage: (msg) => {
           const t = msg.type
-          if (t === 'status') {
-            setQuizTraces((prev) => [
-              ...prev,
-              { text: String(msg.content ?? ''), kind: 'status' },
-            ])
-          } else if (t === 'progress') {
+          if (t === 'stage_start') {
             const stage = String(msg.stage ?? '')
-            const cur = Number(msg.current ?? 0)
-            const tot = Number(msg.total ?? 0)
-            let text = ''
-            if (stage === 'ideation') text = `分析知识点，生成模板 ${cur}/${tot}…`
-            else if (stage === 'generation') text = `正在生成第 ${cur}/${tot} 道题…`
-            else if (stage === 'complete') text = `生成完成，共 ${msg.completed ?? cur} 道`
-            if (text) setQuizTraces((prev) => [...prev, { text, kind: 'progress' }])
-          } else if (t === 'result') {
-            const qa = (msg as { qa_pair?: QAPairRaw }).qa_pair
-            if (qa) {
-              const q = toQuizQuestion(qa)
-              collectedQuestions.push(q)
-              setQuizStreamQuestions((prev) => [...prev, q])
+            const label =
+              stage === 'explore'
+                ? '探索素材'
+                : stage === 'plan'
+                  ? '规划蓝图'
+                  : stage === 'quiz'
+                    ? '逐题生成'
+                    : stage
+            setQuizTraces((prev) => [...prev, { text: label + '…', kind: 'progress' }])
+          } else if (t === 'thinking') {
+            const c = String(msg.content ?? '').trim()
+            if (c) setQuizTraces((prev) => [...prev, { text: c, kind: 'status' }])
+          } else if (t === 'quiz_question') {
+            const q = (msg as { question?: QAPairRaw }).question
+            if (q) {
+              const qq = toQuizQuestion(q)
+              collectedQuestions.push(qq)
+              setQuizStreamQuestions((prev) => [...prev, qq])
             }
-          } else if (t === 'complete') {
+          } else if (t === 'result') {
+            const qs = (msg as { questions?: QAPairRaw[] }).questions
+            if (Array.isArray(qs) && qs.length > 0 && collectedQuestions.length === 0) {
+              qs.forEach((qa) => {
+                const qq = toQuizQuestion(qa)
+                collectedQuestions.push(qq)
+                setQuizStreamQuestions((prev) => [...prev, qq])
+              })
+            }
+          } else if (t === 'done') {
             setQuizTraces((prev) => [
               ...prev,
               { text: `生成完成，共 ${collectedQuestions.length} 道`, kind: 'done' },
             ])
             setQuizStreaming(false)
-            // 将结果以 assistant 消息写入列表
             const quizData: QuizData = { questions: [...collectedQuestions] }
             const assistantMsg: Message = {
               role: 'assistant',
               content: '',
               metadata: { quiz: quizData },
             }
-            setMessages((prev) => [...prev, assistantMsg])
+            update((prev) => [...prev, assistantMsg])
             setQuizStreamQuestions([])
             setQuizTraces([])
             quizCloseRef.current?.()
           } else if (t === 'error') {
-            setQuizError(String(msg.content ?? '出题失败，请重试'))
+            setQuizError(String(msg.message ?? msg.content ?? '出题失败，请重试'))
             setQuizStreaming(false)
           }
         },
         onClose: () => {
-          // onComplete fires first; this handles unexpected close
           setQuizStreaming((v) => {
             if (v) setQuizError('连接意外关闭')
             return false
@@ -438,53 +505,86 @@ export default function ChatWindow({
         const session = await createSession(courseId, `研究: ${topic.slice(0, 20)}`, 'research')
         activeSessionId = session.id
         currentSessionRef.current = session.id
+        suppressSwitchRef.current = true
         onSessionCreated(session)
       } catch {
         // ignore
       }
     }
 
+    const mySession = activeSessionId
+    const update = (updater: (prev: Message[]) => Message[]) => {
+      setMessages((prev) => (currentSessionRef.current === mySession ? updater(prev) : prev))
+    }
+
     const userMsg: Message = { role: 'user', content: topic }
     isUserNearBottomRef.current = true
-    setMessages((prev) => [...prev, userMsg])
+    update((prev) => [...prev, userMsg])
     setResearchStreaming(true)
     setResearchTraces([{ text: '连接中…', kind: 'status' }])
     setResearchError('')
+    let reportContent = ''
+
+    const stageLabel = (stage: string) =>
+      stage === 'rephrase'
+        ? '理解主题'
+        : stage === 'decompose'
+          ? '分解子主题'
+          : stage === 'research'
+            ? '检索研究'
+            : stage === 'reporting'
+              ? '撰写报告'
+              : stage
+
+    const finishWithReport = () => {
+      if (!reportContent) return
+      setResearchStreaming(false)
+      setResearchTraces([])
+      update((prev) => [
+        ...prev,
+        { role: 'assistant', content: reportContent, metadata: { mode: 'research' } },
+      ])
+      if (activeSessionId) {
+        saveMessage(activeSessionId, 'user', topic, 'text').catch(() => {})
+        saveMessage(activeSessionId, 'assistant', reportContent, 'text', { mode: 'research' }).catch(() => {})
+      }
+    }
 
     const close = connectDeepResearch(
       {
-        type: 'start',
-        topic: topic.trim(),
-        kb_name: courseId,
+        course_id: courseId,
+        question: topic.trim(),
         language: 'zh',
-        config: { mode: researchMode, depth: researchDepth, sources: researchSources },
+        metadata: { mode: researchMode, depth: researchDepth, sources: researchSources },
       },
       {
         onOpen: () =>
           setResearchTraces((prev) => [...prev, { text: '已连接，研究中…', kind: 'status' }]),
         onMessage: (msg) => {
-          if (msg.type === 'progress') {
-            const stage = String(msg.stage ?? '')
-            const status = String(msg.status ?? '')
-            const text = msg.message ? String(msg.message) : `${stage}${status ? ` · ${status}` : ''}`
-            setResearchTraces((prev) => [...prev, { text, kind: 'progress' }])
-          } else if (msg.type === 'result') {
-            const report = String(msg.report ?? '')
+          const t = msg.type
+          if (t === 'stage_start') {
+            setResearchTraces((prev) => [
+              ...prev,
+              { text: stageLabel(String(msg.stage ?? '')) + '…', kind: 'progress' },
+            ])
+          } else if (t === 'thinking') {
+            const c = String(msg.content ?? '').trim()
+            if (c) setResearchTraces((prev) => [...prev, { text: c, kind: 'status' }])
+          } else if (t === 'token') {
+            reportContent += String(msg.content ?? '')
+          } else if (t === 'answer') {
+            const c = String(msg.content ?? '')
+            if (c) reportContent = c
+          } else if (t === 'result') {
+            const r = String(msg.report ?? '')
+            if (r) reportContent = r
+            finishWithReport()
+          } else if (t === 'done') {
+            finishWithReport()
             setResearchStreaming(false)
-            setResearchTraces([])
-            const assistantMsg: Message = {
-              role: 'assistant',
-              content: report,
-              metadata: { mode: 'research' },
-            }
-            setMessages((prev) => [...prev, assistantMsg])
-            if (activeSessionId) {
-              saveMessage(activeSessionId, 'user', topic, 'text').catch(() => {})
-              saveMessage(activeSessionId, 'assistant', report, 'text', { mode: 'research' }).catch(() => {})
-            }
             researchCloseRef.current?.()
-          } else if (msg.type === 'error') {
-            setResearchError(String(msg.message ?? '研究失败，请重试'))
+          } else if (t === 'error') {
+            setResearchError(String(msg.message ?? msg.content ?? '研究失败，请重试'))
             setResearchStreaming(false)
           }
         },
@@ -506,7 +606,7 @@ export default function ChatWindow({
   // ---------- 普通聊天 ----------
   const handleSend = useCallback(async () => {
     const text = input.trim()
-    if (!text && !imageFile) return
+    if (!text && pendingFiles.length === 0) return
     if (loading) return
 
     // quiz 模式不走聊天，改为出题
@@ -525,24 +625,38 @@ export default function ChatWindow({
     let activeSessionId = currentSessionRef.current
     if (!activeSessionId) {
       try {
-        const title = (text || '图片分析').slice(0, 20) || '新对话'
+        const title = (text || (pendingFiles.length ? '附件对话' : '新对话')).slice(0, 20)
         const session = await createSession(courseId, title, chatMode)
         activeSessionId = session.id
         currentSessionRef.current = session.id
+        suppressSwitchRef.current = true
         onSessionCreated(session)
       } catch {
         // fall through
       }
     }
 
-    let uploadedPath: string | undefined
-    let displayUrl: string | undefined
+    // 本次请求所属会话；切换到其它会话后丢弃其 UI 写入，避免串台
+    const mySession = activeSessionId
+    const update = (updater: (prev: Message[]) => Message[]) => {
+      setMessages((prev) => (currentSessionRef.current === mySession ? updater(prev) : prev))
+    }
 
-    if (imageFile) {
+    const attachments: AttachmentInfo[] = []
+    let firstImagePreview: string | undefined
+
+    if (pendingFiles.length > 0) {
       try {
-        const result = await uploadImage(imageFile)
-        uploadedPath = result.path
-        displayUrl = imagePreview || undefined
+        for (const pf of pendingFiles) {
+          const result = await uploadImage(pf.file)
+          attachments.push({
+            type: pf.kind === 'image' ? 'image' : 'file',
+            url: result.path,
+            filename: pf.file.name,
+            mime_type: pf.file.type,
+          })
+          if (pf.kind === 'image' && !firstImagePreview) firstImagePreview = pf.preview
+        }
       } catch {
         return
       }
@@ -550,14 +664,15 @@ export default function ChatWindow({
 
     const userMsg: Message = {
       role: 'user',
-      content: text || '请分析这张图片',
-      image: displayUrl,
+      content: text || (attachments.length ? '请分析这些文件' : ''),
+      image: firstImagePreview,
+      attachments: attachments.length > 0 ? attachments : undefined,
     }
 
     isUserNearBottomRef.current = true
-    setMessages((prev) => [...prev, userMsg])
+    update((prev) => [...prev, userMsg])
     setInput('')
-    clearImage()
+    clearFiles()
     setLoading(true)
     setIsStopping(false)
     setStreamingStarted(false)
@@ -585,7 +700,7 @@ export default function ChatWindow({
       courseId,
       userMsg.content,
       history,
-      uploadedPath,
+      undefined,
       activeSessionId || undefined,
       chatMode,
       controller.signal,
@@ -615,7 +730,7 @@ export default function ChatWindow({
             setStreamingStarted(true)
             {
               const snap = cloneThinkingSnapshot(thinkingSteps)
-              setMessages((prev) => {
+              update((prev) => {
                 const last = prev[prev.length - 1]
                 const withSteps = (base: Message) => {
                   const o = { ...base } as Message & { _thinkingSteps?: Message[] }
@@ -642,7 +757,7 @@ export default function ChatWindow({
             setStreamingStarted(true)
             {
               const snap = cloneThinkingSnapshot(thinkingSteps)
-              setMessages((prev) => {
+              update((prev) => {
                 const last = prev[prev.length - 1]
                 const withSteps = (base: Message) => {
                   const o = { ...base } as Message & { _thinkingSteps?: Message[] }
@@ -666,7 +781,7 @@ export default function ChatWindow({
             setStreamingStarted(true)
             {
               const snap = cloneThinkingSnapshot(thinkingSteps)
-              setMessages((prev) => {
+              update((prev) => {
                 const last = prev[prev.length - 1]
                 const withSteps = (base: Message) => {
                   const o = { ...base } as Message & { _thinkingSteps?: Message[] }
@@ -692,7 +807,7 @@ export default function ChatWindow({
               setStreamingStarted(true)
               {
                 const snap = cloneThinkingSnapshot(thinkingSteps)
-                setMessages((prev) => {
+                update((prev) => {
                   const last = prev[prev.length - 1]
                   const withSteps = (base: Message) => {
                     const o = { ...base } as Message & { _thinkingSteps?: Message[] }
@@ -710,7 +825,7 @@ export default function ChatWindow({
           case 'token':
             setStreamingStarted(true)
             answerContent += event.content || ''
-            setMessages((prev) => {
+            update((prev) => {
               const last = prev[prev.length - 1]
               if (last?.role === 'assistant') {
                 const o = { ...last, content: answerContent } as Message & { _thinkingSteps?: Message[] }
@@ -725,7 +840,7 @@ export default function ChatWindow({
           case 'answer':
             setStreamingStarted(true)
             answerContent = event.content || ''
-            setMessages((prev) => {
+            update((prev) => {
               const last = prev[prev.length - 1]
               if (last?.role === 'assistant') {
                 const o = { ...last, content: answerContent } as Message & { _thinkingSteps?: Message[] }
@@ -744,7 +859,7 @@ export default function ChatWindow({
             if (event.content) {
               const skillTitle = (event as unknown as Record<string, unknown>).title as string || '补充'
               answerContent += `\n\n---\n**${skillTitle}**\n\n${event.content}`
-              setMessages((prev) => {
+              update((prev) => {
                 const last = prev[prev.length - 1]
                 if (last?.role === 'assistant') {
                   return [...prev.slice(0, -1), { ...last, content: answerContent }]
@@ -769,11 +884,12 @@ export default function ChatWindow({
         }
       },
       (err) => { answerContent = `出错了: ${err}` },
-      effectiveRagEnabled,
       [
         ...(effectiveRagEnabled ? ['rag'] : []),
         ...(useWebSearch ? ['web_search'] : []),
       ],
+      selectedProfileId || undefined,
+      attachments.length > 0 ? attachments : undefined,
     )
     abortControllerRef.current = null
 
@@ -804,7 +920,7 @@ export default function ChatWindow({
     // @ts-expect-error attach thinking steps for rendering
     assistantMsg._thinkingSteps = [...thinkingSteps]
 
-    setMessages((prev) => {
+    update((prev) => {
       const lastIsAssistant = prev.length > 0 && prev[prev.length - 1].role === 'assistant'
       if (lastIsAssistant) return [...prev.slice(0, -1), assistantMsg]
       return [...prev, assistantMsg]
@@ -812,7 +928,7 @@ export default function ChatWindow({
 
     if (activeSessionId && !displayContent.startsWith('出错了')) {
       try {
-        await saveMessage(activeSessionId, 'user', userMsg.content, 'text')
+        await saveMessage(activeSessionId, 'user', userMsg.content, 'text', attachments.length > 0 ? { attachments } : undefined)
         await saveMessage(activeSessionId, 'assistant', displayContent, 'text', {
           intent,
           intent_confidence: intentConfidence || undefined,
@@ -836,8 +952,7 @@ export default function ChatWindow({
     setStreamingStarted(false)
   }, [
     input,
-    imageFile,
-    imagePreview,
+    pendingFiles,
     loading,
     messages,
     courseId,
@@ -845,6 +960,7 @@ export default function ChatWindow({
     chatMode,
     ragEnabled,
     useKb,
+    selectedProfileId,
     isQuizMode,
     handleQuizStart,
     isResearchMode,
@@ -902,6 +1018,20 @@ export default function ChatWindow({
             <FiMenu size={20} />
           </button>
           <h1 className="text-base font-semibold text-slate-800 truncate">{courseName}</h1>
+          {llmProfiles.length > 0 && (
+            <select
+              value={selectedProfileId}
+              onChange={(e) => setSelectedProfileId(e.target.value)}
+              className="text-[11px] rounded-md border border-slate-200 px-1.5 py-0.5 bg-white text-slate-600 focus:outline-none focus:border-indigo-400 max-w-[150px]"
+              title="选择模型供应商（临时切换，留空=使用默认）"
+            >
+              {llmProfiles.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name || p.id}{p.active ? '（默认）' : ''}
+                </option>
+              ))}
+            </select>
+          )}
           {ragEnabled ? (
             <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700">
               RAG 就绪
@@ -1162,7 +1292,7 @@ export default function ChatWindow({
             <span className="text-[11px]">搜索</span>
           </button>
           {!isQuizMode && (
-            <ImageUpload preview={imagePreview} onSelect={handleImageSelect} onClear={clearImage} />
+            <ImageUpload files={pendingFiles} onSelect={handleFileSelect} onRemove={removeFile} />
           )}
         </div>
 
@@ -1239,7 +1369,7 @@ export default function ChatWindow({
           </button>
           {!isQuizMode && (
             <div className="hidden md:block">
-              <ImageUpload preview={imagePreview} onSelect={handleImageSelect} onClear={clearImage} />
+              <ImageUpload files={pendingFiles} onSelect={handleFileSelect} onRemove={removeFile} />
             </div>
           )}
 
@@ -1281,7 +1411,7 @@ export default function ChatWindow({
               isStopping ||
               (!isRunning &&
                 !input.trim() &&
-                !imageFile &&
+                pendingFiles.length === 0 &&
                 !(isQuizMode && (quizConfig.topic.trim() || input.trim())))
             }
             className={`p-2.5 rounded-xl text-white disabled:opacity-40 disabled:cursor-not-allowed transition shrink-0 ${

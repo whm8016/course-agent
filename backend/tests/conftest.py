@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import os
 
+# Prevent transformers (pulled in by langsmith pytest plugin) from loading TF/Keras
+os.environ.setdefault("USE_TF", "0")
+
 # Set all env vars before importing backend modules
 os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("JWT_SECRET", "test-secret-pytest-only-32chars!!")
@@ -18,7 +21,7 @@ os.environ.setdefault("TESTING", "1")
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from core.db.database import close_db, engine, init_db
+from core.db.database import close_db, init_db
 
 
 @pytest.fixture

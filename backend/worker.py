@@ -3,21 +3,14 @@
 启动方式（Docker / 命令行）：
     python -m arq worker.WorkerSettings
 
-包含四类后台任务：
+包含后台任务：
 1. run_indexing         – LightRAG 知识库索引（替代 BackgroundTasks）
 2. run_llamaindex_build – LlamaIndex 向量索引（替代 BackgroundTasks）
-3. run_deep_research    – Deep Research Pipeline（WS 轮询进度）
-4. run_deep_solve       – Deep Solve Pipeline（WS 轮询进度）
-
-进度推送协议（run_deep_research / run_deep_solve）：
-  Worker   RPUSH  job:{job_id}:events  json(event)
-  WS 端    LRANGE job:{job_id}:events  {offset} -1  轮询读取并转发给客户端
-  最终事件 type="result" 或 type="error" 标志任务结束
-  列表 TTL：任务完成后保留 1 小时，供客户端追取。
+3. cron_flush_memory    – Mem0 批量刷新（cron，每 30s 扫描 Redis mem_flush:* key）
+4. flush_all_pending_job – Shutdown 时 Flush 所有 pending buffer
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import sys
@@ -25,6 +18,22 @@ import os
 
 # 让 import 能找到同目录下所有模块（与 main.py 一致）
 sys.path.insert(0, os.path.dirname(__file__))
+
+# Worker 进程自己配置日志（不经过 main.py），与主进程保持同样的 JSON 格式
+from pythonjsonlogger import jsonlogger as _jsonlogger  # noqa: E402
+from core.observability.logging import ContextFilter as _ContextFilter  # noqa: E402
+
+_LOG_LEVEL = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper(), logging.INFO)
+_handler = logging.StreamHandler()
+_handler.setFormatter(
+    _jsonlogger.JsonFormatter(
+        fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+        rename_fields={"asctime": "timestamp", "levelname": "level"},
+        json_ensure_ascii=False,
+    )
+)
+_handler.addFilter(_ContextFilter())
+logging.basicConfig(level=_LOG_LEVEL, handlers=[_handler])
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +66,27 @@ async def run_indexing(
     resume_from_chunk: int = 0,
 ) -> None:
     """LightRAG 知识库索引后台任务。"""
-    from api.admin import _run_indexing
-    await _run_indexing(kb_id, course_id, file_paths, resume_from_chunk)
+    import time
+    from core.observability import bind_context, log_flow
+    job_id = str(ctx.get("job_id", kb_id or ""))
+    bind_context(job_id=job_id, course_id=course_id)
+    t0 = time.perf_counter()
+    log_flow("worker.indexing.start", job_id=job_id, course_id=course_id,
+             kb_id=kb_id, files=len(file_paths), resume_from_chunk=resume_from_chunk)
+    try:
+        from api.admin import _run_indexing
+        await _run_indexing(kb_id, course_id, file_paths, resume_from_chunk)
+        _el = int((time.perf_counter() - t0) * 1000)
+        log_flow("worker.indexing.complete", job_id=job_id, course_id=course_id, elapsed_ms=_el)
+        from core.observability.metrics import observe_worker_job
+        observe_worker_job("indexing", "ok", _el)
+    except Exception as exc:
+        _el = int((time.perf_counter() - t0) * 1000)
+        log_flow("worker.indexing.error", logger=logger, level=logging.ERROR,
+                 job_id=job_id, error=str(exc), elapsed_ms=_el)
+        from core.observability.metrics import observe_worker_job
+        observe_worker_job("indexing", "error", _el)
+        raise
 
 
 async def run_llamaindex_build(
@@ -68,142 +96,84 @@ async def run_llamaindex_build(
     file_paths: list[str],
 ) -> None:
     """LlamaIndex 向量索引后台任务。"""
-    from api.llama_rag import _run_llamaindex_build
-    await _run_llamaindex_build(kb_id, course_id, file_paths)
+    import time
+    from core.observability import bind_context, log_flow
+    job_id = str(ctx.get("job_id", kb_id or ""))
+    bind_context(job_id=job_id, course_id=course_id)
+    t0 = time.perf_counter()
+    log_flow("worker.llamaindex.start", job_id=job_id, course_id=course_id,
+             kb_id=kb_id, files=len(file_paths))
+    try:
+        from api.llama_rag import _run_llamaindex_build
+        await _run_llamaindex_build(kb_id, course_id, file_paths)
+        log_flow("worker.llamaindex.complete", job_id=job_id, course_id=course_id,
+                 elapsed_ms=int((time.perf_counter() - t0) * 1000))
+    except Exception as exc:
+        log_flow("worker.llamaindex.error", logger=logger, level=logging.ERROR,
+                 job_id=job_id, error=str(exc),
+                 elapsed_ms=int((time.perf_counter() - t0) * 1000))
+        raise
 
 
 # ---------------------------------------------------------------------------
-# 任务 3：Deep Research
+# 任务 3 & 4：Mem0 批量刷新（Producer-Consumer 模式）
 # ---------------------------------------------------------------------------
 
-async def run_deep_research(
-    ctx,
-    job_id: str,
-    research_id: str,
-    topic: str,
-    language: str,
-    kb_name: str | None,
-    runtime_config: dict,
-) -> None:
-    """Deep Research Pipeline 后台任务，进度通过 Redis list 推送。"""
-    redis = ctx["redis"]
 
-    loop = asyncio.get_event_loop()
+async def cron_flush_memory(ctx) -> None:
+    """每 30s 扫描 Redis mem_flush:* key，满批或 idle 超时则 flush。"""
+    import time
+    from settings.base import get_settings
 
-    def progress_callback(event: dict) -> None:
-        try:
-            if loop.is_running():
-                asyncio.ensure_future(_push_event(redis, job_id, {"type": "progress", **event}))
-        except Exception:
-            pass
+    settings = get_settings()
+    max_turns = settings.mem0_flush_max_turns
+    idle_timeout = settings.mem0_flush_idle_timeout
+
+    t0 = time.perf_counter()
+    logger.debug("[worker] cron_flush_memory start max_turns=%d idle_timeout=%.1fs",
+                 max_turns, idle_timeout)
 
     try:
-        from core.research import ResearchPipeline
+        from core.memory.flush_manager import scan_and_flush
 
-        pipeline = ResearchPipeline(
-            config=runtime_config,
-            research_id=research_id,
-            kb_name=kb_name,
-            progress_callback=progress_callback,
-        )
-        result = await pipeline.run(topic)
-        await _push_event(
-            redis,
-            job_id,
-            {
-                "type": "result",
-                "research_id": result["research_id"],
-                "report": result["report"],
-                "final_report_path": result.get("final_report_path", ""),
-                "metadata": result.get("metadata", {}),
-            },
-        )
-    except Exception:
-        logger.exception("Deep research job failed job_id=%s", job_id)
-        await _push_event(redis, job_id, {"type": "error", "message": "deep research failed"})
+        # 使用 ctx["redis"]（ARQ 提供的连接）
+        r = ctx.get("redis")
+        if r is None:
+            import redis.asyncio as aioredis
+            from config import REDIS_URL
+            r = aioredis.from_url(REDIS_URL, decode_responses=True)
+
+        flushed = await scan_and_flush(r, max_turns, idle_timeout)
+
+        logger.info("[worker] cron_flush_memory complete flushed=%d elapsed_ms=%d",
+                    flushed, int((time.perf_counter() - t0) * 1000))
+
+    except Exception as exc:
+        logger.warning("[worker] cron_flush_memory error: %s", exc, exc_info=True)
 
 
-# ---------------------------------------------------------------------------
-# 任务 4：Deep Solve
-# ---------------------------------------------------------------------------
-
-async def run_deep_solve(
-    ctx,
-    job_id: str,
-    question: str,
-    kb_name: str | None,
-    language: str,
-    detailed: bool,
-    enabled_tools: list[str],
-    runtime_config: dict,
-) -> None:
-    """Deep Solve Pipeline 后台任务，进度通过 Redis list 推送。"""
-    redis = ctx["redis"]
-    loop = asyncio.get_event_loop()
-
-    def send_progress(stage: str, progress: dict) -> None:
-        try:
-            if loop.is_running():
-                asyncio.ensure_future(
-                    _push_event(redis, job_id, {"type": "progress", "stage": stage, **progress})
-                )
-        except Exception:
-            pass
-
-    def trace_bridge(event: dict) -> None:
-        try:
-            if loop.is_running():
-                asyncio.ensure_future(_push_event(redis, job_id, {"type": "trace", **event}))
-        except Exception:
-            pass
+async def flush_all_pending_job(ctx) -> None:
+    """Flush 所有 pending buffer（shutdown 时由 main.py enqueue）。"""
+    import time
+    t0 = time.perf_counter()
+    logger.info("[worker] flush_all_pending_job start")
 
     try:
-        rag_enabled = "rag" in {t.lower() for t in enabled_tools}
-        effective_kb = kb_name if rag_enabled else None
+        from core.memory.flush_manager import flush_all_pending
 
-        from core.solve import MainSolver
+        r = ctx.get("redis")
+        if r is None:
+            import redis.asyncio as aioredis
+            from config import REDIS_URL
+            r = aioredis.from_url(REDIS_URL, decode_responses=True)
 
-        solver = MainSolver(
-            config=runtime_config,
-            kb_name=effective_kb or "",
-            language=language,
-            enabled_tools=enabled_tools,
-            disable_planner_retrieve=not (rag_enabled and effective_kb),
-        )
-        solver._send_progress_update = send_progress
-        solver.set_trace_callback(trace_bridge)
+        flushed = await flush_all_pending(r)
 
-        result = await solver.solve(question, verbose=True, detailed=detailed)
-        await _push_event(
-            redis,
-            job_id,
-            {
-                "type": "result",
-                "final_answer": result.get("final_answer", ""),
-                "output_dir": result.get("output_dir", ""),
-                "output_md": result.get("output_md", ""),
-                "metadata": result.get("metadata", {}),
-            },
-        )
-    except Exception:
-        logger.exception("Deep solve job failed job_id=%s", job_id)
-        await _push_event(redis, job_id, {"type": "error", "message": "deep solve failed"})
+        logger.info("[worker] flush_all_pending_job complete flushed=%d elapsed_ms=%d",
+                    flushed, int((time.perf_counter() - t0) * 1000))
 
-
-# ---------------------------------------------------------------------------
-# 任务 5 & 6：定时学习总结
-# ---------------------------------------------------------------------------
-
-async def daily_summary_job(ctx) -> None:
-    """每日学习总结（ARQ cron 触发）。"""
-    from core.memory.scheduled_summaries import run_daily_summary
-    await run_daily_summary(ctx)
-
-
-async def weekly_summary_job(ctx) -> None:
-    """每周学习总结（ARQ cron 触发）。"""
-    from core.memory.scheduled_summaries import run_weekly_summary
-    await run_weekly_summary(ctx)
+    except Exception as exc:
+        logger.warning("[worker] flush_all_pending_job error: %s", exc, exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -227,13 +197,15 @@ class WorkerSettings:
         database=int((_parsed.path or "/0").lstrip("/") or 0),
     )
 
-    functions = [run_indexing, run_llamaindex_build, run_deep_research, run_deep_solve]
+    functions = [run_indexing, run_llamaindex_build, flush_all_pending_job]
     max_jobs = 10
-    job_timeout = 3600   # 单个任务最长 1 小时
+    job_timeout = 36000   # 单个任务最长 10 小时
     keep_result = 300    # 任务结果保留 5 分钟
 
-    from arq.cron import cron
+    # Mem0 批量刷新 cron：每 30s 扫描一次 Redis
+    from arq import cron
+    from settings.base import get_settings
+    _settings = get_settings()
     cron_jobs = [
-        cron(daily_summary_job, hour=22, minute=0),
-        cron(weekly_summary_job, weekday=4, hour=22, minute=10),
+        cron(cron_flush_memory, second=set(range(0, 60, _settings.mem0_flush_scan_interval))),
     ]

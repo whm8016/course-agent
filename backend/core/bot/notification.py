@@ -84,24 +84,24 @@ class NotificationService:
         return notified
 
     async def _send_via_channel(self, platform: str, chat_id: str, content: str) -> bool:
-        """Send a message through a specific channel."""
-        # Find a running bot that has this channel enabled
-        for bot_info in self._bot_manager.list_bots():
-            if not bot_info.get("running"):
+        """Send a message through any running bot that has this channel enabled.
+
+        bot 已按 owner 隔离，但通知推送是跨 owner 的（教师广播），故遍历所有运行实例
+        找一个启用了目标 platform 的作为发送载体。
+        """
+        for instance in self._bot_manager.all_running_instances():
+            if not instance.channel_manager:
                 continue
-            if platform in bot_info.get("channels", []):
-                instance = self._bot_manager.get_bot(bot_info["bot_id"])
-                if instance and instance.channel_manager:
-                    channel = instance.channel_manager.get_channel(platform)
-                    if channel:
-                        try:
-                            msg = OutboundMessage(
-                                channel=platform, chat_id=chat_id, content=content
-                            )
-                            await channel.send(msg)
-                            return True
-                        except Exception:
-                            logger.exception(
-                                "Failed to send notification via %s to %s", platform, chat_id
-                            )
+            channel = instance.channel_manager.get_channel(platform)
+            if channel:
+                try:
+                    msg = OutboundMessage(
+                        channel=platform, chat_id=chat_id, content=content
+                    )
+                    await channel.send(msg)
+                    return True
+                except Exception:
+                    logger.exception(
+                        "Failed to send notification via %s to %s", platform, chat_id
+                    )
         return False

@@ -152,9 +152,45 @@ function StageRow({
   )
 }
 
+function ToolCallRow({ step }: { step: Message }) {
+  const tool = String(step.metadata?.tool ?? 'tool')
+  const input = step.metadata?.toolInput as Record<string, unknown> | undefined
+  let summary = ''
+  if (tool === 'solve_plan') {
+    const arr = Array.isArray(input?.steps) ? (input!.steps as Array<{ goal?: string }>) : []
+    summary = arr.map((st, i) => `${i + 1}. ${st.goal ?? ''}`).join('  ')
+  } else if (tool === 'solve_finish_step') {
+    summary = String(input?.summary ?? input?.step_id ?? '')
+  } else if (tool === 'rag') {
+    summary = String(input?.query ?? '')
+  } else if (tool === 'web_search') {
+    summary = String(input?.query ?? '')
+  } else {
+    summary = JSON.stringify(input ?? {}).slice(0, 80)
+  }
+  const label =
+    tool === 'solve_plan'
+      ? '解题计划'
+      : tool === 'solve_finish_step'
+        ? '完成步骤'
+        : tool === 'rag'
+          ? '检索知识库'
+          : tool === 'web_search'
+            ? '联网搜索'
+            : tool
+  return (
+    <div className="flex items-start gap-2 py-0.5 text-[12px] text-slate-500">
+      <span className="shrink-0">🔧</span>
+      <span className="font-medium shrink-0">{label}</span>
+      {summary && <span className="text-slate-400 truncate">{summary}</span>}
+    </div>
+  )
+}
+
 export default function ThinkingProcess({ steps, isStreaming }: Props) {
   const groups = buildStageGroups(steps)
-  if (groups.length === 0) return null
+  const toolSteps = steps.filter((s) => s.type === 'tool_call')
+  if (groups.length === 0 && toolSteps.length === 0) return null
 
   return (
     <div className="mb-3 space-y-0.5 border-b border-slate-100 pb-3">
@@ -165,6 +201,9 @@ export default function ThinkingProcess({ steps, isStreaming }: Props) {
           isLast={i === groups.length - 1}
           isStreaming={isStreaming}
         />
+      ))}
+      {toolSteps.map((s, i) => (
+        <ToolCallRow key={`tc-${i}`} step={s} />
       ))}
     </div>
   )
