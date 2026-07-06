@@ -1,4 +1,4 @@
-"""Cron job 执行器。精确对齐 DeepTutor services/cron/executor.py。
+"""Cron job 执行器。精确对齐 services/cron/executor.py。
 
 partner job：通过 bot 的 AgentLoop.process_direct() 执行，结果经
 MessageBus → _outbound_router → ChannelManager 自动推向 QQ/飞书。

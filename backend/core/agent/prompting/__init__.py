@@ -1,11 +1,11 @@
-"""Prompt hint 加载与渲染（对标 DeepTutor ``tools/prompting/__init__.py``）。
+"""Prompt hint 加载与渲染。
 
 把每个工具的**使用提示**从 YAML 加载，渲染成文本注入 system prompt，与工具的
 **功能 schema**（``TOOLS_OPENAI_SCHEMA``）分离——两套独立数据源，工具说明单一真相源。
 
-加载器对标 DeepTutor ``load_prompt_hints``：从 ``hints/{lang}/{tool_name}.yaml`` 读，
+加载器``load_prompt_hints``：从 ``hints/{lang}/{tool_name}.yaml`` 读，
 zh 回退 en（当前只提供 zh，回退分支保留以便后续加 en，零代码改动）。
-渲染对标 DeepTutor ``ToolPromptComposer.format_list_with_usage``（带 适用场景 + 参数格式），
+渲染``ToolPromptComposer.format_list_with_usage``（带 适用场景 + 参数格式），
 让 LLM 有足够线索判断*是否*调用一个工具，而不仅知其名。
 
 本模块为纯叠加层：**不改** ``TOOLS_OPENAI_SCHEMA`` / ``execute_tool`` /
@@ -23,7 +23,7 @@ _HINTS_DIR = Path(__file__).parent / "hints"
 
 @dataclass
 class ToolPromptHints:
-    """单个工具的使用提示（对标 DeepTutor ``core/tool_protocol.ToolPromptHints``）。
+    """单个工具的使用提示。
 
     ``short_description`` 决定该工具是否进入渲染的 hint 块（为空则跳过）。
     ``phase`` 预留给后续分阶段渲染（``format_phased``），当前 list 渲染不分组。
@@ -50,7 +50,7 @@ def load_prompt_hints(tool_name: str, language: str = "zh") -> ToolPromptHints:
     """从 ``hints/{lang}/{tool_name}.yaml`` 加载提示，zh 回退 en；缺失/异常返回空 hints。
 
     不缓存（文件小，开发期改动即时生效；与 ``prompt_loader.load_prompt_dict`` 同策略）。
-    对标 DeepTutor ``tools/prompting/__init__.py:load_prompt_hints``。
+    ``tools/prompting/__init__.py:load_prompt_hints``。
     """
     lang = _normalize_language(language)
     candidates = [_HINTS_DIR / lang / f"{tool_name}.yaml"]
@@ -98,7 +98,7 @@ def build_tool_hint_text(
 ) -> str:
     """渲染工具使用提示文本块，注入 chat system prompt。
 
-    对标 DeepTutor ``ToolRegistry.build_prompt_text``：按启用的工具名渲染提示。
+    ``ToolRegistry.build_prompt_text``：按启用的工具名渲染提示。
 
     过滤逻辑（与 ``_get_tool_schemas`` / ``DynamicToolResolver.resolve`` 同语义）：
     - ``names`` 来自 ``context.enabled_tools``；空/None → 返回 ``""``（本轮无工具，

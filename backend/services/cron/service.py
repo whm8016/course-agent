@@ -1,6 +1,6 @@
 """进程级 Cron 服务 — 定时任务调度。
 
-精确对齐 DeepTutor services/cron/service.py。
+精确对齐 services/cron/service.py。
 
 单进程、asyncio.Event 驱动（精确睡眠，非固定轮询），JSON 持久化。
 
@@ -171,7 +171,7 @@ def validate_schedule(schedule: CronSchedule) -> None:
 class CronService:
     """Single-process job store + scheduler.
 
-    精确对齐 DeepTutor CronService API。
+    精确对齐 CronService API。
     """
 
     def __init__(

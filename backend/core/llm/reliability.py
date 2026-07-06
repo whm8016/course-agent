@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -239,8 +240,13 @@ async def with_retry_and_circuit(
                 if any(kw in error_str for kw in retryable_keywords):
                     is_retryable = True
 
-                # 检查 HTTP 429（限流）
-                if '429' in str(e):
+                # 检查 HTTP 状态码（openai/httpx 异常通常带 status_code 属性；
+                # 用配置的 retryable_status_codes 判断，让该配置真正生效，而非硬编码 429）
+                _status = (
+                    getattr(e, 'status_code', None)
+                    or getattr(getattr(e, 'response', None), 'status_code', None)
+                )
+                if _status and int(_status) in config.retryable_status_codes:
                     is_retryable = True
 
                 if not is_retryable or attempt >= config.max_retries:
@@ -258,7 +264,6 @@ async def with_retry_and_circuit(
                     config.max_delay
                 )
                 # 添加 0-25% 的随机抖动，避免多请求同时重试
-                import random
                 delay *= (0.75 + random.random() * 0.5)
 
                 logger.warning(
@@ -286,7 +291,7 @@ _llm_circuit_breakers: dict[str, CircuitBreaker] = {}
 def get_llm_circuit_breaker(name: str = "default") -> CircuitBreaker:
     """获取指定名称的 LLM 熔断器
 
-    阈值从 settings 读取（llm_circuit_*），settings 不可用时回退默认值。
+    阈值从 settings.llm 读取（circuit_failure_threshold 等），settings 不可用时回退默认值。
     传给 CircuitBreaker 的 failure_threshold 仍会经其 __init__ 内的
     BACKEND_WORKERS 除法调整，以适配多 worker 场景。
     """
@@ -295,11 +300,12 @@ def get_llm_circuit_breaker(name: str = "default") -> CircuitBreaker:
         try:
             from settings.base import get_settings
 
-            _s = get_settings()
-            _fail = _s.llm_circuit_failure_threshold
-            _succ = _s.llm_circuit_success_threshold
-            _open = _s.llm_circuit_open_timeout
-        except Exception:  # pragma: no cover
+            _llm = get_settings().llm
+            _fail = _llm.circuit_failure_threshold
+            _succ = _llm.circuit_success_threshold
+            _open = _llm.circuit_open_timeout
+            del _llm
+        except ImportError:  # pragma: no cover - 仅 settings 模块缺失兜底
             _fail, _succ, _open = 5, 2, 30.0
 
         _llm_circuit_breakers[name] = CircuitBreaker(
@@ -311,3 +317,19 @@ def get_llm_circuit_breaker(name: str = "default") -> CircuitBreaker:
             )
         )
     return _llm_circuit_breakers[name]
+
+
+def all_llm_circuit_states() -> dict[str, str]:
+    """返回所有已注册 LLM 熔断器的状态快照 {name: state.value}。
+
+    按 binding 拆分熔断器后，主链路会按供应商注册多个实例（dashscope/openai/...）；
+    运维健康检查需一次性看到全部 binding 的状态，而非只看 "default"。
+    """
+    return {name: cb.get_state().value for name, cb in _llm_circuit_breakers.items()}
+
+
+def reset_all_llm_circuit_breakers() -> int:
+    """重置所有已注册的 LLM 熔断器，返回重置数量（运维一键恢复）。"""
+    for cb in _llm_circuit_breakers.values():
+        cb.reset()
+    return len(_llm_circuit_breakers)

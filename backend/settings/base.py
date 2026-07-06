@@ -268,8 +268,19 @@ class ChunkingConfig(BaseModel):
 
 
 class LightRAGConfig(BaseModel):
-    """LightRAG 后端配置 + 安全阈值 + 计算方法。"""
+    """LightRAG 后端配置 + 安全阈值 + 计算方法。
 
+    llm_model/api_key/base_url 是 LightRAG 索引 LLM 的专属 provider，完全独立于
+    llm.*——_apply_catalog() 用 model_catalog.json 覆盖 llm.*/embedding.*/fallback.*
+    时不会 touch self.lightrag.*，故这三者永远只来自 env，不受前端切 provider 影响。
+    也没有任何回退：未配置即未配置，is_lightrag_available() 直接报错拒绝启用，
+    不会静默套用其它 provider 凭证（否则管理员切 catalog 会把 LightRAG 索引打挂）。
+    """
+
+    # 索引 LLM 专属 provider（与对话主 LLM 解耦，零回退；未配则 is_lightrag_available 报错）
+    llm_model: str = ""
+    api_key: StrippedSecret = SecretStr("")
+    base_url: str = ""
     enabled: TruthyBool = False
     query_mode: str = "mix"
     top_k: int = 20
@@ -453,6 +464,11 @@ class Settings(BaseSettings):
     backend_workers: int = 4  # 承接原 _os.getenv("BACKEND_WORKERS")，供 LRU 缩放
     max_upload_mb: int = 10
     max_kb_upload_mb: int = 50
+    # 对话输入上限：chat（HTTP /api/chat）与 run（WS /run/{cap}）共用 message 长度；
+    # history 两入口取值不同（HTTP 短、流式长），故分别配置——勿盲目合并。
+    chat_message_max_length: int = 2000
+    chat_history_max_length: int = 10
+    run_history_max_length: int = 20
     # langsmith 扁平字段（langchain SDK 读 os.environ 扁平名，例外）
     langsmith_tracing: TruthyBool = False
     langsmith_api_key: StrippedSecret = SecretStr("")

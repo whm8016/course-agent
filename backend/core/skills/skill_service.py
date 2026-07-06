@@ -1,4 +1,4 @@
-"""SkillService — SKILL.md 知识包的三层存储与运行时加载（DeepTutor 式渐进式揭示）。
+"""SkillService — SKILL.md 知识包的三层存储与运行时加载（式渐进式揭示）。
 
 三层（读取优先级 personal > course > builtin）：
 - personal: data/skills_user/<user_id>/  —— 用户私人 playbook（多租户隔离，学生侧）

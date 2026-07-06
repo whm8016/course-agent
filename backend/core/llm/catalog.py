@@ -4,7 +4,7 @@ config.py 在启动时把 active profile 扁平化为 module 常量（供 embedd
 bot 等启动期消费方使用，向后兼容）。本模块负责**运行期**管理：按 id 取 profile、
 CRUD、写回 JSON——所有读操作实时读文件，保证 API 写入后下一个请求立即可见。
 
-【对标 DeepTutor】provider 以 **profile 池**形式存在（管理员预配多个 provider+model
+provider 以 **profile 池**形式存在（管理员预配多个 provider+model
 组合）。用户对话时可在前端下拉指定 model_profile_id，后端按该 profile 动态构造
 client 注入 run_agent_loop（见 provider_factory.get_llm_client_for_profile 与
 chat_pipeline 的 profile 解析逻辑）——立即生效、无需重启、不触碰全局 client 单例。

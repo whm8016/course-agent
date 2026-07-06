@@ -1,6 +1,6 @@
 """Agent loop — 统一走主编排链路（CourseOrchestrator + TurnRuntimeManager）。
 
-【改造说明（对标 DeepTutor Partner 架构）】
+【改造说明（Partner 架构）】
 旧版 bot 维护一套独立薄壳：自己造 system_prompt + 静默 StreamBus + 直调 run_agent_loop，
 绕过了主链路（Orchestrator → ChatCapability → ChatPipeline），因此丢失了
 课程 prompt、DB 记忆更新、LLM 熔断/Fallback。

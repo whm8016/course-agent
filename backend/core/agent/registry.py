@@ -1,6 +1,6 @@
 """轻量 ToolRegistry — 函数式/数据式工具注册中心。
 
-对标 DeepTutor ``ToolRegistry`` 的**架构思想**（单一注册表统一执行路由），
+``ToolRegistry`` 的**架构思想**（单一注册表统一执行路由），
 但不引入 BaseTool/ToolDefinition OOP 体系：executor 是 async callable，schema
 是 dict，注册 ``ToolEntry`` 后 ``execute`` 查表调用。
 

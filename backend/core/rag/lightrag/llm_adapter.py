@@ -17,10 +17,13 @@ import numpy as np
 
 from settings import get_settings
 
-# LightRAG 索引阶段 LLM（实体/关系抽取等；来源 LLM__TEXT_MODEL / LLM__API_KEY / LLM__BASE_URL）
-INDEX_LLM_MODEL = get_settings().llm.text_model
-INDEX_LLM_API_KEY = get_settings().llm.api_key.get_secret_value()
-INDEX_LLM_BASE_URL = get_settings().llm.base_url
+# LightRAG 索引阶段 LLM（实体/关系抽取等）——专属 provider，来源 LIGHTRAG__LLM_MODEL /
+# LIGHTRAG__API_KEY / LIGHTRAG__BASE_URL。与 llm.* 完全解耦：不受 model_catalog.json /
+# 前端切 provider 影响，也无任何回退——未配置 is_lightrag_available() 直接报错，不会
+# 偷偷套用 llm.* 凭证（否则管理员切 catalog 时 LightRAG 会拿错 key/url 调模型而报错）。
+INDEX_LLM_MODEL = get_settings().lightrag.llm_model
+INDEX_LLM_API_KEY = get_settings().lightrag.api_key.get_secret_value()
+INDEX_LLM_BASE_URL = get_settings().lightrag.base_url
 
 # LightRAG 索引阶段 Embedding（来源 EMBEDDING__*）
 INDEX_EMBEDDING_MODEL = get_settings().embedding.model
@@ -93,8 +96,10 @@ def is_lightrag_available() -> tuple[bool, str]:
         return False, "LIGHTRAG_ENABLED 未开启"
     if LIGHTRAG_IMPORT_ERROR is not None:
         return False, f"LightRAG 依赖不可用: {LIGHTRAG_IMPORT_ERROR}"
+    if not INDEX_LLM_MODEL:
+        return False, "缺少 LIGHTRAG__LLM_MODEL（LightRAG 索引 LLM 专属模型，无回退）"
     if not INDEX_LLM_API_KEY:
-        return False, "缺少 LLM__API_KEY（LightRAG 索引 LLM）"
+        return False, "缺少 LIGHTRAG__API_KEY（LightRAG 索引 LLM 专属凭证，无回退）"
     return True, ""
 
 

@@ -5,7 +5,7 @@
 - 绕过库手抓 ``html.duckduckgo.com`` 已被反爬（403 / SSL 断连 / 空 202 挑战页）。
 
 ``ddgs`` 库自带反爬处理（UA 轮换、TLS、endpoint、重试），经 Clash 代理稳定可搜。
-对标 DeepTutor（同样用 ``from ddgs import DDGS`` + ``ddgs.text()``）。
+对标 （同样用 ``from ddgs import DDGS`` + ``ddgs.text()``）。
 """
 
 from __future__ import annotations

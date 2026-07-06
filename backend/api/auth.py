@@ -63,10 +63,30 @@ async def get_current_user(
     return user
 
 
-async def get_current_admin(user: dict = Depends(get_current_user)) -> dict:
-    if not user.get("is_admin"):
+def is_admin_user(user: dict) -> bool:
+    """管理员判定单一数据源：以 role 为权威字段。
+
+    is_admin 布尔列仅为历史冗余（迁移期反向同步用过），不参与任何判定——避免
+    role/is_admin 双轨制下漏同步导致的判定不一致（不同接口读不同字段）。所有
+    "是不是管理员"的判断（权限校验 / 越权放行 / 回显派生）都应走此函数。
+    """
+    return user.get("role") == "admin"
+
+
+async def require_admin(user: dict = Depends(get_current_user)) -> dict:
+    """管理员专用依赖（FastAPI Depends）；非管理员 403。
+
+    llm/mcp/search_config 等模块统一用此 Depends（取代各自复制的 _require_admin），
+    把"管理员判定"收敛到 is_admin_user 一处，杜绝双轨制。
+    """
+    if not is_admin_user(user):
         raise HTTPException(status_code=403, detail="仅管理员可访问")
     return user
+
+
+# 历史别名：admin.py / main.py / llama_rag.py 已大量使用 get_current_admin，保留以
+# 减少改动面；与 require_admin 完全等价（同一 function，同走 is_admin_user）。
+get_current_admin = require_admin
 
 
 async def get_current_teacher(user: dict = Depends(get_current_user)) -> dict:

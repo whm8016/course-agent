@@ -1,6 +1,6 @@
 """Skill 知识包（SKILL.md playbook）管理 REST API。
 
-DeepTutor 式 skill 知识包（教师创建教学 playbook，模型经 read_skill 按需读取）。
+式 skill 知识包（教师创建教学 playbook，模型经 read_skill 按需读取）。
 与 /api/skills（output_cards 对话后补充框）是两个不同的概念，路由分开。
 
 - GET    /api/skill-knowledge           -> 列出所有 skill（builtin + user）

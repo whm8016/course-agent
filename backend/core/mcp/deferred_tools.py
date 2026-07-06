@@ -1,4 +1,4 @@
-"""Deferred tool loading（渐进式工具发现，对标 DeepTutor ``runtime/registry/deferred_tools.py``）。
+"""Deferred tool loading（渐进式工具发现，``runtime/registry/deferred_tools.py``）。
 
 MCP 工具（``deferred=True``）不进初始 tool 列表。system prompt 带一行/工具的 manifest
 （:func:`render_deferred_tools_manifest`）；模型需要时调 ``load_tools``，
@@ -7,7 +7,7 @@ MCP 工具（``deferred=True``）不进初始 tool 列表。system prompt 带一
 tool_schemas``，同引用），工具立即可用。已加载名按 session 持久化，后续 turn 从一开始
 就含这些 schema。
 
-与 DeepTutor 的差异：DeepTutor 的 loader 经 ``ToolRegistry.get(name)`` 查 adapter；
+的差异：loader 经 ``ToolRegistry.get(name)`` 查 adapter；
 本项目 registry 只接管**执行路由**（schema 揭示的 turn-bound 可变 list + session
 持久化 + stale 清理语义 registry 替代不了），故 loader 仍持有 ``pool``
 （wrapped_name → MCPToolAdapter 字典）直接查 schema。

@@ -74,14 +74,10 @@ def _build_default_registry() -> CapabilityRegistry:
     from core.capabilities.deep_solve import DeepSolveCapability
     from core.capabilities.deep_research import DeepResearchCapability
     from core.capabilities.quiz import QuizCapability
-    from core.capabilities.summarize import SummarizeCapability
-    from core.capabilities.vision import VisionCapability
 
     reg = CapabilityRegistry()
     reg.register(ChatCapability())
     reg.register(DeepSolveCapability())
     reg.register(DeepResearchCapability())
     reg.register(QuizCapability())
-    reg.register(SummarizeCapability())
-    reg.register(VisionCapability())
     return reg

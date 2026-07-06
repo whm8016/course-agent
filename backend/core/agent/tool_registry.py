@@ -189,7 +189,7 @@ async def _execute_load_tools(names, **kwargs) -> ToolResult:
 
 
 # ── Solve Tools（确定性脊柱：plan / finish_step / replan）──────────────────
-# 对标 DeepTutor capabilities/solve/tools.py。仅在 solve turn 激活（contextvar 有 session_id）。
+# capabilities/solve/tools.py。仅在 solve turn 激活（contextvar 有 session_id）。
 # 智能在 loop 出口（模型规划+求解），这三个工具提供 commit plan、不跳步、bounded replan 的确定性。
 
 def _no_solve_session() -> ToolResult:
@@ -328,8 +328,8 @@ TOOLS_OPENAI_SCHEMA = [
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id":      {"type": "string", "description": "问题唯一标识（英文 snake_case）"},
-                                "prompt":  {"type": "string", "description": "向用户展示的问题文本"},
+                                "id": {"type": "string", "description": "问题唯一标识（英文 snake_case）"},
+                                "prompt": {"type": "string", "description": "向用户展示的问题文本"},
                                 "options": {
                                     "type": "array",
                                     "description": "可选的预设选项列表（可省略，省略则自由输入）",
@@ -422,7 +422,7 @@ TOOLS_OPENAI_SCHEMA = [
 ]
 
 # read_skill 是动态 schema（不进 TOOLS_OPENAI_SCHEMA 静态列表），由 ChatPipeline /
-# DynamicToolResolver 在 context.skills_manifest 非空时注入。对标 DeepTutor ReadSkillTool。
+# DynamicToolResolver 在 context.skills_manifest 非空时注入。ReadSkillTool。
 READ_SKILL_SCHEMA = {
     "type": "function",
     "function": {

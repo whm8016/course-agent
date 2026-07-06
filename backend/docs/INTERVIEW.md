@@ -8,9 +8,9 @@
 
 ## 0. 一句话定位（30 秒）
 
-> "我做了一个**多租户的课程 AI SaaS**：教师端备课、建知识库、看学情分析；学生端基于课程知识库做智能答疑、解题、出题。架构对标开源单机版的 DeepTutor，但我把它做成了**真正的多租户 SaaS**——加了 RBAC 权限、教师后台、学情看板、异步任务队列。"
+> "我做了一个**多租户的课程 AI SaaS**：教师端备课、建知识库、看学情分析；学生端基于课程知识库做智能答疑、解题、出题。架构对标开源单机版 ，但我把它做成了**真正的多租户 SaaS**——加了 RBAC 权限、教师后台、学情看板、异步任务队列。"
 
-一句话说清三件事：**是什么**（课程 AI SaaS）、**对标谁**（DeepTutor）、**差异化**（多租户 SaaS vs 单机库）。
+一句话说清三件事：**是什么**（课程 AI SaaS）、**对标谁**、**差异化**（多租户 SaaS vs 单机库）。
 
 ---
 
@@ -23,7 +23,7 @@
 | 任务队列 | ARQ（索引 / 解题 / 研究 / 定时总结跑在独立 worker） |
 | RAG | LightRAG（图谱+向量混合）+ LlamaIndex 双引擎 |
 | LLM | 14 provider 抽象（OpenAI/DeepSeek/通义/GLM/Kimi/Claude…），熔断器 + fallback |
-| Agent | 自研 **tool_calls 驱动** Agent Loop + 单层 Capability（四能力对齐 DeepTutor） |
+| Agent | 自研 **tool_calls 驱动** Agent Loop + 单层 Capability（四能力） |
 | 流式 | SSE + WebSocket 双通道，StreamBus fan-out |
 | 前端 | React 19 + TS + Vite + Tailwind |
 
@@ -33,39 +33,39 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│  前端 SPA（React 19 + TS）                                    │
-│  学生端 ChatWindow │ 教师端 TeacherPage │ 管理员 AdminPage    │
+│ 前端 SPA（React 19 + TS） │
+│ 学生端 ChatWindow │ 教师端 TeacherPage │ 管理员 AdminPage │
 └──────────────────────────┬──────────────────────────────────┘
-                           │ HTTP / SSE / WebSocket
+ │ HTTP / SSE / WebSocket
 ┌──────────────────────────▼──────────────────────────────────┐
-│  API 网关（FastAPI）                                          │
-│  JWT 鉴权 │ SlowAPI 限流 │ check_course_access 多租户隔离     │
-│  POST /api/chat(SSE) │ WS /api/run/{capability}              │
+│ API 网关（FastAPI） │
+│ JWT 鉴权 │ SlowAPI 限流 │ check_course_access 多租户隔离 │
+│ POST /api/chat(SSE) │ WS /api/run/{capability} │
 └──────────────────────────┬──────────────────────────────────┘
-                           │
+ │
 ┌──────────────────────────▼──────────────────────────────────┐
-│  编排层                                                       │
-│  CourseOrchestrator → 按 mode 选 Capability                   │
-│  Capability: chat / deep_solve / deep_research / quiz / ...   │
-│  → 统一 Agent Loop（tool_calls 多轮）                         │
+│ 编排层 │
+│ CourseOrchestrator → 按 mode 选 Capability │
+│ Capability: chat / deep_solve / deep_research / quiz / ... │
+│ → 统一 Agent Loop（tool_calls 多轮） │
 └──────────┬───────────────────────────────┬──────────────────┘
-           │                               │
-┌──────────▼──────────┐         ┌──────────▼──────────────────┐
-│  工具面              │         │  双引擎 RAG                  │
-│  rag │ web_search    │         │  LightRAG(图谱+向量)         │
-│  ask_user(可暂停)    │         │  LlamaIndex(多模态文档)      │
-└──────────────────────┘         └─────────────────────────────┘
-           │
+ │ │
+┌──────────▼──────────┐ ┌──────────▼──────────────────┐
+│ 工具面 │ │ 双引擎 RAG │
+│ rag │ web_search │ │ LightRAG(图谱+向量) │
+│ ask_user(可暂停) │ │ LlamaIndex(多模态文档) │
+└──────────────────────┘ └─────────────────────────────┘
+ │
 ┌──────────▼──────────────────────────────────────────────────┐
-│  LLM 抽象层（provider 无关）                                  │
-│  AsyncOpenAI / AnthropicAdapter / AsyncAzureOpenAI           │
-│  熔断器 + 指数退避 + fallback client + 并发信号量             │
+│ LLM 抽象层（provider 无关） │
+│ AsyncOpenAI / AnthropicAdapter / AsyncAzureOpenAI │
+│ 熔断器 + 指数退避 + fallback client + 并发信号量 │
 └──────────────────────────┬──────────────────────────────────┘
-                           │
+ │
 ┌──────────────────────────▼──────────────────────────────────┐
-│  基础设施                                                     │
-│  PostgreSQL（用户/会话/KB/enrollments）│ Redis（缓存/队列）    │
-│  ARQ Worker（后台索引/解题/研究）│ LightRAG Store（每课独立）  │
+│ 基础设施 │
+│ PostgreSQL（用户/会话/KB/enrollments）│ Redis（缓存/队列） │
+│ ARQ Worker（后台索引/解题/研究）│ LightRAG Store（每课独立） │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -76,49 +76,49 @@
 > 这是面试最常问的"讲一个请求的完整链路"。
 
 1. **入口**：学生在 ChatWindow 提问，前端走 SSE（`/api/chat`）或 WebSocket（`/api/run/chat`）。
-   - `api/chat.py` / `api/run.py`
+ - `api/chat.py` / `api/run.py`
 2. **鉴权 + 多租户隔离**：JWT 解析用户 → `check_course_access(course_id, user_id)` 校验"该学生是否选了这门课"，结果 Redis 缓存。未选课直接 403（"自由问答" general 课程除外，任何登录用户可用）。
-   - `api/courses.py` 的 `check_course_access`
-3. **编排选路**：`TurnRuntimeManager.start_turn()` → `CourseOrchestrator.handle(context)` 按 `context.mode`（chat / deep_solve / deep_research / quiz / summarize / vision）选出对应 Capability。
-   - `services/session/turn_runtime.py`、`core/orchestrator.py`、`core/registry.py`
+ - `api/courses.py` 的 `check_course_access`
+3. **编排选路**：`TurnRuntimeManager.start_turn` → `CourseOrchestrator.handle(context)` 按 `context.mode`（chat / deep_solve / deep_research / quiz）选出对应 Capability。
+ - `services/session/turn_runtime.py`、`core/orchestrator.py`、`core/registry.py`
 4. **Agent Loop**：chat 走 `ChatPipeline`（组装 system prompt → `run_agent_loop`）；解题/研究/出题各自是独立多阶段 pipeline，每阶段一次 `run_agent_loop`。进入 tool_calls 多轮循环：
-   - 每轮 LLM 决定调哪些工具（rag 检索 / web_search / ask_user / solve_*）→ 并行分发（最多 8 个并发）→ 把 `role=tool` 结果塞回对话 → 下一轮。
-   - 最后一轮强制 `tools=None`，LLM 必须输出文字答案。
-   - `core/capabilities/chat_pipeline.py`、`core/agentic/loop.py`
+ - 每轮 LLM 决定调哪些工具（rag 检索 / web_search / ask_user / solve_*）→ 并行分发（最多 8 个并发）→ 把 `role=tool` 结果塞回对话 → 下一轮。
+ - 最后一轮强制 `tools=None`，LLM 必须输出文字答案。
+ - `core/capabilities/chat_pipeline.py`、`core/agentic/loop.py`
 5. **流式回传**：每一步通过 `StreamBus` 发事件（thinking / tool_call / tool_result / token / answer / done），前端逐个渲染。
-   - **最终答案轮是真流式**：chunk-by-chunk 透传（见取舍 2）。
-   - `core/stream_bus.py`、`core/agentic/loop.py`（`live_sink`）
+ - **最终答案轮是真流式**：chunk-by-chunk 透传（见取舍 2）。
+ - `core/stream_bus.py`、`core/agentic/loop.py`（`live_sink`）
 
 ---
 
 ## 4. 五个亮点（每个准备讲 3 分钟 + 回答追问）
 
-### 亮点 1：四大能力对齐 DeepTutor（tool_calls 版）
+### 亮点 1：四大能力（tool_calls 版）
 
-> "DeepTutor 用首行 label（FINISH/TOOL/THINK）做流程门控，我对比后选了 tool_calls，用代码编排 + 工具状态机实现等价能力深度。"
+> "用首行 label（FINISH/TOOL/THINK）做流程门控，我对比后选了 tool_calls，用代码编排 + 工具状态机实现等价能力深度。"
 
-- **单层 Capability + 共享 `run_agent_loop`**：chat / deep_solve / deep_research / quiz / summarize / vision 各是一个 `BaseCapability` 薄壳，注册到 `CapabilityRegistry`。
-  - `core/capability_protocol.py`、`core/registry.py`
+- **单层 Capability + 共享 `run_agent_loop`**：chat / deep_solve / deep_research / quiz 各是一个 `BaseCapability` 薄壳，注册到 `CapabilityRegistry`。
+ - `core/capability_protocol.py`、`core/registry.py`
 - **等价门控靠代码而非 label**：solve 用 `SolveSession` 状态机（`solve_plan`/`finish_step`/`replan` 工具）；quiz 三阶段编排（explore→plan→quiz）；research 用 `DynamicTopicQueue` + `CitationManager`。
-  - `core/solve/session.py`、`core/question/pipeline.py`、`core/research/pipeline.py`
+ - `core/solve/session.py`、`core/question/pipeline.py`、`core/research/pipeline.py`
 - **价值**：加新模式只写 capability + 工具，核心 `run_agent_loop` 不动；流程刚性由代码保证，不依赖弱模型遵守 label。
 
 ### 亮点 2：provider 无关的 Agent Loop
 
 > "我的一套 ReAct 循环，能跑 GPT、Claude、通义、DeepSeek，不用为每家改逻辑。"
 
-- Loop 只认 `client.chat.completions.create()`（OpenAI 协议）。
+- Loop 只认 `client.chat.completions.create`（OpenAI 协议）。
 - **AnthropicAdapter** 把 Claude 原生的 `tool_use` 流式协议**桥接成 OpenAI chunk 格式**——delta.content / delta.tool_calls 字段对齐。
-  - `core/llm/providers/anthropic_adapter.py`
+ - `core/llm/providers/anthropic_adapter.py`
 - 14 个 provider 注册表，工厂按 backend 选 client。
-  - `core/llm/provider_registry.py`、`core/llm/provider_factory.py`
+ - `core/llm/provider_registry.py`、`core/llm/provider_factory.py`
 
-### 亮点 3：多租户全链路隔离（SaaS 核心，对标 DeepTutor 的关键差异）
+### 亮点 3：多租户全链路隔离（SaaS 核心，的关键差异）
 
-> "DeepTutor 是单机的，admin 只是部署管理员。我做的是真多租户——从数据库到运行时到向量库全链路隔离。"
+> "是单机的，admin 只是部署管理员。我做的是真多租户——从数据库到运行时到向量库全链路隔离。"
 
 - **DB 层**：`knowledge_bases.owner_id`（KB 属于哪个教师）+ `enrollments`（学生-课程选课关系，唯一约束）。
-  - `alembic/versions/002_roles_invites_enrollments.py`
+ - `alembic/versions/002_roles_invites_enrollments.py`
 - **运行时**：`check_course_access` 在每个 chat / WS 入口强制校验，Redis 缓存结果。
 - **向量库**：LightRAG 按 `course_id` 分独立 workspace（`lightrag_store/course_*`），物理隔离。
 - **角色**：student / teacher / admin 三级 RBAC，教师凭 invite_code 注册升级。
@@ -127,32 +127,31 @@
 
 > "不是 demo 级的'调通就行'，我做了生产级的容错。"
 
-- **熔断器**（CLOSED/OPEN/HALF_OPEN）+ **指数退避重试** + **fallback 兜底 client**。
-  - `core/llm/reliability.py`
-- **进程级 LLM 并发信号量**（`MAX_CONCURRENT_LLM`），防瞬时打爆上游。
+- **熔断器**（CLOSED/OPEN/HALF_OPEN）+ **指数退避重试**，下沉到主 Agent 路径（`_create_with_image_fallback`）保护 chat/解题/研究/出题；chat_complete 另带 fallback 兜底 client。
+ - `core/llm/reliability.py`、`core/llm/llm.py`
 - **RAG 检索缓存 + 权限缓存**（Redis），热路径降延迟。
 - **健康检查**带 LLM/Redis/DB 探针 + 熔断器重置。
-  - `main.py` 的 `/api/health`
+ - `main.py` 的 `/api/health`
 
 ### 亮点 5：流式 + 交互暂停 + 真流式优化
 
 > "AI 能边想边说，还能中途反问学生。"
 
 - **StreamBus**：per-turn 事件总线，支持历史回放（断线重连不丢事件）、stage 上下文。
-  - `core/stream_bus.py`
+ - `core/stream_bus.py`
 - **ask_user 工具**：loop 可**暂停**等学生回答卡片，把回答写回 `role=tool` 消息继续推理。WS 入口双向，SSE 入口优雅降级。
-  - `core/agentic/loop.py`（`wait_for_user_reply`）
+ - `core/agentic/loop.py`（`wait_for_user_reply`）
 - **真流式**：最终答案轮 chunk-by-chunk 透传，首字延迟 ≈ 首 token 时间（见取舍 2）。
 
 ---
 
 ## 5. 难点与取舍（面试加分项，证明"懂为什么"）
 
-### 取舍 1：tool_calls vs label-driven loop（对标 DeepTutor）
+### 取舍 1：tool_calls vs label-driven loop
 
 > "我对比过两种 agent loop 范式，有意识地选了 tool_calls。"
 
-| | tool_calls（我的选择） | label-driven（DeepTutor） |
+| | tool_calls（我的选择） | label-driven |
 |---|---|---|
 | 机制 | OpenAI 原生 function calling | 第一行文本标签 THINK/TOOL/FINISH |
 | 鲁棒性 | provider 保证格式 | 依赖 prompt 工程，弱模型可能不遵守 |
@@ -170,7 +169,7 @@
 - **问题**：旧 `_emit_as_tokens` 把完整字符串切块，首字延迟 = 整段生成时间。
 - **根因**：tool_calls loop 必须等整轮收完才能判断"有没有 tool_calls"，所以单轮内难边收边发。
 - **我的方案**：利用 loop 已有的"最后一轮 `tools=None` 强制收尾"——这轮 LLM 物理上不可能输出 tool_calls，可放心 chunk-by-chunk 透传。给 `_one_round` 加 `live_sink`，最后一轮传入。
-  - `core/agentic/loop.py`：`_one_round(..., live_sink)` + `is_final_round`
+ - `core/agentic/loop.py`：`_one_round(..., live_sink)` + `is_final_round`
 - **覆盖**：RAG/解题/研究"调几轮工具 → 最后一轮总结"的主力长答案场景（80% 收益）。
 - **未做（已知优化项）**：非最后一轮的"提前收尾"乐观流式，涉及前端语义，留后续。
 
@@ -190,9 +189,9 @@
 
 ---
 
-## 6. SaaS 差异化（对比开源单机 DeepTutor）
+## 6. SaaS 差异化（对比开源单机 ）
 
-| 能力 | 单机 DeepTutor | 本项目（SaaS） |
+| 能力 | 单机 | 本项目（SaaS） |
 |---|---|---|
 | 多租户 / 角色 | 无 | admin/teacher/student RBAC |
 | 教师后台 | 无 | 建课、KB CRUD、6 个学情看板、邀请码 |
@@ -201,17 +200,17 @@
 | 异步任务队列 | 同步 | ARQ worker（索引/解题/研究/定时总结） |
 | 用量统计 | 无 | （规划中）token 按用户/课程计量 |
 
-**讲法**："DeepTutor 明确声明不做付费产品，它的多用户只是部署特性。我的护城河是真正的多租户 SaaS + 教师端 + 学情闭环——这是它能讲出而 DeepTutor 仓库讲不出的差异。"
+**讲法**："明确声明不做付费产品，它的多用户只是部署特性。我的护城河是真正的多租户 SaaS + 教师端 + 学情闭环——这是它能讲出而 仓库讲不出的差异。"
 
 ---
 
 ## 7. 简历话术
 
 ### 一段话（中文）
-> 课程 AI SaaS（对标 DeepTutor 的多租户升级版）：FastAPI + ARQ + PostgreSQL 后端，React 19 前端。设计单层 Capability + tool_calls 驱动 Agent Loop（四大能力 chat/solve/research/quiz 对齐 DeepTutor，跨 14 个 LLM provider，含 Claude 协议适配），双引擎 RAG（LightRAG 图谱 + LlamaIndex），SSE/WebSocket 双通道真流式。实现多租户 RBAC、教师学情看板、异步任务队列、熔断器+fallback 可靠性工程。建立中文课程 QA 评测集量化 faithfulness/citation recall。
+> 课程 AI SaaS：FastAPI + ARQ + PostgreSQL 后端，React 19 前端。设计单层 Capability + tool_calls 驱动 Agent Loop（四大能力 chat/solve/research/quiz 跨 14 个 LLM provider，含 Claude 协议适配），双引擎 RAG（LightRAG 图谱 + LlamaIndex），SSE/WebSocket 双通道真流式。实现多租户 RBAC、教师学情看板、异步任务队列、熔断器+fallback 可靠性工程。建立中文课程 QA 评测集量化 faithfulness/citation recall。
 
 ### One-liner（英文）
-> Built a multi-tenant AI tutoring SaaS (DeepTutor-inspired): FastAPI + ARQ backend with a tool-calling agent loop spanning 14 LLM providers, dual-engine RAG (LightRAG + LlamaIndex), real-time streaming, RBAC multi-tenancy, teacher analytics dashboards, and circuit-breaker reliability engineering.
+> Built a multi-tenant AI tutoring SaaS : FastAPI + ARQ backend with a tool-calling agent loop spanning 14 LLM providers, dual-engine RAG (LightRAG + LlamaIndex), real-time streaming, RBAC multi-tenancy, teacher analytics dashboards, and circuit-breaker reliability engineering.
 
 ---
 

@@ -7,7 +7,7 @@
 - ``TopicBlock``      队列最小调度单元（block_id / sub_topic / overview / status / sources）
 - ``DynamicTopicQueue`` 主题队列：add_block / get_pending / all_done / is_full / find_similar
 
-与 DeepTutor 的差异：
+与 的差异：
 - 不做 JSON 落盘 / state_file 持久化（内存态即可，per-turn）
 - 不做 raw_answer 截断（research loop 自带上下文预算）
 - find_similar 用最简单的归一化 + 子串匹配，不引 difflib（足够挡住重复主题）
@@ -78,7 +78,7 @@ def _normalize(text: str) -> str:
 class DynamicTopicQueue:
     """动态主题队列：research 阶段的内存调度中心。
 
-    对标 DeepTutor DynamicTopicQueue，去掉持久化与复杂相似度，保留：
+    DynamicTopicQueue，去掉持久化与复杂相似度，保留：
     add_block / get_pending / all_done / is_full / find_similar / 标记状态。
     """
 

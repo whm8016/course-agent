@@ -1,6 +1,6 @@
-"""DeepSolvePipeline — 单 agent loop + solve 工具状态机（对标 DeepTutor）。
+"""DeepSolvePipeline — 单 agent loop + solve 工具状态机（对标 ）。
 
-DeepTutor 的解题没有独立多阶段 pipeline：chat agent loop 就是解题器，
+的解题没有独立多阶段 pipeline：chat agent loop 就是解题器，
 通过 solve_plan / solve_finish_step / solve_replan 三个工具 + SolveSession
 状态机提供"确定性脊柱"（commit plan、不跳步、bounded replan），实际推理在
 loop 出口由模型完成。
@@ -39,7 +39,7 @@ from core.stream_bus import StreamBus
 
 logger = logging.getLogger(__name__)
 
-# solve playbook（YAML 外部化，对标 DeepTutor capabilities/solve prompts/zh/system.md）
+# solve playbook（YAML 外部化，capabilities/solve prompts/zh/system.md）
 _SOLVE_PROMPT_PATH = Path(__file__).parent / "prompts" / "zh" / "system.yaml"
 
 # solve 确定性脊柱三件套

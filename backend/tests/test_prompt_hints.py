@@ -1,4 +1,4 @@
-"""prompt hint 加载/渲染/注入测试（对标 DeepTutor prompting 层）。
+"""prompt hint 加载/渲染/注入测试（prompting 层）。
 
 渲染层是纯函数、不依赖 chat_pipeline，可独立测试核心逻辑：
 加载（字段/语言归一/缺失回退）、渲染（基本格式/空 names/跳过缺失/去重保序/

@@ -2,6 +2,18 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
+import {
+  MessageCircle,
+  BookOpen,
+  ClipboardList,
+  AlignLeft,
+  ScanEye,
+  BrainCircuit,
+  Search,
+  Image as ImageIcon,
+  Paperclip,
+  type LucideIcon,
+} from 'lucide-react'
 import type { Message } from '../../types'
 import ThinkingProcess from './ThinkingProcess'
 import SourceCard from './SourceCard'
@@ -88,20 +100,28 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
     const imageChips = message.image ? [] : (message.attachments || []).filter((a) => a.type === 'image')
     return (
       <div className="flex justify-end mb-4">
-        <div className="max-w-[92%] md:max-w-[75%] rounded-2xl px-4 py-3 bg-indigo-600 text-white rounded-br-md">
+        <div className="max-w-[92%] md:max-w-[75%] rounded-[var(--radius-lg)] px-4 py-3 bg-ink text-white rounded-br-[3px]">
           {message.image && (
-            <img src={message.image} alt="上传的图片" className="max-w-[280px] rounded-lg mb-2" />
+            <img src={message.image} alt="上传的图片" className="max-w-[280px] rounded-[var(--radius)] mb-2" />
           )}
           {(imageChips.length > 0 || docAtts.length > 0) && (
             <div className="flex flex-wrap gap-1.5 mb-2">
               {imageChips.map((a, i) => (
-                <span key={`img-${i}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white/15 text-xs">
-                  📷 {a.filename || '图片'}
+                <span
+                  key={`img-${i}`}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-[var(--radius-sm)] bg-white/15 text-xs"
+                >
+                  <ImageIcon size={12} strokeWidth={1.5} />
+                  {a.filename || '图片'}
                 </span>
               ))}
               {docAtts.map((a, i) => (
-                <span key={`doc-${i}`} className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white/15 text-xs">
-                  📎 {a.filename || '文档'}
+                <span
+                  key={`doc-${i}`}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-[var(--radius-sm)] bg-white/15 text-xs"
+                >
+                  <Paperclip size={12} strokeWidth={1.5} />
+                  {a.filename || '文档'}
                 </span>
               ))}
             </div>
@@ -116,9 +136,23 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
     )
   }
 
+  // intent / mode → 图标 badge（原 emoji 版的等价重构：条件与文案不变，只换呈现）
+  const meta = message.metadata
+  const intentBadges: { icon: LucideIcon; label: string }[] = []
+  if (meta) {
+    if (meta.intent === 'chitchat') intentBadges.push({ icon: MessageCircle, label: '闲聊' })
+    else if (meta.intent === 'knowledge' || meta.intent === 'teach')
+      intentBadges.push({ icon: BookOpen, label: '知识问答' })
+    else if (meta.intent === 'quiz') intentBadges.push({ icon: ClipboardList, label: '测验模式' })
+    else if (meta.intent === 'summarize') intentBadges.push({ icon: AlignLeft, label: '学习总结' })
+    else if (meta.intent === 'vision') intentBadges.push({ icon: ScanEye, label: '图像分析' })
+    if (meta.mode === 'deep_solve') intentBadges.push({ icon: BrainCircuit, label: '深度解题' })
+    if (meta.mode === 'research') intentBadges.push({ icon: Search, label: '深度研究' })
+  }
+
   return (
     <div className="flex justify-start mb-4">
-      <div className="max-w-[95%] md:max-w-[80%] rounded-2xl px-4 py-3 bg-white border border-slate-200 text-slate-800 rounded-bl-md shadow-sm">
+      <div className="max-w-[95%] md:max-w-[80%] rounded-[var(--radius-lg)] px-4 py-3 bg-surface border border-line text-ink rounded-bl-[3px]">
         {thinkingSteps && thinkingSteps.length > 0 && (
           <ThinkingProcess steps={thinkingSteps} isStreaming={isStreaming} />
         )}
@@ -140,31 +174,25 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
         )}
 
         {message.metadata?.hallucination && message.metadata.hallucination.tip && (
-          <div className="mt-2 px-3 py-1.5 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-700">
+          <div className="mt-2 px-3 py-1.5 rounded-[var(--radius)] bg-info-bg border border-line text-xs text-info-fg">
             <span className="font-medium">可信度：</span>
             {message.metadata.hallucination.tip}
             {message.metadata.hallucination.confidence > 0 && (
-              <span className="ml-1 text-blue-500">
-                ({Math.round(message.metadata.hallucination.confidence * 100)}%)
-              </span>
+              <span className="ml-1">({Math.round(message.metadata.hallucination.confidence * 100)}%)</span>
             )}
           </div>
         )}
 
         {message.metadata?.intent && (
-          <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
-            {message.metadata.intent === 'chitchat' && <span>💬 闲聊</span>}
-            {message.metadata.intent === 'knowledge' && <span>📖 知识问答</span>}
-            {message.metadata.intent === 'teach' && <span>📖 知识问答</span>}
-            {message.metadata.intent === 'quiz' && <span>📝 测验模式</span>}
-            {message.metadata.intent === 'summarize' && <span>📋 学习总结</span>}
-            {message.metadata.intent === 'vision' && <span>🔍 图像分析</span>}
-            {message.metadata.mode === 'deep_solve' && <span>🧠 深度解题</span>}
-            {message.metadata.mode === 'research' && <span>🔎 深度研究</span>}
-            {message.metadata.tools_used && message.metadata.tools_used.length > 0 && (
-              <span className="text-slate-300">
-                · 使用了 {message.metadata.tools_used.join(', ')}
+          <div className="mt-2 flex items-center gap-2 flex-wrap text-xs text-muted">
+            {intentBadges.map((b, i) => (
+              <span key={i} className="inline-flex items-center gap-1">
+                <b.icon size={12} strokeWidth={1.5} />
+                {b.label}
               </span>
+            ))}
+            {message.metadata.tools_used && message.metadata.tools_used.length > 0 && (
+              <span className="text-muted/70">· 使用了 {message.metadata.tools_used.join(', ')}</span>
             )}
           </div>
         )}

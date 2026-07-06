@@ -454,7 +454,7 @@ class TutorBotManager:
         return list(self._bots.values())
 
     def get_bot_history(self, owner_id: str, bot_id: str, limit: int = 100) -> list[dict[str, Any]]:
-        """读取该 bot owner 的 web 对话历史（per-user session，对齐 DeepTutor session 级）。
+        """读取该 bot owner 的 web 对话历史（per-user session，对齐 session 级）。
 
         web 对话 session_key = bot:{bot_id}:{user_id}（owner 即登录用户）。
         仅返回 web 对话线，不含 QQ/飞书各群会话（渠道隔离，对齐 session≠memory 分层）。
@@ -494,7 +494,7 @@ class TutorBotManager:
             else:
                 raise RuntimeError(f"Bot '{bot_id}' not found. Create it first via POST /api/bot/create")
         # web 直发：per-user session_key（每个用户独立 web 对话线，避免多用户串；
-        # 对齐 DeepTutor session 级历史）+ user_id 让 bot 对话写学生记忆（不再匿名）
+        # 对齐 session 级历史）+ user_id 让 bot 对话写学生记忆（不再匿名）
         session_key = f"bot:{bot_id}:{user_id}" if user_id else None
         return await instance.agent_loop.process_direct(
             content, channel="web", chat_id=chat_id, user_id=user_id, session_key=session_key

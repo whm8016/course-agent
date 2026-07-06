@@ -1,17 +1,14 @@
 """ChatPipeline — chat capability 的 agent loop 执行层。
 
 路由完全由上层 Orchestrator + CapabilityRegistry 按 context.mode 完成：
-  chat       → ChatCapability      → ChatPipeline (本文件) → run_agent_loop
-  deep_solve → DeepSolveCapability  → DeepSolvePipeline（独立三阶段）
+  chat          → ChatCapability         → ChatPipeline (本文件) → run_agent_loop
+  deep_solve    → DeepSolveCapability    → DeepSolvePipeline（独立三阶段）
   deep_research → DeepResearchCapability → ResearchPipeline（独立三阶段）
-  quiz       → QuizCapability
-  summarize  → SummarizeCapability
-  vision     → VisionCapability
+  quiz          → QuizCapability
 
 本文件只负责 chat 模式：组装 system prompt → 驱动 agent loop。
 
-chat 的 agent loop 行为规范外部化到 prompts/zh/chat.yaml（对标 DeepTutor
-agentic_chat.yaml，去除 label 协议外壳，适配 tool_calls loop）。
+chat 的 agent loop 行为规范外部化到 prompts/zh/chat.yaml（agentic_chat.yaml，去除 label 协议外壳，适配 tool_calls loop）。
 """
 from __future__ import annotations
 
@@ -31,7 +28,7 @@ from core.stream_bus import StreamBus
 
 logger = logging.getLogger(__name__)
 
-# chat agent loop 行为规范（外部化 YAML，对标 DeepTutor agentic_chat.yaml）
+# chat agent loop 行为规范（外部化 YAML，agentic_chat.yaml）
 _CHAT_PROMPT_PATH = Path(__file__).parent / "prompts" / "zh" / "chat.yaml"
 
 
@@ -106,7 +103,7 @@ class ChatPipeline:
         # include_skills=True：chat 挂 read_skill 工具，急切注入 always-on skill 全文。
         layers = await build_common_context_layers(context, include_skills=True)
 
-        # ── chat agent loop 行为规范（YAML 外部化，对标 DeepTutor agentic_chat.yaml）──
+        # ── chat agent loop 行为规范（YAML 外部化，agentic_chat.yaml）──
         chat_cfg = load_prompt_dict(_CHAT_PROMPT_PATH)
         loop_system = (chat_cfg.get("loop") or {}).get("system") or ""
 

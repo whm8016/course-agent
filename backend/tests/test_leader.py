@@ -155,3 +155,47 @@ async def test_become_leader_idempotent():
 
     assert leader.is_leader() is True
     on_gain.assert_awaited_once()
+
+
+async def test_follower_shutdown_does_not_release_lock():
+    """follower shutdown 不误删锁：_is_leader=False 时 CAS eval/delete 均不调用。
+
+    回归 Bug 1：旧实现 shutdown_leader 在 if _is_leader 之外无条件 delete(_LEADER_KEY)，
+    follower 正常重启/滚动更新时会删掉真 leader 的锁 → leader 下次续约 CAS 返回 0 误判
+    丢锁 → on_lose 误触发、单例空窗。
+    """
+    redis_mock = _make_redis_mock()
+    leader._redis_client = redis_mock
+    leader._is_leader = False  # follower
+
+    await leader.shutdown_leader()
+
+    # follower 不触碰锁（既不 CAS 删，也不无条件 delete）
+    redis_mock.eval.assert_not_awaited()
+    redis_mock.delete.assert_not_awaited()
+    assert leader._redis_client is None  # client 已关闭
+
+
+async def test_leader_shutdown_releases_lock_then_on_lose():
+    """leader shutdown：CAS 删锁（eval）→ on_lose 停单例。
+
+    锁已被新 leader 抢走（eval 返回 0）时仍执行 on_lose——本地单例清理不依赖 Redis 锁状态。
+    回归 Bug 1：旧实现无条件 delete 会误删新 leader 的锁；CAS 返回 0 时安全跳过 del。
+    """
+    redis_mock = _make_redis_mock()
+    redis_mock.eval.return_value = 0  # CAS 删锁返回 0：锁已被别人持
+    leader._redis_client = redis_mock
+    leader._is_leader = True
+
+    on_lose = AsyncMock()
+    leader.register_leader_callbacks(on_gain=AsyncMock(), on_lose=on_lose)
+
+    await leader.shutdown_leader()
+
+    # 走 CAS 删锁（eval），不是无条件 delete
+    redis_mock.eval.assert_awaited_once()
+    redis_mock.delete.assert_not_awaited()
+    # 锁虽已被别人抢，本地 on_lose 仍执行（停 Cron/Bot/MCP 单例）
+    on_lose.assert_awaited_once()
+    assert leader._is_leader is False
+    assert leader._redis_client is None

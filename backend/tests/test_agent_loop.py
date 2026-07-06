@@ -360,12 +360,12 @@ async def test_final_round_live_streaming(ctx, bus):
 
 
 # ---------------------------------------------------------------------------
-# 场景 6：带图附件 → 仍用 TEXT_MODEL（对标 DeepTutor，不硬切 vision），图片照常注入
+# 场景 6：带图附件 → 仍用 TEXT_MODEL（对标 ，不硬切 vision），图片照常注入
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_loop_keeps_text_model_with_image(tmp_path, bus):
-    """ctx 带图 → run_agent_loop 仍用 TEXT_MODEL（对标 DeepTutor：chat 始终同一模型，
+    """ctx 带图 → run_agent_loop 仍用 TEXT_MODEL（对标 ：chat 始终同一模型，
     不因有图硬切 VISION_MODEL），但图片照常乐观注入进 messages（content 为含
     image_url 的 list）。模型不支持时由 Stage-2 降级处理（见场景 7）。"""
     from settings import get_settings
@@ -418,7 +418,7 @@ async def test_loop_keeps_text_model_with_image(tmp_path, bus):
 @pytest.mark.asyncio
 async def test_loop_stage2_image_fallback(tmp_path, bus):
     """模型拒绝图片输入（异常命中 image 关键词）且 not supports_vision →
-    剥掉图片用同一 TEXT_MODEL 重试纯文本成功（对标 DeepTutor Stage-2 fallback）。"""
+    剥掉图片用同一 TEXT_MODEL 重试纯文本成功（Stage-2 fallback）。"""
     from settings import get_settings
     TEXT_MODEL = get_settings().llm.text_model
     from core.attachment import from_image_path

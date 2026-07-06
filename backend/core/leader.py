@@ -56,6 +56,18 @@ else
 end
 """
 
+# CAS 原子删锁：仅当锁 value==自己（worker_id）才 del，否则返回 0。shutdown 时若用无条件
+# delete 会误删别人的锁——follower 正常重启会把真 leader 的锁删掉（→ leader 续约 CAS 返回 0
+# 误判丢锁、触发空窗）；leader 自身 shutdown 时若锁已被新 leader 抢走（_is_leader 仍 True 的
+# 极端窗口）也会删错人的锁。CAS 保证"只有锁是自己的才删"。
+_RELEASE_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+else
+    return 0
+end
+"""
+
 # worker 身份：pid 跨重启/容器会复用，加 uuid 保证全局唯一，CAS 续约才不会误判。
 _worker_id = f"{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
@@ -178,6 +190,7 @@ def _ensure_client() -> None:
         _redis_client = aioredis.from_url(
             url,
             socket_connect_timeout=2,
+            socket_timeout=3,  # 命令执行超时（略大于一个 RTT）；只有连接超时会让 eval 在网络分区时无限挂起 → 续约 loop 卡死、TTL 过期后幽灵 leader
             decode_responses=True,
         )
     except Exception as exc:
@@ -275,12 +288,7 @@ async def shutdown_leader() -> None:
     """清理 leader 资源（应用 shutdown 时调用）。"""
     global _redis_client, _is_leader, _active_task
 
-    # 先回调停单例（若是 leader），再停 loop、释放锁
-    if _is_leader:
-        await _invoke_callback(_on_lose, "on_lose")
-        _is_leader = False
-        set_leader_status(_worker_id, False)
-
+    # 先停选举 loop（续约/竞选），避免释放锁期间又续约或抢锁
     if _active_task is not None and not _active_task.done():
         _active_task.cancel()
         try:
@@ -289,13 +297,28 @@ async def shutdown_leader() -> None:
             pass
     _active_task = None
 
-    if _redis_client is not None:
+    # 仅 leader 释放锁：follower shutdown 不动锁（旧实现无条件 delete 会删掉真 leader 的锁
+    # → 误丢锁空窗）。CAS 原子删锁：锁已被别人抢时返回 0，不误删新 leader 的锁。
+    # 顺序——先 CAS 释放锁（其他 worker 立刻能竞选接管），再 on_lose 停单例：把接管空窗
+    # 压到最小（原实现先 on_lose 再删锁，停机期间无人能接管）。
+    if _is_leader and _redis_client is not None:
         try:
-            # 主动释放锁，让其它 worker 立即竞选接管（不等 TTL 过期）
-            await _redis_client.delete(_LEADER_KEY)
-            logger.info("Leader lock released during shutdown")
+            released = await _redis_client.eval(
+                _RELEASE_SCRIPT, 1, _LEADER_KEY, _worker_id
+            )
+            if released:
+                logger.info("Leader lock released during shutdown")
+            else:
+                logger.warning(
+                    "Leader lock already taken by another worker at shutdown"
+                )
         except Exception:
             pass
+        await _invoke_callback(_on_lose, "on_lose")
+        _is_leader = False
+        set_leader_status(_worker_id, False)
+
+    if _redis_client is not None:
         try:
             await _redis_client.aclose()
         except Exception:

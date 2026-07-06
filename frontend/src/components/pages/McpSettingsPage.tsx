@@ -14,6 +14,7 @@ import {
 } from '../../services/api'
 import { getUser } from '../../services/auth'
 import { Modal, Badge, Toggle, Card, EmptyState, StatusDot } from '../ui'
+import { Plug } from 'lucide-react'
 
 interface Props {
   onBack: () => void
@@ -78,29 +79,29 @@ function McpStudentView({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <div className="h-full flex flex-col bg-slate-50">
-      <header className="px-6 py-4 bg-white border-b border-slate-200 flex items-center justify-between">
+    <div className="h-full flex flex-col bg-canvas">
+      <header className="px-6 py-4 bg-surface border-b border-line flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <button onClick={onBack} className="text-slate-400 hover:text-slate-600 text-sm">
+          <button onClick={onBack} className="text-muted hover:text-ink-soft text-sm">
             ← 返回
           </button>
-          <h1 className="text-lg font-semibold text-slate-800">🔌 MCP 工具</h1>
+          <h1 className="text-lg font-semibold text-ink">MCP 工具</h1>
           <Badge color="indigo">{servers.length}</Badge>
         </div>
       </header>
 
       <div className="flex-1 overflow-y-auto p-6">
-        <p className="text-xs text-slate-400 mb-4">
+        <p className="text-xs text-muted mb-4">
           勾选你想在对话中启用的 MCP 工具。未勾选的对你不可见；server 由管理员统一部署，进程共享。
           未勾选任何项时默认全部可用（除非你显式自定义）。
         </p>
         {error && (
-          <div className="mb-4 px-4 py-2 bg-red-50 text-red-600 text-sm rounded-lg">{error}</div>
+          <div className="mb-4 px-4 py-2 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)]">{error}</div>
         )}
         {loading ? (
-          <div className="text-center text-slate-400 py-16">加载中...</div>
+          <div className="text-center text-muted py-16">加载中...</div>
         ) : servers.length === 0 ? (
-          <EmptyState icon="🔌" title="管理员尚未配置 MCP server" hint="可用的 MCP 工具会在这里列出" />
+          <EmptyState icon={Plug} title="管理员尚未配置 MCP server" hint="可用的 MCP 工具会在这里列出" />
         ) : (
           <div className="space-y-3">
             {servers.map((s) => (
@@ -109,7 +110,7 @@ function McpStudentView({ onBack }: { onBack: () => void }) {
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1 flex-wrap">
                       <StatusDot status={s.connected ? 'connected' : 'disabled'} />
-                      <h3 className="font-mono text-sm font-semibold text-slate-800">{s.name}</h3>
+                      <h3 className="font-mono text-sm font-semibold text-ink">{s.name}</h3>
                       <Badge color="blue">{s.transport}</Badge>
                       {s.connected ? (
                         <Badge color="green">已连接</Badge>
@@ -122,7 +123,7 @@ function McpStudentView({ onBack }: { onBack: () => void }) {
                         {s.tools.map((t) => (
                           <span
                             key={t.name}
-                            className="text-xs px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded font-mono"
+                            className="text-xs px-1.5 py-0.5 bg-surface-2 text-ink-soft rounded font-mono"
                             title={t.description}
                           >
                             {t.name}
@@ -131,7 +132,7 @@ function McpStudentView({ onBack }: { onBack: () => void }) {
                       </div>
                     )}
                   </div>
-                  <label className="flex items-center gap-2 text-xs text-slate-500 cursor-pointer shrink-0">
+                  <label className="flex items-center gap-2 text-xs text-ink-soft cursor-pointer shrink-0">
                     <Toggle checked={enabled.includes(s.name)} onChange={() => void toggle(s.name)} />
                     启用
                   </label>
@@ -242,35 +243,35 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
         : '(未配置)')
 
   return (
-    <div className="h-full flex flex-col bg-slate-50">
-      <header className="px-6 py-4 bg-white border-b border-slate-200 flex items-center justify-between">
+    <div className="h-full flex flex-col bg-canvas">
+      <header className="px-6 py-4 bg-surface border-b border-line flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <button onClick={onBack} className="text-slate-400 hover:text-slate-600 text-sm">
+          <button onClick={onBack} className="text-muted hover:text-ink-soft text-sm">
             ← 返回
           </button>
-          <h1 className="text-lg font-semibold text-slate-800">🔌 MCP 服务器配置</h1>
+          <h1 className="text-lg font-semibold text-ink">MCP 服务器配置</h1>
           <Badge color="indigo">{data?.servers.length ?? 0}</Badge>
         </div>
         <button
           onClick={openNew}
-          className="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition"
+          className="px-3 py-1.5 text-sm bg-accent text-white rounded-[var(--radius)] hover:bg-accent-2 transition"
         >
           + 添加 server
         </button>
       </header>
 
       <div className="flex-1 overflow-y-auto p-6">
-        <p className="text-xs text-slate-400 mb-4">
+        <p className="text-xs text-muted mb-4">
           MCP（Model Context Protocol）工具以 <code>mcp_&lt;server&gt;_&lt;tool&gt;</code> 形式经
           <code> load_tools </code>渐进式揭示挂载到 agent loop。部署级配置（全局共享）。
         </p>
         {error && (
-          <div className="mb-4 px-4 py-2 bg-red-50 text-red-600 text-sm rounded-lg">{error}</div>
+          <div className="mb-4 px-4 py-2 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)]">{error}</div>
         )}
         {loading ? (
-          <div className="text-center text-slate-400 py-16">加载中...</div>
+          <div className="text-center text-muted py-16">加载中...</div>
         ) : !data || data.servers.length === 0 ? (
-          <EmptyState icon="🔌" title="还没有配置 MCP server" hint="点击右上角添加（stdio / sse / streamableHttp）" />
+          <EmptyState icon={Plug} title="还没有配置 MCP server" hint="点击右上角添加（stdio / sse / streamableHttp）" />
         ) : (
           <div className="space-y-3">
             {data.servers.map((s) => {
@@ -281,7 +282,7 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1">
                         <StatusDot status={s.status} />
-                        <h3 className="font-mono text-sm font-semibold text-slate-800">{s.name}</h3>
+                        <h3 className="font-mono text-sm font-semibold text-ink">{s.name}</h3>
                         <Badge color="blue">{s.transport}</Badge>
                         {s.status === 'connected' ? (
                           <Badge color="green">已连接</Badge>
@@ -292,18 +293,18 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
                         )}
                         {cfg && !cfg.enabled && <Badge color="slate">已禁用</Badge>}
                       </div>
-                      <p className="text-xs text-slate-500 font-mono truncate">
+                      <p className="text-xs text-ink-soft font-mono truncate">
                         {cfg?.command
                           ? `${cfg.command} ${(cfg.args || []).join(' ')}`
                           : cfg?.url || ''}
                       </p>
-                      {s.error && <p className="text-xs text-red-500 mt-1">{s.error}</p>}
+                      {s.error && <p className="text-xs text-danger-fg mt-1">{s.error}</p>}
                       {s.tools.length > 0 && (
                         <div className="mt-2 flex flex-wrap gap-1">
                           {s.tools.map((t) => (
                             <span
                               key={t.name}
-                              className="text-xs px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded font-mono"
+                              className="text-xs px-1.5 py-0.5 bg-surface-2 text-ink-soft rounded font-mono"
                               title={t.description}
                             >
                               {t.name}
@@ -315,13 +316,13 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
                     <div className="flex gap-1 shrink-0">
                       <button
                         onClick={() => openEdit(s.name)}
-                        className="text-xs px-2 py-1 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded"
+                        className="text-xs px-2 py-1 text-ink-soft hover:text-ink hover:bg-surface-2 rounded"
                       >
                         编辑
                       </button>
                       <button
                         onClick={() => handleDelete(s.name)}
-                        className="text-xs px-2 py-1 text-slate-500 hover:text-red-500 hover:bg-red-50 rounded"
+                        className="text-xs px-2 py-1 text-ink-soft hover:text-danger-fg hover:bg-danger-bg rounded"
                       >
                         删除
                       </button>
@@ -345,20 +346,20 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
               <button
                 onClick={handleTest}
                 disabled={testing}
-                className="px-3 py-1.5 text-sm text-indigo-600 border border-indigo-200 rounded-lg hover:bg-indigo-50 disabled:opacity-50"
+                className="px-3 py-1.5 text-sm text-ink border border-line rounded-[var(--radius)] hover:bg-surface-2 disabled:opacity-50"
               >
                 {testing ? '测试中...' : '测试连接'}
               </button>
               <button
                 onClick={() => setEditing(null)}
-                className="px-3 py-1.5 text-sm text-slate-500 hover:text-slate-700"
+                className="px-3 py-1.5 text-sm text-ink-soft hover:text-ink"
               >
                 取消
               </button>
               <button
                 onClick={handleSave}
                 disabled={saving}
-                className="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                className="px-3 py-1.5 text-sm bg-accent text-white rounded-[var(--radius)] hover:bg-accent-2 disabled:opacity-50"
               >
                 {saving ? '保存中...' : '保存'}
               </button>
@@ -369,7 +370,7 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
             {testResult && (
               <div
                 className={`px-3 py-2 text-xs rounded ${
-                  testResult.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'
+                  testResult.ok ? 'bg-ok-bg text-ok-fg' : 'bg-danger-bg text-danger-fg'
                 }`}
               >
                 {testResult.ok
@@ -378,7 +379,7 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
                 {testResult.ok && testResult.tools.length > 0 && (
                   <div className="mt-1 flex flex-wrap gap-1">
                     {testResult.tools.map((t) => (
-                      <span key={t.name} className="font-mono px-1 bg-white rounded">
+                      <span key={t.name} className="font-mono px-1 bg-surface rounded">
                         {t.name}
                       </span>
                     ))}
@@ -388,23 +389,23 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
             )}
             {editing.isNew && (
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">名称</label>
+                <label className="block text-xs font-medium text-ink-soft mb-1">名称</label>
                 <input
                   value={draftName}
                   onChange={(e) => setDraftName(e.target.value)}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-400"
+                  className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm font-mono focus:outline-none focus:border-ink"
                   placeholder="如 math-tools"
                 />
               </div>
             )}
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">
+              <label className="block text-xs font-medium text-ink-soft mb-1">
                 传输方式（当前：{transport}）
               </label>
               <select
                 value={draft.type || ''}
                 onChange={(e) => setDraft({ ...draft, type: e.target.value || null })}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm focus:outline-none focus:border-ink"
               >
                 <option value="">自动检测（推荐）</option>
                 <option value="stdio">stdio（本地进程）</option>
@@ -415,23 +416,23 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
             {(!draft.type || draft.type === 'stdio') && (
               <>
                 <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">命令（command）</label>
+                  <label className="block text-xs font-medium text-ink-soft mb-1">命令（command）</label>
                   <input
                     value={draft.command}
                     onChange={(e) => setDraft({ ...draft, command: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-400"
+                    className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm font-mono focus:outline-none focus:border-ink"
                     placeholder="npx"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">参数（每行一个）</label>
+                  <label className="block text-xs font-medium text-ink-soft mb-1">参数（每行一个）</label>
                   <textarea
                     value={(draft.args || []).join('\n')}
                     onChange={(e) =>
                       setDraft({ ...draft, args: e.target.value.split('\n').filter(Boolean) })
                     }
                     rows={3}
-                    className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-400"
+                    className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm font-mono focus:outline-none focus:border-ink"
                     placeholder={'-y\n@modelcontextprotocol/server-filesystem'}
                   />
                 </div>
@@ -439,11 +440,11 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
             )}
             {(!draft.type || draft.type !== 'stdio') && (
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">URL</label>
+                <label className="block text-xs font-medium text-ink-soft mb-1">URL</label>
                 <input
                   value={draft.url}
                   onChange={(e) => setDraft({ ...draft, url: e.target.value })}
-                  className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-400"
+                  className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm font-mono focus:outline-none focus:border-ink"
                   placeholder="https://example.com/mcp"
                 />
               </div>
@@ -454,17 +455,17 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
               onChange={(env) => setDraft({ ...draft, env })}
             />
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">工具超时（秒）</label>
+              <label className="block text-xs font-medium text-ink-soft mb-1">工具超时（秒）</label>
               <input
                 type="number"
                 value={draft.tool_timeout}
                 onChange={(e) =>
                   setDraft({ ...draft, tool_timeout: Number(e.target.value) || 30 })
                 }
-                className="w-32 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                className="w-32 rounded-[var(--radius)] border border-line px-3 py-2 text-sm focus:outline-none focus:border-ink"
               />
             </div>
-            <label className="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+            <label className="flex items-center gap-2 text-sm text-ink-soft cursor-pointer">
               <Toggle
                 checked={draft.enabled}
                 onChange={(v) => setDraft({ ...draft, enabled: v })}
@@ -490,7 +491,7 @@ function KeyValueEditor({
   const entries = Object.entries(value)
   return (
     <div>
-      <label className="block text-xs font-medium text-slate-600 mb-1">{title}</label>
+      <label className="block text-xs font-medium text-ink-soft mb-1">{title}</label>
       <div className="space-y-1.5">
         {entries.map(([k, v], i) => (
           <div key={i} className="flex gap-1.5">
@@ -502,13 +503,13 @@ function KeyValueEditor({
                 next[e.target.value] = v
                 onChange(next)
               }}
-              className="flex-1 rounded border border-slate-200 px-2 py-1 text-xs font-mono focus:outline-none focus:border-indigo-400"
+              className="flex-1 rounded border border-line px-2 py-1 text-xs font-mono focus:outline-none focus:border-ink"
               placeholder="KEY"
             />
             <input
               value={v}
               onChange={(e) => onChange({ ...value, [k]: e.target.value })}
-              className="flex-1 rounded border border-slate-200 px-2 py-1 text-xs font-mono focus:outline-none focus:border-indigo-400"
+              className="flex-1 rounded border border-line px-2 py-1 text-xs font-mono focus:outline-none focus:border-ink"
               placeholder="value"
             />
             <button
@@ -517,7 +518,7 @@ function KeyValueEditor({
                 delete next[k]
                 onChange(next)
               }}
-              className="text-xs text-slate-400 hover:text-red-500 px-1"
+              className="text-xs text-muted hover:text-danger-fg px-1"
             >
               ✕
             </button>
@@ -525,7 +526,7 @@ function KeyValueEditor({
         ))}
         <button
           onClick={() => onChange({ ...value, '': '' })}
-          className="text-xs text-indigo-600 hover:text-indigo-800"
+          className="text-xs text-ink hover:text-ink"
         >
           + 添加
         </button>

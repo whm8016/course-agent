@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef, type ReactNode } from 'react'
-import { FiMenu } from 'react-icons/fi'
+import { Menu, Bell, Inbox, Bot, Briefcase, Settings, Presentation, Shield, LayoutDashboard, Network, Backpack, NotebookPen, Cpu, Plug, Search, SlidersHorizontal } from 'lucide-react'
 import Sidebar from './components/layout/Sidebar'
+import HubPage, { type HubItem } from './components/layout/HubPage'
 import ChatWindow from './components/chat/ChatWindow'
 import LoginPage from './components/pages/LoginPage'
 import AdminPage from './components/pages/AdminPage'
@@ -17,6 +18,8 @@ import NotebookPage from './components/pages/NotebookPage'
 import BotPage from './components/pages/BotPage'
 import { fetchCourses, fetchSessions, createSession, deleteSession, fetchNotifications, markNotificationRead, joinCourseByCode, type BotNotificationItem } from './services/api'
 import { isLoggedIn, getUser, logout } from './services/auth'
+import { Button, EmptyState, ToastViewport } from './components/ui'
+import { toast } from './lib/toast'
 import type { Course, Session, User } from './types'
 import './index.css'
 
@@ -34,6 +37,8 @@ export default function App() {
   const [showNotebook, setShowNotebook] = useState(false)
   const [showBots, setShowBots] = useState(false)
   const [showNotif, setShowNotif] = useState(false)
+  const [showWorkbench, setShowWorkbench] = useState(false)
+  const [showSettingsHub, setShowSettingsHub] = useState(false)
   const [notifList, setNotifList] = useState<BotNotificationItem[]>([])
   const [notifUnread, setNotifUnread] = useState(0)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -43,7 +48,6 @@ export default function App() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string>('')
   const [coursesLoading, setCoursesLoading] = useState(false)
-  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
   const bootstrappedRef = useRef(false)
 
   const handleLogin = useCallback((u: User) => {
@@ -54,7 +58,7 @@ export default function App() {
   // 仅执行一次（ref 守卫），避免刷新/重渲染重复触发；未登录则等下方 effect 登录后消费。
   if (!bootstrappedRef.current) {
     bootstrappedRef.current = true
-    const m = window.location.pathname.match(/^\/join\/([A-Za-z0-9\-]+)\/?$/)
+    const m = window.location.pathname.match(/^\/join\/([A-Za-z0-9-]+)\/?$/)
     if (m) {
       sessionStorage.setItem('_pending_join_code', m[1])
       window.history.replaceState({}, '', '/')
@@ -136,23 +140,17 @@ export default function App() {
     void (async () => {
       try {
         const result = await joinCourseByCode(code)
-        setToast({
-          type: 'success',
-          msg: result.already_enrolled ? `你已在课程《${result.name}》中` : `已成功加入课程《${result.name}》`,
-        })
+        toast.success(
+          result.already_enrolled
+            ? `你已在课程《${result.name}》中`
+            : `已成功加入课程《${result.name}》`,
+        )
         await reloadCourses(false)
       } catch (e) {
-        setToast({ type: 'error', msg: e instanceof Error ? e.message : '加入课程失败' })
+        toast.error(e instanceof Error ? e.message : '加入课程失败')
       }
     })()
   }, [user, reloadCourses])
-
-  // toast 自动消失（3.5s）
-  useEffect(() => {
-    if (!toast) return
-    const t = setTimeout(() => setToast(null), 3500)
-    return () => clearTimeout(t)
-  }, [toast])
 
   // 只要存在 indexing 状态的课程，就每 5 秒轮询一次，等就绪后前端自动放开 RAG
   useEffect(() => {
@@ -226,8 +224,107 @@ export default function App() {
   const role = user.role ?? (user.is_admin ? 'admin' : 'student')
   const isTeacherOrAdmin = role === 'teacher' || role === 'admin'
 
+  const workbenchItems: HubItem[] = [
+    {
+      icon: LayoutDashboard,
+      label: isTeacherOrAdmin ? '学生学情统计' : '学习仪表盘',
+      desc: isTeacherOrAdmin ? '学生答题、掌握度与风险预警' : '你的学习数据与进度概览',
+      onClick: () => { setShowWorkbench(false); setShowDashboard(true) },
+    },
+    {
+      icon: Network,
+      label: '知识图谱',
+      desc: '可视化课程知识点关联',
+      onClick: () => { setShowWorkbench(false); setShowGraph(true) },
+    },
+    {
+      icon: Backpack,
+      label: '技能知识包',
+      desc: '管理课程技能与知识点',
+      onClick: () => { setShowWorkbench(false); setShowSkillKnowledge(true) },
+    },
+    {
+      icon: NotebookPen,
+      label: '题目笔记本',
+      desc: '收藏题目与错题本',
+      onClick: () => { setShowWorkbench(false); setShowNotebook(true) },
+    },
+    ...(isTeacherOrAdmin ? [{
+      icon: Presentation,
+      label: '教师工作台',
+      desc: '知识库、学生学情、课码分享',
+      onClick: () => { setShowWorkbench(false); sessionStorage.setItem('_teacher', '1'); setShowTeacher(true) },
+    }] : []),
+    ...(role === 'admin' ? [{
+      icon: Shield,
+      label: '管理后台',
+      desc: '用户、课程、模型与审批',
+      onClick: () => { setShowWorkbench(false); sessionStorage.setItem('_admin', '1'); setShowAdmin(true) },
+    }] : []),
+  ]
+
+  const settingsItems: HubItem[] = [
+    {
+      icon: Cpu,
+      label: role === 'admin' ? '模型供应商' : '我的模型配置',
+      desc: role === 'admin' ? '平台模型与 API 凭证' : '个人模型配置（覆盖平台默认）',
+      onClick: () => { setShowSettingsHub(false); setShowLlmProvider(true) },
+    },
+    {
+      icon: Plug,
+      label: 'MCP 工具',
+      desc: role === 'admin' ? '部署与配置 MCP 服务器' : '选择启用的 MCP 工具',
+      onClick: () => { setShowSettingsHub(false); setShowMcpSettings(true) },
+    },
+    ...(role === 'admin' ? [{
+      icon: Search,
+      label: '搜索引擎（默认）',
+      desc: '配置平台默认 Web 搜索引擎',
+      onClick: () => { setShowSettingsHub(false); setShowSearchAdmin(true) },
+    }] : []),
+    {
+      icon: SlidersHorizontal,
+      label: '我的搜索设置',
+      desc: '个人搜索偏好',
+      onClick: () => { setShowSettingsHub(false); setShowUserSearchSettings(true) },
+    },
+    {
+      icon: Bot,
+      label: 'Bot 管理',
+      desc: '定时提醒与 Bot 任务',
+      onClick: () => { setShowSettingsHub(false); setShowBots(true) },
+    },
+    {
+      icon: Bell,
+      label: '通知',
+      desc: 'Bot 提醒与系统消息',
+      badge: notifUnread,
+      onClick: () => { setShowSettingsHub(false); setShowNotif(true); void loadNotifList() },
+    },
+  ]
+
   let overlay: ReactNode = null
-  if (showTeacher && isTeacherOrAdmin) {
+  if (showWorkbench) {
+    overlay = (
+      <HubPage
+        title="工作台"
+        icon={Briefcase}
+        subtitle="学习与管理工作入口"
+        items={workbenchItems}
+        onBack={() => setShowWorkbench(false)}
+      />
+    )
+  } else if (showSettingsHub) {
+    overlay = (
+      <HubPage
+        title="设置"
+        icon={Settings}
+        subtitle="模型、检索与系统配置"
+        items={settingsItems}
+        onBack={() => setShowSettingsHub(false)}
+      />
+    )
+  } else if (showTeacher && isTeacherOrAdmin) {
     overlay = (
       <TeacherPage
         user={user}
@@ -323,7 +420,7 @@ export default function App() {
   const closeSidebar = () => setSidebarOpen(false)
 
   return (
-    <div className="flex h-screen bg-slate-50">
+    <div className="flex h-screen bg-canvas">
       {sidebarOpen && (
         <div
           className="fixed inset-0 bg-black/40 z-40 md:hidden"
@@ -346,22 +443,9 @@ export default function App() {
           onDeleteSession={handleDeleteSession}
           user={user}
           onLogout={logout}
-          onAdmin={role === 'admin' ? () => { sessionStorage.setItem('_admin', '1'); setShowAdmin(true) } : undefined}
-          onTeacher={isTeacherOrAdmin ? () => { sessionStorage.setItem('_teacher', '1'); setShowTeacher(true) } : undefined}
           onCoursesRefresh={() => void reloadCourses(false)}
-          onDashboard={() => setShowDashboard(true)}
-          onGraph={() => setShowGraph(true)}
-          onSkillKnowledge={() => setShowSkillKnowledge(true)}
-          onMcpSettings={() => setShowMcpSettings(true)}
-          onLlmProvider={() => setShowLlmProvider(true)}
-          onSearchAdmin={() => setShowSearchAdmin(true)}
-          onUserSearchSettings={() => setShowUserSearchSettings(true)}
-          onNotebook={() => setShowNotebook(true)}
-          onBots={() => setShowBots(true)}
-          onNotifications={() => {
-            setShowNotif(true)
-            void loadNotifList()
-          }}
+          onWorkbench={() => setShowWorkbench(true)}
+          onSettings={() => setShowSettingsHub(true)}
           notifUnread={notifUnread}
           onCloseMobile={closeSidebar}
         />
@@ -379,52 +463,39 @@ export default function App() {
             onOpenSidebar={() => setSidebarOpen(true)}
           />
         ) : (
-          <div className="flex flex-col h-full">
+          <div className="flex flex-col h-full bg-canvas">
             <div className="md:hidden px-3 py-3">
-              <button onClick={() => setSidebarOpen(true)} className="p-1 text-slate-500 hover:text-slate-700 transition">
-                <FiMenu size={20} />
+              <button
+                onClick={() => setSidebarOpen(true)}
+                className="p-1 text-ink-soft hover:text-ink transition"
+                aria-label="打开侧边栏"
+              >
+                <Menu size={20} strokeWidth={1.5} />
               </button>
             </div>
             {loadError ? (
-              <div className="flex items-center justify-center flex-1 text-red-500 px-8 text-center">
+              <div className="flex items-center justify-center flex-1 text-danger-fg px-8 text-center">
                 {loadError}
               </div>
             ) : coursesLoading ? (
-              <div className="flex items-center justify-center flex-1 text-slate-400">
-                加载中...
-              </div>
+              <div className="flex items-center justify-center flex-1 text-muted">加载中...</div>
             ) : (
-              <div className="flex flex-col items-center justify-center flex-1 text-slate-400 gap-2">
-                <span className="text-4xl">📭</span>
-                <p className="text-sm">暂无课程</p>
-                <button
+              <div className="flex-1 flex flex-col items-center justify-center gap-4">
+                <EmptyState icon={Inbox} title="暂无课程" hint="请在左侧输入课程码加入课程" />
+                <Button
+                  variant="primary"
+                  className="md:hidden"
                   onClick={() => setSidebarOpen(true)}
-                  className="md:hidden mt-2 px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition"
                 >
                   输入课程码加入
-                </button>
-                <p className="hidden md:block text-sm">请在左侧输入课程码加入课程</p>
+                </Button>
               </div>
             )}
           </div>
         )}
       </main>
-      {overlay && (
-        <div className="fixed inset-0 z-50 bg-slate-50">{overlay}</div>
-      )}
-      {toast && (
-        <div
-          className={`fixed top-4 right-4 z-[60] max-w-sm px-4 py-3 rounded-lg shadow-lg text-sm text-white flex items-start gap-3 ${
-            toast.type === 'success' ? 'bg-green-600' : 'bg-red-600'
-          }`}
-        >
-          <span className="leading-relaxed">{toast.type === 'success' ? '✅' : '⚠️'}</span>
-          <span className="flex-1 leading-relaxed">{toast.msg}</span>
-          <button onClick={() => setToast(null)} className="text-white/80 hover:text-white shrink-0">
-            ✕
-          </button>
-        </div>
-      )}
+      {overlay && <div className="fixed inset-0 z-50 bg-canvas">{overlay}</div>}
+      <ToastViewport />
     </div>
   )
 }
@@ -443,52 +514,55 @@ function NotificationPanel({
   onRefresh: () => void
 }) {
   return (
-    <div className="h-full flex flex-col bg-slate-50">
-      <header className="px-6 py-4 bg-white border-b border-slate-200 flex items-center justify-between">
+    <div className="h-full flex flex-col bg-canvas">
+      <header className="px-6 py-4 bg-surface border-b border-line flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 text-sm">
+          <button onClick={onClose} className="text-ink-soft hover:text-ink text-sm transition">
             ← 返回
           </button>
-          <h1 className="text-lg font-semibold text-slate-800">🔔 通知</h1>
+          <h1 className="font-serif text-lg text-ink flex items-center gap-2">
+            <Bell size={18} strokeWidth={1.5} className="text-ink-soft" />
+            通知
+          </h1>
           {unread > 0 && (
-            <span className="text-xs bg-red-500 text-white px-2 py-0.5 rounded-full">{unread}</span>
+            <span className="text-xs bg-danger-fg text-white px-2 py-0.5 rounded-full">
+              {unread}
+            </span>
           )}
-          <button onClick={onRefresh} className="text-xs text-slate-400 hover:text-slate-600">
+          <button onClick={onRefresh} className="text-xs text-muted hover:text-ink-soft transition">
             刷新
           </button>
         </div>
       </header>
       <div className="flex-1 overflow-y-auto p-6">
         {items.length === 0 ? (
-          <div className="text-center text-slate-400 py-16">
-            <span className="text-4xl">📭</span>
-            <p className="text-sm mt-2">暂无通知</p>
-            <p className="text-xs mt-1">Bot 定时提醒到点后会出现在这里</p>
-          </div>
+          <EmptyState icon={Inbox} title="暂无通知" hint="Bot 定时提醒到点后会出现在这里" />
         ) : (
           <div className="max-w-2xl mx-auto space-y-3">
             {items.map((n) => (
               <div
                 key={n.id}
-                className={`p-4 rounded-lg border ${
-                  n.read ? 'bg-white border-slate-200' : 'bg-indigo-50/50 border-indigo-200'
+                className={`p-4 rounded-[var(--radius)] border ${
+                  n.read ? 'bg-surface border-line' : 'bg-info-bg border-line'
                 }`}
               >
                 <div className="flex items-center justify-between mb-1">
-                  <span className="text-xs text-slate-400">
-                    {n.bot_id ? `🤖 ${n.bot_id}` : '通知'} ·{' '}
+                  <span className="text-xs text-muted flex items-center gap-1">
+                    {n.bot_id && <Bot size={12} strokeWidth={1.5} />}
+                    {n.bot_id ?? '通知'}
+                    {' · '}
                     {new Date(n.created_at * 1000).toLocaleString('zh-CN')}
                   </span>
                   {!n.read && (
                     <button
                       onClick={() => void onRead(n.id)}
-                      className="text-xs text-indigo-600 hover:underline"
+                      className="text-xs text-ink-soft hover:text-ink transition"
                     >
                       标为已读
                     </button>
                   )}
                 </div>
-                <p className="text-sm text-slate-700 whitespace-pre-wrap">{n.content}</p>
+                <p className="text-sm text-ink whitespace-pre-wrap">{n.content}</p>
               </div>
             ))}
           </div>

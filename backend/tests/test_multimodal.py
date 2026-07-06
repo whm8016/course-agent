@@ -1,6 +1,6 @@
 """core/llm/multimodal.py 单元测试 —— prepare_multimodal_messages 纯函数。
 
-覆盖 OpenAI / Anthropic 双分支图片注入（对标 DeepTutor 三层解耦第二层）。
+覆盖 OpenAI / Anthropic 双分支图片注入（三层解耦第二层）。
 """
 from __future__ import annotations
 
@@ -97,7 +97,7 @@ def test_prepare_empty_text_uses_fallback(tmp_path):
 
 
 def test_is_image_input_unsupported_keywords():
-    """Stage-2 判据：命中图片相关措辞为 True，无关错误为 False（对标 DeepTutor）。"""
+    """Stage-2 判据：命中图片相关措辞为 True，无关错误为 False（对标 ）。"""
     from core.llm.multimodal import is_image_input_unsupported
 
     assert is_image_input_unsupported(RuntimeError("model does not support image input"))

@@ -17,7 +17,7 @@ def upgrade() -> None:
     bind = op.get_bind()
     existing = sa.inspect(bind).get_table_names()
 
-    # 替代 DeepTutor 的 L2/*.md + L3/*.md 文件
+    # 替代 的 L2/*.md + L3/*.md 文件
     if "memory_docs" not in existing:
         op.create_table(
             "memory_docs",
@@ -29,7 +29,7 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("user_id", "layer", "doc_key"),
         )
 
-    # 替代 DeepTutor 的 snapshot/<surface>/state.json + changes.jsonl
+    # 替代 的 snapshot/<surface>/state.json + changes.jsonl
     if "memory_snapshot_state" not in existing:
         op.create_table(
             "memory_snapshot_state",
@@ -41,7 +41,7 @@ def upgrade() -> None:
             sa.PrimaryKeyConstraint("user_id", "surface"),
         )
 
-    # 替代 DeepTutor 的 L2/*.meta.json + L3/*.meta.json
+    # 替代 的 L2/*.meta.json + L3/*.meta.json
     if "memory_consolidator_meta" not in existing:
         op.create_table(
             "memory_consolidator_meta",

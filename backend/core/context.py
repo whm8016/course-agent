@@ -28,8 +28,8 @@ class UnifiedContext:
         user_message: 当前用户输入文本。
         conversation_history: 历史消息列表（OpenAI message 格式）。
         attachments: 本轮附件列表（Attachment，支持多图；新代码优先用此字段）。
-        mode: 已 normalize 的交互模式（"chat" | "deep_solve" | "quiz" | "research" |
-            "vision" | "summarize"），由 API 层调用 normalize_mode() 后写入。
+        mode: 已 normalize 的交互模式（"chat" | "deep_solve" | "deep_research" | "quiz"），
+            由 API 层调用 normalize_mode() 后写入（旧 vision/summarize 已废弃，归入 chat）。
         enabled_tools: 用户本轮启用的工具名列表（如 ["rag", "web_search"]）。
             空列表表示未启用任何可选工具。
         rag_mode: LightRAG 检索模式（"mix" | "naive" | "local" | "global"），默认 "mix"。
@@ -42,8 +42,7 @@ class UnifiedContext:
             自动挂载 read_skill 工具。由 ChatPipeline 经 SkillService 渲染填入。
         extended_tools_manifest: 渐进式揭示的扩展工具（deferred MCP）清单块；
             非空时自动挂载 load_tools 工具（阶段3）。
-        llm_profile_id: 本轮用户在对话下拉选中的 LLM 供应商 profile id（对标 DeepTutor
-            per-request provider 切换）。空字符串表示未选择，走默认 / active profile。
+        llm_profile_id: 本轮用户在对话下拉选中的 LLM 供应商 profile id（per-request provider 切换）。空字符串表示未选择，走默认 / active profile。
             ChatPipeline 据此动态构造 client+model 注入 run_agent_loop（即时生效，不重启）。
         metadata: 兜底字典，供各 pipeline 阶段写入临时扩展字段。
     """

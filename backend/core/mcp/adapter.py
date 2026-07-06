@@ -8,7 +8,7 @@
 命名 ``mcp_<server>_<tool>``（非法字符替换为 ``_``），因 server/tool 名都可能
 含 ``_``，**不能靠名字反解**，registry 按 wrapped_name 查表。
 
-``deferred=True``（对标 DeepTutor）：工具 schema 默认不进 LLM 初始列表，
+``deferred=True``：工具 schema 默认不进 LLM 初始列表，
 经 ``load_tools`` 渐进式加载（阶段3 启用）。
 """
 from __future__ import annotations
@@ -46,7 +46,7 @@ class MCPToolAdapter:
         self.deferred = deferred
 
     def to_openai_schema(self) -> dict[str, Any]:
-        """对标 DeepTutor ``ToolDefinition.to_openai_schema``：
+        """``ToolDefinition.to_openai_schema``：
         inputSchema 透传 + setdefault type/object/properties，直接当 parameters。
         """
         schema = dict(self.input_schema)

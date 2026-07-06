@@ -13,12 +13,12 @@ import {
 const EMPTY: SearchConfigPayload = { provider: '', api_key: '', base_url: '', max_results: 0, proxy: '' }
 
 const inputCls =
-  'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-400'
+  'w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm font-mono focus:outline-none focus:border-ink'
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="block text-xs font-medium text-slate-600 mb-1">{label}</label>
+      <label className="block text-xs font-medium text-ink-soft mb-1">{label}</label>
       {children}
     </div>
   )
@@ -110,31 +110,31 @@ export default function UserSearchSettingsPage({ onBack }: { onBack: () => void 
   }
 
   return (
-    <div className="h-full flex flex-col bg-slate-50">
-      <header className="px-6 py-4 bg-white border-b border-slate-200">
-        <button onClick={onBack} className="text-slate-400 hover:text-slate-600 text-sm">← 返回</button>
-        <h1 className="text-lg font-semibold text-slate-800 mt-1">🔍 我的搜索设置</h1>
-        <p className="text-xs text-slate-400 mt-1">
+    <div className="h-full flex flex-col bg-canvas">
+      <header className="px-6 py-4 bg-surface border-b border-line">
+        <button onClick={onBack} className="text-muted hover:text-ink-soft text-sm">← 返回</button>
+        <h1 className="text-lg font-semibold text-ink mt-1">我的搜索设置</h1>
+        <p className="text-xs text-muted mt-1">
           用你自己的 API Key 覆盖管理员默认；留空的字段会回退到管理员默认配置。
         </p>
       </header>
       <div className="flex-1 overflow-auto p-6">
         {loading ? (
-          <p className="text-sm text-slate-400">加载中…</p>
+          <p className="text-sm text-muted">加载中…</p>
         ) : (
-          <div className="max-w-xl bg-white rounded-xl border border-slate-200 p-5 space-y-3">
-            <div className="px-3 py-2 text-xs rounded bg-slate-50 text-slate-500">
+          <div className="max-w-xl bg-surface rounded-[var(--radius)] border border-line p-5 space-y-3">
+            <div className="px-3 py-2 text-xs rounded bg-canvas text-ink-soft">
               {hasOverride ? '你已设置自定义搜索配置（覆盖管理员默认）' : '当前使用管理员默认配置，可在下方自定义覆盖'}
             </div>
             {testResult && (
               <div
-                className={`px-3 py-2 text-xs rounded ${testResult.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}
+                className={`px-3 py-2 text-xs rounded ${testResult.ok ? 'bg-ok-bg text-ok-fg' : 'bg-danger-bg text-danger-fg'}`}
               >
                 {testResult.ok ? `✓ 连通成功（${testResult.provider}）` : `✗ ${testResult.error}`}
               </div>
             )}
-            {error && <div className="px-3 py-2 text-xs rounded bg-red-50 text-red-600">{error}</div>}
-            {saved && <div className="px-3 py-2 text-xs rounded bg-green-50 text-green-700">✓ 已保存</div>}
+            {error && <div className="px-3 py-2 text-xs rounded bg-danger-bg text-danger-fg">{error}</div>}
+            {saved && <div className="px-3 py-2 text-xs rounded bg-ok-bg text-ok-fg">✓ 已保存</div>}
 
             <Field label="搜索引擎（留空 = 用管理员默认）">
               <select
@@ -187,14 +187,14 @@ export default function UserSearchSettingsPage({ onBack }: { onBack: () => void 
               <button
                 onClick={handleTest}
                 disabled={testing}
-                className="px-3 py-1.5 text-sm rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50 disabled:opacity-50"
+                className="px-3 py-1.5 text-sm rounded-[var(--radius)] border border-line text-ink-soft hover:bg-canvas disabled:opacity-50"
               >
                 {testing ? '测试中…' : '测试连通'}
               </button>
               <button
                 onClick={handleSave}
                 disabled={saving}
-                className="px-3 py-1.5 text-sm rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+                className="px-3 py-1.5 text-sm rounded-[var(--radius)] bg-accent text-white hover:bg-accent-2 disabled:opacity-50"
               >
                 {saving ? '保存中…' : '保存'}
               </button>
@@ -202,7 +202,7 @@ export default function UserSearchSettingsPage({ onBack }: { onBack: () => void 
                 <button
                   onClick={handleReset}
                   disabled={saving}
-                  className="px-3 py-1.5 text-sm rounded-lg border border-red-200 text-red-600 hover:bg-red-50 disabled:opacity-50"
+                  className="px-3 py-1.5 text-sm rounded-[var(--radius)] border border-danger-bg text-danger-fg hover:bg-danger-bg disabled:opacity-50"
                 >
                   恢复默认
                 </button>

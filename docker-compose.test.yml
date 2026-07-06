@@ -8,12 +8,15 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     environment:
-      DATABASE_URL: "sqlite+aiosqlite:///:memory:"
-      REDIS_URL: "memory://"
-      JWT_SECRET: "test-secret-pytest-only-32chars!!"
+      # config 嵌套重构后只认 DB__URL / DB__REDIS_URL / SECURITY__* / LLM__* 嵌套名
+      # （env_nested_delimiter="__"）；旧扁平名 DATABASE_URL/JWT_SECRET/DASHSCOPE_API_KEY
+      # 已不被 Settings 识别，会导致测试容器连不上库、签不出 token。
+      DB__URL: "sqlite+aiosqlite:///:memory:"
+      DB__REDIS_URL: "memory://"
+      SECURITY__JWT_SECRET: "test-secret-pytest-only-32chars!!"
       ENVIRONMENT: "development"
-      DASHSCOPE_API_KEY: "sk-test"
-      ALLOWED_ORIGINS: "*"
+      LLM__API_KEY: "sk-test"
+      SECURITY__ALLOWED_ORIGINS: "*"
       TESTING: "1"
     working_dir: /app
     command: ["python", "-m", "pytest", "tests", "-q", "--tb=short"]

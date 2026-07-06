@@ -134,7 +134,7 @@ async def test_delete_session(client: AsyncClient, admin_headers: dict):
 async def test_message_attachments_persisted_and_echoed(client: AsyncClient, admin_headers: dict):
     """POST /messages 带 attachments → GET 回显 metadata.attachments 且 base64 被清。
 
-    验证附件随消息持久化（对标 DeepTutor attachments_json），且持久化层剥掉
+    验证附件随消息持久化（attachments_json），且持久化层剥掉
     base64（省 DB 空间 + 不泄露原文字节）。
     """
     cr = await client.post(
@@ -167,4 +167,4 @@ async def test_message_attachments_persisted_and_echoed(client: AsyncClient, adm
     atts = msgs[-1].get("metadata", {}).get("attachments")
     assert atts and len(atts) == 1
     assert atts[0]["url"] == "/api/uploads/1_abc.png"
-    assert "base64" not in atts[0]  # DeepTutor 铁律：持久化清 base64
+    assert "base64" not in atts[0]  # 铁律：持久化清 base64

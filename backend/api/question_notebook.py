@@ -1,4 +1,4 @@
-"""Question notebook REST API (aligned with DeepTutor question_notebook router)."""
+"""Question notebook REST API (aligned with question_notebook router)."""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query

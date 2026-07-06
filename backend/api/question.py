@@ -1,4 +1,4 @@
-"""出题：WebSocket /mimic、/followup（对齐 DeepTutor question 路由）。
+"""出题：WebSocket /mimic、/followup（对齐 question 路由）。
 
 按知识点出题的主链路已迁移到统一能力入口 WS /api/run/quiz
 （QuizCapability → QuizPipeline，见 core/capabilities/quiz.py），本路由仅保留

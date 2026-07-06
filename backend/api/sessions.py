@@ -163,7 +163,7 @@ async def api_add_message(
     await _check_session_owner(db, session_id, user["id"])
     meta = dict(body.metadata or {})
     if body.attachments:
-        # 清 base64（对标 DeepTutor 铁律：持久化只存元数据，省 DB 空间 + 不泄露原文字节）
+        # 清 base64（铁律：持久化只存元数据，省 DB 空间 + 不泄露原文字节）
         meta["attachments"] = [
             {k: v for k, v in a.items() if k != "base64"} for a in body.attachments
         ]

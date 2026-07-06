@@ -18,6 +18,7 @@ import {
 } from '../../services/api'
 import { getUser } from '../../services/auth'
 import { Modal, Badge, Card, EmptyState } from '../ui'
+import { Cpu } from 'lucide-react'
 
 interface Props {
   onBack: () => void
@@ -43,7 +44,7 @@ const EMPTY_DRAFT: LlmProfileAdmin = {
 }
 
 const inputCls =
-  'w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-400'
+  'w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm font-mono focus:outline-none focus:border-ink'
 
 export default function LlmProviderPage({ onBack }: Props) {
   const isAdmin = getUser()?.role === 'admin'
@@ -160,9 +161,9 @@ function LlmAdminView({ onBack }: { onBack: () => void }) {
   const handleTestSaved = async (id: string) => {
     try {
       const r = await testLlmProfile(id)
-      const lines = [`💬 对话：${r.ok ? `✓ ${r.model}` : `✗ ${r.error}`}`]
+      const lines = [`对话：${r.ok ? `✓ ${r.model}` : `✗ ${r.error}`}`]
       if (r.vision) {
-        lines.push(`🖼️ 视觉：${r.vision.ok ? `✓ ${r.vision.model}` : `✗ ${r.vision.error}`}`)
+        lines.push(`视觉：${r.vision.ok ? `✓ ${r.vision.model}` : `✗ ${r.vision.error}`}`)
       }
       alert(`${id}\n${lines.join('\n')}`)
     } catch (e) {
@@ -171,33 +172,33 @@ function LlmAdminView({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <div className="h-full flex flex-col bg-slate-50">
-      <header className="px-6 py-4 bg-white border-b border-slate-200 flex items-center justify-between">
+    <div className="h-full flex flex-col bg-canvas">
+      <header className="px-6 py-4 bg-surface border-b border-line flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <button onClick={onBack} className="text-slate-400 hover:text-slate-600 text-sm">← 返回</button>
-          <h1 className="text-lg font-semibold text-slate-800">🤖 模型供应商</h1>
+          <button onClick={onBack} className="text-muted hover:text-ink-soft text-sm">← 返回</button>
+          <h1 className="text-lg font-semibold text-ink">模型供应商</h1>
           <Badge color="indigo">{profiles.length}</Badge>
         </div>
         <button
           onClick={openNew}
-          className="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition"
+          className="px-3 py-1.5 text-sm bg-accent text-white rounded-[var(--radius)] hover:bg-accent-2 transition"
         >
           + 添加 profile
         </button>
       </header>
 
       <div className="flex-1 overflow-y-auto p-6">
-        <p className="text-xs text-slate-400 mb-4">
+        <p className="text-xs text-muted mb-4">
           以 <b>profile 池</b>预配多个 provider+model 组合（对标 DeepTutor）。用户在对话顶部下拉临时切换，
           后端按 profile 动态构造 client 注入 loop，<b>即时生效无需重启</b>。空字段回退 .env（active=default 通常 key/base_url 留空）。
         </p>
         {error && (
-          <div className="mb-4 px-4 py-2 bg-red-50 text-red-600 text-sm rounded-lg">{error}</div>
+          <div className="mb-4 px-4 py-2 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)]">{error}</div>
         )}
         {loading ? (
-          <div className="text-center text-slate-400 py-16">加载中...</div>
+          <div className="text-center text-muted py-16">加载中...</div>
         ) : profiles.length === 0 ? (
-          <EmptyState icon="🤖" title="还没有配置模型 profile" hint="点击右上角添加（deepseek / openai / dashscope / anthropic ...）" />
+          <EmptyState icon={Cpu} title="还没有配置模型 profile" hint="点击右上角添加（deepseek / openai / dashscope / anthropic ...）" />
         ) : (
           <div className="space-y-3">
             {profiles.map((p) => (
@@ -205,31 +206,31 @@ function LlmAdminView({ onBack }: { onBack: () => void }) {
                 <div className="flex items-start justify-between gap-2">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1 flex-wrap">
-                      <h3 className="font-mono text-sm font-semibold text-slate-800">{p.name || p.id}</h3>
+                      <h3 className="font-mono text-sm font-semibold text-ink">{p.name || p.id}</h3>
                       <Badge color="blue">{p.binding || '(未设置)'}</Badge>
                       {p.active && <Badge color="green">默认</Badge>}
                       {p.api_key ? <Badge color="slate">key ✓</Badge> : <Badge color="amber">key 走 .env</Badge>}
                     </div>
-                    <p className="text-xs text-slate-500 font-mono truncate">
+                    <p className="text-xs text-ink-soft font-mono truncate">
                       text: {p.text_model || '(空)'}{p.fast_model && ` · fast: ${p.fast_model}`}
                     </p>
                     {p.base_url && (
-                      <p className="text-[11px] text-slate-400 font-mono truncate">{p.base_url}</p>
+                      <p className="text-[11px] text-muted font-mono truncate">{p.base_url}</p>
                     )}
                   </div>
                   <div className="flex flex-wrap gap-1 justify-end shrink-0">
                     {!p.active && (
-                      <button onClick={() => handleSetActive(p.id)} className="text-xs px-2 py-1 text-green-600 hover:bg-green-50 rounded">
+                      <button onClick={() => handleSetActive(p.id)} className="text-xs px-2 py-1 text-ok-fg hover:bg-ok-bg rounded">
                         设默认
                       </button>
                     )}
-                    <button onClick={() => handleTestSaved(p.id)} className="text-xs px-2 py-1 text-indigo-600 hover:bg-indigo-50 rounded">
+                    <button onClick={() => handleTestSaved(p.id)} className="text-xs px-2 py-1 text-ink hover:bg-surface-2 rounded">
                       测试
                     </button>
-                    <button onClick={() => openEdit(p)} className="text-xs px-2 py-1 text-slate-500 hover:text-indigo-600 hover:bg-indigo-50 rounded">
+                    <button onClick={() => openEdit(p)} className="text-xs px-2 py-1 text-ink-soft hover:text-ink hover:bg-surface-2 rounded">
                       编辑
                     </button>
-                    <button onClick={() => handleDelete(p.id)} className="text-xs px-2 py-1 text-slate-500 hover:text-red-500 hover:bg-red-50 rounded">
+                    <button onClick={() => handleDelete(p.id)} className="text-xs px-2 py-1 text-ink-soft hover:text-danger-fg hover:bg-danger-bg rounded">
                       删除
                     </button>
                   </div>
@@ -251,17 +252,17 @@ function LlmAdminView({ onBack }: { onBack: () => void }) {
               <button
                 onClick={handleTest}
                 disabled={testing}
-                className="px-3 py-1.5 text-sm text-indigo-600 border border-indigo-200 rounded-lg hover:bg-indigo-50 disabled:opacity-50"
+                className="px-3 py-1.5 text-sm text-ink border border-line rounded-[var(--radius)] hover:bg-surface-2 disabled:opacity-50"
               >
                 {testing ? '测试中...' : '测试连接'}
               </button>
-              <button onClick={() => setEditing(null)} className="px-3 py-1.5 text-sm text-slate-500 hover:text-slate-700">
+              <button onClick={() => setEditing(null)} className="px-3 py-1.5 text-sm text-ink-soft hover:text-ink">
                 取消
               </button>
               <button
                 onClick={handleSave}
                 disabled={saving}
-                className="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                className="px-3 py-1.5 text-sm bg-accent text-white rounded-[var(--radius)] hover:bg-accent-2 disabled:opacity-50"
               >
                 {saving ? '保存中...' : '保存'}
               </button>
@@ -271,21 +272,21 @@ function LlmAdminView({ onBack }: { onBack: () => void }) {
           <div className="space-y-3">
             {testResult && (
               <div className="space-y-1.5">
-                <div className={`px-3 py-2 text-xs rounded ${(testResult.text?.ok ?? testResult.ok) ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
-                  💬 对话：{(testResult.text?.ok ?? testResult.ok)
+                <div className={`px-3 py-2 text-xs rounded ${(testResult.text?.ok ?? testResult.ok) ? 'bg-ok-bg text-ok-fg' : 'bg-danger-bg text-danger-fg'}`}>
+                  对话：{(testResult.text?.ok ?? testResult.ok)
                     ? `✓ ${testResult.text?.model ?? testResult.model}`
                     : `✗ ${testResult.text?.error ?? testResult.error}`}
                 </div>
                 {testResult.vision !== undefined && (
                   testResult.vision === null ? (
-                    <div className="px-3 py-2 text-xs rounded bg-slate-50 text-slate-500">
-                      🖼️ 视觉：未配置
+                    <div className="px-3 py-2 text-xs rounded bg-canvas text-ink-soft">
+                      视觉：未配置
                     </div>
                   ) : (
-                    <div className={`px-3 py-2 text-xs rounded ${testResult.vision.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
-                      🖼️ 视觉：{testResult.vision.ok ? `✓ ${testResult.vision.model}` : `✗ ${testResult.vision.error}`}
+                    <div className={`px-3 py-2 text-xs rounded ${testResult.vision.ok ? 'bg-ok-bg text-ok-fg' : 'bg-danger-bg text-danger-fg'}`}>
+                      视觉：{testResult.vision.ok ? `✓ ${testResult.vision.model}` : `✗ ${testResult.vision.error}`}
                       {testResult.vision.warning && (
-                        <div className="mt-0.5 text-[11px] text-amber-600">⚠ {testResult.vision.warning}</div>
+                        <div className="mt-0.5 text-[11px] text-warn-fg">{testResult.vision.warning}</div>
                       )}
                     </div>
                   )
@@ -329,8 +330,8 @@ function LlmAdminView({ onBack }: { onBack: () => void }) {
               </Field>
             </div>
             <details className="text-xs">
-              <summary className="cursor-pointer text-slate-500 hover:text-slate-700">嵌入 / 兜底（高级，可选）</summary>
-              <div className="space-y-2 mt-2 pl-2 border-l border-slate-200">
+              <summary className="cursor-pointer text-ink-soft hover:text-ink">嵌入 / 兜底（高级，可选）</summary>
+              <div className="space-y-2 mt-2 pl-2 border-l border-line">
                 <Field label="嵌入模型 embedding">
                   <input value={draft.embedding_model} onChange={(e) => setDraft({ ...draft, embedding_model: e.target.value })} className={inputCls} />
                 </Field>
@@ -365,7 +366,7 @@ function LlmAdminView({ onBack }: { onBack: () => void }) {
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <label className="block text-xs font-medium text-slate-600 mb-1">{label}</label>
+      <label className="block text-xs font-medium text-ink-soft mb-1">{label}</label>
       {children}
     </div>
   )
@@ -485,15 +486,15 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
   )
 
   return (
-    <div className="h-full flex flex-col bg-slate-50">
-      <header className="px-6 py-4 bg-white border-b border-slate-200 flex items-center justify-between">
+    <div className="h-full flex flex-col bg-canvas">
+      <header className="px-6 py-4 bg-surface border-b border-line flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <button onClick={onBack} className="text-slate-400 hover:text-slate-600 text-sm">← 返回</button>
-          <h1 className="text-lg font-semibold text-slate-800">🤖 我的模型配置</h1>
+          <button onClick={onBack} className="text-muted hover:text-ink-soft text-sm">← 返回</button>
+          <h1 className="text-lg font-semibold text-ink">我的模型配置</h1>
           {hasOverride ? <Badge color="green">个人配置生效</Badge> : <Badge color="slate">用平台默认</Badge>}
         </div>
         {hasOverride && (
-          <button onClick={handleDelete} className="text-xs px-2 py-1 text-red-500 hover:bg-red-50 rounded">
+          <button onClick={handleDelete} className="text-xs px-2 py-1 text-danger-fg hover:bg-danger-bg rounded">
             清除个人配置
           </button>
         )}
@@ -501,8 +502,8 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
 
       <div className="flex-1 overflow-y-auto p-6">
         <div className="max-w-2xl mx-auto space-y-4">
-          <Card className="p-4 bg-indigo-50/40 border-indigo-100">
-            <p className="text-xs text-slate-600 leading-relaxed">
+          <Card className="p-4 bg-surface-2/40 border-line">
+            <p className="text-xs text-ink-soft leading-relaxed">
               自配个人模型会<b>覆盖平台默认</b>，仅对你生效（即时生效，无需重启）。留空字段回退默认。
               对话模型与视觉模型<b>走各自独立的供应商</b>（如对话填 deepseek，视觉填 dashscope 的 qwen-vl），
               两把 API Key / Base URL / 模型各自独立填写。视觉模型用于：当主对话模型不支持看图时，
@@ -510,26 +511,26 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
             </p>
           </Card>
 
-          {error && <div className="px-4 py-2 bg-red-50 text-red-600 text-sm rounded-lg">{error}</div>}
+          {error && <div className="px-4 py-2 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)]">{error}</div>}
           {testResult && (
             <div className="space-y-2">
-              <div className={`px-4 py-2 text-sm rounded-lg ${(testResult.text?.ok ?? testResult.ok) ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
-                💬 对话模型：{(testResult.text?.ok ?? testResult.ok)
+              <div className={`px-4 py-2 text-sm rounded-[var(--radius)] ${(testResult.text?.ok ?? testResult.ok) ? 'bg-ok-bg text-ok-fg' : 'bg-danger-bg text-danger-fg'}`}>
+                对话模型：{(testResult.text?.ok ?? testResult.ok)
                   ? `✓ 连接成功（${testResult.text?.model ?? testResult.model}）`
                   : `✗ ${testResult.text?.error ?? testResult.error}`}
               </div>
               {testResult.vision !== undefined && (
                 testResult.vision === null ? (
-                  <div className="px-4 py-2 text-sm rounded-lg bg-slate-50 text-slate-500">
-                    🖼️ 视觉模型：未配置（将走平台默认）
+                  <div className="px-4 py-2 text-sm rounded-[var(--radius)] bg-canvas text-ink-soft">
+                    视觉模型：未配置（将走平台默认）
                   </div>
                 ) : (
-                  <div className={`px-4 py-2 text-sm rounded-lg ${testResult.vision.ok ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-600'}`}>
-                    🖼️ 视觉模型：{testResult.vision.ok
+                  <div className={`px-4 py-2 text-sm rounded-[var(--radius)] ${testResult.vision.ok ? 'bg-ok-bg text-ok-fg' : 'bg-danger-bg text-danger-fg'}`}>
+                    视觉模型：{testResult.vision.ok
                       ? `✓ 连接成功（${testResult.vision.model}）`
                       : `✗ ${testResult.vision.error}`}
                     {testResult.vision.warning && (
-                      <div className="mt-1 text-xs text-amber-600">⚠ {testResult.vision.warning}</div>
+                      <div className="mt-1 text-xs text-warn-fg">{testResult.vision.warning}</div>
                     )}
                   </div>
                 )
@@ -538,14 +539,14 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
           )}
 
           {loading ? (
-            <div className="text-center text-slate-400 py-12">加载中...</div>
+            <div className="text-center text-muted py-12">加载中...</div>
           ) : (
             <>
             {/* 对话模型供应商区 */}
             <Card className="p-5 space-y-3">
-              <div className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                <span className="text-base">💬</span> 对话模型供应商
-                <span className="text-xs font-normal text-slate-400">主回答模型</span>
+              <div className="text-sm font-semibold text-ink flex items-center gap-2">
+                <span className="text-base"></span> 对话模型供应商
+                <span className="text-xs font-normal text-muted">主回答模型</span>
               </div>
               <Field label="供应商 binding（选择后自动填默认 base_url）">
                 <select value={draft.binding} onChange={(e) => onPickBinding(e.target.value)} className={inputCls}>
@@ -576,11 +577,11 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
 
             {/* 视觉模型供应商区（独立，可异于对话供应商） */}
             <Card className="p-5 space-y-3">
-              <div className="text-sm font-semibold text-slate-700 flex items-center gap-2">
-                <span className="text-base">🖼️</span> 视觉模型供应商
-                <span className="text-xs font-normal text-slate-400">看图用，可与对话供应商不同</span>
+              <div className="text-sm font-semibold text-ink flex items-center gap-2">
+                <span className="text-base"></span> 视觉模型供应商
+                <span className="text-xs font-normal text-muted">看图用，可与对话供应商不同</span>
               </div>
-              <p className="text-xs text-slate-500 leading-relaxed">
+              <p className="text-xs text-ink-soft leading-relaxed">
                 当上面的对话模型不支持看图（如 deepseek）时，由该视觉模型把图片转成文字描述再交给对话模型回答。
                 可填与对话不同的供应商（如对话 deepseek、视觉 dashscope 的 qwen-vl）。全部留空则回退平台默认视觉模型。
               </p>
@@ -616,14 +617,14 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
               <button
                 onClick={handleTest}
                 disabled={testing}
-                className="px-3 py-1.5 text-sm text-indigo-600 border border-indigo-200 rounded-lg hover:bg-indigo-50 disabled:opacity-50"
+                className="px-3 py-1.5 text-sm text-ink border border-line rounded-[var(--radius)] hover:bg-surface-2 disabled:opacity-50"
               >
                 {testing ? '测试中...' : '测试连接'}
               </button>
               <button
                 onClick={handleSave}
                 disabled={saving}
-                className="px-4 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                className="px-4 py-1.5 text-sm bg-accent text-white rounded-[var(--radius)] hover:bg-accent-2 disabled:opacity-50"
               >
                 {saving ? '保存中...' : '保存'}
               </button>

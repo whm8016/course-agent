@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Single-call follow-up agent for quiz question threads (aligned with DeepTutor FollowupAgent).
+Single-call follow-up agent for quiz question threads (aligned with FollowupAgent).
 """
 
 from __future__ import annotations

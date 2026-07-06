@@ -1,4 +1,4 @@
-"""Provider/model 能力注册表（对标 DeepTutor capabilities.py）。
+"""Provider/model 能力注册表。
 
 核心用途：``supports_vision(binding, model)`` 驱动 Stage-2 失败降级——
 LLM 调用失败时，若模型不支持 vision 且消息里带了图，就剥掉图片用**同一模型**
@@ -7,7 +7,7 @@ LLM 调用失败时，若模型不支持 vision 且消息里带了图，就剥�
 chat 主路径始终用配置的 chat model（TEXT_MODEL），图片乐观注入，不预先 gate；
 vision 能力只用在 RAG ingestion（image_extractor）等需要的地方。
 
-查表优先级（get_capability，与 DeepTutor 一致）：
+查表优先级（get_capability，一致）：
 1. MODEL_OVERRIDES —— model 前缀匹配，按 pattern 长度**降序**（最具体的先命中，
    故 "qwen-vl-plus" 命中 "qwen-vl"(True) 而非 "qwen"(False)）
 2. PROVIDER_CAPABILITIES[binding]

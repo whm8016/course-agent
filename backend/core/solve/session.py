@@ -1,4 +1,4 @@
-"""SolveSession — 单 turn 内存状态机（对标 DeepTutor capabilities/solve/session.py）。
+"""SolveSession — 单 turn 内存状态机。
 
 解题 turn 是一次性的：session 只在该 turn 存活，由 solve pipeline 通过 contextvar
 注入的 session_id 索引。它持有模型编写的 plan、逐步完成门控、replan 预算——

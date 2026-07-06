@@ -1,6 +1,6 @@
 """catalog profile 读写单测：CRUD + get_profile + 公开/管理员视图投影 + active。
 
-对标 DeepTutor per-request provider 切换：catalog 以 profile 池形式存，
+per-request provider 切换：catalog 以 profile 池形式存，
 public 视图去 key（对话下拉用），admin 视图含 key（编辑回填）。
 """
 from core.llm import catalog as cat

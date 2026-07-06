@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.auth import get_current_user
+from api.auth import get_current_user, is_admin_user
 from core.db.database import BotNotification, UserSocialBinding, get_db
 from core.bot.manager import get_bot_manager, BotConfig
 from core.bot.notification import NotificationService
@@ -85,7 +85,8 @@ def _owner_of(user: dict) -> str:
 
 
 def _is_admin(user: dict) -> bool:
-    return user.get("role") == "admin" or bool(user.get("is_admin"))
+    # 走 auth.is_admin_user 单一判定源（只读 role），消除 role/is_admin 双轨制
+    return is_admin_user(user)
 
 
 def _resolve_owner(manager, owner_id: str, bot_id: str, is_admin: bool) -> str:

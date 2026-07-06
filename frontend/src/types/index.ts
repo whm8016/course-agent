@@ -49,6 +49,9 @@ export interface AgentMetadata {
 export interface SSEEvent {
   type: 'thinking' | 'thinking_chunk' | 'tool_call' | 'tool_result' | 'answer' | 'quiz' | 'done' | 'error' | 'token' | 'skill_output' | 'turn_started'
   content?: string
+  /** error 事件携带的错误文案。后端 stream_bus 发的是 `message` 字段（非 content），
+   *  前端读 error 事件时须同时认 content / message，否则显示「出错了: undefined」。 */
+  message?: string
   tool?: string
   input?: Record<string, unknown>
   chunks?: RagChunk[]

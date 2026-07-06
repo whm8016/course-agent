@@ -31,31 +31,31 @@ export default function JoinCodeShareSection({ kb, onReset, resetting }: Props) 
   const joinUrl = `${window.location.origin}/join/${normalizeCode(kb.join_code)}`
 
   return (
-    <section className="bg-white rounded-2xl border border-slate-200 p-6">
-      <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
-        <span>🔑</span> 学生入课方式
+    <section className="bg-surface rounded-[var(--radius-lg)] border border-line p-6">
+      <h3 className="font-semibold text-ink mb-4 flex items-center gap-2">
+        <span></span> 学生入课方式
       </h3>
       {kb.join_code ? (
         <div className="grid md:grid-cols-[auto_1fr] gap-6 items-start">
           {/* 左：课程码展示 + 二维码（扫码入课） */}
           <div className="flex flex-col items-center gap-3">
-            <span className="text-3xl font-mono font-bold tracking-widest text-indigo-700 bg-indigo-50 px-6 py-3 rounded-xl border border-indigo-200">
+            <span className="text-3xl font-mono font-bold tracking-widest text-ink bg-surface-2 px-6 py-3 rounded-[var(--radius)] border border-line">
               {formatCode(kb.join_code)}
             </span>
             <QRCodeSVG
               value={joinUrl}
               size={140}
               level="M"
-              className="rounded-lg border border-slate-200 p-2 bg-white"
+              className="rounded-[var(--radius)] border border-line p-2 bg-surface"
             />
-            <span className="text-xs text-slate-400">扫码即可入课</span>
+            <span className="text-xs text-muted">扫码即可入课</span>
           </div>
           {/* 右：分享链接 + 复制/重置操作 */}
           <div className="flex flex-col gap-3 min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
               <button
                 onClick={() => copy(normalizeCode(kb.join_code))}
-                className="px-4 py-2 text-sm bg-slate-100 hover:bg-slate-200 rounded-lg transition"
+                className="px-4 py-2 text-sm bg-surface-2 hover:bg-surface-2 rounded-[var(--radius)] transition"
               >
                 {copied ? '已复制!' : '复制课程码'}
               </button>
@@ -63,13 +63,13 @@ export default function JoinCodeShareSection({ kb, onReset, resetting }: Props) 
                 <button
                   onClick={onReset}
                   disabled={resetting}
-                  className="px-4 py-2 text-sm bg-orange-100 text-orange-700 hover:bg-orange-200 rounded-lg transition disabled:opacity-50"
+                  className="px-4 py-2 text-sm bg-warn-bg text-warn-fg hover:bg-warn-bg rounded-[var(--radius)] transition disabled:opacity-50"
                 >
                   {resetting ? '生成中...' : '重置课程码'}
                 </button>
               )}
             </div>
-            <p className="text-xs text-slate-400">
+            <p className="text-xs text-muted">
               学生可通过 ① 输入课程码 ② 点击分享链接 ③ 扫描二维码 三种方式加入。
               {onReset && '重置后旧码立即失效。'}
             </p>
@@ -77,12 +77,12 @@ export default function JoinCodeShareSection({ kb, onReset, resetting }: Props) 
         </div>
       ) : (
         <div className="flex items-center gap-3">
-          <span className="text-sm text-slate-400">暂无课程码</span>
+          <span className="text-sm text-muted">暂无课程码</span>
           {onReset && (
             <button
               onClick={onReset}
               disabled={resetting}
-              className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition disabled:opacity-50"
+              className="px-4 py-2 text-sm bg-accent text-white rounded-[var(--radius)] hover:bg-accent-2 transition disabled:opacity-50"
             >
               {resetting ? '生成中...' : '生成课程码'}
             </button>

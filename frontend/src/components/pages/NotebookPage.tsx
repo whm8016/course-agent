@@ -10,6 +10,7 @@ import {
   type NotebookCategory,
 } from '../../services/api'
 import { Badge, Toggle, Card, EmptyState } from '../ui'
+import { NotebookPen } from 'lucide-react'
 
 interface Props {
   onBack: () => void
@@ -86,17 +87,17 @@ export default function NotebookPage({ onBack }: Props) {
   }
 
   return (
-    <div className="h-full flex flex-col bg-slate-50">
-      <header className="px-6 py-4 bg-white border-b border-slate-200 flex items-center gap-3">
-        <button onClick={onBack} className="text-slate-400 hover:text-slate-600 text-sm">
+    <div className="h-full flex flex-col bg-canvas">
+      <header className="px-6 py-4 bg-surface border-b border-line flex items-center gap-3">
+        <button onClick={onBack} className="text-muted hover:text-ink-soft text-sm">
           ← 返回
         </button>
-        <h1 className="text-lg font-semibold text-slate-800">📒 题目笔记本</h1>
+        <h1 className="text-lg font-semibold text-ink">题目笔记本</h1>
         <Badge color="indigo">{entries.length}</Badge>
       </header>
       <div className="flex-1 overflow-hidden flex">
-        <div className="w-56 border-r border-slate-200 bg-white p-3 overflow-y-auto shrink-0">
-          <span className="block text-xs font-medium text-slate-500 mb-2">过滤</span>
+        <div className="w-56 border-r border-line bg-surface p-3 overflow-y-auto shrink-0">
+          <span className="block text-xs font-medium text-ink-soft mb-2">过滤</span>
           {(['all', 'bookmarked', 'wrong'] as Filter[]).map((f) => (
             <button
               key={f}
@@ -106,18 +107,18 @@ export default function NotebookPage({ onBack }: Props) {
               }}
               className={`w-full text-left text-sm px-2 py-1.5 rounded mb-0.5 ${
                 filter === f && activeCategory == null
-                  ? 'bg-indigo-50 text-indigo-700'
-                  : 'text-slate-600 hover:bg-slate-50'
+                  ? 'bg-surface-2 text-ink'
+                  : 'text-ink-soft hover:bg-canvas'
               }`}
             >
               {f === 'all' ? '全部' : f === 'bookmarked' ? '⭐ 已收藏' : '✗ 错题'}
             </button>
           ))}
           <div className="flex items-center justify-between mt-4 mb-2">
-            <span className="text-xs font-medium text-slate-500">分类</span>
+            <span className="text-xs font-medium text-ink-soft">分类</span>
             <button
               onClick={handleAddCategory}
-              className="text-xs text-indigo-600 hover:text-indigo-800"
+              className="text-xs text-ink hover:text-ink"
             >
               +
             </button>
@@ -131,11 +132,11 @@ export default function NotebookPage({ onBack }: Props) {
                 }}
                 className={`flex-1 text-left text-sm px-2 py-1.5 rounded ${
                   activeCategory === c.id
-                    ? 'bg-indigo-50 text-indigo-700'
-                    : 'text-slate-600 hover:bg-slate-50'
+                    ? 'bg-surface-2 text-ink'
+                    : 'text-ink-soft hover:bg-canvas'
                 }`}
               >
-                {c.name} <span className="text-xs text-slate-400">({c.entry_count})</span>
+                {c.name} <span className="text-xs text-muted">({c.entry_count})</span>
               </button>
               <button
                 onClick={() => {
@@ -143,7 +144,7 @@ export default function NotebookPage({ onBack }: Props) {
                     void deleteNotebookCategory(c.id).then(() => void reload())
                   }
                 }}
-                className="opacity-0 group-hover:opacity-100 text-xs text-slate-400 hover:text-red-500 px-1"
+                className="opacity-0 group-hover:opacity-100 text-xs text-muted hover:text-danger-fg px-1"
               >
                 ✕
               </button>
@@ -152,12 +153,12 @@ export default function NotebookPage({ onBack }: Props) {
         </div>
         <div className="flex-1 overflow-y-auto p-6">
           {error && (
-            <div className="mb-4 px-4 py-2 bg-red-50 text-red-600 text-sm rounded-lg">{error}</div>
+            <div className="mb-4 px-4 py-2 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)]">{error}</div>
           )}
           {loading ? (
-            <div className="text-center text-slate-400 py-16">加载中...</div>
+            <div className="text-center text-muted py-16">加载中...</div>
           ) : entries.length === 0 ? (
-            <EmptyState icon="📒" title="笔记本还是空的" hint="出题/答题后会自动收录，或手动收藏" />
+            <EmptyState icon={NotebookPen} title="笔记本还是空的" hint="出题/答题后会自动收录，或手动收藏" />
           ) : (
             <div className="space-y-3">
               {entries.map((e) => (
@@ -182,21 +183,21 @@ export default function NotebookPage({ onBack }: Props) {
                     ) : (
                       <Badge color="red">✗ 错误</Badge>
                     )}
-                    <span className="ml-auto text-xs text-slate-400">
+                    <span className="ml-auto text-xs text-muted">
                       {new Date(e.created_at * 1000).toLocaleString()}
                     </span>
                   </div>
-                  <p className="text-sm text-slate-800 mb-2 font-medium">{e.question}</p>
+                  <p className="text-sm text-ink mb-2 font-medium">{e.question}</p>
                   {e.options && Object.keys(e.options).length > 0 && (
-                    <div className="text-xs text-slate-600 space-y-0.5 mb-2">
+                    <div className="text-xs text-ink-soft space-y-0.5 mb-2">
                       {Object.entries(e.options).map(([k, v]) => (
                         <div
                           key={k}
                           className={
                             k === e.correct_answer
-                              ? 'text-green-600 font-medium'
+                              ? 'text-ok-fg font-medium'
                               : k === e.user_answer && !e.is_correct
-                                ? 'text-red-500'
+                                ? 'text-danger-fg'
                                 : ''
                           }
                         >
@@ -211,22 +212,22 @@ export default function NotebookPage({ onBack }: Props) {
                     </div>
                   )}
                   {e.correct_answer && !e.options?.[e.correct_answer] && (
-                    <p className="text-xs text-slate-600 mb-1">
-                      答案：<span className="text-green-600 font-medium">{e.correct_answer}</span>
+                    <p className="text-xs text-ink-soft mb-1">
+                      答案：<span className="text-ok-fg font-medium">{e.correct_answer}</span>
                     </p>
                   )}
                   {e.explanation && (
-                    <p className="text-xs text-slate-500 mt-2 pt-2 border-t border-slate-100">
+                    <p className="text-xs text-ink-soft mt-2 pt-2 border-t border-line">
                       {e.explanation}
                     </p>
                   )}
                   <div className="flex items-center justify-end gap-2 mt-2">
-                    <label className="flex items-center gap-1 text-xs text-slate-500 cursor-pointer">
+                    <label className="flex items-center gap-1 text-xs text-ink-soft cursor-pointer">
                       <Toggle checked={e.bookmarked} onChange={() => toggleBookmark(e)} /> 收藏
                     </label>
                     <button
                       onClick={() => handleDelete(e.id)}
-                      className="text-xs text-slate-400 hover:text-red-500"
+                      className="text-xs text-muted hover:text-danger-fg"
                     >
                       删除
                     </button>

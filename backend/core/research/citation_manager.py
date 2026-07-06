@@ -1,6 +1,6 @@
-"""CitationManager — 引用去重 + 编号 + 渲染（对标 DeepTutor citation_manager）。
+"""CitationManager — 引用去重 + 编号 + 渲染（citation_manager）。
 
-基础版：用自增整数编号（``[1]``、``[2]``）而非 DeepTutor 的 ``CIT-x-yy``。
+基础版：用自增整数编号（``[1]``、``[2]``）而非 的 ``CIT-x-yy``。
 按 url / title / source 去重；render_references() 出 Markdown 有序列表附录，
 inline_marker(source) 出 ``[n]`` 供报告正文行内引用。
 """

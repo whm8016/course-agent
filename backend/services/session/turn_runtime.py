@@ -17,7 +17,7 @@ Turn Runtime Manager
           await execution.bus.emit(event)            fan-out 给所有 subscribe_turn 订阅者
       → 收集 ANSWER 内容 → 发布 CAPABILITY_COMPLETE 到全局 EventBus
 
-【与 DeepTutor TurnRuntimeManager 的对应关系】
+【TurnRuntimeManager 对应关系】
   start_turn()      ← start_turn()
   subscribe_turn()  ← subscribe_turn(turn_id, after_seq)（in-memory 回放）
   cancel_turn()     ← cancel_turn()

@@ -15,17 +15,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.auth import get_current_user
+from api.auth import get_current_user, require_admin
 from core.db.database import get_db, UserMCPEnrollment
 from core.mcp.config import MCPServerConfig, load_mcp_config, save_mcp_config
 from core.mcp.manager import get_mcp_manager, probe_server
 
 router = APIRouter(prefix="/mcp")
-
-
-def _require_admin(user: dict):
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可管理 MCP 配置")
 
 
 class ServerConfigRequest(BaseModel):
@@ -50,8 +45,7 @@ async def _upsert(name: str, payload: ServerConfigRequest) -> dict:
 
 
 @router.get("/servers")
-async def list_servers(user: dict = Depends(get_current_user)):
-    _require_admin(user)
+async def list_servers(_: dict = Depends(require_admin)):
     return {
         "servers": get_mcp_manager().status(),
         "config": load_mcp_config().model_dump(mode="json"),
@@ -60,15 +54,13 @@ async def list_servers(user: dict = Depends(get_current_user)):
 
 @router.post("/servers/{name}")
 async def upsert_server(
-    name: str, payload: ServerConfigRequest, user: dict = Depends(get_current_user)
+    name: str, payload: ServerConfigRequest, _: dict = Depends(require_admin)
 ):
-    _require_admin(user)
     return await _upsert(name, payload)
 
 
 @router.delete("/servers/{name}")
-async def delete_server(name: str, user: dict = Depends(get_current_user)):
-    _require_admin(user)
+async def delete_server(name: str, _: dict = Depends(require_admin)):
     cfg = load_mcp_config()
     if name not in cfg.servers:
         raise HTTPException(status_code=404, detail="server not found")
@@ -79,8 +71,7 @@ async def delete_server(name: str, user: dict = Depends(get_current_user)):
 
 
 @router.post("/servers/{name}/test")
-async def test_server(name: str, user: dict = Depends(get_current_user)):
-    _require_admin(user)
+async def test_server(name: str, _: dict = Depends(require_admin)):
     cfg = load_mcp_config()
     if name not in cfg.servers:
         raise HTTPException(status_code=404, detail="server not found")
@@ -88,9 +79,8 @@ async def test_server(name: str, user: dict = Depends(get_current_user)):
 
 
 @router.post("/probe")
-async def probe(payload: ServerConfigRequest, user: dict = Depends(get_current_user)):
+async def probe(payload: ServerConfigRequest, _: dict = Depends(require_admin)):
     """直接测试一份配置（不持久化），供设置页 Test 按钮在保存前验证。"""
-    _require_admin(user)
     return await probe_server(MCPServerConfig(**payload.model_dump()))
 
 

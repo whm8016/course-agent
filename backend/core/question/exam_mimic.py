@@ -1,5 +1,5 @@
 """
-Thin mimic entrypoint — delegates to AgentCoordinator (aligned with DeepTutor tools/question/exam_mimic.py).
+Thin mimic entrypoint — delegates to AgentCoordinator .
 """
 
 from __future__ import annotations

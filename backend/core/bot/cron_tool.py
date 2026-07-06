@@ -1,4 +1,4 @@
-"""cron 工具 — agent 在对话里设定时提醒（对标 DeepTutor ``tools/cron_tool.py``）。
+"""cron 工具 — agent 在对话里设定时提醒（``tools/cron_tool.py``）。
 
 agent 调 ``cron`` 工具（action=schedule/list/cancel），owner 取**当前会话上下文**
 （partner_id=owner:bot_id + channel/chat_id/session_key/user_id），经 contextvar

@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import { fetchGraphs, deleteGraphNode, type GraphNode, type GraphData, type GraphsResponse } from '../../services/api'
 
 interface CanvasNode extends GraphNode {
@@ -9,6 +9,7 @@ interface CanvasNode extends GraphNode {
   radius: number
 }
 
+// 节点填色与设计系统 token 对齐（去饱和的 muted pastel 语义色）
 function getColor(node: GraphNode): string {
   if (node.type === 'error_pattern') {
     const severity = node.severity ?? 0.5
@@ -17,9 +18,9 @@ function getColor(node: GraphNode): string {
   }
   const mastery = node.mastery ?? 0.5
   const risk = node.risk ?? 0.5
-  if (risk > 0.7) return '#ef4444'
-  if (mastery > 0.7) return '#22c55e'
-  return '#3b82f6'
+  if (risk > 0.7) return '#9F2F2D' // danger-fg
+  if (mastery > 0.7) return '#346538' // ok-fg
+  return '#1F6C9F' // info-fg
 }
 
 function getRadius(node: GraphNode): number {
@@ -51,9 +52,10 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
 
   useEffect(() => { void loadData() }, [loadData])
 
-  const currentGraph: GraphData = data
+  // useMemo 稳定引用，避免每次渲染都触发下方绘制 effect
+  const currentGraph = useMemo<GraphData>(() => data
     ? (activeTab === 'knowledge' ? data.knowledge_graph : data.error_graph)
-    : { nodes: [], edges: [] }
+    : { nodes: [], edges: [] }, [data, activeTab])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -130,7 +132,7 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
 
       ctx.clearRect(0, 0, cw, ch)
 
-      ctx.strokeStyle = '#e2e8f0'
+      ctx.strokeStyle = '#EAEAEA' // line
       ctx.lineWidth = 1
       for (const edge of edgesRef.current) {
         const a = nodeMap.get(edge.source)
@@ -149,11 +151,11 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
         ctx.globalAlpha = node.status === 'candidate' ? 0.5 : 0.9
         ctx.fill()
         ctx.globalAlpha = 1
-        ctx.strokeStyle = selected?.id === node.id ? '#1e293b' : '#fff'
+        ctx.strokeStyle = selected?.id === node.id ? '#2F3437' : '#FFFFFF' // ink / surface
         ctx.lineWidth = selected?.id === node.id ? 3 : 2
         ctx.stroke()
 
-        ctx.fillStyle = '#1e293b'
+        ctx.fillStyle = '#5C615F' // ink-soft
         ctx.font = '11px sans-serif'
         ctx.textAlign = 'center'
         const label = node.label.length > 6 ? node.label.slice(0, 6) + '…' : node.label
@@ -190,18 +192,18 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <div className="h-screen flex flex-col bg-slate-50">
-      <header className="flex items-center gap-4 px-6 py-3 bg-white border-b border-slate-200">
-        <button onClick={onBack} className="text-sm text-slate-500 hover:text-slate-800">&larr; 返回</button>
-        <h1 className="text-lg font-semibold">学习图谱</h1>
+    <div className="h-screen flex flex-col bg-canvas">
+      <header className="flex items-center gap-4 px-6 py-3 bg-surface border-b border-line">
+        <button onClick={onBack} className="text-sm text-ink-soft hover:text-ink transition">&larr; 返回</button>
+        <h1 className="text-lg font-serif text-ink">学习图谱</h1>
         <div className="flex gap-2 ml-auto">
           <button
             onClick={() => { setActiveTab('knowledge'); setSelected(null) }}
-            className={`px-3 py-1 rounded text-sm ${activeTab === 'knowledge' ? 'bg-blue-600 text-white' : 'bg-slate-200'}`}
+            className={`px-3 py-1 rounded-[var(--radius)] text-sm transition ${activeTab === 'knowledge' ? 'bg-accent text-white' : 'bg-surface-2 text-ink-soft hover:text-ink'}`}
           >知识点图谱</button>
           <button
             onClick={() => { setActiveTab('error'); setSelected(null) }}
-            className={`px-3 py-1 rounded text-sm ${activeTab === 'error' ? 'bg-red-600 text-white' : 'bg-slate-200'}`}
+            className={`px-3 py-1 rounded-[var(--radius)] text-sm transition ${activeTab === 'error' ? 'bg-danger-fg text-white' : 'bg-surface-2 text-ink-soft hover:text-ink'}`}
           >错题图谱</button>
         </div>
       </header>
@@ -209,9 +211,9 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
       <div className="flex-1 flex overflow-hidden">
         <div className="flex-1 relative">
           {loading ? (
-            <div className="flex items-center justify-center h-full text-slate-400">加载中...</div>
+            <div className="flex items-center justify-center h-full text-muted">加载中...</div>
           ) : currentGraph.nodes.length === 0 ? (
-            <div className="flex items-center justify-center h-full text-slate-400">
+            <div className="flex items-center justify-center h-full text-muted">
               暂无数据，开始对话后将自动生成图谱
             </div>
           ) : (
@@ -224,48 +226,48 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
         </div>
 
         {selected && (
-          <aside className="w-72 bg-white border-l border-slate-200 p-4 overflow-y-auto">
-            <h3 className="font-semibold text-base mb-2">{selected.label}</h3>
-            <div className="text-xs text-slate-500 mb-3">{selected.type === 'knowledge_point' ? '知识点' : '错误模式'}</div>
+          <aside className="w-72 bg-surface border-l border-line p-4 overflow-y-auto">
+            <h3 className="font-serif text-base text-ink mb-2">{selected.label}</h3>
+            <div className="text-xs text-muted mb-3">{selected.type === 'knowledge_point' ? '知识点' : '错误模式'}</div>
 
             {selected.type === 'knowledge_point' && (
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between"><span>风险度</span><span className="font-mono">{((selected.risk ?? 0) * 100).toFixed(0)}%</span></div>
-                <div className="flex justify-between"><span>掌握度</span><span className="font-mono">{((selected.mastery ?? 0) * 100).toFixed(0)}%</span></div>
-                <div className="flex justify-between"><span>重要性</span><span className="font-mono">{((selected.importance ?? 0) * 100).toFixed(0)}%</span></div>
+              <div className="space-y-2 text-sm text-ink-soft">
+                <div className="flex justify-between"><span>风险度</span><span className="font-mono text-ink">{((selected.risk ?? 0) * 100).toFixed(0)}%</span></div>
+                <div className="flex justify-between"><span>掌握度</span><span className="font-mono text-ink">{((selected.mastery ?? 0) * 100).toFixed(0)}%</span></div>
+                <div className="flex justify-between"><span>重要性</span><span className="font-mono text-ink">{((selected.importance ?? 0) * 100).toFixed(0)}%</span></div>
               </div>
             )}
 
             {selected.type === 'error_pattern' && (
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between"><span>严重度</span><span className="font-mono">{((selected.severity ?? 0) * 100).toFixed(0)}%</span></div>
-                <div className="flex justify-between"><span>出错次数</span><span className="font-mono">{selected.error_count ?? 1}</span></div>
+              <div className="space-y-2 text-sm text-ink-soft">
+                <div className="flex justify-between"><span>严重度</span><span className="font-mono text-ink">{((selected.severity ?? 0) * 100).toFixed(0)}%</span></div>
+                <div className="flex justify-between"><span>出错次数</span><span className="font-mono text-ink">{selected.error_count ?? 1}</span></div>
               </div>
             )}
 
-            {selected.notes && <p className="mt-3 text-sm text-slate-600">{selected.notes}</p>}
+            {selected.notes && <p className="mt-3 text-sm text-ink-soft">{selected.notes}</p>}
 
             {selected.examples && selected.examples.length > 0 && (
               <div className="mt-3">
-                <div className="text-xs font-medium text-slate-500 mb-1">示例</div>
+                <div className="text-xs font-medium text-muted mb-1">示例</div>
                 <ul className="text-sm space-y-1">
-                  {selected.examples.map((ex, i) => <li key={i} className="text-slate-600">• {ex}</li>)}
+                  {selected.examples.map((ex, i) => <li key={i} className="text-ink-soft">• {ex}</li>)}
                 </ul>
               </div>
             )}
 
             {selected.correction_suggestions && selected.correction_suggestions.length > 0 && (
               <div className="mt-3">
-                <div className="text-xs font-medium text-slate-500 mb-1">纠正建议</div>
+                <div className="text-xs font-medium text-muted mb-1">纠正建议</div>
                 <ul className="text-sm space-y-1">
-                  {selected.correction_suggestions.map((s, i) => <li key={i} className="text-slate-600">• {s}</li>)}
+                  {selected.correction_suggestions.map((s, i) => <li key={i} className="text-ink-soft">• {s}</li>)}
                 </ul>
               </div>
             )}
 
             <button
               onClick={handleDelete}
-              className="mt-4 w-full px-3 py-1.5 bg-red-50 text-red-600 rounded text-sm hover:bg-red-100"
+              className="mt-4 w-full px-3 py-1.5 bg-danger-bg text-danger-fg rounded-[var(--radius)] text-sm hover:opacity-80 transition"
             >删除此节点</button>
           </aside>
         )}

@@ -2,7 +2,7 @@
 
 重点验证 ``_extract_text_like`` 的多编码解码（B1：原实现误调不存在的
 ``FileTypeRouter.decode_bytes`` 致 NameError，已改为本地多编码 fallback），以及
-``extract_documents_from_records`` 清 base64 的 DeepTutor 铁律。
+``extract_documents_from_records`` 清 base64 的 铁律。
 """
 from __future__ import annotations
 
@@ -37,7 +37,7 @@ def test_extract_documents_from_records_clears_base64():
     assert len(doc_texts) == 1
     assert doc_texts[0].startswith("[File: doc.txt]")
     assert "文档内容" in doc_texts[0]
-    # base64 必须被清空（DeepTutor 铁律：持久化省 DB 空间 + 不泄露原文字节）
+    # base64 必须被清空（铁律：持久化省 DB 空间 + 不泄露原文字节）
     assert updated[0]["base64"] == ""
 
 

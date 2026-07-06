@@ -62,14 +62,16 @@ from core.context import UnifiedContext
 from core.db.database import AsyncSessionLocal
 from core.observability import bind_context, log_flow
 from services.session.turn_runtime import get_turn_runtime_manager
+from settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/run", tags=["run"])
 
-_VALID_CAPABILITIES = {"chat", "deep_solve", "deep_research", "quiz", "summarize", "vision"}
-_MAX_HISTORY = 20
-_MAX_MESSAGE = 2000
+_VALID_CAPABILITIES = {"chat", "deep_solve", "deep_research", "quiz"}
+_SETTINGS = get_settings()
+_MAX_HISTORY = _SETTINGS.run_history_max_length
+_MAX_MESSAGE = _SETTINGS.chat_message_max_length
 
 
 @router.websocket("/{capability_name}")

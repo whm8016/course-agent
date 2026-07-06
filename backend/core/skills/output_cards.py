@@ -1,6 +1,6 @@
 """Output Cards：对话完成后生成额外的教学补充框。
 
-（原 output_skills.py 重命名，避免与 DeepTutor 式 skill 知识包混淆——前者是对话后
+（原 output_skills.py 重命名，避免与 式 skill 知识包混淆——前者是对话后
 的补充内容生成器，后者是 agent 按需读取的程序性知识 playbook，两者完全不同）
 
 功能：

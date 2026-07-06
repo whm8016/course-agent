@@ -1,7 +1,7 @@
-"""Prompt YAML 加载器（对标 DeepTutor PromptManager 的最小子集）。
+"""Prompt YAML 加载器。
 
 把各 capability 的提示词从代码外部化到 prompts/{language}/{name}.yaml，
-便于参照 DeepTutor 对齐 / 迭代提示词，且不重新部署代码。
+便于对齐 / 迭代提示词，且不重新部署代码。
 
 加载整个 YAML 为 dict，调用方按结构取具体字段（如 data["loop"]["system"]）。
 与 core/question/agent_base.py 的 get_prompt 思路一致，但返回完整 dict 以支持

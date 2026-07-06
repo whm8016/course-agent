@@ -1,6 +1,6 @@
 """MCP 连接管理器（进程级单例）。
 
-忠实移植 DeepTutor ``services/mcp/manager.py``：adapter 经 ``_register_adapters``
+``services/mcp/manager.py``：adapter 经 ``_register_adapters``
 注册进 ``ToolRegistry``（``_make_mcp_entry`` 包成 ``ToolEntry``，executor 闭包调
 ``call_tool``），执行经 ``registry.execute`` 统一路由，无 ``mcp_*`` 前缀分支。
 
@@ -409,7 +409,7 @@ class MCPConnectionManager:
 
     def _make_mcp_entry(self, adapter: MCPToolAdapter) -> "ToolEntry":
         """构造 MCP 工具的 ToolEntry：executor 闭包捕获 self(manager) + adapter，
-        经 registry.execute 统一路由到 call_tool（对标 DeepTutor MCPToolAdapter.execute）。"""
+        经 registry.execute 统一路由到 call_tool。"""
         from core.agent.registry import ToolEntry
         from core.agent.tool_protocol import ToolResult
 

@@ -8,13 +8,14 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_admin
 from api.courses import invalidate_courses_cache
+from api.kb_indexing import trigger_kb_indexing
 from settings import get_settings
 FAQ_CACHE_THRESHOLD = get_settings().question.faq_cache_threshold
 KB_STORE_DIR = get_settings().paths.kb_store_dir
@@ -514,7 +515,6 @@ async def delete_file(
 @router.post("/kb/{course_id}/index")
 async def index_kb(
     course_id: str,
-    background_tasks: BackgroundTasks,
     force: bool = False,
     resume: bool = False,
     _: dict = Depends(get_current_admin),
@@ -524,61 +524,11 @@ async def index_kb(
 
     - force=true：强制重新索引（即使正在进行中）
     - resume=true：从上次中断位置续传（仅限 error 状态）
+
+    公共逻辑（状态校验 / DB 预置 / ARQ 入队）见 api.kb_indexing.trigger_kb_indexing。
     """
     kb = await _get_kb_or_404(db, course_id)
-
-    if kb.status == "indexing" and not force:
-        raise HTTPException(status_code=409, detail="正在索引中，请等待完成后再试")
-
-    files_result = await db.execute(
-        select(KBFile).where(KBFile.kb_id == kb.id)
-    )
-    files = files_result.scalars().all()
-    if not files:
-        raise HTTPException(status_code=400, detail="知识库中没有文件，请先上传文件")
-
-    file_paths = [f.file_path for f in files if Path(f.file_path).exists()]
-    if not file_paths:
-        raise HTTPException(status_code=400, detail="文件在磁盘上不存在，请重新上传")
-
-    # 断点续传：在 error / paused 状态且有进度记录时生效
-    resume_from = 0
-    if resume and kb.status in ("error", "paused") and kb.chunks_done > 0:
-        resume_from = kb.chunks_done
-        logger.info("断点续传 course_id=%s 从 chunk %d 继续", course_id, resume_from)
-
-    # 提前置 indexing（对标 llama_rag.build_llamaindex_index）：接口返回时 DB 已是
-    # indexing，前端 loadCourses 立即拿到 → hasIndexing 触发轮询 → 刷新页面也不丢
-    # "进行中"状态。worker(_run_indexing) 仍会再写一次，幂等兜底。
-    kb.status = "indexing"
-    kb.progress = 0
-    kb.error_msg = ""
-    kb.progress_msg = "准备中…" if resume_from == 0 else f"续传中（从第 {resume_from} 块）…"
-    if resume_from == 0:
-        kb.chunks_done = 0
-        kb.chunks_total = 0
-        kb.token_estimate = 0
-    kb.updated_at = time.time()
-    await db.flush()
-    await invalidate_courses_cache()
-
-    # 必须走 ARQ：索引只在单一 worker 进程跑，配合进程内索引锁才能串行、不撞
-    # lightrag_store。Redis 故障时不再静默降级到 BackgroundTasks（那会跑到 gunicorn
-    # 多进程，跨进程写同一份文件 → 重复文档刷屏 / 数据损坏 / 卡死）——直接报错并
-    # 让 get_db 回滚 status，前端收到 503 可重试。
-    from core.arq_pool import get_arq_pool
-    arq_pool = await get_arq_pool()
-    if arq_pool is None:
-        raise HTTPException(status_code=503, detail="任务队列（ARQ/Redis）不可用，请稍后重试")
-    await arq_pool.enqueue_job("run_indexing", kb.id, course_id, file_paths, resume_from)
-    logger.info("ARQ 索引任务已入队 course_id=%s files=%d", course_id, len(file_paths))
-
-    return {
-        "message": "索引任务已启动" if resume_from == 0 else f"续传任务已启动（从第 {resume_from} 个文本块）",
-        "course_id": course_id,
-        "file_count": len(file_paths),
-        "resume_from_chunk": resume_from,
-    }
+    return await trigger_kb_indexing(db, kb, course_id, force, resume)
 
 
 @router.post("/kb/{course_id}/index/pause")
@@ -684,7 +634,7 @@ async def list_users(
             "username": u.username,
             "display_name": u.display_name,
             "role": u.role,
-            "is_admin": bool(u.is_admin),
+            "is_admin": (u.role == "admin"),
             "created_at": u.created_at,
         }
         for u in users

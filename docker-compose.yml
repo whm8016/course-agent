@@ -4,7 +4,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-postgres}"
       POSTGRES_DB: course_agent
     ports:
       - "127.0.0.1:5432:5432"
@@ -46,7 +46,7 @@ services:
       # 不再认旧扁平名 DATABASE_URL / REDIS_URL。compose environment 优先级高于
       # env_file(./backend/.env)，这里用 Docker 服务名覆盖 .env 里的 localhost
       # （localhost 是宿主机开发用的，容器内回环连不到 postgres/redis 容器）。
-      DB__URL: postgresql+asyncpg://postgres:postgres@postgres:5432/course_agent
+      DB__URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/course_agent
       DB__REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: "${ENVIRONMENT:-development}"
       BACKEND_WORKERS: "${BACKEND_WORKERS:-4}"
@@ -78,7 +78,7 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      DB__URL: postgresql+asyncpg://postgres:postgres@postgres:5432/course_agent
+      DB__URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/course_agent
       DB__REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: "${ENVIRONMENT:-development}"
       LLM_TIMEOUT_SEC: "${LLM_TIMEOUT_SEC:-120}"

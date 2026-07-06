@@ -1,11 +1,11 @@
-"""QuizPipeline — 3-stage quiz generation（对标 DeepTutor agents/question）。
+"""QuizPipeline — 3-stage quiz generation（agents/question）。
 
 Stages（代码编排，不靠 label）：
   explore → run_agent_loop 多轮（rag/web_search tool_calls）检索素材，产出探索摘要
   plan    → 单次 LLM 出 templates JSON（analysis + N 个，topic 不重复，6 题型合法）
   quiz    → 每题 run_agent_loop 出 QAPair JSON + 基础 schema 校验
 
-对标 DeepTutor 的 explore→plan→quiz 三阶段，去 label：tool_calls loop 驱动 explore，
+的 explore→plan→quiz 三阶段，去 label：tool_calls loop 驱动 explore，
 plan/quiz 用 run_agent_loop 单轮 + prompt 要求 JSON + 解析校验（provider 保证结构化
 是 tool_calls 版取舍；强 repair / Tool Summarizer 留后续优化，避免侵入 run_agent_loop）。
 """

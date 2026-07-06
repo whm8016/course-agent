@@ -17,7 +17,7 @@ from typing import Any
 from core.context import UnifiedContext
 from core.observability import log_flow
 
-# load_tools 是动态 schema（deferred pool 非空时挂载）。对标 DeepTutor LoadToolsTool。
+# load_tools 是动态 schema（deferred pool 非空时挂载）。
 LOAD_TOOLS_SCHEMA = {
     "type": "function",
     "function": {
@@ -76,7 +76,7 @@ def resolve(
     # read_skill（skills_manifest 非空时）
     if context.skills_manifest:
         base.append(_registry.get("read_skill").schema)
-        # write_memory 始终挂载（用户明确说偏好时用）
+    # write_memory 始终挂载（用户明确说偏好时用）
     if context.user_id:
         wm = _registry.get("write_memory")
         if wm:

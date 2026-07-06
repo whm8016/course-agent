@@ -7,7 +7,7 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
-from api.auth import get_current_user
+from api.auth import get_current_user, is_admin_user
 from core.attachment import Attachment, AttachmentType
 from settings import get_settings
 UPLOAD_DIR = get_settings().paths.upload_dir
@@ -72,7 +72,7 @@ def assert_upload_owner(filename: str, user: dict) -> None:
     """
     safe_name = _safe_basename(filename)
     owner = _upload_owner(safe_name)
-    if owner is None or (owner != str(user["id"]) and not user.get("is_admin")):
+    if owner is None or (owner != str(user["id"]) and not is_admin_user(user)):
         raise HTTPException(status_code=403, detail="无权访问此文件")
 
 

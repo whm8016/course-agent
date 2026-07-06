@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { FiMessageSquare, FiSend, FiSquare, FiX } from 'react-icons/fi'
+import { MessageSquare, Send, Square, X, ClipboardList } from 'lucide-react'
 import type { QuizData, QuizQuestion } from '../../types'
 import FormattedMarkdown from '../shared/FormattedMarkdown'
 import { connectQuestionFollowup } from '../../services/questionWs'
@@ -26,7 +26,8 @@ interface FollowupPanelProps {
 function quizOptionsToRecord(options: string[]): Record<string, string> {
   const out: Record<string, string> = {}
   for (const line of options) {
-    const m = /^([A-D])[\.\):]\s*(.*)$/i.exec(line.trim())
+    // 字符类内的 . 和 ) 是字面量，无需转义
+    const m = /^([A-D])[.):]\s*(.*)$/i.exec(line.trim())
     if (m) out[m[1].toUpperCase()] = m[2]
   }
   return out
@@ -144,24 +145,24 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
   }, [])
 
   return (
-    <div className="mt-3 border border-indigo-100 rounded-xl bg-indigo-50/30 overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-indigo-100 bg-indigo-50/50">
-        <span className="text-xs font-medium text-indigo-700">追问</span>
-        <button type="button" onClick={onClose} className="text-slate-400 hover:text-slate-600">
-          <FiX size={13} />
+    <div className="mt-3 border border-line rounded-[var(--radius)] bg-surface-2 overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2 border-b border-line bg-canvas">
+        <span className="text-xs font-medium text-ink-soft">追问</span>
+        <button type="button" onClick={onClose} className="text-muted hover:text-ink transition">
+          <X size={13} strokeWidth={1.5} />
         </button>
       </div>
       <div className="max-h-52 overflow-y-auto px-3 py-2 space-y-2">
         {messages.length === 0 && (
-          <p className="text-[11px] text-slate-400 text-center py-2">有问题？在这里追问吧</p>
+          <p className="text-[11px] text-muted text-center py-2">有问题？在这里追问吧</p>
         )}
         {messages.map((m, i) => (
           <div
             key={i}
-            className={`text-xs rounded-lg px-2.5 py-1.5 ${
+            className={`text-xs rounded-[var(--radius)] px-2.5 py-1.5 ${
               m.role === 'user'
-                ? 'bg-indigo-100 text-indigo-800 ml-6'
-                : 'bg-white border border-slate-200 text-slate-700 mr-6'
+                ? 'bg-surface-2 text-ink ml-6'
+                : 'bg-surface border border-line text-ink-soft mr-6'
             }`}
           >
             <FormattedMarkdown
@@ -172,16 +173,16 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
         ))}
         {loading && (
           <div className="flex gap-1 items-center ml-1 pb-1">
-            <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
-            <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
-            <span className="w-1.5 h-1.5 bg-indigo-400 rounded-full animate-bounce" />
+            <span className="w-1.5 h-1.5 bg-ink-soft rounded-full animate-bounce [animation-delay:-0.3s]" />
+            <span className="w-1.5 h-1.5 bg-ink-soft rounded-full animate-bounce [animation-delay:-0.15s]" />
+            <span className="w-1.5 h-1.5 bg-ink-soft rounded-full animate-bounce" />
           </div>
         )}
         <div ref={bottomRef} />
       </div>
-      <div className="flex items-center gap-2 px-3 py-2 border-t border-indigo-100">
+      <div className="flex items-center gap-2 px-3 py-2 border-t border-line">
         <input
-          className="flex-1 text-xs border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-1 focus:ring-indigo-300 bg-white"
+          className="flex-1 text-xs border border-line rounded-[var(--radius)] px-2.5 py-1.5 bg-surface text-ink placeholder:text-muted focus:outline-none focus:border-ink"
           placeholder="输入追问内容…"
           value={input}
           onChange={(e) => setInput(e.target.value)}
@@ -198,11 +199,11 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
           onClick={loading ? handleStop : () => void handleSend()}
           disabled={!loading && !input.trim()}
           title={loading ? '停止' : '发送'}
-          className={`p-1.5 rounded-lg text-white disabled:opacity-40 disabled:cursor-not-allowed transition ${
-            loading ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'
+          className={`p-1.5 rounded-[var(--radius)] text-white disabled:opacity-40 disabled:cursor-not-allowed transition ${
+            loading ? 'bg-danger-fg hover:opacity-90' : 'bg-accent hover:bg-accent-2'
           }`}
         >
-          {loading ? <FiSquare size={12} /> : <FiSend size={12} />}
+          {loading ? <Square size={12} strokeWidth={1.5} /> : <Send size={12} strokeWidth={1.5} />}
         </button>
       </div>
     </div>
@@ -235,14 +236,14 @@ function QuestionItem({
   const openAnswerSubmitted = !isChoice && submitted && typedAnswer.trim().length > 0
 
   return (
-    <div className="border-b border-slate-100 last:border-0 pb-5 last:pb-0">
+    <div className="border-b border-line last:border-0 pb-5 last:pb-0">
       {/* 题干 */}
       <div className="mb-2.5 flex gap-1.5 items-start">
-        <span className="text-sm font-semibold text-slate-800 shrink-0 pt-0.5">{qIdx + 1}.</span>
+        <span className="text-sm font-semibold text-ink shrink-0 pt-0.5">{qIdx + 1}.</span>
         <div className="min-w-0 flex-1">
           <FormattedMarkdown
             content={q.question}
-            className="markdown-body text-sm text-slate-800 [&_p]:my-1.5 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0"
+            className="markdown-body text-sm text-ink [&_p]:my-1.5 [&_p:first-child]:mt-0 [&_p:last-child]:mb-0"
           />
         </div>
       </div>
@@ -256,17 +257,17 @@ function QuestionItem({
               const isSelected = selected === optLetter
               const isAnswer = q.answer === optLetter
 
-              let cls = 'w-full text-left px-3 py-2 rounded-lg text-sm border transition '
+              let cls = 'w-full text-left px-3 py-2 rounded-[var(--radius)] text-sm border transition '
               if (!submitted) {
                 cls += isSelected
-                  ? 'border-indigo-400 bg-indigo-50 text-indigo-700'
-                  : 'border-slate-200 hover:border-slate-300 text-slate-700'
+                  ? 'border-ink bg-surface-2 text-ink'
+                  : 'border-line hover:border-ink-soft text-ink-soft'
               } else if (isAnswer) {
-                cls += 'border-green-400 bg-green-50 text-green-700'
+                cls += 'border-ok-fg bg-ok-bg text-ok-fg'
               } else if (isSelected && !isCorrect) {
-                cls += 'border-red-400 bg-red-50 text-red-700'
+                cls += 'border-danger-fg bg-danger-bg text-danger-fg'
               } else {
-                cls += 'border-slate-200 text-slate-400'
+                cls += 'border-line text-muted'
               }
 
               return (
@@ -284,18 +285,18 @@ function QuestionItem({
           {submitted && (
             <div className="mt-2 space-y-2">
               <div
-                className={`px-3 py-2 rounded-lg text-xs font-medium ${
-                  isCorrect ? 'bg-green-50 text-green-700' : 'bg-amber-50 text-amber-700'
+                className={`px-3 py-2 rounded-[var(--radius)] text-xs font-medium ${
+                  isCorrect ? 'bg-ok-bg text-ok-fg' : 'bg-warn-bg text-warn-fg'
                 }`}
               >
                 {isCorrect ? '✓ 回答正确' : `✗ 正确答案是 ${q.answer}`}
               </div>
               {q.explanation && (
-                <div className="px-3 py-2 rounded-lg border border-slate-100 bg-slate-50/80">
-                  <p className="text-[11px] font-semibold text-slate-500 mb-1.5">解析</p>
+                <div className="px-3 py-2 rounded-[var(--radius)] border border-line bg-surface-2">
+                  <p className="text-[11px] font-semibold text-muted mb-1.5">解析</p>
                   <FormattedMarkdown
                     content={q.explanation}
-                    className="markdown-body text-xs leading-relaxed text-slate-700"
+                    className="markdown-body text-xs leading-relaxed text-ink-soft"
                   />
                 </div>
               )}
@@ -306,7 +307,7 @@ function QuestionItem({
         /* 简答题 作答区域 */
         <div className="space-y-2">
           <textarea
-            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-indigo-200 disabled:bg-slate-50 disabled:text-slate-400 transition"
+            className="w-full border border-line rounded-[var(--radius)] px-3 py-2 text-sm text-ink placeholder:text-muted bg-surface resize-none focus:outline-none focus:border-ink disabled:bg-surface-2 disabled:text-muted transition"
             rows={3}
             placeholder="在此输入你的答案…"
             value={typedAnswer}
@@ -315,19 +316,19 @@ function QuestionItem({
           />
           {openAnswerSubmitted && (
             <div className="space-y-2">
-              <div className="text-emerald-900 bg-emerald-50 px-3 py-2 rounded-lg">
-                <p className="text-[11px] font-semibold text-emerald-700 mb-1">参考答案</p>
+              <div className="text-ok-fg bg-ok-bg px-3 py-2 rounded-[var(--radius)]">
+                <p className="text-[11px] font-semibold text-ok-fg mb-1">参考答案</p>
                 <FormattedMarkdown
                   content={typeof q.answer === 'string' ? q.answer : String(q.answer)}
                   className="markdown-body text-xs leading-relaxed"
                 />
               </div>
               {q.explanation && (
-                <div className="bg-slate-50 rounded-lg px-3 py-2 border border-slate-100">
-                  <p className="text-[11px] font-semibold text-slate-500 mb-1">解析</p>
+                <div className="bg-surface-2 rounded-[var(--radius)] px-3 py-2 border border-line">
+                  <p className="text-[11px] font-semibold text-muted mb-1">解析</p>
                   <FormattedMarkdown
                     content={q.explanation}
-                    className="markdown-body text-xs leading-relaxed text-slate-700"
+                    className="markdown-body text-xs leading-relaxed text-ink-soft"
                   />
                 </div>
               )}
@@ -342,9 +343,9 @@ function QuestionItem({
           <button
             type="button"
             onClick={() => setShowFollowup(true)}
-            className="inline-flex items-center gap-1 text-[11px] text-slate-400 hover:text-indigo-500 transition"
+            className="inline-flex items-center gap-1 text-[11px] text-muted hover:text-ink transition"
           >
-            <FiMessageSquare size={12} />
+            <MessageSquare size={12} strokeWidth={1.5} />
             追问
           </button>
         ) : (
@@ -362,7 +363,7 @@ function QuestionItem({
 }
 
 // ---------- 测验卡片 ----------
-export default function QuizCard({ quiz, courseId: _courseId }: Props) {
+export default function QuizCard({ quiz }: Props) {
   const [selectedAnswers, setSelectedAnswers] = useState<Record<number, string>>({})
   const [typedAnswers, setTypedAnswers] = useState<Record<number, string>>({})
   const [submitted, setSubmitted] = useState(false)
@@ -377,12 +378,13 @@ export default function QuizCard({ quiz, courseId: _courseId }: Props) {
   )
 
   return (
-    <div className="mt-3 border border-indigo-200 rounded-xl bg-indigo-50/50 overflow-hidden">
-      <div className="px-4 py-2.5 bg-indigo-100/60 border-b border-indigo-200">
-        <h3 className="text-sm font-semibold text-indigo-800 flex items-center gap-1.5">
-          📝 测验题目
+    <div className="mt-3 border border-line rounded-[var(--radius)] bg-surface-2 overflow-hidden">
+      <div className="px-4 py-2.5 bg-canvas border-b border-line">
+        <h3 className="text-sm font-semibold text-ink flex items-center gap-1.5">
+          <ClipboardList size={15} strokeWidth={1.5} />
+          测验题目
           {submitted && choiceQuestions.length > 0 && (
-            <span className="text-xs font-normal text-indigo-600 ml-2">
+            <span className="text-xs font-normal text-ink-soft ml-2">
               答对了 {correctCount}/{choiceQuestions.length}
             </span>
           )}
@@ -415,7 +417,7 @@ export default function QuizCard({ quiz, courseId: _courseId }: Props) {
           <button
             onClick={() => setSubmitted(true)}
             disabled={choiceQuestions.length > 0 && !allChoiceAnswered}
-            className="w-full py-2 rounded-lg bg-indigo-600 text-white text-sm font-medium hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+            className="w-full py-2 rounded-[var(--radius)] bg-accent hover:bg-accent-2 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition"
           >
             提交答案
           </button>

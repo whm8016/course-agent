@@ -25,12 +25,16 @@ htmlcov/
 **/.env
 !.env.example
 !**/.env.example
+# phase1 重构残留的备份文件（.env.bak 含真实 key，绝不能提交；**/.env 只匹配精确 .env 不含 .bak）
+**/.env.bak*
+**/.env.example.bak*
 
 # --- This project: runtime data ---
 backend/uploads/
 backend/vectorstore/
 backend/data/
 backend/lightrag_store/
+backend/kb_store/
 *.db
 *.sqlite3
 
@@ -40,6 +44,10 @@ backend/data/model_catalog.json
 # --- Logs & debug ---
 *.log
 logs/
+# 调试脚本 / 对话 dump（临时产物，不提交）
+_test_*.py
+conversation-*.txt
+*-this-session-is-being-continued-*.txt
 
 # --- Frontend (monorepo root) ---
 frontend/node_modules/

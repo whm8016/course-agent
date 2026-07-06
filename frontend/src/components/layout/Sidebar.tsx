@@ -1,8 +1,10 @@
 import { useState } from 'react'
+import { GraduationCap, Briefcase, Settings, X, Plus } from 'lucide-react'
 import type { Course, Session, User } from '../../types'
 import CourseSelector from './CourseSelector'
 import SessionList from './SessionList'
 import { authHeaders } from '../../services/auth'
+import { Avatar, Badge, Button } from '../ui'
 
 interface Props {
   courses: Course[]
@@ -15,19 +17,11 @@ interface Props {
   onDeleteSession: (id: string) => void
   user: User
   onLogout: () => void
-  onAdmin?: () => void
-  onTeacher?: () => void
   onCoursesRefresh?: () => void
-  onDashboard?: () => void
-  onGraph?: () => void
-  onSkillKnowledge?: () => void
-  onMcpSettings?: () => void
-  onLlmProvider?: () => void
-  onSearchAdmin?: () => void
-  onUserSearchSettings?: () => void
-  onNotebook?: () => void
-  onBots?: () => void
-  onNotifications?: () => void
+  /** 打开「工作台」聚合页（仪表盘/图谱/知识包/笔记本/教师/管理）*/
+  onWorkbench: () => void
+  /** 打开「设置」聚合页（模型/MCP/搜索/Bot/通知）*/
+  onSettings: () => void
   notifUnread?: number
   onCloseMobile?: () => void
 }
@@ -43,19 +37,9 @@ export default function Sidebar({
   onDeleteSession,
   user,
   onLogout,
-  onAdmin,
-  onTeacher,
   onCoursesRefresh,
-  onDashboard,
-  onGraph,
-  onSkillKnowledge,
-  onMcpSettings,
-  onLlmProvider,
-  onSearchAdmin,
-  onUserSearchSettings,
-  onNotebook,
-  onBots,
-  onNotifications,
+  onWorkbench,
+  onSettings,
   notifUnread,
   onCloseMobile,
 }: Props) {
@@ -101,24 +85,25 @@ export default function Sidebar({
   }
 
   return (
-    <aside className="w-64 h-full bg-white border-r border-slate-200 flex flex-col">
-      <div className="px-4 py-5 border-b border-slate-100">
+    <aside className="w-64 h-full bg-surface border-r border-line flex flex-col overflow-hidden">
+      <div className="px-4 py-5 border-b border-line">
         <div className="flex items-center justify-between">
-          <h1 className="text-base font-bold text-slate-800 flex items-center gap-2">
-            <span className="text-xl">📚</span>
+          <h1 className="font-serif text-base text-ink flex items-center gap-2">
+            <GraduationCap size={20} strokeWidth={1.5} className="text-ink" />
             课程学习 Agent
           </h1>
           <button
             onClick={onCloseMobile}
-            className="md:hidden p-1 text-slate-400 hover:text-slate-600 transition"
+            className="md:hidden p-1 -mr-1 rounded-[var(--radius-sm)] text-muted hover:text-ink hover:bg-surface-2 transition"
+            aria-label="关闭侧边栏"
           >
-            ✕
+            <X size={16} strokeWidth={1.5} />
           </button>
         </div>
-        <p className="text-xs text-slate-400 mt-1">LangGraph 多 Agent 编排</p>
+        <p className="text-xs text-muted mt-1">多 Agent 编排 · RAG 检索</p>
       </div>
 
-      <div className="p-3 border-b border-slate-100">
+      <div className="max-h-[35vh] overflow-y-auto p-3 border-b border-line">
         <CourseSelector
           courses={[
             { id: 'general', name: '自由问答', icon: '💬', description: '通用学习问答（未选课）', source: 'builtin' },
@@ -131,47 +116,48 @@ export default function Sidebar({
 
       {/* 学生用课程码加入 */}
       {!isTeacher && (
-        <div className="px-3 py-2 border-b border-slate-100">
+        <div className="px-3 py-2 border-b border-line">
           {showJoin ? (
             <form onSubmit={handleJoin} className="space-y-1.5">
               <input
                 value={joinCode}
-                onChange={e => setJoinCode(e.target.value.toUpperCase())}
-                className="w-full rounded border border-slate-200 px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:border-indigo-400 transition"
+                onChange={(e) => setJoinCode(e.target.value.toUpperCase())}
+                className="w-full bg-surface border border-line rounded-[var(--radius-sm)] px-2.5 py-1.5 text-xs font-mono text-ink placeholder:text-muted focus:outline-none focus:border-ink transition"
                 placeholder="课程码 XXXXXXXX"
                 maxLength={16}
                 autoFocus
               />
               <div className="flex gap-1.5">
-                <button
-                  type="submit"
-                  disabled={joining}
-                  className="flex-1 text-xs py-1.5 bg-indigo-600 text-white rounded hover:bg-indigo-700 disabled:opacity-50 transition"
-                >
+                <Button type="submit" variant="primary" size="sm" loading={joining} className="flex-1">
                   {joining ? '加入中...' : '加入'}
-                </button>
-                <button
+                </Button>
+                <Button
                   type="button"
-                  onClick={() => { setShowJoin(false); setJoinMsg('') }}
-                  className="text-xs px-2 py-1.5 text-slate-400 hover:text-slate-600 transition"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setShowJoin(false)
+                    setJoinMsg('')
+                  }}
                 >
                   取消
-                </button>
+                </Button>
               </div>
-              {joinMsg && <p className="text-xs text-indigo-600">{joinMsg}</p>}
+              {joinMsg && <p className="text-xs text-ink-soft">{joinMsg}</p>}
             </form>
           ) : (
             <button
               onClick={() => setShowJoin(true)}
-              className="w-full text-xs text-slate-500 hover:text-indigo-600 py-1.5 rounded hover:bg-indigo-50 transition text-left px-1"
+              className="w-full text-xs text-ink-soft hover:text-ink py-1.5 rounded-[var(--radius-sm)] hover:bg-surface-2 transition text-left px-1 flex items-center gap-1"
             >
-              + 用课程码加入课程
+              <Plus size={12} strokeWidth={1.5} />
+              用课程码加入课程
             </button>
           )}
         </div>
       )}
 
-      <div className="flex-1 overflow-y-auto p-3">
+      <div className="flex-1 min-h-0 overflow-y-auto p-3">
         <SessionList
           sessions={sessions}
           activeSessionId={activeSessionId}
@@ -181,124 +167,46 @@ export default function Sidebar({
         />
       </div>
 
-      <div className="p-4 border-t border-slate-100">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-sm text-slate-600 font-medium truncate" title={user.display_name || user.username}>
-            {user.display_name || user.username}
-            {role === 'admin' && <span className="ml-1 text-xs text-purple-500">管理员</span>}
-            {role === 'teacher' && <span className="ml-1 text-xs text-green-600">教师</span>}
-          </span>
+      <div className="p-4 border-t border-line">
+        <div className="flex items-center gap-2.5 mb-3">
+          <Avatar name={user.display_name || user.username} size={32} />
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span
+                className="text-sm text-ink font-medium truncate"
+                title={user.display_name || user.username}
+              >
+                {user.display_name || user.username}
+              </span>
+              {role === 'admin' && <Badge color="neutral">管理员</Badge>}
+              {role === 'teacher' && <Badge color="info">教师</Badge>}
+            </div>
+          </div>
           <button
             onClick={onLogout}
-            className="text-xs text-slate-400 hover:text-red-500 transition"
+            className="text-xs text-muted hover:text-danger-fg transition shrink-0"
           >
             退出
           </button>
         </div>
-        {(role === 'admin' || role === 'teacher') && onTeacher && (
-          <button
-            onClick={onTeacher}
-            className="w-full text-xs text-center text-green-700 hover:text-green-900 py-1 rounded hover:bg-green-50 transition mb-1"
+
+        {/* 双聚合入口：工作台 / 设置。其余十项功能全部收进这两个 overlay。 */}
+        <div className="grid grid-cols-2 gap-1.5">
+          <Button variant="ghost" size="sm" icon={Briefcase} onClick={onWorkbench} className="justify-center">
+            工作台
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={Settings}
+            onClick={onSettings}
+            className="relative justify-center"
           >
-            教师工作台
-          </button>
-        )}
-        {role === 'admin' && onAdmin && (
-          <button
-            onClick={onAdmin}
-            className="w-full text-xs text-center text-indigo-600 hover:text-indigo-800 py-1 rounded hover:bg-indigo-50 transition mb-1"
-          >
-            管理后台
-          </button>
-        )}
-        {onNotifications && (
-          <button
-            onClick={onNotifications}
-            className="w-full text-xs text-center text-rose-600 hover:text-rose-800 py-1 rounded hover:bg-rose-50 transition mb-1"
-          >
-            🔔 通知
+            设置
             {(notifUnread ?? 0) > 0 && (
-              <span className="ml-1 inline-flex items-center justify-center min-w-[16px] h-4 px-1 text-[10px] bg-red-500 text-white rounded-full align-middle">
-                {notifUnread! > 99 ? '99+' : notifUnread}
-              </span>
+              <span className="absolute top-1 right-1 w-2 h-2 rounded-full bg-danger-fg ring-2 ring-surface" />
             )}
-          </button>
-        )}
-        {onDashboard && (
-          <button
-            onClick={onDashboard}
-            className="w-full text-xs text-center text-teal-600 hover:text-teal-800 py-1 rounded hover:bg-teal-50 transition mb-1"
-          >
-            {isTeacher ? '学生学情统计' : '学习仪表盘'}
-          </button>
-        )}
-        {onGraph && (
-          <button
-            onClick={onGraph}
-            className="w-full text-xs text-center text-blue-600 hover:text-blue-800 py-1 rounded hover:bg-blue-50 transition mb-1"
-          >
-            知识图谱
-          </button>
-        )}
-        {onSkillKnowledge && (
-          <button
-            onClick={onSkillKnowledge}
-            className="w-full text-xs text-center text-purple-600 hover:text-purple-800 py-1 rounded hover:bg-purple-50 transition mb-1"
-          >
-            技能知识包
-          </button>
-        )}
-        {onMcpSettings && (
-          <button
-            onClick={onMcpSettings}
-            className="w-full text-xs text-center text-cyan-600 hover:text-cyan-800 py-1 rounded hover:bg-cyan-50 transition mb-1"
-          >
-            MCP 服务器配置
-          </button>
-        )}
-        {onLlmProvider && (
-          <button
-            onClick={onLlmProvider}
-            className="w-full text-xs text-center text-fuchsia-600 hover:text-fuchsia-800 py-1 rounded hover:bg-fuchsia-50 transition mb-1"
-          >
-            🤖 {role === 'admin' ? '模型供应商' : '我的模型配置'}
-          </button>
-        )}
-        {role === 'admin' && onSearchAdmin && (
-          <button
-            onClick={onSearchAdmin}
-            className="w-full text-xs text-center text-fuchsia-600 hover:text-fuchsia-800 py-1 rounded hover:bg-fuchsia-50 transition mb-1"
-          >
-            🔍 搜索引擎（默认）
-          </button>
-        )}
-        {onUserSearchSettings && (
-          <button
-            onClick={onUserSearchSettings}
-            className="w-full text-xs text-center text-cyan-600 hover:text-cyan-800 py-1 rounded hover:bg-cyan-50 transition mb-1"
-          >
-            🔍 我的搜索设置
-          </button>
-        )}
-        {onNotebook && (
-          <button
-            onClick={onNotebook}
-            className="w-full text-xs text-center text-amber-600 hover:text-amber-800 py-1 rounded hover:bg-amber-50 transition mb-1"
-          >
-            题目笔记本
-          </button>
-        )}
-        {onBots && (
-          <button
-            onClick={onBots}
-            className="w-full text-xs text-center text-orange-600 hover:text-orange-800 py-1 rounded hover:bg-orange-50 transition mb-1"
-          >
-            Bot 管理
-          </button>
-        )}
-        <div className="text-xs text-slate-400 space-y-0.5">
-          <p className="text-center font-medium">v2.0 · Agent Architecture</p>
-          <p className="text-center">LangGraph + ChromaDB + Qwen</p>
+          </Button>
         </div>
       </div>
     </aside>

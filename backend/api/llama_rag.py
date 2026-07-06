@@ -103,7 +103,7 @@ async def _llama_final_fallback(kb_id: str, course_id: str) -> None:
 
 
 async def _run_llamaindex_build(kb_id: str, course_id: str, file_paths: list[str]) -> None:
-    """后台任务：与 DeepTutor `run_initialization_task` 类似，HTTP 先已把状态置为 indexing，这里慢慢 embed + 落盘。"""
+    """后台任务：与 `run_initialization_task` 类似，HTTP 先已把状态置为 indexing，这里慢慢 embed + 落盘。"""
     main_loop: asyncio.AbstractEventLoop | None = None
     try:
         main_loop = asyncio.get_running_loop()
@@ -225,7 +225,7 @@ async def build_llamaindex_index(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    接受请求后立即返回；真正建索引在 FastAPI BackgroundTasks 中执行（同 DeepTutor 思路）。
+    接受请求后立即返回；真正建索引在 FastAPI BackgroundTasks 中执行（同 思路）。
     落盘：{LLAMA_INDEX_KB_ROOT}/{course_id}/llamaindex_storage/
     """
     kb = await _get_kb_or_404(db, course_id)
@@ -263,7 +263,7 @@ async def build_llamaindex_index(
 
     return {
         "accepted": True,
-        "message": "LlamaIndex 索引任务已在后台启动（与 DeepTutor 后台初始化类似）",
+        "message": "LlamaIndex 索引任务已在后台启动（与 后台初始化类似）",
         "course_id": course_id,
         "file_count": len(file_paths),
         "storage_dir": str(Path(LLAMA_INDEX_KB_ROOT) / course_id / "llamaindex_storage"),

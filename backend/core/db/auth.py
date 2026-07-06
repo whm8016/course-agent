@@ -91,7 +91,7 @@ async def create_user(
         "username": user.username,
         "display_name": user.display_name,
         "role": user.role,
-        "is_admin": user.is_admin,
+        "is_admin": (user.role == "admin"),
     }
 
 
@@ -107,7 +107,7 @@ async def authenticate_user(db: AsyncSession, username: str, password: str) -> d
         "username": user.username,
         "display_name": user.display_name,
         "role": user.role,
-        "is_admin": bool(user.is_admin),
+        "is_admin": (user.role == "admin"),
         "summary_memory": user.summary_memory or "",
         "profile_memory": user.profile_memory or "",
     }
@@ -133,7 +133,7 @@ async def get_user_by_id(db: AsyncSession, user_id: str) -> dict | None:
         "username": row.username,
         "display_name": row.display_name,
         "role": row.role,
-        "is_admin": bool(row.is_admin),
+        "is_admin": (row.role == "admin"),
         "summary_memory": row.summary_memory or "",
         "profile_memory": row.profile_memory or "",
     }

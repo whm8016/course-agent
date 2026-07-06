@@ -1,10 +1,10 @@
-"""附件模型 —— 多模态对话的统一附件抽象（对标 DeepTutor 三层解耦第一层）。
+"""附件模型 —— 多模态对话的统一附件抽象。
 
 纯数据载体（Pydantic v2），无业务行为。type 是唯一分类开关：
 - IMAGE 本期实现（视觉看图）
 - FILE / PDF 预留给 P2 的文件解析（DOCX/TXT/PDF，属于深度解析，本期不做）
 
-设计要点：url 与 base64 双存；持久化前 base64 必须清空（DeepTutor 铁律）。
+设计要点：url 与 base64 双存；持久化前 base64 必须清空。
 """
 from __future__ import annotations
 

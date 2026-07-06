@@ -72,7 +72,7 @@ async def test_run_agent_loop_threads_binding_to_create():
 
     captured: dict = {}
 
-    async def _fake_create(llm_client, create_kwargs, binding, model):
+    async def _fake_create(llm_client, create_kwargs, binding, model, circuit_breaker=None):
         captured["binding"] = binding
         mock = MagicMock()
         mock.__aiter__ = lambda self: _async_iter([_make_chunk("答案")])
@@ -96,7 +96,7 @@ async def test_run_agent_loop_default_binding_back_compat():
     ctx = UnifiedContext(user_message="hi")
     bus = StreamBus()
 
-    async def _fake_create(llm_client, create_kwargs, binding, model):
+    async def _fake_create(llm_client, create_kwargs, binding, model, circuit_breaker=None):
         mock = MagicMock()
         mock.__aiter__ = lambda self: _async_iter([_make_chunk("ok")])
         return mock

@@ -6,6 +6,7 @@ import {
   type BotInstance, type BotReminder, type BotReminderSchedule, type SocialBinding,
 } from '../../services/api'
 import { Modal, Badge, Card, EmptyState, StatusDot } from '../ui'
+import { Bot } from 'lucide-react'
 import FormattedMarkdown from '../shared/FormattedMarkdown'
 
 interface Props {
@@ -103,45 +104,45 @@ export default function BotPage({ onBack }: Props) {
   }
 
   return (
-    <div className="h-full flex flex-col bg-slate-50">
-      <header className="px-6 py-4 bg-white border-b border-slate-200 flex items-center justify-between">
+    <div className="h-full flex flex-col bg-canvas">
+      <header className="px-6 py-4 bg-surface border-b border-line flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <button onClick={onBack} className="text-slate-400 hover:text-slate-600 text-sm">
+          <button onClick={onBack} className="text-muted hover:text-ink-soft text-sm">
             ← 返回
           </button>
-          <h1 className="text-lg font-semibold text-slate-800">🤖 我的 Bot</h1>
+          <h1 className="text-lg font-semibold text-ink">我的 Bot</h1>
           <Badge color="indigo">{bots.length}</Badge>
         </div>
         <div className="flex gap-2">
           <button
             onClick={() => setShowBinding(true)}
-            className="px-3 py-1.5 text-sm bg-white border border-slate-200 text-slate-600 rounded-lg hover:border-indigo-300 hover:text-indigo-600 transition"
+            className="px-3 py-1.5 text-sm bg-surface border border-line text-ink-soft rounded-[var(--radius)] hover:border-ink-soft hover:text-ink transition"
           >
-            🔗 绑定 IM
+            绑定 IM
           </button>
           <button
             onClick={() => setCreating(true)}
-            className="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition"
+            className="px-3 py-1.5 text-sm bg-accent text-white rounded-[var(--radius)] hover:bg-accent-2 transition"
           >
             + 新建 Bot
           </button>
         </div>
       </header>
       <div className="flex-1 overflow-y-auto p-6">
-        <div className="mb-4 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-800 space-y-1">
-          <p className="font-medium">💡 Bot = 你的专属对话机器人（共享后端 agent 引擎：安全护栏/课程提示/记忆）</p>
-          <p>• 每人独立管理自己的 Bot，互不可见。点「💬 对话」即可在网页内与它交流。</p>
+        <div className="mb-4 px-4 py-3 bg-warn-bg border border-warn-bg rounded-[var(--radius)] text-xs text-warn-fg space-y-1">
+          <p className="font-medium">Bot = 你的专属对话机器人（共享后端 agent 引擎：安全护栏/课程提示/记忆）</p>
+          <p>• 每人独立管理自己的 Bot，互不可见。点「对话」即可在网页内与它交流。</p>
           <p>• <b>QQ / 飞书</b>：新建 Bot 时填入你自己机器人的 App ID / Secret（每个 Bot 独立持有，存于本机配置，不再用全局 .env）。</p>
           <p>• <b>Web</b>：网页内对话，无需额外凭证。</p>
-          <p>• <b>会话隔离</b>：网页「💬 对话」与 QQ / 飞书各频道会话<b>互相独立</b>（QQ 群聊历史不在网页显示，反之亦然）——网页窗口用于测试 bot / 独立 Web 对话，每个频道、每个群各自独立会话是标准设计。</p>
+          <p>• <b>会话隔离</b>：网页「对话」与 QQ / 飞书各频道会话<b>互相独立</b>（QQ 群聊历史不在网页显示，反之亦然）——网页窗口用于测试 bot / 独立 Web 对话，每个频道、每个群各自独立会话是标准设计。</p>
         </div>
         {error && (
-          <div className="mb-4 px-4 py-2 bg-red-50 text-red-600 text-sm rounded-lg">{error}</div>
+          <div className="mb-4 px-4 py-2 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)]">{error}</div>
         )}
         {loading ? (
-          <div className="text-center text-slate-400 py-16">加载中...</div>
+          <div className="text-center text-muted py-16">加载中...</div>
         ) : bots.length === 0 ? (
-          <EmptyState icon="🤖" title="还没有 Bot" hint="点击右上角新建" />
+          <EmptyState icon={Bot} title="还没有 Bot" hint="点击右上角新建" />
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {bots.map((b) => {
@@ -150,15 +151,15 @@ export default function BotPage({ onBack }: Props) {
                 <Card key={b.bot_id} className="p-4">
                   <div className="flex items-center gap-2 mb-2">
                     <StatusDot status={b.running ? 'connected' : 'disabled'} />
-                    <h3 className="font-semibold text-slate-800 truncate">{b.name}</h3>
+                    <h3 className="font-semibold text-ink truncate">{b.name}</h3>
                     {b.running ? (
                       <Badge color="green">运行中</Badge>
                     ) : (
                       <Badge color="slate">已停止</Badge>
                     )}
                   </div>
-                  <p className="text-xs text-slate-400 font-mono mb-1 truncate">{b.bot_id}</p>
-                  <p className="text-xs text-slate-500 line-clamp-2 mb-2">
+                  <p className="text-xs text-muted font-mono mb-1 truncate">{b.bot_id}</p>
+                  <p className="text-xs text-ink-soft line-clamp-2 mb-2">
                     {b.description || '（无描述）'}
                   </p>
                   <div className="flex flex-wrap gap-1 mb-3">
@@ -169,7 +170,7 @@ export default function BotPage({ onBack }: Props) {
                         </Badge>
                       ))
                     ) : (
-                      <span className="text-xs text-slate-400">无频道</span>
+                      <span className="text-xs text-muted">无频道</span>
                     )}
                     {b.course_id && <Badge color="indigo">课程绑定</Badge>}
                   </div>
@@ -177,21 +178,21 @@ export default function BotPage({ onBack }: Props) {
                     <div className="flex gap-2">
                       <button
                         onClick={() => setChattingBot(b)}
-                        className="flex-1 text-xs py-1.5 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 rounded transition"
+                        className="flex-1 text-xs py-1.5 bg-surface-2 text-ink hover:bg-surface-2 rounded transition"
                       >
-                        💬 对话
+                        对话
                       </button>
                       <button
                         onClick={() => setReminderBot(b)}
-                        className="flex-1 text-xs py-1.5 bg-amber-50 text-amber-700 hover:bg-amber-100 rounded transition"
+                        className="flex-1 text-xs py-1.5 bg-warn-bg text-warn-fg hover:bg-warn-bg rounded transition"
                       >
-                        ⏰ 提醒
+                        提醒
                       </button>
                       <button
                         onClick={() => setEditingBot(b)}
-                        className="flex-1 text-xs py-1.5 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded transition"
+                        className="flex-1 text-xs py-1.5 bg-surface-2 text-ink-soft hover:bg-surface-2 rounded transition"
                       >
-                        ✏️ 编辑
+                        ✏编辑
                       </button>
                     </div>
                     <div className="flex gap-2">
@@ -199,15 +200,15 @@ export default function BotPage({ onBack }: Props) {
                         onClick={() => handleToggle(b)}
                         className={`flex-1 text-xs py-1.5 rounded transition ${
                           b.running
-                            ? 'bg-red-50 text-red-600 hover:bg-red-100'
-                            : 'bg-green-50 text-green-700 hover:bg-green-100'
+                            ? 'bg-danger-bg text-danger-fg hover:bg-danger-bg'
+                            : 'bg-ok-bg text-ok-fg hover:bg-ok-bg'
                         }`}
                       >
                         {b.running ? '停止' : '启动'}
                       </button>
                       <button
                         onClick={() => handleDelete(b)}
-                        className="text-xs px-3 py-1.5 bg-slate-50 text-slate-500 hover:bg-red-50 hover:text-red-600 rounded transition"
+                        className="text-xs px-3 py-1.5 bg-canvas text-ink-soft hover:bg-danger-bg hover:text-danger-fg rounded transition"
                       >
                         删除
                       </button>
@@ -280,7 +281,7 @@ function BotChat({ bot, onClose }: { bot: BotInstance; onClose: () => void }) {
     } catch (e) {
       setMessages((prev) => [
         ...prev,
-        { role: 'assistant', content: `⚠️ ${e instanceof Error ? e.message : '发送失败'}` },
+        { role: 'assistant', content: `${e instanceof Error ? e.message : '发送失败'}` },
       ])
     } finally {
       setSending(false)
@@ -292,11 +293,11 @@ function BotChat({ bot, onClose }: { bot: BotInstance; onClose: () => void }) {
       open
       onClose={onClose}
       overlayCloses={false}
-      title={`💬 ${bot.name}`}
+      title={`${bot.name}`}
       footer={
         <button
           onClick={onClose}
-          className="px-3 py-1.5 text-sm text-slate-500 hover:text-slate-700"
+          className="px-3 py-1.5 text-sm text-ink-soft hover:text-ink"
         >
           关闭
         </button>
@@ -305,8 +306,8 @@ function BotChat({ bot, onClose }: { bot: BotInstance; onClose: () => void }) {
       <div className="flex flex-col" style={{ height: '60vh' }}>
         <div ref={scrollRef} className="flex-1 overflow-y-auto space-y-3 pr-1">
           {messages.length === 0 ? (
-            <p className="text-center text-slate-400 text-sm py-12">
-              和「{bot.name}」开始对话吧 ✨
+            <p className="text-center text-muted text-sm py-12">
+              和「{bot.name}」开始对话吧 
             </p>
           ) : (
             messages.map((m, i) => (
@@ -315,10 +316,10 @@ function BotChat({ bot, onClose }: { bot: BotInstance; onClose: () => void }) {
                 className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
               >
                 <div
-                  className={`max-w-[85%] px-3 py-2 rounded-2xl text-sm ${
+                  className={`max-w-[85%] px-3 py-2 rounded-[var(--radius-lg)] text-sm ${
                     m.role === 'user'
-                      ? 'bg-indigo-600 text-white'
-                      : 'bg-slate-100 text-slate-800'
+                      ? 'bg-accent text-white'
+                      : 'bg-surface-2 text-ink'
                   }`}
                 >
                   {m.role === 'assistant' ? (
@@ -331,7 +332,7 @@ function BotChat({ bot, onClose }: { bot: BotInstance; onClose: () => void }) {
             ))
           )}
           {sending && (
-            <div className="text-center text-xs text-slate-400 animate-pulse">思考中...</div>
+            <div className="text-center text-xs text-muted animate-pulse">思考中...</div>
           )}
         </div>
         <div className="mt-3 flex gap-2">
@@ -345,13 +346,13 @@ function BotChat({ bot, onClose }: { bot: BotInstance; onClose: () => void }) {
               }
             }}
             disabled={sending}
-            className="flex-1 rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 disabled:bg-slate-50"
+            className="flex-1 rounded-[var(--radius)] border border-line px-3 py-2 text-sm focus:outline-none focus:border-ink disabled:bg-canvas"
             placeholder="输入消息，Enter 发送"
           />
           <button
             onClick={send}
             disabled={sending || !input.trim()}
-            className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition"
+            className="px-4 py-2 text-sm bg-accent text-white rounded-[var(--radius)] hover:bg-accent-2 disabled:opacity-50 transition"
           >
             发送
           </button>
@@ -452,26 +453,26 @@ function BotReminderPanel({ bot, onClose }: { bot: BotInstance; onClose: () => v
       open
       onClose={onClose}
       overlayCloses={false}
-      title={`⏰ ${bot.name} 的提醒`}
+      title={`${bot.name} 的提醒`}
       footer={
         <button
           onClick={onClose}
-          className="px-3 py-1.5 text-sm text-slate-500 hover:text-slate-700"
+          className="px-3 py-1.5 text-sm text-ink-soft hover:text-ink"
         >
           关闭
         </button>
       }
     >
       <div className="space-y-3">
-        {error && <div className="px-3 py-2 bg-red-50 text-red-600 text-xs rounded">{error}</div>}
-        <div className="p-3 bg-slate-50 rounded-lg space-y-2">
+        {error && <div className="px-3 py-2 bg-danger-bg text-danger-fg text-xs rounded">{error}</div>}
+        <div className="p-3 bg-canvas rounded-[var(--radius)] space-y-2">
           <div className="flex gap-1.5 text-xs">
             {(['web', 'qq', 'feishu'] as const).map((ch) => (
               <button
                 key={ch}
                 onClick={() => setChannel(ch)}
                 className={`px-2 py-1 rounded transition ${
-                  channel === ch ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-600'
+                  channel === ch ? 'bg-accent text-white' : 'bg-surface border border-line text-ink-soft'
                 }`}
               >
                 {ch === 'web' ? '网页' : ch === 'qq' ? 'QQ' : '飞书'}
@@ -482,7 +483,7 @@ function BotReminderPanel({ bot, onClose }: { bot: BotInstance; onClose: () => v
             <input
               value={chatId}
               onChange={(e) => setChatId(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs font-mono focus:outline-none focus:border-indigo-400"
+              className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-xs font-mono focus:outline-none focus:border-ink"
               placeholder={channel === 'qq' ? 'QQ 群 openid / 用户 openid' : '飞书 chat_id / open_id'}
             />
           )}
@@ -490,7 +491,7 @@ function BotReminderPanel({ bot, onClose }: { bot: BotInstance; onClose: () => v
             value={message}
             onChange={(e) => setMessage(e.target.value)}
             rows={2}
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+            className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm focus:outline-none focus:border-ink"
             placeholder="提醒内容，如：该复习电路第二章了"
           />
           <div className="flex gap-1.5 text-xs">
@@ -499,7 +500,7 @@ function BotReminderPanel({ bot, onClose }: { bot: BotInstance; onClose: () => v
                 key={k}
                 onClick={() => setKind(k)}
                 className={`px-2 py-1 rounded transition ${
-                  kind === k ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-600'
+                  kind === k ? 'bg-accent text-white' : 'bg-surface border border-line text-ink-soft'
                 }`}
               >
                 {k === 'repeat' ? '周期重复' : k === 'once' ? '一次性' : '定时 Cron'}
@@ -511,10 +512,10 @@ function BotReminderPanel({ bot, onClose }: { bot: BotInstance; onClose: () => v
               <input
                 value={delayMin}
                 onChange={(e) => setDelayMin(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm focus:outline-none focus:border-ink"
                 placeholder="输入分钟数，如 5 表示 5 分钟后提醒"
               />
-              <p className="text-[11px] text-slate-400">⏱ 多少分钟后触发一次提醒</p>
+              <p className="text-[11px] text-muted">⏱ 多少分钟后触发一次提醒</p>
             </div>
           )}
           {kind === 'repeat' && (
@@ -522,10 +523,10 @@ function BotReminderPanel({ bot, onClose }: { bot: BotInstance; onClose: () => v
               <input
                 value={everyMin}
                 onChange={(e) => setEveryMin(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm focus:outline-none focus:border-ink"
                 placeholder="输入分钟数，如 30 表示每 30 分钟提醒一次"
               />
-              <p className="text-[11px] text-slate-400">🔄 每隔多少分钟重复提醒</p>
+              <p className="text-[11px] text-muted">每隔多少分钟重复提醒</p>
             </div>
           )}
           {kind === 'cron' && (
@@ -533,13 +534,13 @@ function BotReminderPanel({ bot, onClose }: { bot: BotInstance; onClose: () => v
               <input
                 value={cronExpr}
                 onChange={(e) => setCronExpr(e.target.value)}
-                className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-400"
+                className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm font-mono focus:outline-none focus:border-ink"
                 placeholder="分 时 日 月 周"
               />
-              <p className="text-[11px] text-slate-400">
-                📅 Cron 表达式，如 <code className="bg-slate-100 px-1 rounded">0 9 * * *</code> = 每天上午 9:00
+              <p className="text-[11px] text-muted">
+                Cron 表达式，如 <code className="bg-surface-2 px-1 rounded">0 9 * * *</code> = 每天上午 9:00
               </p>
-              <div className="text-[10px] text-slate-400 bg-slate-50 rounded p-2 space-y-0.5">
+              <div className="text-[10px] text-muted bg-canvas rounded p-2 space-y-0.5">
                 <p>示例：</p>
                 <p>• <code>0 9 * * *</code> → 每天 9:00</p>
                 <p>• <code>30 14 * * 1-5</code> → 周一到周五 14:30</p>
@@ -550,26 +551,26 @@ function BotReminderPanel({ bot, onClose }: { bot: BotInstance; onClose: () => v
           <button
             onClick={handleCreate}
             disabled={saving}
-            className="w-full py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition"
+            className="w-full py-1.5 text-sm bg-accent text-white rounded-[var(--radius)] hover:bg-accent-2 disabled:opacity-50 transition"
           >
             {saving ? '添加中...' : '+ 添加提醒'}
           </button>
         </div>
         {loading ? (
-          <div className="text-center text-slate-400 text-sm py-4">加载中...</div>
+          <div className="text-center text-muted text-sm py-4">加载中...</div>
         ) : reminders.length === 0 ? (
-          <p className="text-center text-slate-400 text-sm py-4">还没有提醒</p>
+          <p className="text-center text-muted text-sm py-4">还没有提醒</p>
         ) : (
           <div className="space-y-2 max-h-60 overflow-y-auto">
             {reminders.map((r) => (
-              <div key={r.id} className="p-2 border border-slate-200 rounded-lg flex justify-between items-start gap-2">
+              <div key={r.id} className="p-2 border border-line rounded-[var(--radius)] flex justify-between items-start gap-2">
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm text-slate-700">{r.message}</p>
-                  <p className="text-xs text-slate-400 mt-0.5">{formatReminderSchedule(r.schedule, r.state)}</p>
+                  <p className="text-sm text-ink">{r.message}</p>
+                  <p className="text-xs text-muted mt-0.5">{formatReminderSchedule(r.schedule, r.state)}</p>
                 </div>
                 <button
                   onClick={() => handleDelete(r.id)}
-                  className="text-xs text-red-500 hover:bg-red-50 px-2 py-1 rounded shrink-0"
+                  className="text-xs text-danger-fg hover:bg-danger-bg px-2 py-1 rounded shrink-0"
                 >
                   删除
                 </button>
@@ -577,7 +578,7 @@ function BotReminderPanel({ bot, onClose }: { bot: BotInstance; onClose: () => v
             ))}
           </div>
         )}
-        <p className="text-xs text-slate-400">
+        <p className="text-xs text-muted">
           web 渠道的提醒到点后会出现在侧边栏通知铃铛里；QQ/飞书渠道需绑定账号。
         </p>
       </div>
@@ -638,52 +639,52 @@ function BotBindingPanel({ onClose }: { onClose: () => void }) {
       open
       onClose={onClose}
       overlayCloses={false}
-      title="🔗 绑定 IM 账号"
+      title="绑定 IM 账号"
       footer={
-        <button onClick={onClose} className="px-3 py-1.5 text-sm text-slate-500 hover:text-slate-700">
+        <button onClick={onClose} className="px-3 py-1.5 text-sm text-ink-soft hover:text-ink">
           关闭
         </button>
       }
     >
       <div className="space-y-3">
-        <p className="text-xs text-slate-500">
+        <p className="text-xs text-ink-soft">
           把 QQ / 飞书账号绑定到网站账号后，bot 会<b>跨渠道记住你</b>（学习画像、知识图谱长期共享）。
           短期对话历史仍各渠道独立（对齐 DeepTutor session≠memory 分层）。
         </p>
-        {error && <div className="px-3 py-2 bg-red-50 text-red-600 text-xs rounded">{error}</div>}
-        <div className="p-3 bg-slate-50 rounded-lg space-y-2">
+        {error && <div className="px-3 py-2 bg-danger-bg text-danger-fg text-xs rounded">{error}</div>}
+        <div className="p-3 bg-canvas rounded-[var(--radius)] space-y-2">
           <button
             onClick={handleGen}
             disabled={genLoading}
-            className="w-full py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition"
+            className="w-full py-1.5 text-sm bg-accent text-white rounded-[var(--radius)] hover:bg-accent-2 disabled:opacity-50 transition"
           >
             {genLoading ? '生成中...' : '生成绑定码'}
           </button>
           {code && (
             <div className="text-center space-y-1">
-              <p className="text-xs text-slate-500">在 QQ / 飞书私聊你的 bot 发送：</p>
-              <p className="text-2xl font-mono font-bold tracking-widest text-indigo-600">绑定 {code}</p>
-              <p className="text-[11px] text-slate-400">{Math.round(expires / 60)} 分钟内有效，一次性</p>
+              <p className="text-xs text-ink-soft">在 QQ / 飞书私聊你的 bot 发送：</p>
+              <p className="text-2xl font-mono font-bold tracking-widest text-ink">绑定 {code}</p>
+              <p className="text-[11px] text-muted">{Math.round(expires / 60)} 分钟内有效，一次性</p>
             </div>
           )}
         </div>
         <div>
-          <p className="text-xs font-medium text-slate-600 mb-1">已绑定账号</p>
+          <p className="text-xs font-medium text-ink-soft mb-1">已绑定账号</p>
           {loading ? (
-            <p className="text-center text-slate-400 text-sm py-3">加载中...</p>
+            <p className="text-center text-muted text-sm py-3">加载中...</p>
           ) : bindings.length === 0 ? (
-            <p className="text-center text-slate-400 text-sm py-3">尚未绑定任何 IM 账号</p>
+            <p className="text-center text-muted text-sm py-3">尚未绑定任何 IM 账号</p>
           ) : (
             <div className="space-y-1.5">
               {bindings.map((b) => (
-                <div key={b.id} className="p-2 border border-slate-200 rounded-lg flex justify-between items-center gap-2">
+                <div key={b.id} className="p-2 border border-line rounded-[var(--radius)] flex justify-between items-center gap-2">
                   <div className="flex-1 min-w-0">
-                    <span className="text-sm text-slate-700">{b.platform}</span>
-                    <span className="text-xs text-slate-400 font-mono ml-2 truncate">{b.platform_user_id}</span>
+                    <span className="text-sm text-ink">{b.platform}</span>
+                    <span className="text-xs text-muted font-mono ml-2 truncate">{b.platform_user_id}</span>
                   </div>
                   <button
                     onClick={() => handleUnbind(b.id)}
-                    className="text-xs text-red-500 hover:bg-red-50 px-2 py-1 rounded shrink-0"
+                    className="text-xs text-danger-fg hover:bg-danger-bg px-2 py-1 rounded shrink-0"
                   >
                     解绑
                   </button>
@@ -795,14 +796,14 @@ function BotEditor({
         <>
           <button
             onClick={onClose}
-            className="px-3 py-1.5 text-sm text-slate-500 hover:text-slate-700"
+            className="px-3 py-1.5 text-sm text-ink-soft hover:text-ink"
           >
             取消
           </button>
           <button
             onClick={submit}
             disabled={saving}
-            className="px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+            className="px-3 py-1.5 text-sm bg-accent text-white rounded-[var(--radius)] hover:bg-accent-2 disabled:opacity-50"
           >
             {saving ? (editing ? '保存中...' : '创建中...') : editing ? '保存' : '创建'}
           </button>
@@ -810,44 +811,44 @@ function BotEditor({
       }
     >
       <div className="space-y-3">
-        {err && <div className="px-3 py-2 bg-red-50 text-red-600 text-xs rounded">{err}</div>}
+        {err && <div className="px-3 py-2 bg-danger-bg text-danger-fg text-xs rounded">{err}</div>}
         <div>
-          <label className="block text-xs font-medium text-slate-600 mb-1">Bot ID</label>
+          <label className="block text-xs font-medium text-ink-soft mb-1">Bot ID</label>
           <input
             value={botId}
             onChange={(e) => setBotId(e.target.value)}
             disabled={editing}
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-400 disabled:bg-slate-50 disabled:text-slate-400"
+            className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm font-mono focus:outline-none focus:border-ink disabled:bg-canvas disabled:text-muted"
             placeholder="如 study-buddy"
           />
         </div>
         <div>
-          <label className="block text-xs font-medium text-slate-600 mb-1">名称</label>
+          <label className="block text-xs font-medium text-ink-soft mb-1">名称</label>
           <input
             value={name}
             onChange={(e) => setName(e.target.value)}
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+            className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm focus:outline-none focus:border-ink"
             placeholder="如 学习伙伴"
           />
         </div>
         <div>
-          <label className="block text-xs font-medium text-slate-600 mb-1">描述</label>
+          <label className="block text-xs font-medium text-ink-soft mb-1">描述</label>
           <input
             value={description}
             onChange={(e) => setDescription(e.target.value)}
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+            className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm focus:outline-none focus:border-ink"
           />
         </div>
         {!editing && (
           <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">
+            <label className="block text-xs font-medium text-ink-soft mb-1">
               启用频道（可多选，建后不可改）
             </label>
             <div className="space-y-1.5">
               {CHANNELS.map((ch) => {
                 const enabled = Boolean(channels[ch.key]?.enabled)
                 return (
-                  <div key={ch.key} className="p-2 rounded-lg border border-slate-200">
+                  <div key={ch.key} className="p-2 rounded-[var(--radius)] border border-line">
                     <label className="flex items-start gap-2 cursor-pointer">
                       <input
                         type="checkbox"
@@ -856,8 +857,8 @@ function BotEditor({
                         className="mt-0.5"
                       />
                       <div className="flex-1">
-                        <div className="text-sm font-medium text-slate-700">{ch.label}</div>
-                        <div className="text-xs text-slate-400">{ch.hint}</div>
+                        <div className="text-sm font-medium text-ink">{ch.label}</div>
+                        <div className="text-xs text-muted">{ch.hint}</div>
                       </div>
                     </label>
                     {enabled && ch.fields.length > 0 && (
@@ -868,7 +869,7 @@ function BotEditor({
                             type={f.secret ? 'password' : 'text'}
                             value={String(channels[ch.key]?.[f.k] ?? '')}
                             onChange={(e) => setChannelField(ch.key, f.k, e.target.value)}
-                            className="w-full rounded border border-slate-200 px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-indigo-400"
+                            className="w-full rounded border border-line px-2 py-1.5 text-xs font-mono focus:outline-none focus:border-ink"
                             placeholder={f.placeholder}
                           />
                         ))}
@@ -881,32 +882,32 @@ function BotEditor({
           </div>
         )}
         {editing && (
-          <p className="text-xs text-slate-400">
+          <p className="text-xs text-muted">
             频道配置建后不可改（避免凭证丢失）；如需换频道请删除重建。
           </p>
         )}
         <div>
-          <label className="block text-xs font-medium text-slate-600 mb-1">
+          <label className="block text-xs font-medium text-ink-soft mb-1">
             人设（persona{editing ? '，留空保持不变' : '，可选'}）
           </label>
           <textarea
             value={persona}
             onChange={(e) => setPersona(e.target.value)}
             rows={3}
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+            className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm focus:outline-none focus:border-ink"
             placeholder={
               editing ? '如需修改人设请输入，留空保持不变' : '如：耐心、鼓励式的苏格拉底式导师'
             }
           />
         </div>
         <div>
-          <label className="block text-xs font-medium text-slate-600 mb-1">
+          <label className="block text-xs font-medium text-ink-soft mb-1">
             绑定课程 ID（可选，用于 RAG）
           </label>
           <input
             value={courseId}
             onChange={(e) => setCourseId(e.target.value)}
-            className="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm font-mono focus:outline-none focus:border-indigo-400"
+            className="w-full rounded-[var(--radius)] border border-line px-3 py-2 text-sm font-mono focus:outline-none focus:border-ink"
           />
         </div>
       </div>

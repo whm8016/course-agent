@@ -1,5 +1,7 @@
 import { useState } from 'react'
+import { GraduationCap, PartyPopper } from 'lucide-react'
 import { applyTeacher, login, register } from '../../services/auth'
+import { Button, Input, Textarea } from '../ui'
 import type { User } from '../../types'
 
 interface Props {
@@ -76,61 +78,52 @@ export default function LoginPage({ onLogin }: Props) {
   // 注册 + 教师申请成功后的确认页（不直接跳转，让用户确认申请状态）
   if (applied && registeredUser) {
     return (
-      <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-indigo-50 via-white to-slate-100">
-        <div className="w-full max-w-md px-5 md:px-8 py-10 mx-4 md:mx-0 bg-white rounded-2xl shadow-xl border border-slate-100 text-center">
-          <div className="text-5xl mb-4">🎉</div>
-          <h1 className="text-2xl font-bold text-slate-800 mb-2">账号创建成功</h1>
-          <p className="text-sm text-slate-600 mb-1">您的教师申请已提交。</p>
-          <p className="text-xs text-slate-400 mb-6">
+      <div className="flex items-center justify-center min-h-screen bg-canvas px-4">
+        <div className="w-full max-w-md px-5 md:px-8 py-10 bg-surface rounded-[var(--radius-lg)] border border-line text-center">
+          <PartyPopper size={40} strokeWidth={1.5} className="text-ink mx-auto mb-4" />
+          <h1 className="font-serif text-2xl text-ink mb-2">账号创建成功</h1>
+          <p className="text-sm text-ink-soft mb-1">您的教师申请已提交。</p>
+          <p className="text-xs text-muted mb-6">
             管理员审批通过后，您将获得教师权限，并收到站内通知。
           </p>
-          <button
-            onClick={() => onLogin(registeredUser)}
-            className="w-full py-2.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 transition"
-          >
+          <Button variant="primary" className="w-full" onClick={() => onLogin(registeredUser)}>
             进入学习
-          </button>
+          </Button>
         </div>
       </div>
     )
   }
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-indigo-50 via-white to-slate-100">
-      <div className="w-full max-w-md px-5 md:px-8 py-8 md:py-10 mx-4 md:mx-0 bg-white rounded-2xl shadow-xl border border-slate-100">
+    <div className="flex items-center justify-center min-h-screen bg-canvas px-4">
+      <div className="w-full max-w-md px-5 md:px-8 py-8 md:py-10 bg-surface rounded-[var(--radius-lg)] border border-line">
         <div className="text-center mb-8">
-          <div className="text-4xl mb-3">📚</div>
-          <h1 className="text-2xl font-bold text-slate-800">课程学习 Agent</h1>
-          <p className="text-sm text-slate-400 mt-1">
+          <GraduationCap size={36} strokeWidth={1.5} className="text-ink mx-auto mb-3" />
+          <h1 className="font-serif text-2xl text-ink">课程学习 Agent</h1>
+          <p className="text-sm text-muted mt-1">
             {mode === 'login' ? '登录以开始学习' : '创建一个新账号'}
           </p>
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-slate-600 mb-1">用户名</label>
-            <input
-              type="text"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition"
-              placeholder="请输入用户名"
-              autoFocus
-            />
-          </div>
+          <Input
+            label="用户名"
+            type="text"
+            value={username}
+            onChange={(e) => setUsername(e.target.value)}
+            placeholder="请输入用户名"
+            autoFocus
+          />
 
           {mode === 'register' && (
             <>
-              <div>
-                <label className="block text-sm font-medium text-slate-600 mb-1">显示名称（可选）</label>
-                <input
-                  type="text"
-                  value={displayName}
-                  onChange={(e) => setDisplayName(e.target.value)}
-                  className="w-full rounded-lg border border-slate-200 px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition"
-                  placeholder="显示在界面上的名字"
-                />
-              </div>
+              <Input
+                label="显示名称（可选）"
+                type="text"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder="显示在界面上的名字"
+              />
 
               {/* 主入口：申请教师权限（申请-审批流） */}
               <label className="flex items-center gap-2 cursor-pointer select-none">
@@ -138,71 +131,59 @@ export default function LoginPage({ onLogin }: Props) {
                   type="checkbox"
                   checked={wantsTeacher}
                   onChange={(e) => setWantsTeacher(e.target.checked)}
-                  className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-100"
+                  className="rounded border-line accent-[var(--color-accent)]"
                 />
-                <span className="text-sm text-slate-600">我是一名教师，申请教师权限</span>
+                <span className="text-sm text-ink-soft">我是一名教师，申请教师权限</span>
               </label>
               {wantsTeacher && (
-                <div>
-                  <label className="block text-sm font-medium text-slate-600 mb-1">申请理由</label>
-                  <textarea
-                    value={teacherReason}
-                    onChange={(e) => setTeacherReason(e.target.value)}
-                    rows={3}
-                    className="w-full rounded-lg border border-slate-200 px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition resize-none"
-                    placeholder="请简要说明您的任教课程 / 院系，便于管理员审批"
-                  />
-                </div>
+                <Textarea
+                  label="申请理由"
+                  value={teacherReason}
+                  onChange={(e) => setTeacherReason(e.target.value)}
+                  rows={3}
+                  placeholder="请简要说明您的任教课程 / 院系，便于管理员审批"
+                />
               )}
 
               {/* 次要入口：邀请码快速通道（折叠，与申请-审批并存） */}
               <button
                 type="button"
                 onClick={() => setShowInviteCode(!showInviteCode)}
-                className="text-xs text-slate-400 hover:text-slate-600 transition"
+                className="text-xs text-muted hover:text-ink-soft transition"
               >
                 {showInviteCode ? '▼' : '▶'} 我有教师邀请码（快速通道，免审批）
               </button>
               {showInviteCode && (
-                <div>
-                  <label className="block text-sm font-medium text-slate-600 mb-1">
-                    教师邀请码
-                  </label>
-                  <input
-                    type="text"
-                    value={inviteCode}
-                    onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
-                    className="w-full rounded-lg border border-slate-200 px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition font-mono tracking-wider"
-                    placeholder="填写后直接注册为教师"
-                    maxLength={16}
-                  />
-                </div>
+                <Input
+                  label="教师邀请码"
+                  type="text"
+                  value={inviteCode}
+                  onChange={(e) => setInviteCode(e.target.value.toUpperCase())}
+                  className="font-mono tracking-wider"
+                  placeholder="填写后直接注册为教师"
+                  maxLength={16}
+                />
               )}
             </>
           )}
 
-          <div>
-            <label className="block text-sm font-medium text-slate-600 mb-1">密码</label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-slate-200 px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition"
-              placeholder={mode === 'register' ? '至少 4 个字符' : '请输入密码'}
-            />
-          </div>
+          <Input
+            label="密码"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder={mode === 'register' ? '至少 4 个字符' : '请输入密码'}
+          />
 
           {error && (
-            <div className="text-sm text-red-500 bg-red-50 rounded-lg px-4 py-2">{error}</div>
+            <div className="text-sm text-danger-fg bg-danger-bg rounded-[var(--radius)] px-4 py-2">
+              {error}
+            </div>
           )}
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full py-2.5 rounded-lg bg-indigo-600 text-white font-medium hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
-          >
+          <Button type="submit" variant="primary" loading={loading} className="w-full">
             {loading ? '处理中...' : mode === 'login' ? '登 录' : '注 册'}
-          </button>
+          </Button>
         </form>
 
         <div className="text-center mt-6">
@@ -212,7 +193,7 @@ export default function LoginPage({ onLogin }: Props) {
               setMode(mode === 'login' ? 'register' : 'login')
               setError('')
             }}
-            className="text-sm text-indigo-600 hover:text-indigo-800 transition"
+            className="text-sm text-ink-soft hover:text-ink transition"
           >
             {mode === 'login' ? '没有账号？点击注册' : '已有账号？点击登录'}
           </button>

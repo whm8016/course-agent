@@ -1,9 +1,13 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { FiSend, FiSquare, FiChevronDown, FiDatabase, FiGlobe, FiMenu, FiUploadCloud } from 'react-icons/fi'
-import { BrainCircuit, MessageSquare, Microscope, PenLine, Zap } from 'lucide-react'
+import {
+  Send, Square, ChevronDown, Database, Globe, Menu, UploadCloud,
+  BrainCircuit, MessageSquare, Microscope, PenLine, Zap, Target, X,
+} from 'lucide-react'
 import MessageBubble from './MessageBubble'
-import ImageUpload, { type PendingFile, isImage } from './ImageUpload'
-import QuizConfigPanel, { DEFAULT_QUIZ_CONFIG, type QuizConfig } from '../quiz/QuizConfigPanel'
+import ImageUpload, { type PendingFile } from './ImageUpload'
+import { isImage } from './fileUtils'
+import QuizConfigPanel from '../quiz/QuizConfigPanel'
+import { DEFAULT_QUIZ_CONFIG, type QuizConfig } from '../quiz/types'
 import { chatStream, uploadImage, fetchMessages, saveMessage, createSession, updateSessionMode, fetchLlmProfilesSelectable, fetchMyLlmProvider, deleteMyLlmProvider, requestAnswerNow } from '../../services/api'
 import type { LlmProfileSelectable, UserProviderView } from '../../services/api'
 import {
@@ -157,7 +161,7 @@ function QuizStreamingBubble({ traces, questions, done, error }: QuizStreamingBu
   const lastTrace = traces[traces.length - 1]
   return (
     <div className="flex justify-start mb-4">
-      <div className="max-w-[95%] md:max-w-[80%] rounded-2xl px-4 py-3 bg-white border border-slate-200 text-slate-800 rounded-bl-md shadow-sm space-y-2">
+      <div className="max-w-[95%] md:max-w-[80%] rounded-[var(--radius-lg)] px-4 py-3 bg-surface border border-line text-ink rounded-bl-[3px] space-y-2">
         {/* 小字过程 */}
         {!done && !error && (
           <div className="space-y-1">
@@ -166,24 +170,24 @@ function QuizStreamingBubble({ traces, questions, done, error }: QuizStreamingBu
                 key={i}
                 className={`text-[11px] leading-relaxed ${
                   i === traces.length - 1
-                    ? 'text-indigo-500 animate-pulse'
-                    : 'text-slate-400'
+                    ? 'text-ink animate-pulse'
+                    : 'text-muted'
                 }`}
               >
-                {t.kind === 'status' ? '⚙ ' : t.kind === 'progress' ? '⟳ ' : ''}{t.text}
+                {t.text}
               </p>
             ))}
           </div>
         )}
         {done && lastTrace && (
-          <p className="text-[11px] text-slate-400">{lastTrace.text}</p>
+          <p className="text-[11px] text-muted">{lastTrace.text}</p>
         )}
         {error && (
-          <p className="text-[11px] text-red-500">{error}</p>
+          <p className="text-[11px] text-danger-fg">{error}</p>
         )}
         {/* 已生成的题目（流式逐题追加） */}
         {questions.length > 0 && (
-          <p className="text-xs text-slate-500 font-medium">已生成 {questions.length} 道题目</p>
+          <p className="text-xs text-ink-soft font-medium">已生成 {questions.length} 道题目</p>
         )}
       </div>
     </div>
@@ -1028,7 +1032,8 @@ export default function ChatWindow({
             hallucination = event.metadata?.hallucination
             break
           case 'error':
-            answerContent = `出错了: ${event.content}`
+            // 后端 stream_bus 的 error 事件字段是 `message`（非 content）；两个都认，避免「出错了: undefined」
+            answerContent = `出错了: ${event.content || event.message || '未知错误，请查看后端日志'}`
             break
         }
       },
@@ -1168,31 +1173,35 @@ export default function ChatWindow({
   return (
     <div className="flex flex-col h-full">
       {/* 顶部标题栏 */}
-      <div className="border-b border-slate-200 px-3 md:px-6 py-3 bg-white/80 backdrop-blur-sm">
+      <div className="border-b border-line px-3 md:px-6 py-3 bg-surface/80 backdrop-blur-sm">
         <div className="flex items-center gap-2">
-          <button onClick={onOpenSidebar} className="md:hidden p-1 -ml-1 text-slate-500 hover:text-slate-700 transition">
-            <FiMenu size={20} />
+          <button onClick={onOpenSidebar} className="md:hidden p-1 -ml-1 text-ink-soft hover:text-ink transition" aria-label="打开侧边栏">
+            <Menu size={20} strokeWidth={1.5} />
           </button>
-          <h1 className="text-base font-semibold text-slate-800 truncate">{courseName}</h1>
+          <h1 className="text-base font-medium text-ink truncate">{courseName}</h1>
           {hasMyProvider ? (
-            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-indigo-100 text-indigo-700 inline-flex items-center gap-1 max-w-[260px]">
+            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-info-bg text-info-fg inline-flex items-center gap-1 max-w-[260px]">
+              <Target size={11} strokeWidth={1.5} className="shrink-0" />
               <span
                 className="truncate min-w-0"
                 title={`个人配置生效（覆盖平台默认）\n对话：${myProvider?.binding || '?'} / ${myProvider?.text_model || '?'}${myProvider?.vision_model ? `\n视觉：${myProvider?.vision_binding || myProvider?.binding || '?'}/${myProvider?.vision_model}` : ''}\n（在「我的模型配置」页修改）`}
               >
-                🎯 个人：{myProvider?.binding || '?'} / {myProvider?.text_model || '?'}
+                个人：{myProvider?.binding || '?'} / {myProvider?.text_model || '?'}
               </span>
               <button
                 onClick={handleResetToDefault}
                 title="清除个人配置，回到平台默认"
-                className="shrink-0 px-1 rounded-full leading-none text-indigo-500 hover:bg-indigo-200 hover:text-red-600"
-              >✕</button>
+                className="shrink-0 p-0.5 rounded-full leading-none text-info-fg hover:bg-surface-2 hover:text-danger-fg transition"
+                aria-label="清除个人配置"
+              >
+                <X size={11} strokeWidth={1.5} />
+              </button>
             </span>
           ) : llmProfiles.length > 0 ? (
             <select
               value={selectedProfileId}
               onChange={(e) => setSelectedProfileId(e.target.value)}
-              className="text-[11px] rounded-md border border-slate-200 px-1.5 py-0.5 bg-white text-slate-600 focus:outline-none focus:border-indigo-400 max-w-[150px]"
+              className="text-[11px] rounded-[var(--radius-sm)] border border-line px-1.5 py-0.5 bg-surface text-ink-soft focus:outline-none focus:border-ink max-w-[150px]"
               title="选择模型供应商（临时切换，留空=使用默认）"
             >
               {llmProfiles.map((p) => (
@@ -1203,33 +1212,31 @@ export default function ChatWindow({
             </select>
           ) : null}
           {ragEnabled ? (
-            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-green-100 text-green-700">
+            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-ok-bg text-ok-fg">
               RAG 就绪
             </span>
           ) : kbStatus === 'indexing' ? (
-            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-blue-100 text-blue-700">
+            <span className="text-[11px] px-1.5 py-0.5 rounded-full bg-info-bg text-info-fg">
               知识库索引中…
             </span>
           ) : null}
         </div>
-        <p className="text-xs text-slate-400 mt-0.5">多 Agent 编排 · RAG 知识检索 · 智能出题</p>
+        <p className="text-xs text-muted mt-0.5">多 Agent 编排 · RAG 知识检索 · 智能出题</p>
       </div>
 
       {/* 消息列表 */}
       <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-3 md:px-6 py-4 bg-slate-50/50"
+        className="flex-1 overflow-y-auto px-3 md:px-6 py-4 bg-canvas"
       >
         {messages.length === 0 && !quizStreaming && (
-          <div className="flex flex-col items-center justify-center h-full text-slate-400">
-            <div className="text-4xl mb-3">
-              {activeCap === 'quiz' ? '📝' : activeCap === 'deep_solve' ? '🧠' : activeCap === 'research' ? '🔎' : '💬'}
-            </div>
-            <p className="text-base font-medium">
+          <div className="flex flex-col items-center justify-center h-full text-muted gap-3">
+            <CapIcon size={36} strokeWidth={1.5} className="text-muted" />
+            <p className="text-base font-medium text-ink">
               {activeCap === 'quiz' ? '配置参数后开始出题' : '开始提问吧'}
             </p>
-            <p className="text-xs mt-1">
+            <p className="text-xs">
               {activeCap === 'quiz'
                 ? '填写知识点，点击"开始出题"'
                 : '输入问题、要求出题或上传图片'}
@@ -1257,21 +1264,21 @@ export default function ChatWindow({
         {/* 深度研究流式进度气泡 */}
         {researchStreaming && (
           <div className="flex justify-start mb-4">
-            <div className="max-w-[95%] md:max-w-[80%] rounded-2xl px-4 py-3 bg-white border border-indigo-200 text-slate-800 rounded-bl-md shadow-sm space-y-1.5">
+            <div className="max-w-[95%] md:max-w-[80%] rounded-[var(--radius-lg)] px-4 py-3 bg-surface border border-line text-ink rounded-bl-[3px] space-y-1.5">
               {researchTraces.map((t, i) => (
                 <p
                   key={i}
                   className={`text-[11px] leading-relaxed ${
                     i === researchTraces.length - 1
-                      ? 'text-indigo-500 animate-pulse'
-                      : 'text-slate-400'
+                      ? 'text-ink animate-pulse'
+                      : 'text-muted'
                   }`}
                 >
-                  {t.kind === 'status' ? '⚙ ' : t.kind === 'progress' ? '🔍 ' : ''}{t.text}
+                  {t.text}
                 </p>
               ))}
               {researchError && (
-                <p className="text-[11px] text-red-500">{researchError}</p>
+                <p className="text-[11px] text-danger-fg">{researchError}</p>
               )}
             </div>
           </div>
@@ -1279,13 +1286,13 @@ export default function ChatWindow({
         {/* 普通聊天 loading */}
         {loading && !streamingStarted && (
           <div className="flex justify-start mb-4">
-            <div className="bg-white border border-slate-200 rounded-2xl rounded-bl-md px-4 py-3 shadow-sm">
+            <div className="bg-surface border border-line rounded-[var(--radius-lg)] rounded-bl-[3px] px-4 py-3">
               <div className="flex gap-1">
-                <span className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.3s]" />
-                <span className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce [animation-delay:-0.15s]" />
-                <span className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" />
+                <span className="w-2 h-2 bg-ink-soft rounded-full animate-bounce [animation-delay:-0.3s]" />
+                <span className="w-2 h-2 bg-ink-soft rounded-full animate-bounce [animation-delay:-0.15s]" />
+                <span className="w-2 h-2 bg-ink-soft rounded-full animate-bounce" />
               </div>
-              <p className="text-xs text-slate-400 mt-2">
+              <p className="text-xs text-muted mt-2">
                 {activeCap === 'research' ? '深度研究中…' : activeCap === 'deep_solve' ? '深度推理中…' : '思考中…'}
               </p>
             </div>
@@ -1299,12 +1306,10 @@ export default function ChatWindow({
             <button
               type="button"
               onClick={scrollToBottom}
-              className="pointer-events-auto mb-1 flex items-center gap-1 rounded-full bg-white border border-slate-200 shadow-md px-3 py-1.5 text-xs text-slate-600 hover:bg-slate-50 hover:text-slate-800 transition"
+              className="pointer-events-auto mb-1 flex items-center gap-1 rounded-full bg-surface border border-line shadow-[var(--shadow-hover)] px-3 py-1.5 text-xs text-ink-soft hover:bg-surface-2 hover:text-ink transition"
               title="回到底部"
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="6 9 12 15 18 9" />
-              </svg>
+              <ChevronDown size={14} strokeWidth={1.5} />
               回到底部
             </button>
           </div>
@@ -1313,8 +1318,8 @@ export default function ChatWindow({
 
       {/* 底部输入区 */}
       <div
-        className={`relative border-t border-slate-200 bg-white px-3 md:px-4 pt-2 md:pt-3 pb-3 md:pb-4 ${
-          isDragging ? 'ring-2 ring-indigo-300' : ''
+        className={`relative border-t border-line bg-surface px-3 md:px-4 pt-2 md:pt-3 pb-3 md:pb-4 ${
+          isDragging ? 'ring-2 ring-ink/20' : ''
         }`}
         onDragEnter={handleDragEnter}
         onDragOver={handleDragOver}
@@ -1322,11 +1327,11 @@ export default function ChatWindow({
         onDrop={handleDrop}
       >
         {isDragging && (
-          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center border-2 border-dashed border-indigo-400 bg-indigo-50/70">
-            <div className="flex flex-col items-center gap-1 text-indigo-500">
-              <FiUploadCloud size={22} strokeWidth={1.6} />
+          <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center border-2 border-dashed border-ink/40 bg-canvas/80">
+            <div className="flex flex-col items-center gap-1 text-ink">
+              <UploadCloud size={22} strokeWidth={1.5} />
               <span className="text-[13px] font-medium">拖放文件到此</span>
-              <span className="text-[11px] text-indigo-400">图片 / 文档 / 代码</span>
+              <span className="text-[11px] text-muted">图片 / 文档 / 代码</span>
             </div>
           </div>
         )}
@@ -1337,9 +1342,9 @@ export default function ChatWindow({
 
         {/* 深度研究配置条（research 模式时展开） */}
         {isResearchMode && (
-          <div className="flex flex-wrap gap-2 mb-2 px-1 py-2 rounded-xl bg-slate-50 border border-slate-200 text-xs">
+          <div className="flex flex-wrap gap-2 mb-2 px-1 py-2 rounded-[var(--radius)] bg-surface-2 border border-line text-xs">
             <div className="flex items-center gap-1 flex-wrap">
-              <span className="text-slate-400 shrink-0">模式</span>
+              <span className="text-muted shrink-0">模式</span>
               {(
                 [
                   { v: 'report', label: '研究报告' },
@@ -1354,8 +1359,8 @@ export default function ChatWindow({
                   onClick={() => setResearchMode(v)}
                   className={`px-2 py-0.5 rounded-full border transition ${
                     researchMode === v
-                      ? 'bg-indigo-100 border-indigo-400 text-indigo-700 font-medium'
-                      : 'border-slate-200 text-slate-500 hover:border-slate-300'
+                      ? 'border-ink bg-ink text-white font-medium'
+                      : 'border-line text-muted hover:border-ink-soft'
                   }`}
                 >
                   {label}
@@ -1363,10 +1368,10 @@ export default function ChatWindow({
               ))}
             </div>
 
-            <div className="w-px bg-slate-200 self-stretch hidden sm:block" />
+            <div className="w-px bg-line self-stretch hidden sm:block" />
 
             <div className="flex items-center gap-1 flex-wrap">
-              <span className="text-slate-400 shrink-0">深度</span>
+              <span className="text-muted shrink-0">深度</span>
               {(
                 [
                   { v: 'quick', label: '快速' },
@@ -1380,8 +1385,8 @@ export default function ChatWindow({
                   onClick={() => setResearchDepth(v)}
                   className={`px-2 py-0.5 rounded-full border transition ${
                     researchDepth === v
-                      ? 'bg-indigo-100 border-indigo-400 text-indigo-700 font-medium'
-                      : 'border-slate-200 text-slate-500 hover:border-slate-300'
+                      ? 'border-ink bg-ink text-white font-medium'
+                      : 'border-line text-muted hover:border-ink-soft'
                   }`}
                 >
                   {label}
@@ -1389,10 +1394,10 @@ export default function ChatWindow({
               ))}
             </div>
 
-            <div className="w-px bg-slate-200 self-stretch hidden sm:block" />
+            <div className="w-px bg-line self-stretch hidden sm:block" />
 
             <div className="flex items-center gap-1 flex-wrap">
-              <span className="text-slate-400 shrink-0">资料</span>
+              <span className="text-muted shrink-0">资料</span>
               {(
                 [
                   { v: 'kb', label: '知识库' },
@@ -1412,8 +1417,8 @@ export default function ChatWindow({
                     }
                     className={`px-2 py-0.5 rounded-full border transition ${
                       selected
-                        ? 'bg-indigo-100 border-indigo-400 text-indigo-700 font-medium'
-                        : 'border-slate-200 text-slate-500 hover:border-slate-300'
+                        ? 'border-ink bg-ink text-white font-medium'
+                        : 'border-line text-muted hover:border-ink-soft'
                     }`}
                   >
                     {label}
@@ -1430,15 +1435,15 @@ export default function ChatWindow({
             <button
               type="button"
               onClick={() => setCapMenuOpen((v) => !v)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white text-slate-600 hover:border-indigo-300 hover:text-indigo-600 transition text-xs font-medium"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-[var(--radius)] border border-line bg-surface text-ink-soft hover:border-ink hover:text-ink transition text-xs font-medium"
               title="切换能力"
             >
-              <CapIcon size={14} strokeWidth={1.8} className="text-indigo-500" />
+              <CapIcon size={14} strokeWidth={1.5} className="text-ink" />
               {activeCapDef.label}
-              <FiChevronDown size={12} />
+              <ChevronDown size={12} strokeWidth={1.5} />
             </button>
             {capMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-1.5 w-[220px] rounded-xl border border-slate-200 bg-white shadow-lg py-1.5 z-50">
+              <div className="absolute bottom-full left-0 mb-1.5 w-[220px] rounded-[var(--radius)] border border-line bg-surface shadow-[var(--shadow-hover)] py-1.5 z-50">
                 {CAPABILITIES.map((cap) => {
                   const Icon = cap.icon
                   const selected = activeCap === cap.value
@@ -1448,20 +1453,20 @@ export default function ChatWindow({
                       type="button"
                       onClick={() => void handleSelectCap(cap.value)}
                       className={`flex w-full items-center gap-3 px-3.5 py-2 text-left transition-colors ${
-                        selected ? 'bg-slate-50' : 'hover:bg-slate-50/60'
+                        selected ? 'bg-surface-2' : 'hover:bg-surface-2'
                       }`}
                     >
                       <Icon
                         size={15}
-                        strokeWidth={1.6}
-                        className={selected ? 'text-indigo-500' : 'text-slate-400'}
+                        strokeWidth={1.5}
+                        className={selected ? 'text-ink' : 'text-muted'}
                       />
                       <div className="min-w-0 flex-1">
-                        <div className="text-xs font-medium text-slate-800">{cap.label}</div>
-                        <div className="text-[11px] text-slate-400 truncate">{cap.description}</div>
+                        <div className="text-xs font-medium text-ink">{cap.label}</div>
+                        <div className="text-[11px] text-muted truncate">{cap.description}</div>
                       </div>
                       {selected && (
-                        <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-500" />
+                        <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink" />
                       )}
                     </button>
                   )
@@ -1474,13 +1479,13 @@ export default function ChatWindow({
             disabled={!ragEnabled}
             onClick={() => setUseKb((v) => !v)}
             title={ragEnabled ? '点击开关知识库检索' : '该课程暂无知识库'}
-            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-xl border text-xs transition ${
+            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-[var(--radius)] border text-xs transition ${
               useKb
-                ? 'border-indigo-400 bg-indigo-50 text-indigo-600'
-                : 'border-slate-200 text-slate-400 hover:border-slate-300'
+                ? 'border-ink bg-surface-2 text-ink'
+                : 'border-line text-muted hover:border-ink-soft'
             }${!ragEnabled ? ' cursor-not-allowed opacity-40' : ''}`}
           >
-            <FiDatabase size={14} />
+            <Database size={14} strokeWidth={1.5} />
             <span className="text-[11px]">知识库</span>
           </button>
           {useKb && ragEnabled && (
@@ -1488,7 +1493,7 @@ export default function ChatWindow({
               value={ragMode}
               onChange={(e) => setRagMode(e.target.value as 'mix' | 'naive' | 'local')}
               title="知识库检索模式"
-              className="text-[11px] px-1.5 py-1.5 rounded-xl border border-slate-200 bg-white text-slate-600 focus:outline-none focus:border-indigo-400"
+              className="text-[11px] px-1.5 py-1.5 rounded-[var(--radius)] border border-line bg-surface text-ink-soft focus:outline-none focus:border-ink"
             >
               <option value="mix">混合</option>
               <option value="naive">向量</option>
@@ -1499,13 +1504,13 @@ export default function ChatWindow({
             type="button"
             onClick={() => setUseWebSearch((v) => !v)}
             title="网络搜索"
-            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-xl border text-xs transition ${
+            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-[var(--radius)] border text-xs transition ${
               useWebSearch
-                ? 'border-indigo-400 bg-indigo-50 text-indigo-600'
-                : 'border-slate-200 text-slate-400 hover:border-slate-300'
+                ? 'border-ink bg-surface-2 text-ink'
+                : 'border-line text-muted hover:border-ink-soft'
             }`}
           >
-            <FiGlobe size={14} />
+            <Globe size={14} strokeWidth={1.5} />
             <span className="text-[11px]">搜索</span>
           </button>
           <ImageUpload files={pendingFiles} onSelect={handleFileSelect} onRemove={removeFile} />
@@ -1517,15 +1522,15 @@ export default function ChatWindow({
             <button
               type="button"
               onClick={() => setCapMenuOpen((v) => !v)}
-              className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 hover:border-indigo-300 hover:text-indigo-600 transition text-xs font-medium"
+              className="inline-flex items-center gap-1.5 px-2.5 py-2 rounded-[var(--radius)] border border-line bg-surface text-ink-soft hover:border-ink hover:text-ink transition text-xs font-medium"
               title="切换能力"
             >
-              <CapIcon size={14} strokeWidth={1.8} className="text-indigo-500" />
+              <CapIcon size={14} strokeWidth={1.5} className="text-ink" />
               <span className="hidden sm:inline">{activeCapDef.label}</span>
-              <FiChevronDown size={12} />
+              <ChevronDown size={12} strokeWidth={1.5} />
             </button>
             {capMenuOpen && (
-              <div className="absolute bottom-full left-0 mb-1.5 w-[220px] rounded-xl border border-slate-200 bg-white shadow-lg py-1.5 z-50">
+              <div className="absolute bottom-full left-0 mb-1.5 w-[220px] rounded-[var(--radius)] border border-line bg-surface shadow-[var(--shadow-hover)] py-1.5 z-50">
                 {CAPABILITIES.map((cap) => {
                   const Icon = cap.icon
                   const selected = activeCap === cap.value
@@ -1535,20 +1540,20 @@ export default function ChatWindow({
                       type="button"
                       onClick={() => void handleSelectCap(cap.value)}
                       className={`flex w-full items-center gap-3 px-3.5 py-2 text-left transition-colors ${
-                        selected ? 'bg-slate-50' : 'hover:bg-slate-50/60'
+                        selected ? 'bg-surface-2' : 'hover:bg-surface-2'
                       }`}
                     >
                       <Icon
                         size={15}
-                        strokeWidth={1.6}
-                        className={selected ? 'text-indigo-500' : 'text-slate-400'}
+                        strokeWidth={1.5}
+                        className={selected ? 'text-ink' : 'text-muted'}
                       />
                       <div className="min-w-0 flex-1">
-                        <div className="text-xs font-medium text-slate-800">{cap.label}</div>
-                        <div className="text-[11px] text-slate-400 truncate">{cap.description}</div>
+                        <div className="text-xs font-medium text-ink">{cap.label}</div>
+                        <div className="text-[11px] text-muted truncate">{cap.description}</div>
                       </div>
                       {selected && (
-                        <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-indigo-500" />
+                        <div className="h-1.5 w-1.5 shrink-0 rounded-full bg-ink" />
                       )}
                     </button>
                   )
@@ -1561,13 +1566,13 @@ export default function ChatWindow({
             disabled={!ragEnabled}
             onClick={() => setUseKb((v) => !v)}
             title={ragEnabled ? '点击开关知识库检索' : '该课程暂无知识库'}
-            className={`hidden md:inline-flex items-center gap-1 px-2 py-2 rounded-xl border text-xs transition ${
+            className={`hidden md:inline-flex items-center gap-1 px-2 py-2 rounded-[var(--radius)] border text-xs transition ${
               useKb
-                ? 'border-indigo-400 bg-indigo-50 text-indigo-600'
-                : 'border-slate-200 text-slate-400 hover:border-slate-300'
+                ? 'border-ink bg-surface-2 text-ink'
+                : 'border-line text-muted hover:border-ink-soft'
             }${!ragEnabled ? ' cursor-not-allowed opacity-40' : ''}`}
           >
-            <FiDatabase size={14} />
+            <Database size={14} strokeWidth={1.5} />
             <span className="hidden sm:inline text-[11px]">知识库</span>
           </button>
           {useKb && ragEnabled && (
@@ -1575,7 +1580,7 @@ export default function ChatWindow({
               value={ragMode}
               onChange={(e) => setRagMode(e.target.value as 'mix' | 'naive' | 'local')}
               title="知识库检索模式"
-              className="hidden md:inline-block text-[11px] px-1.5 py-2 rounded-xl border border-slate-200 bg-white text-slate-600 focus:outline-none focus:border-indigo-400"
+              className="hidden md:inline-block text-[11px] px-1.5 py-2 rounded-[var(--radius)] border border-line bg-surface text-ink-soft focus:outline-none focus:border-ink"
             >
               <option value="mix">混合</option>
               <option value="naive">向量</option>
@@ -1586,13 +1591,13 @@ export default function ChatWindow({
             type="button"
             onClick={() => setUseWebSearch((v) => !v)}
             title="网络搜索"
-            className={`hidden md:inline-flex items-center gap-1 px-2 py-2 rounded-xl border text-xs transition ${
+            className={`hidden md:inline-flex items-center gap-1 px-2 py-2 rounded-[var(--radius)] border text-xs transition ${
               useWebSearch
-                ? 'border-indigo-400 bg-indigo-50 text-indigo-600'
-                : 'border-slate-200 text-slate-400 hover:border-slate-300'
+                ? 'border-ink bg-surface-2 text-ink'
+                : 'border-line text-muted hover:border-ink-soft'
             }`}
           >
-            <FiGlobe size={14} />
+            <Globe size={14} strokeWidth={1.5} />
             <span className="hidden sm:inline text-[11px]">搜索</span>
           </button>
           <div className="hidden md:block">
@@ -1617,8 +1622,14 @@ export default function ChatWindow({
               }
               rows={1}
               disabled={isRunning}
-              className="w-full resize-none rounded-xl border border-slate-200 px-3 md:px-4 py-2.5 text-sm focus:outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100 transition disabled:opacity-50"
-              style={{ minHeight: '42px', maxHeight: '120px' }}
+              className="w-full resize-none rounded-[var(--radius)] border border-line bg-surface px-3 md:px-4 py-2.5 text-sm text-ink placeholder:text-muted focus:outline-none focus:border-ink transition disabled:opacity-50"
+              style={{
+                minHeight: '42px',
+                maxHeight: '120px',
+                colorScheme: 'light',
+                backgroundColor: 'var(--color-surface, #FFFFFF)',
+                color: 'var(--color-ink, #2F3437)',
+              }}
               onInput={(e) => {
                 const target = e.target as HTMLTextAreaElement
                 target.style.height = 'auto'
@@ -1632,10 +1643,10 @@ export default function ChatWindow({
             <button
               onClick={handleAnswerNow}
               disabled={isAnswerNowPending}
-              className="p-2.5 rounded-xl text-white disabled:opacity-40 disabled:cursor-not-allowed transition shrink-0 bg-amber-500 hover:bg-amber-600"
+              className="p-2.5 rounded-[var(--radius)] text-white disabled:opacity-40 disabled:cursor-not-allowed transition shrink-0 bg-warn-fg hover:opacity-90"
               title="立即回答（基于已有信息直接作答）"
             >
-              <Zap size={17} />
+              <Zap size={17} strokeWidth={1.5} />
             </button>
           )}
 
@@ -1653,12 +1664,12 @@ export default function ChatWindow({
                 pendingFiles.length === 0 &&
                 !(isQuizMode && (quizConfig.topic.trim() || input.trim())))
             }
-            className={`p-2.5 rounded-xl text-white disabled:opacity-40 disabled:cursor-not-allowed transition shrink-0 ${
-              isRunning ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'
+            className={`p-2.5 rounded-[var(--radius)] text-white disabled:opacity-40 disabled:cursor-not-allowed transition shrink-0 ${
+              isRunning ? 'bg-danger-fg hover:opacity-90' : 'bg-accent hover:bg-accent-2'
             }`}
             title={isRunning ? '停止' : isQuizMode ? '开始出题' : '发送'}
           >
-            {isRunning ? <FiSquare size={17} /> : isQuizMode ? <PenLine size={17} /> : <FiSend size={17} />}
+            {isRunning ? <Square size={17} strokeWidth={1.5} /> : isQuizMode ? <PenLine size={17} strokeWidth={1.5} /> : <Send size={17} strokeWidth={1.5} />}
           </button>
         </div>
       </div>

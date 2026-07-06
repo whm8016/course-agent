@@ -1,4 +1,4 @@
-"""per-session deferred 工具持久化（对标 DeepTutor ``services/mcp/session_state.py``）。
+"""per-session deferred 工具持久化。
 
 记录每个 chat session 已 load 的 deferred 工具名，使后续 turn 从一开始就含这些
 schema，而不必重新 load。落 ``data/sessions/<session_id>/loaded_tools.json``。

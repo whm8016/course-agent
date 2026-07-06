@@ -2,25 +2,25 @@
 
 ## Overview
 
-The backend follows a **three-layer plugin model** (aligned with DeepTutor): single-shot **Tools** (能做什么) + multi-stage **Capabilities** (怎么做) + on-demand **Skills** (应该知道什么 — knowledge packages the model fetches via `read_skill`). MCP server tools plug into the same `tool_calls` surface through a **progressive-disclosure** loader (`load_tools`). The four capabilities (chat / quiz / solve / research) all run on a shared `run_agent_loop`, driven by **tool_calls** (no label protocol layer).
+The backend follows a **three-layer plugin model** : single-shot **Tools** (能做什么) + multi-stage **Capabilities** (怎么做) + on-demand **Skills** (应该知道什么 — knowledge packages the model fetches via `read_skill`). MCP server tools plug into the same `tool_calls` surface through a **progressive-disclosure** loader (`load_tools`). The four capabilities (chat / quiz / solve / research) all run on a shared `run_agent_loop`, driven by **tool_calls** (no label protocol layer).
 
 ```
 Entry Points
-  POST /api/chat        (SSE streaming)
-  WS   /api/run/{cap}   (WebSocket, unified)
-  Bot  QQ / Feishu      (IM channels — shares the same engine)
-          |
-  TurnRuntimeManager + CourseOrchestrator   (services/session/turn_runtime.py, core/orchestrator.py)
-          |
-  CapabilityRegistry   (core/registry.py)
-   ├── ChatCapability        ──► ChatPipeline (system_prompt + run_agent_loop)
-   ├── DeepSolveCapability   ──► single loop + solve_plan/finish_step/replan tools + SolveSession
-   ├── DeepResearchCapability──► rephrase → decompose → research(queue+parallel) → reporting(citation)
-   └── QuizCapability        ──► explore → plan → quiz
-          |
-      StreamBus  (core/stream_bus.py)
-          |
-   SSE / WebSocket consumers
+ POST /api/chat (SSE streaming)
+ WS /api/run/{cap} (WebSocket, unified)
+ Bot QQ / Feishu (IM channels — shares the same engine)
+ |
+ TurnRuntimeManager + CourseOrchestrator (services/session/turn_runtime.py, core/orchestrator.py)
+ |
+ CapabilityRegistry (core/registry.py)
+ ├── ChatCapability ──► ChatPipeline (system_prompt + run_agent_loop)
+ ├── DeepSolveCapability ──► single loop + solve_plan/finish_step/replan tools + SolveSession
+ ├── DeepResearchCapability──► rephrase → decompose → research(queue+parallel) → reporting(citation)
+ └── QuizCapability ──► explore → plan → quiz
+ |
+ StreamBus (core/stream_bus.py)
+ |
+ SSE / WebSocket consumers
 ```
 
 ---
@@ -29,31 +29,31 @@ Entry Points
 
 The core scheduling kernel lives in `core/agentic/loop.py` (`run_agent_loop`).
 
-One user turn = one call to `run_agent_loop()`:
+One user turn = one call to `run_agent_loop`:
 
 ```
 for iteration in range(max_iterations):
-    result = _one_round(messages, tool_schemas, model)   # one streaming LLM call
-    if result.has_tool_calls:          # tool round
-        emit thinking narration
-        dispatch tools in parallel     # core/agentic/tool_dispatch.py
-        append role=tool messages
-        continue
-    else:                              # finish round (or last round tools=None)
-        emit content as token events (true streaming, live_sink)
-        break
+ result = _one_round(messages, tool_schemas, model) # one streaming LLM call
+ if result.has_tool_calls: # tool round
+ emit thinking narration
+ dispatch tools in parallel # core/agentic/tool_dispatch.py
+ append role=tool messages
+ continue
+ else: # finish round (or last round tools=None)
+ emit content as token events (true streaming, live_sink)
+ break
 ```
 
 The last iteration always runs with `tools=None`, forcing a text answer (forced finish + true chunk streaming; first-token latency ≈ model first token). Multi-stage capabilities (solve / question / research) are orchestrated in code as **multiple `run_agent_loop` calls** (one per stage), with `dataclasses.replace` to isolate context between stages.
 
-### tool_calls vs label-driven (the DeepTutor trade-off)
+### tool_calls vs label-driven (the )
 
 | Approach | How "what next?" is decided |
 |---|---|
-| ReAct (label protocol) | First-line label (`FINISH`/`TOOL`/`THINK`) — DeepTutor approach |
+| ReAct (label protocol) | First-line label (`FINISH`/`TOOL`/`THINK`) — |
 | **tool_calls (this project)** | **OpenAI `tool_calls` field** — provider-guaranteed structure, works across GPT/Qwen/DeepSeek |
 
-This project chose tool_calls: simpler prompts, provider-guaranteed formatting, mainstream. Where DeepTutor relies on the label protocol to enforce flow gating, this project achieves equivalence via **code orchestration + tool state machines** (SolveSession for solve, three-stage orchestration for quiz, DynamicTopicQueue + CitationManager for research).
+This project chose tool_calls: simpler prompts, provider-guaranteed formatting, mainstream. Where relies on the label protocol to enforce flow gating, this project achieves equivalence via **code orchestration + tool state machines** (SolveSession for solve, three-stage orchestration for quiz, DynamicTopicQueue + CitationManager for research).
 
 ---
 
@@ -61,14 +61,14 @@ This project chose tool_calls: simpler prompts, provider-guaranteed formatting, 
 
 ```
 POST /api/chat
-  └── api/chat.py
-        ├── auth + check_course_access (multi-tenant isolation)
-        ├── build UnifiedContext
-        ├── TurnRuntimeManager.start_turn(ctx)
-        └── SSE: subscribe_turn(turn_id) → yield events
-              └── (TRM drives) CourseOrchestrator → ChatCapability → ChatPipeline
-                    ├── assemble system_prompt (chat.yaml loop spec + course prompt + persona + memory)
-                    └── run_agent_loop(...)
+ └── api/chat.py
+ ├── auth + check_course_access (multi-tenant isolation)
+ ├── build UnifiedContext
+ ├── TurnRuntimeManager.start_turn(ctx)
+ └── SSE: subscribe_turn(turn_id) → yield events
+ └── (TRM drives) CourseOrchestrator → ChatCapability → ChatPipeline
+ ├── assemble system_prompt (chat.yaml loop spec + course prompt + persona + memory)
+ └── run_agent_loop(...)
 ```
 
 Key files:
@@ -78,9 +78,9 @@ Key files:
 | `api/chat.py` | SSE endpoint, TRM lifecycle |
 | `services/session/turn_runtime.py` | TurnRuntimeManager — turn lifecycle + StreamBus fan-out |
 | `core/orchestrator.py` | `CourseOrchestrator` — routes context to the selected capability |
-| `core/agent/orchestrator.py` | `normalize_mode` + 辅助流式节点（summarize/vision）|
+| `core/agent/orchestrator.py` | `normalize_mode`（chat_mode 规范化）|
 | `core/capabilities/chat_pipeline.py` | system_prompt assembly + run_agent_loop |
-| `core/agentic/loop.py` | `run_agent_loop()` — the scheduling kernel (tool_calls, true streaming) |
+| `core/agentic/loop.py` | `run_agent_loop` — the scheduling kernel (tool_calls, true streaming) |
 | `core/agentic/tool_dispatch.py` | parallel tool execution (≤8 concurrent) |
 | `core/agent/tool_registry.py` | rag / web_search / ask_user / solve_* + read_skill / load_tools / mcp_* dispatch |
 | `core/agentic/dynamic_tools.py` | `DynamicToolResolver` — assemble tool_schemas (base + read_skill + load_tools + deferred mcp_*), contextvar-injected loader |
@@ -91,7 +91,7 @@ Key files:
 
 ---
 
-## The Four Capabilities (aligned with DeepTutor)
+## The Four Capabilities 
 
 | Capability | Pipeline | Stages (tool_calls version, code-orchestrated) |
 |---|---|---|
@@ -147,7 +147,7 @@ Both **Skills** (knowledge playbooks) and **MCP tools** (deferred) reach the mod
 
 - **`SkillService`** (`core/skills/`) loads `SKILL.md` packages from two layers (builtin read-only + per-course user that shadows builtin). `always: true` skills are eagerly injected; the rest are manifest-only.
 - **`MCPConnectionManager`** (`core/mcp/`) owns per-server connection tasks (each holds its own `AsyncExitStack` — MCP SDK cancel scopes are task-bound, so sessions must open/close within one task). MCP tools default to `deferred=True`: not in the initial tool list, reachable only via `load_tools`. Loaded names persist per chat session (`session_state`).
-- **`DynamicToolResolver`** (`core/agentic/dynamic_tools.py`) assembles each turn's `tool_schemas` (base + read_skill + load_tools + already-loaded mcp_*), binds the `DeferredToolLoader` to that **mutable list**, and exposes the loader via a `contextvars.ContextVar`. **`run_agent_loop`'s core loop is unchanged** — `loop.py:252` reuses the same list reference each iteration (`schemas = None if final else tool_schemas`), so `load()`'s `.append()` makes the tool callable on the very next round.
+- **`DynamicToolResolver`** (`core/agentic/dynamic_tools.py`) assembles each turn's `tool_schemas` (base + read_skill + load_tools + already-loaded mcp_*), binds the `DeferredToolLoader` to that **mutable list**, and exposes the loader via a `contextvars.ContextVar`. **`run_agent_loop`'s core loop is unchanged** — `loop.py:252` reuses the same list reference each iteration (`schemas = None if final else tool_schemas`), so `load`'s `.append` makes the tool callable on the very next round.
 
 ---
 
@@ -156,13 +156,13 @@ Both **Skills** (knowledge playbooks) and **MCP tools** (deferred) reach the mod
 `core/registry.py` → `CapabilityRegistry` maps names to instances:
 
 ```python
-registry.register(ChatCapability())         # "chat"
-registry.register(DeepSolveCapability())    # "deep_solve"
-registry.register(DeepResearchCapability()) # "deep_research"
-registry.register(QuizCapability())         # "quiz"
+registry.register(ChatCapability) # "chat"
+registry.register(DeepSolveCapability) # "deep_solve"
+registry.register(DeepResearchCapability) # "deep_research"
+registry.register(QuizCapability) # "quiz"
 ```
 
-Adding a new capability: implement `BaseCapability` (see `core/capability_protocol.py`), call `registry.register()`.
+Adding a new capability: implement `BaseCapability` (see `core/capability_protocol.py`), call `registry.register`.
 
 ---
 
@@ -177,7 +177,7 @@ The IM Bot (`core/bot/`) **already shares the same Agent engine as the Web API**
 1. **tool_calls driven (no label layer)**: provider-guaranteed structured output; flow gating done in code (SolveSession / three-stage orchestration / queue).
 2. **StreamBus fan-out**: SSE, WebSocket, and tests all subscribe to the same bus — no duplication between transport layers.
 3. **Capability isolation**: each capability owns its full pipeline; the orchestrator only routes, never executes business logic.
-4. **Externalized prompts**: `core/<cap>/prompts/zh/*.yaml` + `prompt_loader`, aligned with DeepTutor's prompt organization.
+4. **Externalized prompts**: `core/<cap>/prompts/zh/*.yaml` + `prompt_loader`, 's prompt organization.
 5. **Forced finish + true streaming**: the last loop iteration forces `tools=None` to guarantee a text answer, with chunk pass-through for low first-token latency.
 6. **Progressive disclosure (Skills + deferred MCP)**: the system prompt carries one-line manifests; `read_skill` reveals knowledge playbooks, `load_tools` reveals tool schemas — isomorphic mechanisms. `run_agent_loop`'s core loop is **unchanged**: a mutable `tool_schemas` list + `contextvars`-injected loader makes deferred tools appear next round with zero edits to the scheduling kernel.
 
@@ -226,17 +226,17 @@ Redis SETNX 效率型锁（单实例 Redis 足够，无需 Redlock）+ **竞选�
 
 ```python
 register_leader_callbacks(on_gain=start_singleton_services, on_lose=stop_singleton_services)
-await try_become_leader()   # 当选走 on_gain；未当选起竞选 loop，接管时再走 on_gain
+await try_become_leader # 当选走 on_gain；未当选起竞选 loop，接管时再走 on_gain
 ```
 
-`is_leader()` 动态反映当前状态（竞选接管 / 丢锁实时更新），不再是启动时的静态快照。状态上报 Prometheus `ca_leader_is_leader`（`sum==0` 即无 leader 告警）。
+`is_leader` 动态反映当前状态（竞选接管 / 丢锁实时更新），不再是启动时的静态快照。状态上报 Prometheus `ca_leader_is_leader`（`sum==0` 即无 leader 告警）。
 
 ### 粘性会话（`frontend/nginx.conf`）
 
 ```nginx
 upstream backend_pool {
-    ip_hash;  # 同一客户端 IP 路由到同一 worker
-    server backend:8002;
+ ip_hash; # 同一客户端 IP 路由到同一 worker
+ server backend:8002;
 }
 ```
 
@@ -263,10 +263,10 @@ TurnRuntime 的 `_executions` 字典在进程内，断线重连必须回到同�
 ```python
 _TRACING_ON = bool(LANGSMITH_TRACING) and bool(LANGSMITH_API_KEY)
 
-def is_tracing_enabled() -> bool: ...
-def safe_traceable(*, name, run_type, ...): ...  # 未启用时 identity 装饰器
-async def trace_context(*, name, metadata, tags): ...  # 顶层 root run
-def wrap_openai_client(client, *, chat_name): ...  # AsyncOpenAI/AsyncAzureOpenAI wrap
+def is_tracing_enabled -> bool: ...
+def safe_traceable(*, name, run_type, ...): ... # 未启用时 identity 装饰器
+async def trace_context(*, name, metadata, tags): ... # 顶层 root run
+def wrap_openai_client(client, *, chat_name): ... # AsyncOpenAI/AsyncAzureOpenAI wrap
 ```
 
 **设计原则**：
@@ -290,11 +290,11 @@ def wrap_openai_client(client, *, chat_name): ...  # AsyncOpenAI/AsyncAzureOpenA
 ### Trace 层级（LangSmith UI）
 
 ```
-turn (root)                          ← trace_context
-├─ course_agent_chat (LLM)           ← wrap_openai
-├─ tool.execute (tool)               ← @safe_traceable
-│  └─ rag.retrieve (retriever)       ← @safe_traceable
-│     └─ lightrag.llm (llm)          ← @safe_traceable
+turn (root) ← trace_context
+├─ course_agent_chat (LLM) ← wrap_openai
+├─ tool.execute (tool) ← @safe_traceable
+│ └─ rag.retrieve (retriever) ← @safe_traceable
+│ └─ lightrag.llm (llm) ← @safe_traceable
 └─ course_agent_chat (LLM, 最终答案)
 ```
 
@@ -309,17 +309,17 @@ LANGSMITH_PROJECT=course-agent-dev
 
 ---
 
-## LLM Provider Catalog (per-request, DeepTutor-style)
+## LLM Provider Catalog (per-request, )
 
-The backend supports **per-request provider/model switching** aligned with DeepTutor: admins pre-configure a pool of LLM provider profiles (`data/model_catalog.json` → `profiles[]`), and any user can pick one from a dropdown in the chat window for that turn — **no restart, takes effect immediately**.
+The backend supports **per-request provider/model switching** admins pre-configure a pool of LLM provider profiles (`data/model_catalog.json` → `profiles[]`), and any user can pick one from a dropdown in the chat window for that turn — **no restart, takes effect immediately**.
 
 ```
 ChatWindow (model dropdown) ──► POST /api/chat { model_profile_id }
-   └── UnifiedContext.llm_profile_id
-         └── ChatPipeline._resolve_profile_runtime()
-               ├── core/llm/catalog.get_profile(id)                 # read JSON (live)
-               └── provider_factory.get_llm_client_for_profile()    # fingerprint-cached client
-                     └── run_agent_loop(client=<profile>, model=<profile.text>)   # loop already accepts client/model
+ └── UnifiedContext.llm_profile_id
+ └── ChatPipeline._resolve_profile_runtime
+ ├── core/llm/catalog.get_profile(id) # read JSON (live)
+ └── provider_factory.get_llm_client_for_profile # fingerprint-cached client
+ └── run_agent_loop(client=<profile>, model=<profile.text>) # loop already accepts client/model
 ```
 
 Key points:
@@ -327,6 +327,6 @@ Key points:
 - **Empty fields fall back to `.env`** (`get_llm_client_for_profile`): `active=default` (catalog key/base_url usually empty) still constructs correctly via the startup constants — so "no selection" and "select active profile" behave identically.
 - **Fingerprint-cached clients**: same `(binding, key, base_url, api_version)` reuses one client (avoids per-request `new`).
 - **No selection → uses catalog `active_profile` (read live)**, so `set_active` also takes effect immediately (not just post-restart).
-- **Scope**: only the chat / deep_solve turn is per-request switchable (both route through `/api/chat` → ChatPipeline). Embedding / LightRAG / Bot subsystems keep using the startup constants — DeepTutor scope parity.
+- **Scope**: only the chat / deep_solve turn is per-request switchable (both route through `/api/chat` → ChatPipeline). Embedding / LightRAG / Bot subsystems keep using the startup constants — .
 
 Management API (`api/llm.py`, admin): CRUD profiles + `/probe` test connection + `/active` default; `/profiles/selectable` feeds the dropdown (**api_key stripped**). Catalog read/write layer: `core/llm/catalog.py` (live file reads → API writes visible next request). Frontend: `LlmProviderPage` (admin CRUD+test) + `ChatWindow` model dropdown (all users).

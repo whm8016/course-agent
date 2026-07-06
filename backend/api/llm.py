@@ -1,4 +1,4 @@
-"""LLM 供应商 profile 管理 REST API（对标 DeepTutor provider 设置）。
+"""LLM 供应商 profile 管理 REST API（provider 设置）。
 
 provider 以 profile 池形式部署级共享（管理员预配）；所有用户对话时从 /selectable
 下拉选 profile，后端按该 profile 动态构造 client（provider_factory.get_llm_client_for_profile）
@@ -18,17 +18,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from api.auth import get_current_user
+from api.auth import get_current_user, require_admin
 from core.llm import catalog as catalog_mod
 from core.llm.provider_factory import clear_llm_client_cache
 from core.llm.provider_registry import PROVIDERS
 
 router = APIRouter(prefix="/llm")
-
-
-def _require_admin(user: dict):
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可管理 LLM 供应商配置")
 
 
 class ProfilePayload(BaseModel):
@@ -88,8 +83,7 @@ async def list_selectable_profiles(user: dict = Depends(get_current_user)):
 # ── admin：完整 profile 管理 ─────────────────────────────────────────────────
 
 @router.get("/profiles")
-async def list_profiles_admin(user: dict = Depends(get_current_user)):
-    _require_admin(user)
+async def list_profiles_admin(_: dict = Depends(require_admin)):
     catalog = catalog_mod.load_catalog()
     active = catalog_mod.active_profile_id(catalog)
     return {
@@ -103,9 +97,8 @@ async def list_profiles_admin(user: dict = Depends(get_current_user)):
 
 @router.post("/profiles/{profile_id}")
 async def upsert_profile_route(
-    profile_id: str, payload: ProfilePayload, user: dict = Depends(get_current_user)
+    profile_id: str, payload: ProfilePayload, _: dict = Depends(require_admin)
 ):
-    _require_admin(user)
     if not profile_id.strip():
         raise HTTPException(status_code=400, detail="profile id 不能为空")
     saved = catalog_mod.upsert_profile(profile_id, payload.model_dump())
@@ -116,8 +109,7 @@ async def upsert_profile_route(
 
 
 @router.delete("/profiles/{profile_id}")
-async def delete_profile_route(profile_id: str, user: dict = Depends(get_current_user)):
-    _require_admin(user)
+async def delete_profile_route(profile_id: str, _: dict = Depends(require_admin)):
     if not catalog_mod.delete_profile(profile_id):
         raise HTTPException(status_code=404, detail=f"profile '{profile_id}' not found")
     clear_llm_client_cache()
@@ -125,8 +117,7 @@ async def delete_profile_route(profile_id: str, user: dict = Depends(get_current
 
 
 @router.put("/active")
-async def set_active_route(payload: ActiveRequest, user: dict = Depends(get_current_user)):
-    _require_admin(user)
+async def set_active_route(payload: ActiveRequest, _: dict = Depends(require_admin)):
     if not catalog_mod.set_active(payload.profile_id):
         raise HTTPException(status_code=404, detail=f"profile '{payload.profile_id}' not found")
     clear_llm_client_cache()
@@ -194,8 +185,7 @@ async def _probe_profile(prof: dict, timeout: int = 20) -> dict:
 
 
 @router.post("/profiles/{profile_id}/test")
-async def test_profile_route(profile_id: str, user: dict = Depends(get_current_user)):
-    _require_admin(user)
+async def test_profile_route(profile_id: str, _: dict = Depends(require_admin)):
     prof = catalog_mod.get_profile(profile_id)
     if not prof:
         raise HTTPException(status_code=404, detail=f"profile '{profile_id}' not found")
@@ -203,8 +193,7 @@ async def test_profile_route(profile_id: str, user: dict = Depends(get_current_u
 
 
 @router.post("/probe")
-async def probe_route(payload: ProfilePayload, user: dict = Depends(get_current_user)):
-    _require_admin(user)
+async def probe_route(payload: ProfilePayload, _: dict = Depends(require_admin)):
     prof = {
         "binding": payload.binding,
         "api_key": payload.api_key,

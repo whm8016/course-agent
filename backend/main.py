@@ -21,7 +21,7 @@ logging.basicConfig(level=_LOG_LEVEL, handlers=[_log_handler])
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -35,6 +35,7 @@ from api.llama_rag import router as llama_rag_router
 from api.admin import router as admin_router
 from api.teacher import router as teacher_router
 from api.auth import router as auth_router
+from api.auth import get_current_admin
 from api.chat import router as chat_router
 from api.courses import router as courses_router
 from api.lightrag import router as lightrag_router
@@ -58,7 +59,10 @@ from core.db.database import init_db, close_db
 from core.db.limiter import limiter
 from core.arq_pool import get_arq_pool, close_arq_pool
 from core.rag.cache import init_rag_cache, get_cache_stats as get_rag_cache_stats, set_rag_cache
-from core.llm.llm import get_llm_circuit_state, reset_llm_circuit_breaker
+from core.llm.llm import (
+    get_all_llm_circuit_states,
+    reset_all_llm_circuit_breakers,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +189,7 @@ async def lifespan(app: FastAPI):
     get_event_bus().subscribe(EventType.CAPABILITY_COMPLETE, _on_capability_complete)
     logger.info("EventBus: registered capability_complete handlers")
 
-    # 尝试初始化 ARQ 任务队列连接池（Redis 不可用时跳过，降级为 BackgroundTasks）
+    # 尝试初始化 ARQ 任务队列连接池
     await get_arq_pool()
     # 初始化 RAG 缓存并注入到 rag.py 检索路径
     try:
@@ -383,7 +387,10 @@ async def health_detailed():
         DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
         if DASHSCOPE_API_KEY:
             checks["llm"] = "ok (api_key configured)"
-            details["llm_circuit_breaker"] = get_llm_circuit_state()
+            # 熔断器按 binding 拆分：展示全部供应商状态；保留旧单数 key（default）向后兼容
+            _cb_states = get_all_llm_circuit_states()
+            details["llm_circuit_breakers"] = _cb_states
+            details["llm_circuit_breaker"] = _cb_states.get("default", "closed")
         else:
             checks["llm"] = "error: DASHSCOPE_API_KEY not set"
     except Exception as exc:
@@ -404,11 +411,14 @@ async def health_detailed():
 
 
 @app.post("/api/admin/circuit-breaker/reset")
-async def reset_circuit_breaker():
+async def reset_circuit_breaker(_: dict = Depends(get_current_admin)):
     """
     重置 LLM 熔断器（运维操作）
 
     当熔断器长时间处于 OPEN 状态时，可以手动重置
     """
-    reset_llm_circuit_breaker()
-    return {"message": "LLM circuit breaker reset successfully", "state": get_llm_circuit_state()}
+    n = reset_all_llm_circuit_breakers()
+    return {
+        "message": f"所有 LLM 熔断器已重置（共 {n} 个）",
+        "states": get_all_llm_circuit_states(),
+    }

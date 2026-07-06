@@ -10,22 +10,17 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.auth import get_current_user
+from api.auth import get_current_user, require_admin
 from core.db.database import get_db, UserSearchConfig
 from services.search import get_providers_info, probe_search
 from services.search.config import load_admin_default, save_admin_default
 
 router = APIRouter(prefix="/search_config")
-
-
-def _require_admin(user: dict):
-    if user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="仅管理员可管理搜索默认配置")
 
 
 class SearchConfigPayload(BaseModel):
@@ -63,16 +58,14 @@ async def list_providers(user: dict = Depends(get_current_user)):
 
 
 @router.get("/admin")
-async def get_admin_config(user: dict = Depends(get_current_user)):
+async def get_admin_config(_: dict = Depends(require_admin)):
     """admin 默认配置（admin only，含 key 回填）。"""
-    _require_admin(user)
     return load_admin_default() or _empty_cfg()
 
 
 @router.put("/admin")
-async def put_admin_config(payload: SearchConfigPayload, user: dict = Depends(get_current_user)):
+async def put_admin_config(payload: SearchConfigPayload, _: dict = Depends(require_admin)):
     """保存 admin 默认到 data/search_config.json（admin only）。"""
-    _require_admin(user)
     saved = save_admin_default(payload.model_dump())
     return {"saved": True, "config": saved}
 

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { ChevronDown, BrainCircuit, Database, Eye, MessageSquare, Loader2 } from 'lucide-react'
+import { ChevronDown, BrainCircuit, Database, Eye, MessageSquare, Loader2, Wrench } from 'lucide-react'
 import type { Message } from '../../types'
 
 interface Props {
@@ -83,16 +83,10 @@ function StageRow({
   const active = group.state === 'running' && isLast && Boolean(isStreaming)
   const Icon = STAGE_ICONS[group.stage] ?? BrainCircuit
   const [nowSec, setNowSec] = useState(() => Date.now() / 1000)
-  // running 时默认展开，complete 时默认收起；用户点击可手动覆盖
-  const [open, setOpen] = useState(group.state === 'running')
-  const [userOverride, setUserOverride] = useState(false)
+  // running 时默认展开，complete 时默认收起；用户点击后用 override 固定（derived state，无需 effect 同步）
+  const [override, setOverride] = useState<boolean | null>(null)
+  const open = override ?? (group.state === 'running')
   const contentRef = useRef<HTMLDivElement | null>(null)
-
-  // 阶段状态变化时同步 open（除非用户已手动改过）
-  useEffect(() => {
-    if (userOverride) return
-    setOpen(group.state === 'running')
-  }, [group.state, userOverride])
 
   // 流式内容更新时自动滚到底部
   useEffect(() => {
@@ -118,22 +112,21 @@ function StageRow({
 
   const handleToggle = () => {
     if (!hasContent) return
-    setUserOverride(true)
-    setOpen((v) => !v)
+    setOverride(!open)
   }
 
   const header = (
     <div
-      className="flex items-center gap-2 py-0.5 text-[12px] font-medium text-slate-500 cursor-pointer hover:text-slate-700"
+      className="flex items-center gap-2 py-0.5 text-[12px] font-medium text-muted cursor-pointer hover:text-ink-soft"
       onClick={handleToggle}
     >
       {hasContent
-        ? <ChevronDown size={12} className={`shrink-0 transition-transform ${open ? '' : '-rotate-90'}`} />
+        ? <ChevronDown size={12} strokeWidth={1.5} className={`shrink-0 transition-transform ${open ? '' : '-rotate-90'}`} />
         : <span className="w-3 shrink-0" />
       }
-      <Icon size={12} strokeWidth={1.6} className="shrink-0" />
+      <Icon size={12} strokeWidth={1.5} className="shrink-0" />
       <span>{group.label}{duration ? ` · ${duration}` : ''}</span>
-      {active && <Loader2 size={11} className="animate-spin text-indigo-400" />}
+      {active && <Loader2 size={11} strokeWidth={1.5} className="animate-spin text-ink-soft" />}
     </div>
   )
 
@@ -143,7 +136,7 @@ function StageRow({
       {hasContent && open && (
         <div
           ref={contentRef}
-          className="ml-5 mr-3 mt-0.5 max-h-[180px] overflow-y-auto px-3 py-1 text-[11px] italic leading-relaxed text-slate-400 whitespace-pre-wrap"
+          className="ml-5 mr-3 mt-0.5 max-h-[180px] overflow-y-auto px-3 py-1 text-[11px] italic leading-relaxed text-muted whitespace-pre-wrap"
         >
           {group.content}
         </div>
@@ -178,10 +171,10 @@ function ToolCallRow({ step }: { step: Message }) {
   }
   const label = toolLabel(tool)
   return (
-    <div className="flex items-start gap-2 py-0.5 text-[12px] text-slate-500">
-      <span className="shrink-0">🔧</span>
+    <div className="flex items-start gap-2 py-0.5 text-[12px] text-muted">
+      <Wrench size={12} strokeWidth={1.5} className="shrink-0 mt-0.5" />
       <span className="font-medium shrink-0">{label}</span>
-      {summary && <span className="text-slate-400 truncate">{summary}</span>}
+      {summary && <span className="text-muted truncate">{summary}</span>}
     </div>
   )
 }
@@ -191,29 +184,22 @@ function ToolCallGroup({ steps, isStreaming }: { steps: Message[]; isStreaming?:
   const allSame = labels.every((l) => l === labels[0])
   const groupLabel = allSame ? labels[0] : '工具调用'
 
-  // 流式进行中默认展开（看实时进度），结束后默认收起；用户点击可手动覆盖（对齐 StageRow）
-  const [open, setOpen] = useState(() => Boolean(isStreaming))
-  const [userOverride, setUserOverride] = useState(false)
-  useEffect(() => {
-    if (userOverride) return
-    setOpen(Boolean(isStreaming))
-  }, [isStreaming, userOverride])
+  // 流式进行中默认展开（看实时进度），结束后默认收起；用户点击后用 override 固定（derived state，对齐 StageRow）
+  const [override, setOverride] = useState<boolean | null>(null)
+  const open = override ?? Boolean(isStreaming)
 
-  const toggle = () => {
-    setUserOverride(true)
-    setOpen((v) => !v)
-  }
+  const toggle = () => setOverride(!open)
 
   return (
     <div>
       <div
-        className="flex items-center gap-2 py-0.5 text-[12px] font-medium text-slate-500 cursor-pointer hover:text-slate-700"
+        className="flex items-center gap-2 py-0.5 text-[12px] font-medium text-muted cursor-pointer hover:text-ink-soft"
         onClick={toggle}
       >
-        <ChevronDown size={12} className={`shrink-0 transition-transform ${open ? '' : '-rotate-90'}`} />
-        <span className="shrink-0">🔧</span>
+        <ChevronDown size={12} strokeWidth={1.5} className={`shrink-0 transition-transform ${open ? '' : '-rotate-90'}`} />
+        <Wrench size={12} strokeWidth={1.5} className="shrink-0" />
         <span>{groupLabel} · {steps.length} 次</span>
-        {isStreaming && <Loader2 size={11} className="animate-spin text-indigo-400" />}
+        {isStreaming && <Loader2 size={11} strokeWidth={1.5} className="animate-spin text-ink-soft" />}
       </div>
       {open && (
         <div className="ml-5 mt-0.5 space-y-0.5">
@@ -235,7 +221,7 @@ export default function ThinkingProcess({ steps, isStreaming }: Props) {
   const collapseTools = toolSteps.length >= 3
 
   return (
-    <div className="mb-3 space-y-0.5 border-b border-slate-100 pb-3">
+    <div className="mb-3 space-y-0.5 border-b border-line pb-3">
       {groups.map((g, i) => (
         <StageRow
           key={g.stage}

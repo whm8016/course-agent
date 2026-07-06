@@ -41,7 +41,7 @@ class ChatRequest(BaseModel):
     image_path: str | None = Field(default=None, description="图片上传路径（可选，向后兼容旧单图入口）")
     attachments: list[Attachment] = Field(default_factory=list, description="附件列表（图片，支持多图）")
     tools: list[str] = Field(default_factory=list, description="启用的工具，如 ['rag', 'web_search']")
-    model_profile_id: str | None = Field(default=None, description="本次对话使用的 LLM 供应商 profile id（对标 DeepTutor：用户下拉选中；不传走默认/active）")
+    model_profile_id: str | None = Field(default=None, description="本次对话使用的 LLM 供应商 profile id（对标 ：用户下拉选中；不传走默认/active）")
     rag_mode: str = Field(default="mix", description="LightRAG 检索模式：mix/naive/local/global，默认 mix")
 
 

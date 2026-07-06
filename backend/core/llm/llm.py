@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import logging
 import os
-from collections.abc import AsyncGenerator
 from pathlib import Path
 
 from settings import get_settings
@@ -18,6 +17,7 @@ LLM_TIMEOUT_SEC = get_settings().llm.timeout_sec
 TEXT_MODEL = get_settings().llm.text_model
 from core.llm.provider_factory import get_llm_client
 from core.llm.reliability import (
+    CircuitBreaker,
     CircuitOpenError,
     LLMRetryError,
     RetryConfig,
@@ -94,22 +94,28 @@ if FALLBACK_API_KEY:
 # 熔断器配置
 # ============================================================
 
-# 获取全局 LLM 熔断器
+# "default" 熔断器：仅 binding 解析失败 / 未走 profile 的兜底调用使用。主链路按 binding
+# （dashscope/openai/...）各自注册独立实例（见 _create_with_image_fallback）。保留此全局
+# 引用供 get_llm_circuit_state/reset_llm_circuit_breaker 默认行为向后兼容。
 _llm_circuit_breaker = get_llm_circuit_breaker("default")
 
-# 重试配置（从 settings 读取；settings 不可用时回退默认值，避免循环导入阻断启动）
+# 重试配置（从 settings.llm 读取；settings 模块缺失时回退默认值，避免循环导入阻断启动）。
+# ⚠️ 路径必须是 _s.llm.retry_max（嵌套），不是旧扁平 _s.llm_retry_max —— config 嵌套重构后
+# 扁平名已不存在，读它会 AttributeError。曾因下方 except Exception 把这个错误静默吞掉，
+# 导致 retry 配置永远走兜底默认值、面板配置不生效。except 已收窄为 ImportError（仅兜底
+# settings 模块缺失），配置路径错误会直接抛出暴露问题。
 try:
     from settings.base import get_settings as _get_settings
 
-    _s = _get_settings()
+    _llm_cfg = _get_settings().llm
     _retry_config = RetryConfig(
-        max_retries=_s.llm_retry_max,
-        base_delay=_s.llm_retry_base_delay,
-        max_delay=_s.llm_retry_max_delay,
-        exponential_base=_s.llm_retry_exponential_base,
+        max_retries=_llm_cfg.retry_max,
+        base_delay=_llm_cfg.retry_base_delay,
+        max_delay=_llm_cfg.retry_max_delay,
+        exponential_base=_llm_cfg.retry_exponential_base,
     )
-    del _s
-except Exception:  # pragma: no cover - 启动期 settings 缺失的兜底
+    del _llm_cfg
+except ImportError:  # pragma: no cover - 仅 settings 模块本身缺失（循环导入兜底）
     _retry_config = RetryConfig(
         max_retries=3,
         base_delay=1.0,
@@ -142,7 +148,7 @@ def _build_messages(
 ) -> list[dict]:
     """构建纯文本消息列表（system + history + user）。
 
-    图片注入由调用方经 prepare_multimodal_messages 完成（对标 DeepTutor 两步式）。
+    图片注入由调用方经 prepare_multimodal_messages 完成。
     """
     messages = [{"role": "system", "content": system_prompt}]
     for msg in history:
@@ -160,27 +166,45 @@ async def _create_with_image_fallback(
     create_kwargs: dict,
     binding: str,
     model: str,
+    circuit_breaker: CircuitBreaker | None = _llm_circuit_breaker,
 ):
-    """单次 create 调用，失败时若模型不支持图片则剥图重试（Stage-2 降级）。
+    """带 retry+熔断的 create 调用；模型拒图时在闭包内剥图重试（Stage-2 降级）。
 
-    对标 DeepTutor agent_loop._safe_create 的 image fallback 分支：模型不支持
-    vision（异常命中 image/vision/multimodal 等关键词）时，剥掉图片用**同一模型**
-    重试纯文本。剥图 inplace 改 create_kwargs['messages']，后续 retry 也用纯文本。
+    reliability（指数退避重试 + 熔断器）下沉到此——主 Agent 路径（loop._one_round）与
+    chat_complete 经此统一获得保护。
+
+    image fallback 放进 with_retry_and_circuit 的 _call 内部：剥图重试与首次调用对熔断器
+    原子（成功算 1 次 success，failure_count 不增），避免"模型不支持图片"这类确定性业务
+    错误污染服务可用性熔断计数，HALF_OPEN 探测期也能正常剥图。模型不支持 vision（异常命中
+    image/vision/multimodal 等关键词）时，剥掉图片用同一模型重试纯文本。
     """
     from core.llm.multimodal import (
         is_image_input_unsupported,
         should_degrade_to_text,
         strip_image_parts_inplace,
     )
-    try:
-        return await llm_client.chat.completions.create(**create_kwargs)
-    except Exception as exc:
-        msgs = create_kwargs.get("messages") or []
-        if is_image_input_unsupported(exc) and should_degrade_to_text(binding, model, msgs):
-            strip_image_parts_inplace(create_kwargs["messages"])
-            logger.warning("Stage-2 降级：模型 %s 不支持图片输入，剥图后用同模型重试纯文本", model)
+
+    async def _call_with_image_fallback():
+        try:
             return await llm_client.chat.completions.create(**create_kwargs)
-        raise
+        except Exception as exc:
+            msgs = create_kwargs.get("messages") or []
+            if is_image_input_unsupported(exc) and should_degrade_to_text(binding, model, msgs):
+                strip_image_parts_inplace(create_kwargs["messages"])
+                logger.warning("Stage-2 降级：模型 %s 不支持图片输入，剥图后用同模型重试纯文本", model)
+                return await llm_client.chat.completions.create(**create_kwargs)
+            raise
+
+    # 熔断器策略：circuit_breaker=None 时不熔断（with_retry_and_circuit 仍重试，只是不计
+    # failure）。默认 _llm_circuit_breaker（全局 "default"）保护平台共享的 DashScope——它
+    # 是所有未自配用户共用的下游，挂了要快速失败防雪崩；自配 client 路径由调用方传 None
+    # 关闭：自配供应商是用户私有资源，平台不替它兜底，让真实错误冒给用户，也避免自配失败
+    # 把全局熔断器打 OPEN 误伤他人（含同 binding 不同 key 的自配用户）。
+    return await with_retry_and_circuit(
+        _call_with_image_fallback,
+        retry_config=_retry_config,
+        circuit_breaker=circuit_breaker,
+    )
 
 
 async def _make_chat_completion(
@@ -191,135 +215,20 @@ async def _make_chat_completion(
     max_tokens: int = 8192,
     binding: str = LLM_BINDING,
 ) -> dict:
+    """执行 LLM 调用（retry+熔断+图片降级已下沉到 _create_with_image_fallback）。
+
+    本函数为 chat_complete 等历史调用方保留签名薄封装；可靠性不再在此层包装，
+    否则会与 _create_with_image_fallback 内的 with_retry_and_circuit 双重叠加
+    （retry 套 retry、failure 双重计数）。
     """
-    执行 LLM 调用（带熔断和重试 + Stage-2 图片降级）
-
-    原理：
-    1. 通过熔断器执行调用
-    2. 如果熔断器拒绝（OPEN 状态），抛出 CircuitOpenError
-    3. 如果调用失败，根据 RetryConfig 重试
-    4. 单次失败若因模型不支持图片 → 剥图重试（降级在 _call 内，retry 复用已剥图的 messages）
-    5. 使用指数退避策略避免 API 限流
-    """
-    async def _call():
-        kwargs = {
-            "model": model,
-            "messages": messages,
-            "stream": stream,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        return await _create_with_image_fallback(client, kwargs, binding, model)
-
-    return await with_retry_and_circuit(
-        _call,
-        retry_config=_retry_config,
-        circuit_breaker=_llm_circuit_breaker,
-    )
-
-
-async def chat_stream(
-    system_prompt: str,
-    history: list[dict],
-    user_message: str,
-    image_path: str | None = None,
-    attachments: list | None = None,
-    use_reliability: bool = True,
-    model_override: str | None = None,
-) -> AsyncGenerator[str, None]:
-    """
-    流式 LLM 对话（带可靠性增强）
-
-    参数：
-        system_prompt: 系统提示词
-        history: 对话历史
-        user_message: 用户消息
-        image_path: 图片路径（可选，向后兼容旧单图入口）
-        attachments: 附件列表（Attachment，支持多图；优先于 image_path）
-        use_reliability: 是否使用重试和熔断机制
-        model_override: 指定模型（不传则用 TEXT_MODEL，不因有图自动切换 vision 模型）
-
-    原理：
-    - 构造纯文本消息后，经 prepare_multimodal_messages 注入图片
-    - 使用流式响应逐字返回
-    - 失败时使用指数退避重试
-    """
-    from core.attachment import from_image_path
-    from core.llm.multimodal import prepare_multimodal_messages
-
-    # 合并附件来源：attachments 列表优先，回退旧 image_path 单图
-    all_attachments = list(attachments or [])
-    if image_path and not any(a.is_image() for a in all_attachments):
-        all_attachments.append(from_image_path(image_path))
-    has_image = any(a.is_image() for a in all_attachments)
-
-    # 始终用 chat 主模型（TEXT_MODEL）——对标 DeepTutor，不因有图硬切 VISION_MODEL。
-    # 图片乐观注入；模型若不支持 vision，由 create 层 Stage-2 降级剥图重试。
-    model = model_override or TEXT_MODEL
-    messages = _build_messages(system_prompt, history, user_message)
-    if all_attachments:
-        prepare_multimodal_messages(
-            messages, all_attachments, LLM_BINDING,
-            fallback_text=user_message or "请描述这张图片",
-        )
-
-    logger.info(
-        "LLM stream start model=%s msg_count=%d has_image=%s user_msg=「%s」",
-        model, len(messages), has_image, user_message[:80],
-    )
-
-    try:
-        if use_reliability:
-            stream = await _make_chat_completion(
-                model=model,
-                messages=messages,
-                stream=True,
-                temperature=0.7,
-                max_tokens=8192,
-                binding=LLM_BINDING,
-            )
-        else:
-            stream = await _create_with_image_fallback(
-                client,
-                {
-                    "model": model,
-                    "messages": messages,
-                    "stream": True,
-                    "temperature": 0.7,
-                    "max_tokens": 8192,
-                },
-                LLM_BINDING,
-                model,
-            )
-
-        async for chunk in stream:
-            delta = chunk.choices[0].delta
-            if delta.content:
-                yield delta.content
-
-    except (CircuitOpenError, LLMRetryError) as e:
-        logger.warning(f"Primary LLM failed: {e}, trying fallback...")
-        if _fallback_client:
-            try:
-                fb_model = FALLBACK_MODEL
-                fb_stream = await _fallback_client.chat.completions.create(
-                    model=fb_model,
-                    messages=messages,
-                    stream=True,
-                    temperature=0.7,
-                    max_tokens=8192,
-                )
-                async for chunk in fb_stream:
-                    delta = chunk.choices[0].delta
-                    if delta.content:
-                        yield delta.content
-                return
-            except Exception as fb_e:
-                logger.error(f"Fallback LLM also failed: {fb_e}")
-        yield "⚠️ AI 服务暂时不可用（服务繁忙），请稍后重试。"
-    except Exception:
-        logger.exception("LLM stream error")
-        yield "⚠️ AI 服务发生错误，请稍后重试。"
+    kwargs = {
+        "model": model,
+        "messages": messages,
+        "stream": stream,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+    }
+    return await _create_with_image_fallback(client, kwargs, binding, model)
 
 
 async def chat_complete(
@@ -378,12 +287,30 @@ async def chat_complete(
 # 熔断器状态查询
 # ============================================================
 
-def get_llm_circuit_state() -> str:
-    """获取 LLM 熔断器当前状态"""
-    return _llm_circuit_breaker.get_state().value
+def get_llm_circuit_state(name: str = "default") -> str:
+    """获取指定 binding 的 LLM 熔断器状态（默认 "default"）。
+
+    按 binding 拆分后主链路用供应商名注册（dashscope/openai/...），看全量状态用
+    get_all_llm_circuit_states。
+    """
+    return get_llm_circuit_breaker(name).get_state().value
 
 
-def reset_llm_circuit_breaker():
-    """重置 LLM 熔断器（用于运维操作）"""
-    _llm_circuit_breaker.reset()
-    logger.info("LLM circuit breaker reset")
+def get_all_llm_circuit_states() -> dict[str, str]:
+    """返回所有已注册 LLM 熔断器的状态快照 {binding: state}（运维健康检查用）。"""
+    from core.llm.reliability import all_llm_circuit_states
+    return all_llm_circuit_states()
+
+
+def reset_llm_circuit_breaker(name: str = "default") -> None:
+    """重置指定 binding 的 LLM 熔断器（运维操作）。"""
+    get_llm_circuit_breaker(name).reset()
+    logger.info("LLM circuit breaker reset (name=%s)", name)
+
+
+def reset_all_llm_circuit_breakers() -> int:
+    """重置所有已注册的 LLM 熔断器，返回重置数量（运维一键恢复）。"""
+    from core.llm.reliability import reset_all_llm_circuit_breakers as _reset_all
+    n = _reset_all()
+    logger.info("LLM circuit breakers reset (count=%d)", n)
+    return n

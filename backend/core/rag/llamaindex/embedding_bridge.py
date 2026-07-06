@@ -1,11 +1,11 @@
 """
 embedding_bridge.py
 ───────────────────
-替代 DeepTutor 的 get_embedding_client / get_embedding_config。
+替代 的 get_embedding_client / get_embedding_config。
 
 基于 EMBEDDING__* 凭证独立构造 OpenAI 兼容客户端（不复用主 LLM client——
 主 LLM 可能是不提供 /embeddings 的 provider，如 deepseek），
-对外暴露与 DeepTutor EmbeddingClient 完全一致的接口：
+对外暴露与 EmbeddingClient 完全一致的接口：
 
     await get_embedding_client().embed(list[str])  ->  list[list[float]]
 
@@ -41,7 +41,7 @@ _async_openai_client = get_llm_client(
 logger = logging.getLogger("EmbeddingBridge")
 
 
-# ── 配置对象（对应 DeepTutor 的 EmbeddingConfig）─────────────────────────────
+# ── 配置对象（对应 的 EmbeddingConfig）─────────────────────────────
 @dataclass
 class EmbeddingConfig:
     model: str
@@ -54,11 +54,11 @@ def get_embedding_config() -> EmbeddingConfig:
     return EmbeddingConfig(model=EMBEDDING_MODEL, dim=EMBEDDING_DIM)
 
 
-# ── Embedding 客户端（对应 DeepTutor 的 EmbeddingClient）─────────────────────
+# ── Embedding 客户端（对应 的 EmbeddingClient）─────────────────────
 class DashScopeEmbeddingClient:
     """
     异步 embed()：接收字符串列表，返回向量列表。
-    接口与 DeepTutor EmbeddingClient.embed 完全一致，CustomEmbedding 可以直接调用。
+    接口与 EmbeddingClient.embed 完全一致，CustomEmbedding 可以直接调用。
     """
 
     async def embed(
@@ -100,7 +100,7 @@ class DashScopeEmbeddingClient:
         return all_vecs
 
 
-# ── 单例工厂（对应 DeepTutor 的 get_embedding_client()）──────────────────────
+# ── 单例工厂（对应 的 get_embedding_client()）──────────────────────
 _client_instance: Optional[DashScopeEmbeddingClient] = None
 
 

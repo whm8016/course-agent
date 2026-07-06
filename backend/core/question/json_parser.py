@@ -1,5 +1,5 @@
 """
-LLM 返回文本 → dict（替代 DeepTutor parse_json_response）。
+LLM 返回文本 → dict（parse_json_response）。
 """
 
 from __future__ import annotations

@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import { authHeaders } from '../../services/auth'
 import type { User } from '../../types'
 import JoinCodeShareSection from './JoinCodeShareSection'
-import KbDetailPanel, { STATUS_LABEL, STATUS_COLOR, formatTime } from './KbDetailPanel'
+import KbDetailPanel from './KbDetailPanel'
+import { STATUS_LABEL, STATUS_COLOR, formatTime } from './kbUtils'
 import type { KB } from './KbDetailPanel'
 
 interface Props {
@@ -314,12 +315,12 @@ export default function AdminPage({ user, onBack }: Props) {
   }
 
   return (
-    <div className="flex flex-col md:flex-row h-screen bg-slate-50">
+    <div className="flex flex-col md:flex-row h-screen bg-canvas">
       {/* 侧边栏 */}
-      <aside className="w-full md:w-52 bg-white border-b md:border-b-0 md:border-r border-slate-200 flex flex-col md:h-full">
-        <div className="px-4 py-5 border-b border-slate-100">
-          <h1 className="text-sm font-bold text-slate-800">管理后台</h1>
-          <p className="text-xs text-slate-400 mt-0.5">{user.display_name}</p>
+      <aside className="w-full md:w-52 bg-surface border-b md:border-b-0 md:border-r border-line flex flex-col md:h-full">
+        <div className="px-4 py-5 border-b border-line">
+          <h1 className="text-sm font-bold text-ink">管理后台</h1>
+          <p className="text-xs text-muted mt-0.5">{user.display_name}</p>
         </div>
         <nav className="flex md:flex-col md:flex-1 p-2 md:p-3 gap-1 md:space-y-1 overflow-x-auto">
           {(['kb', 'applications', 'users', 'invites', 'faq'] as const).map(t => (
@@ -329,10 +330,10 @@ export default function AdminPage({ user, onBack }: Props) {
                 setTab(t)
                 if (t === 'faq') loadFaq(faqCourseId || undefined)
               }}
-              className={`whitespace-nowrap md:w-full text-left px-3 py-2 rounded-lg text-sm transition ${
+              className={`whitespace-nowrap md:w-full text-left px-3 py-2 rounded-[var(--radius)] text-sm transition ${
                 tab === t
-                  ? 'bg-indigo-50 text-indigo-700 font-medium'
-                  : 'text-slate-600 hover:bg-slate-50'
+                  ? 'bg-surface-2 text-ink font-medium'
+                  : 'text-ink-soft hover:bg-canvas'
               }`}
             >
               {t === 'kb' ? '知识库管理' : t === 'applications' ? '教师申请' : t === 'users' ? '用户管理' : t === 'invites' ? '教师邀请码' : '高频问题'}
@@ -340,15 +341,15 @@ export default function AdminPage({ user, onBack }: Props) {
           ))}
           <button
             onClick={onBack}
-            className="whitespace-nowrap md:hidden text-left px-3 py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-50 transition"
+            className="whitespace-nowrap md:hidden text-left px-3 py-2 rounded-[var(--radius)] text-sm text-ink-soft hover:bg-canvas transition"
           >
             返回
           </button>
         </nav>
-        <div className="hidden md:block p-3 border-t border-slate-100">
+        <div className="hidden md:block p-3 border-t border-line">
           <button
             onClick={onBack}
-            className="w-full text-left px-3 py-2 rounded-lg text-sm text-slate-500 hover:bg-slate-50 transition"
+            className="w-full text-left px-3 py-2 rounded-[var(--radius)] text-sm text-ink-soft hover:bg-canvas transition"
           >
             返回课程页
           </button>
@@ -360,35 +361,35 @@ export default function AdminPage({ user, onBack }: Props) {
         {tab === 'kb' ? (
           <>
             {/* KB 列表 */}
-            <div className="w-full md:w-80 border-b md:border-b-0 md:border-r border-slate-200 bg-white flex flex-col max-h-48 md:max-h-none">
-              <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
-                <span className="font-medium text-sm text-slate-700">知识库列表</span>
+            <div className="w-full md:w-80 border-b md:border-b-0 md:border-r border-line bg-surface flex flex-col max-h-48 md:max-h-none">
+              <div className="px-4 py-3 border-b border-line flex items-center justify-between">
+                <span className="font-medium text-sm text-ink">知识库列表</span>
                 <button
                   onClick={() => setShowCreateModal(true)}
-                  className="text-xs bg-indigo-600 text-white px-3 py-1 rounded-lg hover:bg-indigo-700 transition"
+                  className="text-xs bg-accent text-white px-3 py-1 rounded-[var(--radius)] hover:bg-accent-2 transition"
                 >
                   + 新建
                 </button>
               </div>
               <div className="flex-1 overflow-y-auto p-2 space-y-1">
                 {kbs.length === 0 && (
-                  <p className="text-xs text-slate-400 text-center mt-8">暂无知识库</p>
+                  <p className="text-xs text-muted text-center mt-8">暂无知识库</p>
                 )}
                 {kbs.map(kb => (
                   <button
                     key={kb.id}
                     onClick={() => { setSelectedKB(kb); loadKBDetail(kb.course_id) }}
-                    className={`w-full text-left px-3 py-3 rounded-lg border transition ${
+                    className={`w-full text-left px-3 py-3 rounded-[var(--radius)] border transition ${
                       selectedKB?.id === kb.id
-                        ? 'border-indigo-200 bg-indigo-50'
-                        : 'border-transparent hover:bg-slate-50'
+                        ? 'border-line bg-surface-2'
+                        : 'border-transparent hover:bg-canvas'
                     }`}
                   >
                     <div className="flex items-center justify-between mb-1">
-                      <span className="text-sm font-medium text-slate-800 truncate">{kb.name}</span>
+                      <span className="text-sm font-medium text-ink truncate">{kb.name}</span>
                       <div className="flex items-center gap-1 ml-1 shrink-0">
                         {!kb.is_visible && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-slate-100 text-slate-400" title="已隐藏，学生不可见">
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-2 text-muted" title="已隐藏，学生不可见">
                             隐藏
                           </span>
                         )}
@@ -397,7 +398,7 @@ export default function AdminPage({ user, onBack }: Props) {
                         </span>
                       </div>
                     </div>
-                    <div className="text-xs text-slate-400">{kb.course_id} · {kb.file_count} 个文件</div>
+                    <div className="text-xs text-muted">{kb.course_id} · {kb.file_count} 个文件</div>
                   </button>
                 ))}
               </div>
@@ -406,13 +407,13 @@ export default function AdminPage({ user, onBack }: Props) {
             {/* KB 详情 */}
             <div className="flex-1 overflow-y-auto p-6">
               {error && (
-                <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg flex justify-between">
+                <div className="mb-4 p-3 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)] flex justify-between">
                   <span>{error}</span>
-                  <button onClick={() => setError('')} className="ml-2 text-red-400 hover:text-red-600">✕</button>
+                  <button onClick={() => setError('')} className="ml-2 text-danger-fg hover:text-danger-fg">✕</button>
                 </div>
               )}
               {!selectedKB ? (
-                <div className="flex items-center justify-center h-full text-slate-400 text-sm">
+                <div className="flex items-center justify-center h-full text-muted text-sm">
                   选择左侧知识库查看详情
                 </div>
               ) : (
@@ -440,66 +441,66 @@ export default function AdminPage({ user, onBack }: Props) {
         ) : tab === 'faq' ? (
           <div className="flex-1 overflow-y-auto p-6">
             {error && (
-              <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg flex justify-between">
+              <div className="mb-4 p-3 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)] flex justify-between">
                 <span>{error}</span>
                 <button onClick={() => setError('')} className="ml-2">✕</button>
               </div>
             )}
             <div className="flex items-center gap-3 mb-4">
-              <h2 className="text-lg font-semibold text-slate-800">高频问题</h2>
-              <span className="text-xs text-slate-400">（达到 {faqThreshold} 次后缓存答案）</span>
+              <h2 className="text-lg font-semibold text-ink">高频问题</h2>
+              <span className="text-xs text-muted">（达到 {faqThreshold} 次后缓存答案）</span>
               <div className="flex-1" />
               <input
                 type="text"
                 placeholder="课程 ID（留空=全部）"
                 value={faqCourseId}
                 onChange={e => setFaqCourseId(e.target.value)}
-                className="border border-slate-200 rounded-lg px-3 py-1.5 text-sm w-48 focus:outline-none focus:ring-2 focus:ring-indigo-300"
+                className="border border-line rounded-[var(--radius)] px-3 py-1.5 text-sm w-48 focus:outline-none focus:ring-2 focus:ring-ink/20"
               />
               <button
                 onClick={() => loadFaq(faqCourseId || undefined)}
                 disabled={faqLoading}
-                className="text-sm bg-indigo-600 text-white px-4 py-1.5 rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition"
+                className="text-sm bg-accent text-white px-4 py-1.5 rounded-[var(--radius)] hover:bg-accent-2 disabled:opacity-50 transition"
               >
                 {faqLoading ? '加载中...' : '查询'}
               </button>
             </div>
             {faqItems.length === 0 ? (
-              <p className="text-sm text-slate-400 text-center mt-16">暂无数据（学生提问后自动统计）</p>
+              <p className="text-sm text-muted text-center mt-16">暂无数据（学生提问后自动统计）</p>
             ) : (
-              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+              <div className="bg-surface rounded-[var(--radius)] border border-line overflow-hidden">
                 <table className="w-full text-sm">
-                  <thead className="bg-slate-50 border-b border-slate-200">
+                  <thead className="bg-canvas border-b border-line">
                     <tr>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 w-12">#</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-ink-soft w-12">#</th>
                       {!faqCourseId && (
-                        <th className="text-left px-4 py-3 text-xs font-medium text-slate-500">课程</th>
+                        <th className="text-left px-4 py-3 text-xs font-medium text-ink-soft">课程</th>
                       )}
-                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500">问题</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 w-24">提问次数</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 w-20">已缓存</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-ink-soft">问题</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-ink-soft w-24">提问次数</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-ink-soft w-20">已缓存</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-line">
                     {faqItems.map((item, idx) => (
-                      <tr key={idx} className="hover:bg-slate-50">
-                        <td className="px-4 py-3 text-slate-400">{idx + 1}</td>
+                      <tr key={idx} className="hover:bg-canvas">
+                        <td className="px-4 py-3 text-muted">{idx + 1}</td>
                         {!faqCourseId && (
-                          <td className="px-4 py-3 text-slate-500 text-xs">
-                            <span className="bg-slate-100 px-1.5 py-0.5 rounded">{item.course_name || item.course_id}</span>
+                          <td className="px-4 py-3 text-ink-soft text-xs">
+                            <span className="bg-surface-2 px-1.5 py-0.5 rounded">{item.course_name || item.course_id}</span>
                           </td>
                         )}
-                        <td className="px-4 py-3 text-slate-800">{item.question}</td>
+                        <td className="px-4 py-3 text-ink">{item.question}</td>
                         <td className="px-4 py-3">
-                          <span className={`font-semibold ${item.count >= faqThreshold ? 'text-indigo-600' : 'text-slate-500'}`}>
+                          <span className={`font-semibold ${item.count >= faqThreshold ? 'text-ink' : 'text-ink-soft'}`}>
                             {item.count}
                           </span>
                         </td>
                         <td className="px-4 py-3">
                           {item.count >= faqThreshold ? (
-                            <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">已缓存</span>
+                            <span className="text-xs bg-ok-bg text-ok-fg px-2 py-0.5 rounded-full">已缓存</span>
                           ) : (
-                            <span className="text-xs text-slate-300">—</span>
+                            <span className="text-xs text-muted">—</span>
                           )}
                         </td>
                       </tr>
@@ -512,46 +513,46 @@ export default function AdminPage({ user, onBack }: Props) {
         ) : tab === 'users' ? (
           <div className="flex-1 overflow-y-auto p-6">
             {error && (
-              <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg flex justify-between">
+              <div className="mb-4 p-3 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)] flex justify-between">
                 <span>{error}</span>
                 <button onClick={() => setError('')} className="ml-2">✕</button>
               </div>
             )}
-            <h2 className="text-lg font-semibold text-slate-800 mb-4">用户列表</h2>
-            <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+            <h2 className="text-lg font-semibold text-ink mb-4">用户列表</h2>
+            <div className="bg-surface rounded-[var(--radius)] border border-line overflow-hidden">
               <table className="w-full text-sm">
-                <thead className="bg-slate-50 border-b border-slate-200">
+                <thead className="bg-canvas border-b border-line">
                   <tr>
                     {['用户名', '显示名', '角色', '注册时间'].map(h => (
-                      <th key={h} className="text-left px-4 py-3 text-xs font-medium text-slate-500">{h}</th>
+                      <th key={h} className="text-left px-4 py-3 text-xs font-medium text-ink-soft">{h}</th>
                     ))}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-line">
                   {users.map(u => {
                     const displayRole = u.role || (u.is_admin ? 'admin' : 'student')
                     const roleColor: Record<string, string> = {
-                      admin: 'bg-purple-100 text-purple-700',
-                      teacher: 'bg-green-100 text-green-700',
-                      student: 'bg-slate-100 text-slate-500',
+                      admin: 'bg-info-bg text-info-fg',
+                      teacher: 'bg-ok-bg text-ok-fg',
+                      student: 'bg-surface-2 text-ink-soft',
                     }
                     const roleLabel: Record<string, string> = {
                       admin: '管理员', teacher: '教师', student: '学生',
                     }
                     return (
-                      <tr key={u.id} className="hover:bg-slate-50">
-                        <td className="px-4 py-3 font-medium text-slate-800">{u.username}</td>
-                        <td className="px-4 py-3 text-slate-600">{u.display_name}</td>
+                      <tr key={u.id} className="hover:bg-canvas">
+                        <td className="px-4 py-3 font-medium text-ink">{u.username}</td>
+                        <td className="px-4 py-3 text-ink-soft">{u.display_name}</td>
                         <td className="px-4 py-3">
                           <div className="flex items-center gap-2">
-                            <span className={`text-xs px-2 py-0.5 rounded-full ${roleColor[displayRole] ?? 'bg-slate-100 text-slate-500'}`}>
+                            <span className={`text-xs px-2 py-0.5 rounded-full ${roleColor[displayRole] ?? 'bg-surface-2 text-ink-soft'}`}>
                               {roleLabel[displayRole] ?? displayRole}
                             </span>
                             <select
                               value={displayRole}
                               disabled={roleChanging === u.id}
                               onChange={e => void changeUserRole(u.id, e.target.value)}
-                              className="text-xs border border-slate-200 rounded px-1.5 py-0.5 bg-white focus:outline-none focus:border-indigo-400"
+                              className="text-xs border border-line rounded px-1.5 py-0.5 bg-surface focus:outline-none focus:border-ink"
                             >
                               <option value="student">学生</option>
                               <option value="teacher">教师</option>
@@ -559,7 +560,7 @@ export default function AdminPage({ user, onBack }: Props) {
                             </select>
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-slate-400">{formatTime(u.created_at)}</td>
+                        <td className="px-4 py-3 text-muted">{formatTime(u.created_at)}</td>
                       </tr>
                     )
                   })}
@@ -570,53 +571,53 @@ export default function AdminPage({ user, onBack }: Props) {
         ) : tab === 'invites' ? (
           <div className="flex-1 overflow-y-auto p-6">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-slate-800">教师邀请码</h2>
+              <h2 className="text-lg font-semibold text-ink">教师邀请码</h2>
               <button
                 onClick={() => void generateInviteCode()}
                 disabled={generatingInvite}
-                className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition"
+                className="px-4 py-2 bg-accent text-white text-sm rounded-[var(--radius)] hover:bg-accent-2 disabled:opacity-50 transition"
               >
                 {generatingInvite ? '生成中...' : '+ 生成邀请码'}
               </button>
             </div>
-            <p className="text-sm text-slate-500 mb-4">
+            <p className="text-sm text-ink-soft mb-4">
               将邀请码发给待注册的教师，注册时填写邀请码即可获得教师权限（每码限用一次）。
             </p>
             {inviteLoading ? (
-              <p className="text-sm text-slate-400">加载中...</p>
+              <p className="text-sm text-muted">加载中...</p>
             ) : inviteCodes.length === 0 ? (
-              <p className="text-sm text-slate-400">暂无邀请码，点击右上角生成。</p>
+              <p className="text-sm text-muted">暂无邀请码，点击右上角生成。</p>
             ) : (
-              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+              <div className="bg-surface rounded-[var(--radius)] border border-line overflow-hidden">
                 <table className="w-full text-sm">
-                  <thead className="bg-slate-50 border-b border-slate-200">
+                  <thead className="bg-canvas border-b border-line">
                     <tr>
                       {['邀请码', '状态', '创建时间', '有效期'].map(h => (
-                        <th key={h} className="text-left px-4 py-3 text-xs font-medium text-slate-500">{h}</th>
+                        <th key={h} className="text-left px-4 py-3 text-xs font-medium text-ink-soft">{h}</th>
                       ))}
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-line">
                     {inviteCodes.map(ic => (
-                      <tr key={ic.id} className="hover:bg-slate-50">
+                      <tr key={ic.id} className="hover:bg-canvas">
                         <td className="px-4 py-3">
-                          <span className="font-mono font-bold text-indigo-700 tracking-widest">{ic.code}</span>
+                          <span className="font-mono font-bold text-ink tracking-widest">{ic.code}</span>
                           <button
                             onClick={() => void navigator.clipboard.writeText(ic.code)}
-                            className="ml-2 text-xs text-slate-400 hover:text-slate-600"
+                            className="ml-2 text-xs text-muted hover:text-ink-soft"
                           >
                             复制
                           </button>
                         </td>
                         <td className="px-4 py-3">
                           {ic.used_by ? (
-                            <span className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded-full">已使用</span>
+                            <span className="text-xs bg-ok-bg text-ok-fg px-2 py-0.5 rounded-full">已使用</span>
                           ) : (
-                            <span className="text-xs bg-yellow-100 text-yellow-700 px-2 py-0.5 rounded-full">未使用</span>
+                            <span className="text-xs bg-warn-bg text-warn-fg px-2 py-0.5 rounded-full">未使用</span>
                           )}
                         </td>
-                        <td className="px-4 py-3 text-slate-400 text-xs">{formatTime(ic.created_at)}</td>
-                        <td className="px-4 py-3 text-slate-400 text-xs">
+                        <td className="px-4 py-3 text-muted text-xs">{formatTime(ic.created_at)}</td>
+                        <td className="px-4 py-3 text-muted text-xs">
                           {ic.expires_at ? formatTime(ic.expires_at) : '永不过期'}
                         </td>
                       </tr>
@@ -629,20 +630,20 @@ export default function AdminPage({ user, onBack }: Props) {
         ) : tab === 'applications' ? (
           <div className="flex-1 overflow-y-auto p-6">
             {error && (
-              <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg flex justify-between">
+              <div className="mb-4 p-3 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)] flex justify-between">
                 <span>{error}</span>
                 <button onClick={() => setError('')} className="ml-2">✕</button>
               </div>
             )}
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-slate-800">教师申请审批</h2>
-              <div className="flex gap-1 bg-slate-100 rounded-lg p-1">
+              <h2 className="text-lg font-semibold text-ink">教师申请审批</h2>
+              <div className="flex gap-1 bg-surface-2 rounded-[var(--radius)] p-1">
                 {(['pending', 'approved', 'rejected'] as const).map(f => (
                   <button
                     key={f}
                     onClick={() => setAppFilter(f)}
                     className={`px-3 py-1 rounded-md text-xs transition ${
-                      appFilter === f ? 'bg-white text-indigo-700 font-medium shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                      appFilter === f ? 'bg-surface text-ink font-medium shadow-sm' : 'text-ink-soft hover:text-ink'
                     }`}
                   >
                     {f === 'pending' ? '待审批' : f === 'approved' ? '已通过' : '已拒绝'}
@@ -650,62 +651,62 @@ export default function AdminPage({ user, onBack }: Props) {
                 ))}
               </div>
             </div>
-            <p className="text-sm text-slate-500 mb-4">
+            <p className="text-sm text-ink-soft mb-4">
               学生注册时勾选"申请教师权限"提交的申请，通过后自动获得教师权限并发送站内通知。邀请码仍可作为快速通道使用（见"教师邀请码"标签页）。
             </p>
             {appLoading ? (
-              <p className="text-sm text-slate-400">加载中...</p>
+              <p className="text-sm text-muted">加载中...</p>
             ) : applications.length === 0 ? (
-              <p className="text-sm text-slate-400">
+              <p className="text-sm text-muted">
                 暂无{appFilter === 'pending' ? '待审批' : appFilter === 'approved' ? '已通过' : '已拒绝'}的申请。
               </p>
             ) : (
-              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+              <div className="bg-surface rounded-[var(--radius)] border border-line overflow-hidden">
                 <table className="w-full text-sm">
-                  <thead className="bg-slate-50 border-b border-slate-200">
+                  <thead className="bg-canvas border-b border-line">
                     <tr>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500">用户名</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500">显示名</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500">申请理由</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 w-28">提交时间</th>
-                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 w-44">操作</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-ink-soft">用户名</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-ink-soft">显示名</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-ink-soft">申请理由</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-ink-soft w-28">提交时间</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-ink-soft w-44">操作</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-line">
                     {applications.map(app => {
                       const statusColor: Record<string, string> = {
-                        pending: 'bg-yellow-100 text-yellow-700',
-                        approved: 'bg-green-100 text-green-700',
-                        rejected: 'bg-red-100 text-red-700',
+                        pending: 'bg-warn-bg text-warn-fg',
+                        approved: 'bg-ok-bg text-ok-fg',
+                        rejected: 'bg-danger-bg text-danger-fg',
                       }
                       const statusLabel: Record<string, string> = {
                         pending: '待审批', approved: '已通过', rejected: '已拒绝',
                       }
                       return (
-                        <tr key={app.id} className="hover:bg-slate-50 align-top">
-                          <td className="px-4 py-3 font-medium text-slate-800">{app.username}</td>
-                          <td className="px-4 py-3 text-slate-600">{app.display_name || '—'}</td>
-                          <td className="px-4 py-3 text-slate-600 max-w-md">
+                        <tr key={app.id} className="hover:bg-canvas align-top">
+                          <td className="px-4 py-3 font-medium text-ink">{app.username}</td>
+                          <td className="px-4 py-3 text-ink-soft">{app.display_name || '—'}</td>
+                          <td className="px-4 py-3 text-ink-soft max-w-md">
                             <p className="whitespace-pre-wrap break-words">{app.reason || '（未填写）'}</p>
                             {app.status === 'rejected' && app.review_note && (
-                              <p className="mt-1 text-xs text-red-500">拒绝理由：{app.review_note}</p>
+                              <p className="mt-1 text-xs text-danger-fg">拒绝理由：{app.review_note}</p>
                             )}
                           </td>
-                          <td className="px-4 py-3 text-slate-400 text-xs">{formatTime(app.created_at)}</td>
+                          <td className="px-4 py-3 text-muted text-xs">{formatTime(app.created_at)}</td>
                           <td className="px-4 py-3">
                             {app.status === 'pending' ? (
                               <div className="flex gap-2">
                                 <button
                                   onClick={() => void approveApp(app.id)}
                                   disabled={reviewing === app.id}
-                                  className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg hover:bg-green-700 disabled:opacity-50 transition"
+                                  className="text-xs bg-ok-fg text-white px-3 py-1.5 rounded-[var(--radius)] hover:bg-ok-fg disabled:opacity-50 transition"
                                 >
                                   {reviewing === app.id ? '处理中...' : '通过'}
                                 </button>
                                 <button
                                   onClick={() => void rejectApp(app.id)}
                                   disabled={reviewing === app.id}
-                                  className="text-xs border border-red-200 text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-50 disabled:opacity-50 transition"
+                                  className="text-xs border border-danger-bg text-danger-fg px-3 py-1.5 rounded-[var(--radius)] hover:bg-danger-bg disabled:opacity-50 transition"
                                 >
                                   拒绝
                                 </button>
@@ -777,14 +778,14 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-      <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
-        <h3 className="text-lg font-semibold text-slate-800 mb-4">新建知识库</h3>
-        {error && <p className="mb-3 text-sm text-red-600 bg-red-50 p-2 rounded">{error}</p>}
+      <div className="bg-surface rounded-[var(--radius-lg)] shadow-xl w-full max-w-lg p-6 max-h-[90vh] overflow-y-auto">
+        <h3 className="text-lg font-semibold text-ink mb-4">新建知识库</h3>
+        {error && <p className="mb-3 text-sm text-danger-fg bg-danger-bg p-2 rounded">{error}</p>}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">
-                课程 ID <span className="text-slate-400 font-normal text-xs">（字母/数字/-/_）</span>
+              <label className="block text-sm font-medium text-ink mb-1">
+                课程 ID <span className="text-muted font-normal text-xs">（字母/数字/-/_）</span>
               </label>
               <input
                 type="text"
@@ -793,61 +794,61 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
                 placeholder="例如: circuit_analysis"
                 pattern="^[a-zA-Z0-9_\-]+$"
                 required
-                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                className="w-full border border-ink-soft rounded-[var(--radius)] px-3 py-2 text-sm focus:outline-none focus:border-ink"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-slate-700 mb-1">图标（emoji）</label>
+              <label className="block text-sm font-medium text-ink mb-1">图标（emoji）</label>
               <input
                 type="text"
                 value={icon}
                 onChange={e => setIcon(e.target.value)}
                 placeholder="📘"
-                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+                className="w-full border border-ink-soft rounded-[var(--radius)] px-3 py-2 text-sm focus:outline-none focus:border-ink"
               />
             </div>
           </div>
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">知识库名称</label>
+            <label className="block text-sm font-medium text-ink mb-1">知识库名称</label>
             <input
               type="text"
               value={name}
               onChange={e => setName(e.target.value)}
               placeholder="例如: 电路分析基础"
               required
-              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+              className="w-full border border-ink-soft rounded-[var(--radius)] px-3 py-2 text-sm focus:outline-none focus:border-ink"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">描述（可选）</label>
+            <label className="block text-sm font-medium text-ink mb-1">描述（可选）</label>
             <input
               type="text"
               value={description}
               onChange={e => setDescription(e.target.value)}
-              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400"
+              className="w-full border border-ink-soft rounded-[var(--radius)] px-3 py-2 text-sm focus:outline-none focus:border-ink"
             />
           </div>
           <div>
-            <label className="block text-sm font-medium text-slate-700 mb-1">
+            <label className="block text-sm font-medium text-ink mb-1">
               AI System Prompt
-              <span className="ml-1 text-slate-400 font-normal text-xs">（AI 助教的角色设定，可创建后再填）</span>
+              <span className="ml-1 text-muted font-normal text-xs">（AI 助教的角色设定，可创建后再填）</span>
             </label>
             <textarea
               value={systemPrompt}
               onChange={e => setSystemPrompt(e.target.value)}
               rows={5}
-              className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-indigo-400 resize-y font-mono"
+              className="w-full border border-ink-soft rounded-[var(--radius)] px-3 py-2 text-sm focus:outline-none focus:border-ink resize-y font-mono"
               placeholder="你是一位耐心的课程助教，擅长讲解..."
             />
           </div>
           <label className="flex items-center gap-3 cursor-pointer select-none">
             <div
               onClick={() => setIsVisible(v => !v)}
-              className={`relative w-9 h-5 rounded-full transition-colors ${isVisible ? 'bg-indigo-500' : 'bg-slate-300'}`}
+              className={`relative w-9 h-5 rounded-full transition-colors ${isVisible ? 'bg-accent' : 'bg-ink-soft'}`}
             >
-              <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-white rounded-full shadow transition-transform ${isVisible ? 'translate-x-4' : ''}`} />
+              <span className={`absolute top-0.5 left-0.5 w-4 h-4 bg-surface rounded-full shadow transition-transform ${isVisible ? 'translate-x-4' : ''}`} />
             </div>
-            <span className="text-sm text-slate-700">
+            <span className="text-sm text-ink">
               {isVisible ? '对学生可见' : '对学生隐藏'}
             </span>
           </label>
@@ -855,14 +856,14 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
             <button
               type="submit"
               disabled={loading}
-              className="flex-1 bg-indigo-600 text-white py-2 rounded-lg text-sm font-medium hover:bg-indigo-700 disabled:opacity-50 transition"
+              className="flex-1 bg-accent text-white py-2 rounded-[var(--radius)] text-sm font-medium hover:bg-accent-2 disabled:opacity-50 transition"
             >
               {loading ? '创建中...' : '创建'}
             </button>
             <button
               type="button"
               onClick={onClose}
-              className="flex-1 border border-slate-300 text-slate-600 py-2 rounded-lg text-sm hover:bg-slate-50 transition"
+              className="flex-1 border border-ink-soft text-ink-soft py-2 rounded-[var(--radius)] text-sm hover:bg-canvas transition"
             >
               取消
             </button>

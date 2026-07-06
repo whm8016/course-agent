@@ -1,16 +1,15 @@
 """LLM client factory — 按 binding/backend 构造正确的 LLM client。
 
 对外暴露两个构造入口：
-  - get_llm_client()              —— 启动期按 ProviderSpec.backend 构造固定 client
-  - get_llm_client_for_profile()  —— 运行期按 catalog profile 取（缓存的）client
-                                      （对标 DeepTutor per-request provider 切换）
+ - get_llm_client()              —— 启动期按 ProviderSpec.backend 构造固定 client
+ - get_llm_client_for_profile()  —— 运行期按 catalog profile 取（缓存的）client
 
 两者返回与 openai.AsyncOpenAI 接口兼容的 client：
-  - openai_compat  → openai.AsyncOpenAI（覆盖 openai/deepseek/dashscope/zhipuai/
-                      moonshot/groq/gemini/openrouter/siliconflow/ollama/vllm/lm_studio）
-  - anthropic      → AnthropicAdapter（原生 SDK 包装为 OpenAI 兼容接口）
-  - azure_openai   → openai.AsyncAzureOpenAI
-  - 未知 binding   → 按 openai_compat 处理，使用用户提供的 base_url
+ - openai_compat  → openai.AsyncOpenAI（覆盖 openai/deepseek/dashscope/zhipuai/
+                     moonshot/groq/gemini/openrouter/siliconflow/ollama/vllm/lm_studio）
+ - anthropic      → AnthropicAdapter（原生 SDK 包装为 OpenAI 兼容接口）
+ - azure_openai   → openai.AsyncAzureOpenAI
+ - 未知 binding   → 按 openai_compat 处理，使用用户提供的 base_url
 """
 from __future__ import annotations
 
@@ -98,7 +97,7 @@ def get_llm_client(
 
 
 # ============================================================
-# 运行期 profile 动态 client（对标 DeepTutor：每请求可选 provider）
+# 运行期 profile 动态 client
 # ============================================================
 # 按 profile 指纹缓存：同一 (binding, key, base_url, api_version, timeout) 复用同一
 # client，避免 per-request 频繁 new。profile 字段为空时回退 config 启动常量（.env

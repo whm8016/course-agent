@@ -382,7 +382,7 @@ async def run_agent_loop(
     返回：
         LoopOutcome（final_text、rounds、tools_used、completed）。
     """
-    # 始终用 chat 主模型（对标 DeepTutor）；图片乐观注入，模型不支持时 Stage-2 降级剥图
+    # 始终用 chat 主模型（对标 ）；图片乐观注入，模型不支持时 Stage-2 降级剥图
     model = model or TEXT_MODEL
     eff_binding = binding or LLM_BINDING
     messages = _build_messages(system_prompt, context, binding=eff_binding)

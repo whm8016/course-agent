@@ -1,6 +1,6 @@
-"""ResearchPipeline — DeepTutor 式 4 阶段深度研究（tool_calls 版）。
+"""ResearchPipeline — 式 4 阶段深度研究（tool_calls 版）。
 
-对标 DeepTutor agents/research/pipeline.py 的 rephrase → decompose → research →
+agents/research/pipeline.py 的 rephrase → decompose → research →
 reporting 四阶段，去除 label 协议层：每阶段用 run_agent_loop（tool_calls），
 按 Phase 2/3 范式做 dataclasses.replace context 隔离 + stream.stage() + prompt YAML。
 
@@ -16,7 +16,7 @@ reporting 四阶段，去除 label 协议层：每阶段用 run_agent_loop（too
 简化项（见返回说明）：
 - Note Agent 省略：run_agent_loop 无 per-tool hook，不为它改 loop；每块 loop 的 FINISH 摘要
   本身就是该块的知识整合，sources 从摘要里的 ``[来源: ...]`` 标记提取。
-- Citation 用基础 ``[n]`` 编号（按 url/title/source 去重），非 DeepTutor 的 CIT-x-yy。
+- Citation 用基础 ``[n]`` 编号（按 url/title/source 去重），非 的 CIT-x-yy。
 """
 from __future__ import annotations
 

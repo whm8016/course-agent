@@ -9,10 +9,10 @@ Supports:
 - OpenAI-compatible API (content array with image_url blocks)
 - Anthropic API (content array with image source blocks)
 
-对标 DeepTutor services/llm/multimodal.py 的两步式注入：
+两步式注入：
 - Stage-1（本模块，``prepare_multimodal_messages``）：乐观注入图片，**不查
   supports_vision**。优先用已有 ``base64`` 内联 data URL；没有 base64 但有
-  ``file_path`` 时读盘兜底（对标 DeepTutor 本地解析，也让 ``from_image_path``
+  ``file_path`` 时读盘兜底（本地解析，也让 ``from_image_path``
   路径无需调用方预填 base64）；仅外部 http(s) URL 才以 URL 形式发送。
 - Stage-2（``core/llm/llm.py::_create_with_image_fallback``）：调用失败时若
   :func:`is_image_input_unsupported` 且 :func:`should_degrade_to_text`，剥图
@@ -161,7 +161,7 @@ def _inject_images(
         url = getattr(att, "url", "") or ""
         file_path = getattr(att, "file_path", "") or ""
 
-        # 已有 base64 优先；否则从 file_path 读盘兜底（对标 DeepTutor 本地解析），
+        # 已有 base64 优先；否则从 file_path 读盘兜底，
         # 让 from_image_path 路径无需调用方预填 base64。
         if not b64 and file_path:
             try:
@@ -191,7 +191,7 @@ def _inject_images(
                 # 相对路径 /api/uploads/... 当外部 image URL 发给 LLM 的问题。
                 content_parts.append(_build_openai_image_part(base64_data=b64, mime_type=mime))
             elif url.lower().startswith(("http://", "https://")):
-                # 仅外部 http(s) URL 才以 URL 形式发送（对标 DeepTutor）。
+                # 仅外部 http(s) URL 才以 URL 形式发送。
                 content_parts.append(
                     _build_openai_image_part(base64_data="", mime_type=mime, url=url)
                 )
@@ -294,10 +294,7 @@ def should_degrade_to_text(
 
 
 def _error_text(exc: BaseException) -> str:
-    """从异常对象里抠出可读错误文本（兼容 openai/python SDK 异常的不同字段）。
-
-    对标 DeepTutor ``agent_loop._error_text``。
-    """
+    """从异常对象里抠出可读错误文本（兼容 openai/python SDK 异常的不同字段）。"""
     response = getattr(exc, "response", None)
     body = (
         getattr(exc, "body", None)
@@ -314,7 +311,7 @@ def is_image_input_unsupported(exc: BaseException) -> bool:
 
     覆盖 OpenAI / Anthropic / 国产网关的常见拒绝措辞，以及部分网关把 content
     数组里的非字符串元素报成 ``must be a string`` / ``expected a string`` 的
-    情况。对标 DeepTutor ``agent_loop._is_image_input_unsupported``。
+    情况。
     """
     text = _error_text(exc)
     return any(

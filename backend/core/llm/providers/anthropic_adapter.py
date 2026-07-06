@@ -4,7 +4,7 @@
 client.chat.completions.create(**kwargs) 接口，使 agent loop 及其他调用方
 无需感知底层供应商差异。
 
-设计参考 DeepTutor core/agentic/client.py 中的 _ProviderOpenAIAdapter 和
+设计参考 core/agentic/client.py 中的 _ProviderOpenAIAdapter 和
 _ProviderOpenAIStream，核心机制相同：
   - 非流式：直接调用 anthropic.messages.create，将结果封装为 SimpleNamespace
   - 流式：asyncio.Queue 桥接 anthropic 流 → 逐 chunk yield OpenAI 格式

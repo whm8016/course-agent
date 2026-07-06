@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import Integer, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.auth import get_current_teacher
 from api.admin import _kb_to_dict, _ALLOWED_EXT, _MAX_BYTES
 from api.courses import invalidate_courses_cache
+from api.kb_indexing import trigger_kb_indexing, trigger_llamaindex_build
 from settings import get_settings
 KB_STORE_DIR = get_settings().paths.kb_store_dir
 MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
@@ -191,57 +192,14 @@ async def upload_files(
 @router.post("/courses/{course_id}/index")
 async def index_course(
     course_id: str,
-    background_tasks: BackgroundTasks,
     force: bool = False,
     resume: bool = False,
     teacher: dict = Depends(get_current_teacher),
     db: AsyncSession = Depends(get_db),
 ):
+    """触发知识库索引（ARQ 后台任务）。公共逻辑见 api.kb_indexing.trigger_kb_indexing。"""
     kb = await _get_owned_kb(db, course_id, teacher)
-    if kb.status == "indexing" and not force:
-        raise HTTPException(status_code=409, detail="正在索引中")
-
-    files_result = await db.execute(select(KBFile).where(KBFile.kb_id == kb.id))
-    files = files_result.scalars().all()
-    if not files:
-        raise HTTPException(status_code=400, detail="请先上传文件")
-
-    file_paths = [f.file_path for f in files if Path(f.file_path).exists()]
-    if not file_paths:
-        raise HTTPException(status_code=400, detail="文件不存在，请重新上传")
-
-    resume_from = 0
-    if resume and kb.status in ("error", "paused") and kb.chunks_done > 0:
-        resume_from = kb.chunks_done
-
-    # 提前置 indexing（对标 build_llamaindex_index / llama_rag.build_llamaindex_index）：
-    # 接口返回时 DB 已是 indexing，前端 loadCourses 立即拿到 → hasIndexing 触发轮询 →
-    # 刷新页面也不丢"进行中"状态。worker(_run_indexing) 仍会再写一次，幂等兜底。
-    kb.status = "indexing"
-    kb.progress = 0
-    kb.error_msg = ""
-    kb.progress_msg = "准备中…" if resume_from == 0 else f"续传中（从第 {resume_from} 块）…"
-    if resume_from == 0:
-        kb.chunks_done = 0
-        kb.chunks_total = 0
-        kb.token_estimate = 0
-    kb.updated_at = time.time()
-    await db.flush()
-    await invalidate_courses_cache()
-
-    # 必须走 ARQ（单 worker 进程 + 索引锁串行）；Redis 故障不降级到 BackgroundTasks，
-    # 直接报错回滚，避免跨 gunicorn 进程撞 lightrag_store。
-    from core.arq_pool import get_arq_pool
-    arq_pool = await get_arq_pool()
-    if arq_pool is None:
-        raise HTTPException(status_code=503, detail="任务队列（ARQ/Redis）不可用，请稍后重试")
-    await arq_pool.enqueue_job("run_indexing", kb.id, course_id, file_paths, resume_from)
-
-    return {
-        "message": "索引任务已启动" if resume_from == 0 else f"续传（从第 {resume_from} 块）",
-        "course_id": course_id,
-        "file_count": len(file_paths),
-    }
+    return await trigger_kb_indexing(db, kb, course_id, force, resume)
 
 
 # ── 学生管理（选课） ──────────────────────────────────────────────────────────
@@ -499,42 +457,12 @@ async def stop_course_index(
 @router.post("/courses/{course_id}/llamaindex/build")
 async def build_llamaindex_index(
     course_id: str,
-    background_tasks: BackgroundTasks,
     teacher: dict = Depends(get_current_teacher),
     db: AsyncSession = Depends(get_db),
 ):
-    """触发 LlamaIndex 向量索引构建（后台任务）。"""
+    """触发 LlamaIndex 向量索引构建（后台任务）。公共逻辑见 api.kb_indexing.trigger_llamaindex_build。"""
     kb = await _get_owned_kb(db, course_id, teacher)
-
-    files_result = await db.execute(select(KBFile).where(KBFile.kb_id == kb.id))
-    files = files_result.scalars().all()
-    if not files:
-        raise HTTPException(status_code=400, detail="知识库中没有文件")
-
-    file_paths = [f.file_path for f in files if Path(f.file_path).exists()]
-    if not file_paths:
-        raise HTTPException(status_code=400, detail="文件在磁盘上不存在，请重新上传")
-
-    if kb.status == "indexing":
-        raise HTTPException(status_code=409, detail="知识库正在索引中，请稍候完成后再试")
-
-    kb.status = "indexing"
-    kb.progress = 0
-    kb.error_msg = ""
-    kb.progress_msg = "LlamaIndex 向量索引构建中\u2026"
-    kb.updated_at = time.time()
-    await db.flush()
-    await invalidate_courses_cache()
-
-    # 必须走 ARQ（与 LightRAG 索引共用 worker 单进程 + 索引锁）；Redis 故障不降级，
-    # 直接报错回滚，避免跨 gunicorn 进程撞 llamaindex_storage。
-    from core.arq_pool import get_arq_pool
-    arq_pool = await get_arq_pool()
-    if arq_pool is None:
-        raise HTTPException(status_code=503, detail="任务队列（ARQ/Redis）不可用，请稍后重试")
-    await arq_pool.enqueue_job("run_llamaindex_build", kb.id, course_id, file_paths)
-
-    return {"accepted": True, "message": "LlamaIndex 构建已提交后台", "course_id": course_id}
+    return await trigger_llamaindex_build(db, kb, course_id)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

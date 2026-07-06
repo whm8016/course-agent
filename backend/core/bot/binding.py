@@ -1,6 +1,6 @@
 """IM 账号绑定码（短期一次性，打通 web User.id ↔ IM openid）。
 
-绑定流程（对标 DeepTutor「长期记忆按 user 聚合」的跨渠道统一）：
+绑定流程：
   1. web 用户调 POST /api/bot/bind/code 生成 6 位码（关联其 user_id，10 分钟有效）
   2. 用户在 QQ/飞书私聊 bot 发「绑定 <码>」
   3. bot loop 拦截该指令 → consume_bind_code 校验 → 写 UserSocialBinding
