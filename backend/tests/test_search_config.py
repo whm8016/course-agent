@@ -14,6 +14,15 @@ def _no_admin(monkeypatch):
     monkeypatch.setattr("services.search.config.load_admin_default", lambda: {})
 
 
+def _no_env_defaults(monkeypatch):
+    """清掉 .env 经 settings 固化进模块常量的默认值（嵌套化后 SEARCH__* 会固化），
+    使 resolve 仅受实时 env / 参数驱动 —— 还原「无任何配置」的测试前提。"""
+    import services.search.config as sc
+    monkeypatch.setattr(sc, "SEARCH_PROVIDER", "")
+    monkeypatch.setattr(sc, "SEARCH_API_KEY", "")
+    monkeypatch.setattr(sc, "SEARCH_BASE_URL", "")
+
+
 def test_resolve_env_only(monkeypatch):
     _no_admin(monkeypatch)
     monkeypatch.setenv("SEARCH_PROVIDER", "brave")
@@ -57,6 +66,7 @@ def test_resolve_field_level_merge(monkeypatch):
 def test_resolve_fallback_when_key_missing(monkeypatch):
     """brave 无 key → 降级 duckduckgo（与原 env 行为一致）。"""
     _no_admin(monkeypatch)
+    _no_env_defaults(monkeypatch)  # 清固化 key，否则 brave 会拿到 .env 的 key 不降级
     cfg = resolve_search_config(user_override={"provider": "brave"})  # 无 key
     assert cfg.provider == "duckduckgo"
     assert cfg.missing_credentials is True
@@ -65,6 +75,7 @@ def test_resolve_fallback_when_key_missing(monkeypatch):
 
 def test_resolve_default_duckduckgo(monkeypatch):
     _no_admin(monkeypatch)
+    _no_env_defaults(monkeypatch)  # 清 .env 固化的 tavily，还原「无配置」前提
     monkeypatch.delenv("SEARCH_PROVIDER", raising=False)
     cfg = resolve_search_config()
     assert cfg.provider == "duckduckgo"

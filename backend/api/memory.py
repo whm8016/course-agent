@@ -58,7 +58,7 @@ async def get_memories(user: dict = Depends(get_current_user)):
     user_id = user["id"]
     logger.info("[mem0-api] GET /memory user_id=%s", user_id)
     m = get_memory()
-    items = _results(await m.get_all(user_id=user_id, top_k=200))
+    items = _results(await m.get_all(filters={"user_id": user_id}, top_k=200))
     logger.info("[mem0-api] GET /memory OK user_id=%s count=%d", user_id, len(items))
     return {"memories": items}
 
@@ -115,7 +115,7 @@ async def search_memory(q: str, user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=400, detail="q is required")
     logger.info("[mem0-api] GET /memory/search user_id=%s query=%s", user_id, q[:50])
     m = get_memory()
-    items = _results(await m.search(q, user_id=user_id, top_k=8))
+    items = _results(await m.search(q, filters={"user_id": user_id}, top_k=8))
     logger.info("[mem0-api] GET /memory/search OK user_id=%s count=%d", user_id, len(items))
     return {"query": q, "memories": items}
 
@@ -128,7 +128,7 @@ async def get_overview(
     user_id = user["id"]
     logger.info("[mem0-api] GET /memory/overview user_id=%s", user_id)
     m = get_memory()
-    items = _results(await m.get_all(user_id=user_id, top_k=500))
+    items = _results(await m.get_all(filters={"user_id": user_id}, top_k=500))
     kg, eg = await load_graphs(db, user_id)
     logger.info(
         "[mem0-api] GET /memory/overview OK user_id=%s mem_count=%d kg_nodes=%d eg_nodes=%d",
@@ -184,7 +184,7 @@ async def get_dashboard(
     user_id = user["id"]
     logger.info("[mem0-api] GET /memory/dashboard user_id=%s", user_id)
     m = get_memory()
-    items = _results(await m.get_all(user_id=user_id, top_k=50))
+    items = _results(await m.get_all(filters={"user_id": user_id}, top_k=50))
     kg, eg = await load_graphs(db, user_id)
     high_risk = sorted(
         [n for n in (kg.get("nodes") or []) if n.get("status") == "active"],
@@ -199,8 +199,11 @@ async def get_dashboard(
         user_id, len(items), len(kg.get("nodes") or []), len(eg.get("nodes") or []),
         len(high_risk), len(frequent_errors)
     )
+    memories = [{"content": i.get("memory", "")} for i in items]
     return {
-        "memories": [{"content": i.get("memory", "")} for i in items],
+        "memories": memories,
+        # 前端 DashboardData.summary（"学习轨迹"区块）：把记忆条目拼成纯文本展示
+        "summary": "\n".join(f"- {m['content']}" for m in memories if m.get("content")),
         "high_risk_points": high_risk,
         "frequent_errors": frequent_errors,
         "knowledge_node_count": len(kg.get("nodes") or []),

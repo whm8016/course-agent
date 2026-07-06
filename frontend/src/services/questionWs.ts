@@ -1,5 +1,6 @@
 /** WebSocket 出题 & 深度研究服务 */
 import { getToken } from './auth'
+import type { AttachmentInfo } from '../types'
 
 export interface QuestionRequirement {
   knowledge_point: string
@@ -18,6 +19,7 @@ export interface QuestionGeneratePayload {
     [key: string]: unknown
   }
   language?: string
+  attachments?: AttachmentInfo[]
 }
 
 export interface QuestionMimicPayload {
@@ -75,6 +77,7 @@ export interface DeepResearchPayload {
     sources?: DeepResearchSource[]
   }
   language?: string
+  attachments?: AttachmentInfo[]
 }
 
 export interface DeepResearchMessage {

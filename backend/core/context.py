@@ -27,13 +27,14 @@ class UnifiedContext:
         session_id: 会话持久化标识（可选），供日志追踪使用。
         user_message: 当前用户输入文本。
         conversation_history: 历史消息列表（OpenAI message 格式）。
-        image_path: 本轮上传的单张图片路径（无图片时为 None；向后兼容旧字段，
-            loop/chat_stream 内部会自动合并进 attachments）。
         attachments: 本轮附件列表（Attachment，支持多图；新代码优先用此字段）。
         mode: 已 normalize 的交互模式（"chat" | "deep_solve" | "quiz" | "research" |
             "vision" | "summarize"），由 API 层调用 normalize_mode() 后写入。
         enabled_tools: 用户本轮启用的工具名列表（如 ["rag", "web_search"]）。
             空列表表示未启用任何可选工具。
+        rag_mode: LightRAG 检索模式（"mix" | "naive" | "local" | "global"），默认 "mix"。
+            用户在对话界面选择，注入到 chat 流式的 rag 工具调用（覆盖 retrieve_context
+            默认的 naive）。仅 chat 工具消费；出题/研究等其它路径各自写死 mode，不受影响。
         memory_context: 记忆快照文本，由 build_memory_context(user) 生成，
             注入 system prompt 使用。
         language: 响应语言（默认 "zh"）。
@@ -52,10 +53,10 @@ class UnifiedContext:
     session_id: str = ""
     user_message: str = ""
     conversation_history: list[dict[str, Any]] = field(default_factory=list)
-    image_path: str | None = None
     attachments: list[Attachment] = field(default_factory=list)
     mode: str = "chat"
     enabled_tools: list[str] = field(default_factory=list)
+    rag_mode: str = "mix"  # LightRAG 检索模式：mix/naive/local/global（chat 工具注入）
     memory_context: str = ""  # L3: mem0 事实记忆
     session_summary: str = ""  # L2: 早期对话摘要
     language: str = "zh"

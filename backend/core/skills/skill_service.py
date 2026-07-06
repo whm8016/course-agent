@@ -12,8 +12,7 @@
 ``read_skill`` 工具在任务匹配时拉取（避免 prompt 膨胀）。``always: true`` 的 skill
 全文急切注入（用于每轮都适用的全局守则）。
 
-忠实移植 DeepTutor ``services/skill/service.py``，裁掉 tag 词汇表 / hub 导入 /
-requires·sandbox gate（教育场景纯文本 playbook 无外部依赖，available 永真）；
+
 保留 user 层 CRUD（create/update/delete）。
 """
 from __future__ import annotations
@@ -26,7 +25,7 @@ from typing import Any
 
 import yaml
 
-from config import BASE_DIR
+from settings import BASE_DIR
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")

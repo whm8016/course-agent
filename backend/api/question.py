@@ -1,14 +1,17 @@
-"""出题：WebSocket /generate、/mimic、/followup（对齐 DeepTutor question 路由）。"""
+"""出题：WebSocket /mimic、/followup（对齐 DeepTutor question 路由）。
+
+按知识点出题的主链路已迁移到统一能力入口 WS /api/run/quiz
+（QuizCapability → QuizPipeline，见 core/capabilities/quiz.py），本路由仅保留
+仿卷（/mimic，PDF / 已解析目录出题）与单题追问（/followup）两个仍在使用的端点。
+旧的 /generate（AgentCoordinator.generate_from_topic 路径）已移除。
+"""
 from __future__ import annotations
 
 import asyncio
 import base64
-import hashlib
-import json
 import logging
 import re
 import sys
-import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -17,8 +20,6 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from api.auth import ws_authenticate
 from api.courses import check_course_access
 from core.db.database import AsyncSessionLocal
-from config import QUESTION_LOG_DIR
-from core.question.coordinator import AgentCoordinator
 from core.question.exam_mimic import mimic_exam_questions
 from core.question.followup_agent import FollowupAgent
 from core.question.path import get_question_dir
@@ -29,15 +30,6 @@ router = APIRouter(prefix="/question", tags=["question"])
 
 _MAX_PDF_BYTES = 30 * 1024 * 1024
 ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
-
-
-def _output_dir_for_run() -> str:
-    base = Path(QUESTION_LOG_DIR) / "runs"
-    base.mkdir(parents=True, exist_ok=True)
-    run_id = uuid.uuid4().hex[:12]
-    d = base / run_id
-    d.mkdir(parents=True, exist_ok=True)
-    return str(d)
 
 
 def _mimic_output_dir() -> Path:
@@ -51,130 +43,6 @@ def _safe_pdf_name(name: str) -> str:
     if ".." in base or "/" in base or "\\" in base:
         raise ValueError("Invalid pdf_name")
     return base
-
-
-def _task_id_for_question_gen(kb_name: str, requirement: object) -> str:
-    key = f"question_{kb_name}_{json.dumps(requirement, sort_keys=True, ensure_ascii=False)}"
-    return "qgen_" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
-
-
-@router.websocket("/generate")
-async def websocket_question_generate(websocket: WebSocket):
-    user = await ws_authenticate(websocket)
-    if user is None:
-        return
-    log_queue: asyncio.Queue = asyncio.Queue()
-    pusher: asyncio.Task | None = None
-
-    try:
-        data = await websocket.receive_json()
-    except WebSocketDisconnect:
-        return
-
-    requirement = data.get("requirement")
-    kb_name = data.get("kb_name") or data.get("course_id")
-    count = int(data.get("count", 1))
-
-    if not requirement:
-        await websocket.send_json({"type": "error", "content": "requirement 必填"})
-        return
-    if not kb_name:
-        await websocket.send_json({"type": "error", "content": "kb_name 或 course_id 必填"})
-        return
-
-    try:
-        async with AsyncSessionLocal() as db:
-            await check_course_access(db, str(kb_name), user)
-    except HTTPException as exc:
-        await websocket.send_json({"type": "error", "content": exc.detail})
-        await websocket.close()
-        return
-
-    task_id = _task_id_for_question_gen(str(kb_name), requirement)
-    try:
-        await websocket.send_json({"type": "task_id", "task_id": task_id})
-    except (RuntimeError, WebSocketDisconnect):
-        return
-
-    out_dir = _output_dir_for_run()
-    coordinator = AgentCoordinator(
-        kb_name=kb_name,
-        output_dir=out_dir,
-        language=str(data.get("language", "zh")),
-        enable_idea_rag=True,
-    )
-
-    async def ws_callback(entry: dict):
-        await log_queue.put(entry)
-
-    coordinator.set_ws_callback(ws_callback)
-
-    async def log_pusher():
-        while True:
-            entry = await log_queue.get()
-            try:
-                await websocket.send_json(entry)
-            except Exception:
-                break
-            log_queue.task_done()
-
-    pusher = asyncio.create_task(log_pusher())
-
-    try:
-        await websocket.send_json({"type": "status", "content": "started", "output_dir": out_dir})
-
-        req = requirement if isinstance(requirement, dict) else {"knowledge_point": str(requirement)}
-        user_topic = str(req.get("knowledge_point", "") or req.get("topic", ""))
-        preference = str(req.get("preference", ""))
-        difficulty = str(req.get("difficulty", "") or "")
-        question_type = str(req.get("question_type", "") or "")
-
-        if not user_topic:
-            await websocket.send_json(
-                {"type": "error", "content": "requirement 中需含 knowledge_point 或 topic"}
-            )
-            return
-
-        batch_result = await coordinator.generate_from_topic(
-            user_topic=user_topic,
-            preference=preference,
-            num_questions=count,
-            difficulty=difficulty,
-            question_type=question_type,
-        )
-
-        await log_queue.put(
-            {
-                "type": "batch_summary",
-                "requested": count,
-                "completed": batch_result.get("completed", 0),
-                "failed": batch_result.get("failed", 0),
-            }
-        )
-        await log_queue.put({"type": "complete", "summary": batch_result})
-    except WebSocketDisconnect:
-        logger.info("WebSocket disconnected during question generation")
-    except Exception as e:
-        logger.exception("question generate failed")
-        try:
-            await websocket.send_json({"type": "error", "content": str(e)[:800]})
-        except Exception:
-            pass
-    finally:
-        try:
-            await asyncio.wait_for(log_queue.join(), timeout=15.0)
-        except (asyncio.TimeoutError, Exception):
-            pass
-        if pusher:
-            pusher.cancel()
-            try:
-                await pusher
-            except asyncio.CancelledError:
-                pass
-        try:
-            await websocket.close()
-        except Exception:
-            pass
 
 
 @router.websocket("/followup")

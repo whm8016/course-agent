@@ -1,0 +1,202 @@
+"""Pipeline 公共 helper —— 四条 pipeline（chat / solve / research / quiz）共享的运行时解析、
+通用上下文层组装与图片两阶段描述包装。
+
+设计选择：**组合优于继承**。本模块提供「无状态函数 + 不可变 dataclass」，四条 pipeline
+各自 import 调用，不引入 BasePipeline 抽象基类。理由：research 是 4 阶段多 loop、quiz 是
+3 阶段多 loop，套不进「基类 run() 调一次 loop」的模板方法，强套产生坏继承。真正的共性是
+「loop 外的三个准备步骤」（解析 profile / 组装通用上下文层 / 两阶段图片描述）——把它们
+函数化下沉，让每条 pipeline 在自己的 execute 里按需组合，是更优的解耦。
+
+对外接口：
+  resolve_profile_runtime(profile_id, user_id) → ProfileRuntime
+      解析**对话**供应商 (client, text_model, binding)。用户自配 > 平台 profile > 全 None。
+  build_common_context_layers(ctx, *, include_skills=False) → CommonContextLayers
+      组装通用上下文层（course_prompt / bot_persona / memory / session_summary / now）。
+      include_skills=True 时额外急切注入 always-on skill 全文（仅 chat 挂 read_skill 工具；
+      solve/research/quiz 不挂，传 False 避免提示有 skill 却无工具可读）。
+  assemble_common_context(layers) → str
+      纯函数：按稳定性递减拼接通用层，过滤空段。
+  describe_images(ctx, base_text, rt) → str
+      describe_images_into 的薄包装，统一把 rt.text_model/binding 透传（修复 solve/research/quiz
+      此前只传 user_id、误判主模型不支持 vision 而白走两阶段的问题）。
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from datetime import datetime
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from core.context import UnifiedContext
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ProfileRuntime:
+    """一次 turn 的对话供应商运行时（run_agent_loop override 用）。
+
+    frozen=True → 不可变，research 多阶段并行块只读共享安全。
+    全 None 时 loop 回退全局 _default_client + TEXT_MODEL（向后兼容）。
+    """
+
+    client: Any | None = None
+    text_model: str | None = None
+    binding: str | None = None
+
+
+@dataclass(frozen=True)
+class CommonContextLayers:
+    """通用上下文层（chat 9 层里去掉 loop_system/skills_manifest/tool_hint/extended 的那几层）。
+
+    frozen=True → 不可变，多阶段 pipeline 复用同一份安全。assemble_common_context 自动过滤空段。
+    """
+
+    course_prompt: str = ""
+    bot_persona: str = ""
+    always_skills: str = ""
+    memory_context: str = ""
+    session_summary: str = ""
+    now_text: str = ""
+
+
+async def resolve_profile_runtime(
+    profile_id: str, user_id: str = ""
+) -> ProfileRuntime:
+    """解析**对话**供应商 → ProfileRuntime(client, text_model, binding)。
+
+    视觉供应商由 _resolve_vision_runtime 独立解析（可走不同 binding/key/url）。
+
+    优先级：
+    1. 用户自配 provider（DB，user_id 非空时查）
+    2. 用户下拉选的平台 profile_id → 平台 active profile（catalog）
+    3. 回退 ProfileRuntime()（全 None），loop 用全局 _default_client + TEXT_MODEL
+
+    client 经 provider_factory.get_llm_client_for_profile 按 profile 指纹缓存，空 key 回退 .env。
+    """
+    from core.llm.catalog import active_profile_id, get_profile, profile_text_model
+    from core.llm.provider_factory import get_llm_client_for_profile
+
+    try:
+        # 1. 用户自配 provider（优先）
+        if user_id:
+            from core.db.user_llm_provider import get_active_provider_view
+
+            user_prof = await get_active_provider_view(user_id)
+            if user_prof:
+                text_m = (
+                    (user_prof.get("models", {}) or {}).get("text", {}) or {}
+                ).get("model") or None
+                binding = (user_prof.get("binding") or "").strip() or None
+                return ProfileRuntime(
+                    client=get_llm_client_for_profile(user_prof),
+                    text_model=text_m,
+                    binding=binding,
+                )
+
+        # 2/3. 平台 profile（profile_id → active）
+        pid = (profile_id or "").strip() or active_profile_id()
+        prof = get_profile(pid)
+        if prof:
+            return ProfileRuntime(
+                client=get_llm_client_for_profile(prof),
+                text_model=profile_text_model(prof) or None,
+                binding=(prof.get("binding") or "").strip() or None,
+            )
+
+        # 4. 回退默认
+        return ProfileRuntime()
+    except Exception:
+        logger.exception(
+            "resolve profile runtime failed profile_id=%r user_id=%r", profile_id, user_id
+        )
+        return ProfileRuntime()
+
+
+async def build_common_context_layers(
+    ctx: "UnifiedContext", *, include_skills: bool = False
+) -> CommonContextLayers:
+    """组装通用上下文层。各 pipeline 在 run() 开头调一次，多阶段复用同一份（避免每阶段重查 DB）。
+
+    include_skills=True 时急切注入 always-on skill 全文（仅 chat——它挂 read_skill 工具）。
+    solve/research/quiz 传 False：它们不挂 read_skill，注入全文却无工具会让模型误以为有 skill 可读。
+    course_prompt 经 get_course_prompt 走 Redis 缓存。
+    """
+    from core.llm.prompts import get_course_prompt
+
+    course_prompt = await get_course_prompt(ctx.course_id)
+
+    always_skills = ""
+    if include_skills:
+        from core.skills.skill_service import get_skill_service
+
+        svc = get_skill_service(ctx.course_id, ctx.user_id)
+        always_skills = svc.load_always_for_context()
+
+    session_summary = (
+        f"## 本次对话前情摘要（早期对话的压缩，非完整原文）\n{ctx.session_summary}"
+        if ctx.session_summary
+        else ""
+    )
+    now_text = f"【当前时间】{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %A')}"
+
+    metadata = ctx.metadata or {}
+    return CommonContextLayers(
+        course_prompt=course_prompt,
+        bot_persona=(metadata.get("bot_persona") or "").strip(),
+        always_skills=always_skills,
+        memory_context=ctx.memory_context or "",
+        session_summary=session_summary,
+        now_text=now_text,
+    )
+
+
+def assemble_common_context(layers: CommonContextLayers) -> str:
+    """纯函数：按稳定性递减拼接通用层（course→persona→always→memory→summary→now），过滤空段。
+
+    与 chat 的 assemble_system_prompt 同语义（稳定性递减 + 空段过滤 + 空行连接），但不含
+    chat 专属的 loop_system/skills_manifest/tool_hint/extended 段。各 pipeline 在 task_system
+    之后叠加本输出：``task_system + "\\n\\n" + assemble_common_context(layers)``。
+    """
+    return "\n\n".join(
+        p
+        for p in (
+            layers.course_prompt,
+            layers.bot_persona,
+            layers.always_skills,
+            layers.memory_context,
+            layers.session_summary,
+            layers.now_text,
+        )
+        if p
+    )
+
+
+async def describe_images(
+    ctx: "UnifiedContext", base_text: str, rt: ProfileRuntime
+) -> str:
+    """两阶段图片描述的统一包装：把 rt.text_model/binding 透传给 describe_images_into。
+
+    修复 solve/research/quiz 此前只传 user_id、用全局默认模型判断 → 即使主模型支持 vision
+    也误走两阶段（白调一次 vision 模型把图描述成文字）的问题。
+    """
+    from core.llm.vision_describe import describe_images_into
+
+    return await describe_images_into(
+        ctx,
+        base_text,
+        user_id=ctx.user_id,
+        text_model=rt.text_model,
+        binding=rt.binding,
+    )
+
+
+__all__ = [
+    "ProfileRuntime",
+    "CommonContextLayers",
+    "resolve_profile_runtime",
+    "build_common_context_layers",
+    "assemble_common_context",
+    "describe_images",
+]

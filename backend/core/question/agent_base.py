@@ -8,14 +8,15 @@ import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Any
 
-from config import TEXT_MODEL
+from settings import get_settings
+TEXT_MODEL = get_settings().llm.text_model
 from core.llm.llm import client as _openai_client
 
 TraceCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
 
 
 class QuestionAgentBase:
-    """提供 IdeaAgent / Generator 所需的 get_prompt、stream_llm、trace。"""
+    """提供 Generator 所需的 get_prompt、stream_llm、trace（出题 agent 基类）。"""
 
     def __init__(
         self,
@@ -56,7 +57,7 @@ class QuestionAgentBase:
                 Path(__file__).parent          # core/question/
                 / "prompts"
                 / self.language                # zh
-                / f"{self.agent_name}.yaml"    # idea_agent.yaml / generator.yaml
+                / f"{self.agent_name}.yaml"    # generator.yaml
             )
             if not prompt_path.exists():
                 self.logger.warning(f"prompt file not found: {prompt_path}")

@@ -22,6 +22,12 @@ from typing import Any
 from core.agentic.loop import _get_tool_schemas, run_agent_loop
 from core.context import UnifiedContext
 from core.observability import log_flow
+from core.pipeline_common import (
+    assemble_common_context,
+    build_common_context_layers,
+    describe_images,
+    resolve_profile_runtime,
+)
 from core.prompt_loader import load_prompt_dict
 from core.solve.session import (
     DEFAULT_MAX_REPLANS,
@@ -65,22 +71,28 @@ class DeepSolvePipeline:
     ) -> dict[str, Any]:
         rag_enabled = bool(context.course_id and "rag" in context.enabled_tools)
 
+        # 解析对话供应商 runtime + 通用上下文层（四条 pipeline 共享步骤，pipeline_common）
+        rt = await resolve_profile_runtime(context.llm_profile_id, context.user_id)
+        layers = await build_common_context_layers(context)
+
         # 解析 solve 会话 id（per-turn），初始化 session + replan 预算
         sid = _resolve_session_id(context)
         context.metadata["solve_session_id"] = sid
         session = get_session(sid)
         session.max_replans = DEFAULT_MAX_REPLANS
 
-        # solve playbook：强调先 solve_plan、逐步 finish_step、可 replan
+        # solve playbook + 通用上下文层叠加（course_prompt / memory / now…，原先缺失）
         solve_cfg = load_prompt_dict(_SOLVE_PROMPT_PATH)
-        system_prompt = solve_cfg.get("system") or ""
+        task_system = solve_cfg.get("system") or ""
+        common = assemble_common_context(layers)
+        system_prompt = f"{task_system}\n\n{common}" if common else task_system
 
         # 可用工具：solve 三件套 + rag（可选）
         enabled = list(_SOLVE_TOOLS) + (["rag"] if rag_enabled else [])
 
         solve_ctx = replace(
             context,
-            user_message=question,
+            user_message=await describe_images(context, question, rt),
             mode="deep_solve",
             enabled_tools=enabled,
         )
@@ -97,6 +109,9 @@ class DeepSolvePipeline:
                 system_prompt=system_prompt,
                 tool_schemas=_get_tool_schemas(solve_ctx),
                 max_iterations=12,
+                client=rt.client,
+                model=rt.text_model,
+                binding=rt.binding,
             )
         finally:
             reset_current_solve_session(token)

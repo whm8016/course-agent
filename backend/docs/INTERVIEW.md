@@ -77,11 +77,11 @@
 
 1. **入口**：学生在 ChatWindow 提问，前端走 SSE（`/api/chat`）或 WebSocket（`/api/run/chat`）。
    - `api/chat.py` / `api/run.py`
-2. **鉴权 + 多租户隔离**：JWT 解析用户 → `check_course_access(course_id, user_id)` 校验"该学生是否选了这门课"，结果 Redis 缓存。未选课直接 403。
+2. **鉴权 + 多租户隔离**：JWT 解析用户 → `check_course_access(course_id, user_id)` 校验"该学生是否选了这门课"，结果 Redis 缓存。未选课直接 403（"自由问答" general 课程除外，任何登录用户可用）。
    - `api/courses.py` 的 `check_course_access`
 3. **编排选路**：`TurnRuntimeManager.start_turn()` → `CourseOrchestrator.handle(context)` 按 `context.mode`（chat / deep_solve / deep_research / quiz / summarize / vision）选出对应 Capability。
    - `services/session/turn_runtime.py`、`core/orchestrator.py`、`core/registry.py`
-4. **Agent Loop**：chat 走 `ChatPipeline`（`evaluate_guardrail` 安全护栏 → 组装 system prompt → `run_agent_loop`）；解题/研究/出题各自是独立多阶段 pipeline，每阶段一次 `run_agent_loop`。进入 tool_calls 多轮循环：
+4. **Agent Loop**：chat 走 `ChatPipeline`（组装 system prompt → `run_agent_loop`）；解题/研究/出题各自是独立多阶段 pipeline，每阶段一次 `run_agent_loop`。进入 tool_calls 多轮循环：
    - 每轮 LLM 决定调哪些工具（rag 检索 / web_search / ask_user / solve_*）→ 并行分发（最多 8 个并发）→ 把 `role=tool` 结果塞回对话 → 下一轮。
    - 最后一轮强制 `tools=None`，LLM 必须输出文字答案。
    - `core/capabilities/chat_pipeline.py`、`core/agentic/loop.py`

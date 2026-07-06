@@ -8,11 +8,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from api.auth import get_current_teacher
-from config import LIGHTRAG_TIMEOUT_SEC
-from core.rag.lightrag_engine import (
-    index_course_with_lightrag,
-    is_lightrag_available,
-)
+from settings import get_settings
+LIGHTRAG_TIMEOUT_SEC = get_settings().lightrag.timeout_sec
+from core.rag import get_indexer, is_lightrag_available
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +19,7 @@ from core.db.limiter import limiter
 router = APIRouter()
 
 MAX_MESSAGE_LENGTH = 2000
-MAX_HISTORY_LENGTH = 20
+MAX_HISTORY_LENGTH = 10
 TOOL_RESULT_CONTEXT_LIMIT = 4
 TOOL_RESULT_CONTEXT_MAX_CHARS = 300
 
@@ -82,8 +80,17 @@ async def index_lightrag(request: Request, body: IndexBody, user: dict = Depends
         body.force,
         body.source_dir,
     )
+
+    indexer = get_indexer("lightrag")
     result = await asyncio.wait_for(
-        index_course_with_lightrag(body.course_id, force=body.force, source_dir=body.source_dir),
+        indexer.index(body.course_id, [], force=body.force, source_dir=body.source_dir),
         timeout=LIGHTRAG_TIMEOUT_SEC,
     )
-    return {"engine": "lightrag", "course_id": body.course_id, **result}
+    return {
+        "engine": "lightrag",
+        "course_id": body.course_id,
+        "indexed_docs": result.chunks_created,
+        "indexed_files": result.files_indexed,
+        "skipped": result.status == "skipped",
+        "reason": result.error,
+    }

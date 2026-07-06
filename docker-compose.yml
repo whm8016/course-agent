@@ -19,8 +19,13 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    # 持久化：AOF（每次写追加 appendonly.aof，默认 everysec fsync，最多丢 1s 数据）
+    # + RDB 快照（60s 内 1000 次写则 dump.rdb），双保险；重启/重建容器数据不丢。
+    command: ["redis-server", "--appendonly", "yes", "--save", "60", "1000"]
     ports:
       - "127.0.0.1:6379:6379"
+    volumes:
+      - redisdata:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -37,10 +42,12 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/course_agent
-      REDIS_URL: redis://redis:6379/0
-      DB_POOL_SIZE: "${DB_POOL_SIZE:-10}"
-      DB_MAX_OVERFLOW: "${DB_MAX_OVERFLOW:-20}"
+      # config 嵌套重构后代码读 DB__URL / DB__REDIS_URL（env_nested_delimiter="__"），
+      # 不再认旧扁平名 DATABASE_URL / REDIS_URL。compose environment 优先级高于
+      # env_file(./backend/.env)，这里用 Docker 服务名覆盖 .env 里的 localhost
+      # （localhost 是宿主机开发用的，容器内回环连不到 postgres/redis 容器）。
+      DB__URL: postgresql+asyncpg://postgres:postgres@postgres:5432/course_agent
+      DB__REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: "${ENVIRONMENT:-development}"
       BACKEND_WORKERS: "${BACKEND_WORKERS:-4}"
       LLM_TIMEOUT_SEC: "${LLM_TIMEOUT_SEC:-120}"
@@ -52,8 +59,9 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - backend_venv:/app/.venv
       - backend_uploads:/app/uploads
-    command: ["sh", "-c", "until alembic upgrade head; do echo 'alembic failed, retrying in 5s...'; sleep 5; done && gunicorn main:app -k uvicorn.workers.UvicornWorker -w ${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
+    command: ["sh", "-c", "until .venv/bin/alembic upgrade head; do echo 'alembic failed, retrying in 5s...'; sleep 5; done && .venv/bin/gunicorn main:app -k uvicorn.workers.UvicornWorker -w ${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/api/health')\""]
       interval: 15s
@@ -70,8 +78,8 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/course_agent
-      REDIS_URL: redis://redis:6379/0
+      DB__URL: postgresql+asyncpg://postgres:postgres@postgres:5432/course_agent
+      DB__REDIS_URL: redis://redis:6379/0
       ENVIRONMENT: "${ENVIRONMENT:-development}"
       LLM_TIMEOUT_SEC: "${LLM_TIMEOUT_SEC:-120}"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -84,8 +92,9 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - backend_venv:/app/.venv
       - backend_uploads:/app/uploads
-    command: ["python", "-m", "arq", "worker.WorkerSettings"]
+    command: [".venv/bin/python", "-m", "arq", "worker.WorkerSettings"]
 
   frontend:
     build:
@@ -93,10 +102,12 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "0.0.0.0:80:80"
     depends_on:
       - backend
 
 volumes:
   pgdata:
   backend_uploads:
+  backend_venv:
+  redisdata:

@@ -12,6 +12,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     gsfonts fonts-dejavu-core fonts-noto-cjk fontconfig && \
     fc-cache -f
 
+# 安装 Node.js 22 LTS（NodeSource 官方源）
+# 用途：供 stdio 类型的 MCP server（如 npx -y mcp-deepwiki@latest）在容器内运行。
+# backend 与 worker 共用本镜像，故两者都能拉起 stdio MCP 子进程。
+# 采用显式 keyring 写法而非 setup_22.x 脚本（脚本内容随版本易变、不可控）；
+# 不用 Debian 仓库的 nodejs/npm——其 Node 18 已 EOL，且 npm/npx 版本偏旧、易与 MCP 包不兼容。
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg && \
+    mkdir -p /etc/apt/keyrings && \
+    curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+        | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg && \
+    echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_22.x nodistro main" \
+        > /etc/apt/sources.list.d/nodesource.list && \
+    apt-get update && apt-get install -y --no-install-recommends nodejs
+
 # 安装 uv（官方推荐方式：从 astral-sh 镜像复制二进制）
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 

@@ -32,6 +32,12 @@ from typing import Any
 from core.agentic.loop import _get_tool_schemas, run_agent_loop
 from core.context import UnifiedContext
 from core.observability import log_flow
+from core.pipeline_common import (
+    assemble_common_context,
+    build_common_context_layers,
+    describe_images,
+    resolve_profile_runtime,
+)
 from core.prompt_loader import load_prompt_dict
 from core.research.citation_manager import CitationManager
 from core.research.data_structures import (
@@ -174,6 +180,15 @@ class ResearchPipeline:
         self.block_max_iterations = max(2, int(block_max_iterations))
         self.queue_max_length = max(1, int(queue_max_length))
 
+    def _with_common(self, task_system: str, layers=None) -> str:
+        """叠加通用上下文层到 task system（solve/research/quiz 共享语义）。
+
+        layers 默认取 self._layers（run() 开头算一次，多阶段 + asyncio.gather 并行块
+        只读复用同一份不可变 dataclass，无竞态）。通用层为空时原样返回。
+        """
+        common = assemble_common_context(layers if layers is not None else self._layers)
+        return f"{task_system}\n\n{common}" if common else task_system
+
     # ------------------------------------------------------------------
     # Public entry
     # ------------------------------------------------------------------
@@ -187,6 +202,10 @@ class ResearchPipeline:
         research_id = f"research_{started.strftime('%Y%m%d_%H%M%S')}"
         cfg = load_prompt_dict(_PROMPT_PATH)
         topic = (topic or "").strip() or context.user_message.strip()
+        # 解析对话供应商 runtime + 通用上下文层（四条 pipeline 共享步骤，pipeline_common）
+        # 不可变 dataclass：5 个阶段方法 + asyncio.gather 并行块只读共享，无竞态
+        self._rt = await resolve_profile_runtime(context.llm_profile_id, context.user_id)
+        self._layers = await build_common_context_layers(context)
         log_flow("research.pipeline.start", research_id=research_id, topic=topic[:120])
 
         # ── Phase 1: rephrase ────────────────────────────────────────────
@@ -280,11 +299,13 @@ class ResearchPipeline:
         cfg: dict[str, Any],
     ) -> str:
         rephrase_cfg = cfg.get("rephrase") or {}
-        system_prompt = rephrase_cfg.get("system", "")
+        system_prompt = self._with_common(rephrase_cfg.get("system", ""))
         tools = [t for t in context.enabled_tools if t in _RESEARCH_TOOLS]
         ctx = replace(
             context,
-            user_message=f"用户的研究主题：\n\n{topic}",
+            user_message=await describe_images(
+                context, f"用户的研究主题：\n\n{topic}", self._rt
+            ),
             conversation_history=[],
             enabled_tools=tools,
             mode="research",
@@ -295,6 +316,10 @@ class ResearchPipeline:
             system_prompt=system_prompt,
             tool_schemas=_get_tool_schemas(ctx) if tools else None,
             max_iterations=DEFAULT_REPHRASE_MAX_ITERATIONS,
+            client=self._rt.client,
+            model=self._rt.text_model,
+            binding=self._rt.binding,
+            emit_terminal_events=False,
         )
         refined = (outcome.final_text or "").strip()
         return refined or topic
@@ -311,8 +336,8 @@ class ResearchPipeline:
         cfg: dict[str, Any],
     ) -> list[dict[str, str]]:
         decompose_cfg = cfg.get("decompose") or {}
-        system_prompt = (decompose_cfg.get("system", "")).format(
-            num_subtopics=self.num_subtopics
+        system_prompt = self._with_common(
+            (decompose_cfg.get("system", "")).format(num_subtopics=self.num_subtopics)
         )
         ctx = replace(
             context,
@@ -330,6 +355,10 @@ class ResearchPipeline:
             system_prompt=system_prompt,
             tool_schemas=None,
             max_iterations=1,
+            client=self._rt.client,
+            model=self._rt.text_model,
+            binding=self._rt.binding,
+            emit_terminal_events=False,
         )
         return _parse_sub_topics(outcome.final_text, topic, self.num_subtopics)
 
@@ -388,16 +417,19 @@ class ResearchPipeline:
         """研究单个子主题：run_agent_loop 检索 → FINISH 摘要 → 抽来源入 sources。"""
         queue.mark_researching(block.block_id)
         step_cfg = cfg.get("research_step") or {}
-        kb_note = ""
-        if context.course_id:
-            kb_note = f"\n    已挂载知识库：{context.course_id}，调用 rag 时优先检索该库。"
-
         tools = [t for t in context.enabled_tools if t in _RESEARCH_TOOLS]
-        system_prompt = (step_cfg.get("system", "")).format(
-            topic=topic,
-            block_title=block.sub_topic,
-            block_overview=block.overview or "(无额外说明)",
-            kb_note=kb_note,
+        # 只有用户选了知识库（enabled_tools 含 rag）且课程存在时，才提示已挂载知识库；
+        # 否则本轮工具里没有 rag，却提示"调用 rag 检索"会让 LLM 困惑（有提示无工具可调）
+        kb_note = ""
+        if "rag" in tools and context.course_id:
+            kb_note = f"\n    已挂载知识库：{context.course_id}，调用 rag 时优先检索该库。"
+        system_prompt = self._with_common(
+            (step_cfg.get("system", "")).format(
+                topic=topic,
+                block_title=block.sub_topic,
+                block_overview=block.overview or "(无额外说明)",
+                kb_note=kb_note,
+            )
         )
         siblings = "\n".join(
             f"  - {b.sub_topic}" for b in queue.blocks if b.block_id != block.block_id
@@ -418,6 +450,10 @@ class ResearchPipeline:
                 system_prompt=system_prompt,
                 tool_schemas=_get_tool_schemas(ctx) if tools else None,
                 max_iterations=self.block_max_iterations,
+                client=self._rt.client,
+                model=self._rt.text_model,
+                binding=self._rt.binding,
+                emit_terminal_events=False,
             )
         except Exception:
             logger.exception("research 块 %s 失败", block.block_id)
@@ -540,7 +576,7 @@ class ResearchPipeline:
         for b in blocks:
             preview = _strip_source_markers(b.knowledge).split("\n\n")[0][:400]
             summaries.append(f"- [{b.block_id}] {b.sub_topic}\n  {preview}")
-        system_prompt = report_cfg.get("system", "")
+        system_prompt = self._with_common(report_cfg.get("system", ""))
         user_prompt = (report_cfg.get("user_template", "")).format(
             topic=topic,
             block_summaries="\n".join(summaries) or "(无研究块)",
@@ -558,6 +594,10 @@ class ResearchPipeline:
             system_prompt=system_prompt,
             tool_schemas=None,
             max_iterations=1,
+            client=self._rt.client,
+            model=self._rt.text_model,
+            binding=self._rt.binding,
+            emit_terminal_events=False,
         )
         data = _extract_json(outcome.final_text)
         if isinstance(data, dict) and (data.get("title") or data.get("sections")):
@@ -703,9 +743,13 @@ class ResearchPipeline:
         outcome = await run_agent_loop(
             context=ctx,
             stream=stream,
-            system_prompt=system_prompt,
+            system_prompt=self._with_common(system_prompt),
             tool_schemas=None,
             max_iterations=1,
+            client=self._rt.client,
+            model=self._rt.text_model,
+            binding=self._rt.binding,
+            emit_terminal_events=False,
         )
         return (outcome.final_text or "").strip()
 

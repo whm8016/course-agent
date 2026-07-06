@@ -134,13 +134,12 @@ def test_log_flow_respects_level():
 def test_metrics_observe_does_not_raise():
     from core.observability.metrics import (
         observe_turn, observe_llm_round, observe_tool_call,
-        inc_guardrail_blocked, observe_worker_job, observe_mcp_tool,
+        observe_worker_job, observe_mcp_tool,
     )
     observe_turn("chat", "ok", 1200)
     observe_llm_round("chat", 800, 320)
     observe_llm_round("chat", 800, None)  # ttft_ms can be None
     observe_tool_call("rag", "ok", 400)
-    inc_guardrail_blocked("prompt_injection")
     observe_worker_job("indexing", "ok", 5000)
     observe_mcp_tool("my-server", "ok", 150)
 

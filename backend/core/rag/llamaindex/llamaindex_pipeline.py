@@ -9,7 +9,7 @@ import asyncio
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 import os
-import config
+from settings import BASE_DIR
 from llama_index.core import (
     Settings,
     StorageContext,
@@ -32,7 +32,7 @@ def get_logger(name: str) -> logging.Logger:
 
 
 # Default knowledge base directory
-DEFAULT_KB_BASE_DIR = os.path.join(config.BASE_DIR,'data','knowledge_bases')
+DEFAULT_KB_BASE_DIR = os.path.join(BASE_DIR,'data','knowledge_bases')
 
 
 logger=get_logger("LlamaIndexPipeline")

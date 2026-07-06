@@ -61,6 +61,19 @@ export async function register(
   return data
 }
 
+export async function applyTeacher(reason: string): Promise<{ id: string; status: string }> {
+  const res = await fetch('/api/auth/apply-teacher', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ reason }),
+  })
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}))
+    throw new Error(data.detail || '申请失败')
+  }
+  return res.json()
+}
+
 export async function login(username: string, password: string): Promise<AuthResponse> {
   const res = await fetch('/api/auth/login', {
     method: 'POST',

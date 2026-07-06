@@ -9,7 +9,8 @@ import json
 import logging
 from pathlib import Path
 
-from config import MCP_SESSIONS_DIR
+from settings import get_settings
+MCP_SESSIONS_DIR = get_settings().paths.mcp_sessions_dir
 
 logger = logging.getLogger(__name__)
 

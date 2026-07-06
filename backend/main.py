@@ -48,12 +48,16 @@ from api.bot import router as bot_router
 from api.llm import router as llm_router
 from api.search_config import router as search_config_router
 from api.user_llm import router as user_llm_router
-from config import UPLOAD_DIR, ALLOWED_ORIGINS, REDIS_URL, KB_STORE_DIR, TUTORBOT_ENABLED
+from settings import get_settings
+UPLOAD_DIR = get_settings().paths.upload_dir
+ALLOWED_ORIGINS = get_settings().security.allowed_origins
+REDIS_URL = get_settings().db.redis_url.get_secret_value()
+KB_STORE_DIR = get_settings().paths.kb_store_dir
+TUTORBOT_ENABLED = get_settings().tutorbot.enabled
 from core.db.database import init_db, close_db
 from core.db.limiter import limiter
 from core.arq_pool import get_arq_pool, close_arq_pool
-from core.rag.cache import init_rag_cache, get_cache_stats as get_rag_cache_stats
-from core.rag.rag import set_rag_cache
+from core.rag.cache import init_rag_cache, get_cache_stats as get_rag_cache_stats, set_rag_cache
 from core.llm.llm import get_llm_circuit_state, reset_llm_circuit_breaker
 
 logger = logging.getLogger(__name__)
@@ -102,6 +106,74 @@ async def _maybe_compress_summary(session_id: str) -> None:
         logger.warning("[L2] session summary compress failed session=%s", session_id, exc_info=True)
 
 
+# ---- Leader 单例服务：启停解耦为运行时可调用（竞选接管时动态拉起/停止）----
+_singletons_started = False
+
+
+async def start_singleton_services() -> None:
+    """拉起 leader 专属单例服务（TutorBot / Cron / MCP）。幂等：已启则跳过。
+
+    被 leader 回调调用：首次当选 + 运行中竞选接管。各服务自身亦幂等（双重保险）。
+    """
+    global _singletons_started
+    if _singletons_started:
+        return
+
+    if TUTORBOT_ENABLED:
+        try:
+            from core.bot.manager import get_bot_manager
+            await get_bot_manager().auto_start_bots()
+            logger.info("TutorBot manager initialized (auto-started configured bots)")
+        except Exception as e:
+            logger.warning(f"TutorBot startup failed (non-fatal): {e}")
+
+    try:
+        from services.cron.service import get_cron_service
+        await get_cron_service().start()
+        logger.info("Cron service started")
+    except Exception as e:
+        logger.warning(f"Cron service startup failed (non-fatal): {e}")
+
+    try:
+        from core.mcp.manager import get_mcp_manager
+        await get_mcp_manager().ensure_started()
+        logger.info("MCP manager initialized")
+    except Exception as e:
+        logger.warning(f"MCP manager startup failed (non-fatal): {e}")
+
+    _singletons_started = True
+
+
+async def stop_singleton_services() -> None:
+    """停止 leader 专属单例服务。幂等：未启则跳过。
+
+    被 leader 回调调用：丢失 leader（锁被别人抢）+ 应用 shutdown。
+    """
+    global _singletons_started
+    if not _singletons_started:
+        return
+
+    try:
+        from core.mcp.manager import get_mcp_manager
+        await get_mcp_manager().shutdown()
+    except Exception:
+        pass
+
+    try:
+        from services.cron.service import get_cron_service
+        await get_cron_service().stop()
+    except Exception:
+        pass
+
+    if TUTORBOT_ENABLED:
+        try:
+            from core.bot.manager import get_bot_manager
+            await get_bot_manager().stop_all()
+        except Exception:
+            pass
+
+    _singletons_started = False
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -123,37 +195,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"RAG cache initialization failed: {e}")
 
-    # Leader election: 只有 leader worker 启动单例服务 (Cron/Bot/MCP)
-    from core.leader import try_become_leader, shutdown_leader
-    _is_leader = await try_become_leader()
-
-    # 仅 leader worker 启 TutorBot
-    if _is_leader and TUTORBOT_ENABLED:
-        try:
-            from core.bot.manager import get_bot_manager
-            bot_mgr = get_bot_manager()
-            await bot_mgr.auto_start_bots()
-            logger.info("TutorBot manager initialized (auto-started configured bots)")
-        except Exception as e:
-            logger.warning(f"TutorBot startup failed (non-fatal): {e}")
-
-    # 仅 leader worker 启 Cron 调度服务
-    if _is_leader:
-        try:
-            from services.cron.service import get_cron_service
-            await get_cron_service().start()
-            logger.info("Cron service started")
-        except Exception as e:
-            logger.warning(f"Cron service startup failed (non-fatal): {e}")
-
-    # 仅 leader worker 启 MCP 连接管理器
-    if _is_leader:
-        try:
-            from core.mcp.manager import get_mcp_manager
-            await get_mcp_manager().ensure_started()
-            logger.info("MCP manager initialized")
-        except Exception as e:
-            logger.warning(f"MCP manager startup failed (non-fatal): {e}")
+    # Leader election: 注册状态翻转回调；leader（含运行中竞选接管）启单例服务。
+    from core.leader import try_become_leader, shutdown_leader, register_leader_callbacks
+    register_leader_callbacks(
+        on_gain=start_singleton_services,
+        on_lose=stop_singleton_services,
+    )
+    # 当选则内部走 on_gain 拉单例；未当选则起竞选 loop，锁可被接管时再走 on_gain
+    await try_become_leader()
 
     yield
 
@@ -166,32 +215,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Enqueue flush_all_pending_job failed: {e}")
 
-    # 仅 leader worker 停止单例服务
-    if _is_leader:
-        # 关闭 MCP 连接
-        try:
-            from core.mcp.manager import get_mcp_manager
-            await get_mcp_manager().shutdown()
-        except Exception:
-            pass
-
-        # 停止 Cron 服务
-        try:
-            from services.cron.service import get_cron_service
-            await get_cron_service().stop()
-        except Exception:
-            pass
-
-        # Stop TutorBot if running
-        if TUTORBOT_ENABLED:
-            try:
-                from core.bot.manager import get_bot_manager
-                await get_bot_manager().stop_all()
-            except Exception:
-                pass
-
-        # 清理 leader 选举资源
-        await shutdown_leader()
+    # 停止单例服务（leader 经 on_lose 回调）+ 清理 leader 选举资源（cancel loop、释放锁）
+    await shutdown_leader()
 
     logger.info("Application shutdown – closing database pool")
     await close_db()
@@ -306,7 +331,8 @@ async def health():
 
     # LLM check：仅验证 API key 已配置；不做实际调用（避免消耗 token / 拖慢探针）
     try:
-        from config import DASHSCOPE_API_KEY
+        from settings import get_settings
+        DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
         if DASHSCOPE_API_KEY:
             checks["llm"] = "ok (api_key configured)"
         else:
@@ -353,7 +379,8 @@ async def health_detailed():
 
     # LLM check
     try:
-        from config import DASHSCOPE_API_KEY
+        from settings import get_settings
+        DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
         if DASHSCOPE_API_KEY:
             checks["llm"] = "ok (api_key configured)"
             details["llm_circuit_breaker"] = get_llm_circuit_state()

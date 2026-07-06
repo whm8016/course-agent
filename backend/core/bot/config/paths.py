@@ -4,7 +4,8 @@ from pathlib import Path
 
 
 def get_bot_workspace_root() -> Path:
-    from config import TUTORBOT_WORKSPACE_DIR
+    from settings import get_settings
+    TUTORBOT_WORKSPACE_DIR = get_settings().paths.tutorbot_workspace_dir
     return Path(TUTORBOT_WORKSPACE_DIR)
 
 

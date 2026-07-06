@@ -38,7 +38,8 @@ from typing import Any
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import TEXT_MODEL
+from settings import get_settings
+TEXT_MODEL = get_settings().llm.text_model
 from core.db.database import User
 from core.llm.llm import client as async_openai_client
 
@@ -46,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 _ACTIVE_LIMIT = 200  # 放宽限制，一门课知识点可能很多
 _CANDIDATE_LIMIT = 100
-_EXTRACT_EVERY_N_TURNS = 3
+_EXTRACT_EVERY_N_TURNS = 6
 
 # 全局计数器，用于节流 LLM 提取频率
 _turn_counter: dict[str, int] = {}  # user_id -> turn count
@@ -307,13 +308,14 @@ def _merge_error_graph(existing: dict, new_errors: list[dict]) -> dict:
 
 async def _get_entity_catalog(course_id: str, max_entities: int = 100) -> str:
     """从 LightRAG 获取实体目录，格式化为 prompt 可用的文本。"""
-    from config import LIGHTRAG_ENABLED
+    from settings import get_settings
+    LIGHTRAG_ENABLED = get_settings().lightrag.enabled
 
     if not LIGHTRAG_ENABLED:
         return ""
 
     try:
-        from core.rag.lightrag_engine import get_course_entities
+        from core.rag import get_course_entities
         entities = await get_course_entities(course_id)
         if not entities:
             return ""
@@ -389,7 +391,8 @@ async def _extract_from_conversation(
 
     优先使用 LightRAG 实体目录（新路径），降级时走旧的开放提取。
     """
-    from config import LIGHTRAG_ENABLED
+    from settings import get_settings
+    LIGHTRAG_ENABLED = get_settings().lightrag.enabled
 
     logger.info(
         "[graph] extract START course_id=%s user_msg_len=%d assistant_len=%d lightrag=%s",

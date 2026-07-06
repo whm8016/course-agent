@@ -328,3 +328,9 @@ async def init_rag_cache(redis_url: str, ttl_seconds: int = 3600) -> RAGCache:
         logger.info("RAG cache disabled, continuing without caching")
         _rag_cache = RAGCache(redis_client=None)
         return _rag_cache
+
+
+def set_rag_cache(cache: RAGCache | None) -> None:
+    """设置全局 RAG 缓存实例。"""
+    global _rag_cache
+    _rag_cache = cache

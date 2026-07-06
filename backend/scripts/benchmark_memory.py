@@ -86,7 +86,7 @@ async def evaluate_configuration(settings, config):
     # 清空测试用户记忆（通过删除所有该用户的记录）
     from mem0 import AsyncMemory
     m = AsyncMemory.from_config(await _build_test_config())
-    all_memories = await m.get_all(user_id="test_user")
+    all_memories = await m.get_all(filters={"user_id": "test_user"})
     if isinstance(all_memories, dict):
         all_memories = all_memories.get("results", [])
     for mem in all_memories:
@@ -222,7 +222,14 @@ def count_contradictions(memories, test_cases):
 async def _build_test_config():
     """构建测试用的 Mem0 配置。"""
     import urllib.parse
-    from config import DATABASE_URL, DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, EMBEDDING_API_KEY, EMBEDDING_MODEL, LIGHTRAG_EMBEDDING_DIM, TEXT_MODEL
+    from settings import get_settings
+    DATABASE_URL = get_settings().db.url.get_secret_value()
+    DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
+    DASHSCOPE_BASE_URL = get_settings().llm.base_url
+    EMBEDDING_API_KEY = get_settings().embedding.api_key.get_secret_value()
+    EMBEDDING_MODEL = get_settings().embedding.model
+    LIGHTRAG_EMBEDDING_DIM = get_settings().lightrag.embedding_dim
+    TEXT_MODEL = get_settings().llm.text_model
 
     parsed = urllib.parse.urlparse(DATABASE_URL.replace("+asyncpg", "+psycopg2"))
     return {

@@ -14,11 +14,11 @@ from datetime import datetime
 import json
 from pathlib import Path
 from typing import Any
-from core.question.idea_agent import BATCH_SIZE, IdeaAgent
 from core.question.generator import Generator
 
 from core.question.models import QAPair, QuestionTemplate
-from config import QUESTION_DEFAULT_TOOL_FLAGS
+from settings import get_settings
+QUESTION_DEFAULT_TOOL_FLAGS = get_settings().question.default_tool_flags
 
 import logging
 from core.question.exam_stubs import extract_questions_from_paper, parse_pdf_with_mineru
@@ -75,18 +75,6 @@ class AgentCoordinator:
             except Exception as exc:
                 self.logger.debug(f"WS update failed: {exc}")
 
-    def _create_idea_agent(self) -> IdeaAgent:
-        agent = IdeaAgent(
-            kb_name=self.kb_name,
-            enable_rag=self.enable_idea_rag,
-            language=self.language,
-            api_key=self._api_key,
-            base_url=self._base_url,
-            api_version=self._api_version,
-        )
-        agent.set_trace_callback(self._trace_callback)
-        return agent
-
     def _create_generator(self) -> Generator:
         agent = Generator(
             kb_name=self.kb_name,
@@ -98,140 +86,6 @@ class AgentCoordinator:
         )
         agent.set_trace_callback(self._trace_callback)
         return agent
-
-    async def generate_from_topic(
-        self,
-        user_topic: str,
-        preference: str,
-        num_questions: int,
-        difficulty: str = "",
-        question_type: str = "",
-        history_context: str = "",
-    ) -> dict[str, Any]:
-        self._current_batch_dir = self._create_batch_dir("custom")
-        requested = max(1, int(num_questions or 1))
-        log_question_flow(
-            self.logger,
-            "coordinator.topic_start",
-            num_questions=requested,
-            user_topic=user_topic,
-            preference=preference,
-            history_context=history_context,
-            kb_name=self.kb_name or "",
-            enable_idea_rag=self.enable_idea_rag,
-        )
-        idea_agent = self._create_idea_agent()
-        templates: list[QuestionTemplate] = []
-        batch_trace: list[dict[str, Any]] = []
-        existing_concentrations: list[str] = []
-
-        normalized_difficulty = difficulty.strip().lower()
-        normalized_question_type = question_type.strip().lower()
-        target_difficulty = (
-            normalized_difficulty
-            if normalized_difficulty and normalized_difficulty != "auto"
-            else ""
-        )
-        target_question_type = (
-            normalized_question_type
-            if normalized_question_type and normalized_question_type != "auto"
-            else ""
-        )
-
-        batch_number = 0
-        while len(templates) < requested:
-            batch_number += 1
-            batch_size = min(BATCH_SIZE, requested - len(templates))
-            await self._send_ws_update(
-                "progress",
-                {
-                    "stage": "ideation",
-                    "status": "running",
-                    "batch": batch_number,
-                    "current": len(templates),
-                    "total": requested,
-                    "batch_size": batch_size,
-                },
-            )
-
-            idea_result = await idea_agent.process(
-                user_topic=user_topic,
-                preference=preference,
-                num_ideas=batch_size,
-                target_difficulty=target_difficulty,
-                target_question_type=target_question_type,
-                existing_concentrations=existing_concentrations,
-                batch_number=batch_number,
-            )
-            log_question_flow(
-                self.logger,
-                "coordinator.ideation_batch_done",
-                batch=batch_number,
-                batch_templates=len(idea_result.get("templates") or []),
-                knowledge_context=str(idea_result.get("knowledge_context", "")),
-                retrievals_n=len(idea_result.get("retrievals") or []),
-            )
-            batch_templates = idea_result.get("templates", [])
-            if not isinstance(batch_templates, list):
-                batch_templates = []
-
-            for template in batch_templates:
-                if not isinstance(template, QuestionTemplate):
-                    continue
-                template.question_id = f"q_{len(templates) + 1}"
-                templates.append(template)
-                existing_concentrations.append(template.concentration)
-
-            batch_trace.append(
-                {
-                    "batch": batch_number,
-                    "requested": batch_size,
-                    "generated": len(batch_templates),
-                    "knowledge_context": idea_result.get("knowledge_context", ""),
-                }
-            )
-            await self._send_ws_update(
-                "templates_ready",
-                {
-                    "stage": "ideation",
-                    "batch": batch_number,
-                    "count": len(batch_templates),
-                    "generated_total": len(templates),
-                    "requested_total": requested,
-                    "templates": [t.__dict__ for t in batch_templates],
-                },
-            )
-
-            if not batch_templates:
-                self.logger.warning(
-                    "Template generation returned an empty batch; stopping early."
-                )
-                break
-
-        await self._send_ws_update(
-            "progress",
-            {
-                "stage": "ideation",
-                "status": "complete",
-                "current": len(templates),
-                "total": requested,
-                "batches": batch_number,
-            },
-        )
-
-        qa_pairs = await self._generation_loop(
-            templates=templates[:requested],
-            user_topic=user_topic,
-            preference=preference,
-            history_context=history_context,
-        )
-        return self._build_summary(
-            source="topic",
-            requested=requested,
-            templates=templates[:requested],
-            qa_pairs=qa_pairs,
-            trace={"batches": batch_trace},
-        )
 
     async def generate_from_exam(
         self,

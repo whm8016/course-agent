@@ -36,6 +36,7 @@ class CapabilityCompleteEvent:
 
     type: EventType = EventType.CAPABILITY_COMPLETE
     turn_id: str = ""
+    session_id: str = ""          # L2 摘要压缩 / 记忆更新等后台任务按 session 定位
     user_id: str = ""
     course_id: str = ""
     mode: str = ""

@@ -81,20 +81,22 @@ class ToolRegistry:
     # ── 执行（核心）─────────────────────────────────────────────────────
     async def execute(
         self,
-        name: str,
+        tool_name: str,
         *,
         course_id: str = "",
         user_id: str = "",
         **kwargs: Any,
     ) -> ToolResult:
-        entry = self._entries.get(name)
+        entry = self._entries.get(tool_name)
         if entry is None:
-            return ToolResult(content=f"（未知工具：{name}）", success=False)
+            return ToolResult(content=f"（未知工具：{tool_name}）", success=False)
         try:
-            # 关键字调用：course_id/user_id 命中具名参数或落进 **kwargs，业务参数透传
+            # 关键字调用：course_id/user_id 命中具名参数或落进 **kwargs，业务参数透传。
+            # tool_name 刻意不叫 name——与 read_skill 等工具的 name 业务参数隔离，
+            # 否则 execute("read_skill", name="aihot") 会触发 multiple values for 'name'。
             return await entry.executor(course_id=course_id, user_id=user_id, **kwargs)
         except Exception as exc:
-            logger.exception("registry execute failed: %s", name)
+            logger.exception("registry execute failed: %s", tool_name)
             return ToolResult(content=f"（工具执行失败：{exc}）", success=False)
 
 

@@ -44,6 +44,45 @@ _CONNECT_TIMEOUT_S = 15
 _TRANSIENT_ERRORS = (BrokenPipeError, ConnectionResetError)
 
 
+def _unwrap_exception_group(exc: BaseException) -> str:
+    """把 anyio/mcp 抛出的 ExceptionGroup 递归拆开，拿到底层真实错误描述。
+
+    MCP 连接走 anyio TaskGroup，失败会被包成 ``ExceptionGroup``，而
+    ``str(ExceptionGroup)`` 只显示 "unhandled errors in a TaskGroup (N
+    sub-exception)"，看不到根因（如 httpx 的 410 Gone / ConnectError）。这里
+    递归下钻 ``.exceptions``，把叶子异常的类型+消息透出来，让设置页 Test 按钮
+    和启动日志能直接看到"为什么连不上"，而不是无信息的 TaskGroup 概要。
+    """
+    seen: list[str] = []
+
+    def _walk(e: BaseException) -> None:
+        if isinstance(e, BaseExceptionGroup):
+            for sub in e.exceptions:
+                _walk(sub)
+            return
+        msg = str(e).strip()
+        # httpx 的 HTTP 状态错误：追加响应体（如 410 的 "Url is expired"），
+        # 比纯 status+url 更让用户直接看懂失败原因
+        if isinstance(e, httpx.HTTPStatusError):
+            try:
+                body = (e.response.text or "").strip().replace("\n", " ")
+            except Exception:
+                body = ""
+            if body:
+                msg = f"{msg} | body: {body[:200]}"
+        seen.append(f"{type(e).__name__}: {msg}" if msg else type(e).__name__)
+
+    _walk(exc)
+    if not seen:
+        return f"{type(exc).__name__}: {exc}"
+    # 去重保序：嵌套 TaskGroup 可能把同一根因包多层
+    uniq: list[str] = []
+    for s in seen:
+        if s not in uniq:
+            uniq.append(s)
+    return "; ".join(uniq)
+
+
 @dataclass
 class _ServerConnection:
     """一个已配置 server 的活动状态。"""
@@ -249,7 +288,7 @@ class MCPConnectionManager:
             logger.error("MCP server %r: %s", name, conn.error)
         except Exception as exc:
             conn.status = "error"
-            conn.error = f"{type(exc).__name__}: {exc}"
+            conn.error = _unwrap_exception_group(exc)
             conn.shutdown.set()
             logger.error("MCP server %r failed to connect: %s", name, conn.error)
 
@@ -392,6 +431,30 @@ class MCPConnectionManager:
         )
 
 
+async def _http_probe_detail(cfg: MCPServerConfig) -> str:
+    """对 http/sse transport 补一次直连，拿 status+响应体。
+
+    mcp 的 sse_client 用 streaming response，抛 ``HTTPStatusError`` 时流已被关闭，
+    异常里的 ``response.text`` 读不出（``ResponseNotRead`` / ``StreamClosed``），
+    真实失败原因（如 410 的 ``{"message":"Url is expired"}``）会丢。这里独立 GET
+    一次把响应体补到错误信息里，让设置页 Test 按钮能直接告诉用户"为什么连不上"。
+    只对 sse/streamableHttp 有效；stdio 无 url，跳过。
+    """
+    try:
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            r = await client.get(
+                cfg.url,
+                headers={"Accept": "text/event-stream", **(cfg.headers or {})},
+            )
+        body = (r.text or "").strip().replace("\n", " ")
+        detail = f" [直连探测: HTTP {r.status_code}"
+        if body:
+            detail += f" body={body[:200]}"
+        return detail + "]"
+    except Exception as he:
+        return f" [直连探测失败: {type(he).__name__}]"
+
+
 async def probe_server(
     cfg: MCPServerConfig, *, timeout: int = _CONNECT_TIMEOUT_S
 ) -> dict[str, Any]:
@@ -412,7 +475,11 @@ async def probe_server(
     except asyncio.TimeoutError:
         return {"ok": False, "tools": [], "error": f"connect timed out after {timeout}s"}
     except Exception as exc:
-        return {"ok": False, "tools": [], "error": f"{type(exc).__name__}: {exc}"}
+        err = _unwrap_exception_group(exc)
+        # http/sse transport：mcp 抛异常时流式 response 已关、body 丢失，补一次直连
+        if cfg.resolved_type() in ("sse", "streamableHttp") and cfg.url:
+            err += await _http_probe_detail(cfg)
+        return {"ok": False, "tools": [], "error": err}
 
 
 _manager: MCPConnectionManager | None = None

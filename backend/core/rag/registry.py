@@ -24,23 +24,13 @@ _indexers: dict[str, type[Indexer]] = {}
 
 
 def register_retriever(name: str, cls: type[Retriever]) -> None:
-    """注册 Retriever 实现。
-
-    Args:
-        name: 后端名称（如 "lightrag", "llamaindex", "chroma"）
-        cls: Retriever 实现类
-    """
+    """注册 Retriever 实现。"""
     _retrievers[name] = cls
     logger.info("RAG registry: registered retriever '%s'", name)
 
 
 def register_indexer(name: str, cls: type[Indexer]) -> None:
-    """注册 Indexer 实现。
-
-    Args:
-        name: 后端名称
-        cls: Indexer 实现类
-    """
+    """注册 Indexer 实现。"""
     _indexers[name] = cls
     logger.info("RAG registry: registered indexer '%s'", name)
 
@@ -49,23 +39,13 @@ def register_indexer(name: str, cls: type[Indexer]) -> None:
 
 
 def get_retriever(backend: str | None = None) -> Retriever:
-    """获取 Retriever 实例。
-
-    Args:
-        backend: 后端名称，不传则从 settings.RAG_BACKEND 读取
-
-    Returns:
-        Retriever 实例
-
-    Raises:
-        ValueError: 后端未注册
-    """
-    from config import RAG_BACKEND
+    """获取 Retriever 实例。"""
+    from settings import get_settings
+    RAG_BACKEND = get_settings().rag.backend
 
     name = backend or RAG_BACKEND or "lightrag"
 
     if name not in _retrievers:
-        # 尝试自动导入并注册
         _auto_register(name)
 
     if name not in _retrievers:
@@ -76,23 +56,13 @@ def get_retriever(backend: str | None = None) -> Retriever:
 
 
 def get_indexer(backend: str | None = None) -> Indexer:
-    """获取 Indexer 实例。
-
-    Args:
-        backend: 后端名称，不传则从 settings.RAG_BACKEND 读取
-
-    Returns:
-        Indexer 实例
-
-    Raises:
-        ValueError: 后端未注册
-    """
-    from config import RAG_BACKEND
+    """获取 Indexer 实例。"""
+    from settings import get_settings
+    RAG_BACKEND = get_settings().rag.backend
 
     name = backend or RAG_BACKEND or "lightrag"
 
     if name not in _indexers:
-        # 尝试自动导入并注册
         _auto_register(name)
 
     if name not in _indexers:
@@ -109,44 +79,37 @@ def _auto_register(name: str) -> None:
     """自动导入并注册后端实现。"""
     if name == "lightrag":
         try:
-            from core.rag.retriever.lightrag import LightRAGREtriever
-            register_retriever("lightrag", LightRAGREtriever)
-            # Indexer 暂未实现，后续补充
+            from core.rag.retriever.lightrag import LightRAGRetriever
+            from core.rag.indexer.lightrag import LightRAGIndexer
+            register_retriever("lightrag", LightRAGRetriever)
+            register_indexer("lightrag", LightRAGIndexer)
         except ImportError as e:
-            logger.warning("Failed to auto-register lightrag retriever: %s", e)
+            logger.warning("Failed to auto-register lightrag: %s", e)
 
     elif name == "llamaindex":
         try:
-            # LlamaIndex Retriever 暂未实现
+            # LlamaIndex Retriever/Indexer 已废弃，不实现
             pass
         except ImportError as e:
-            logger.warning("Failed to auto-register llamaindex retriever: %s", e)
+            logger.warning("Failed to auto-register llamaindex: %s", e)
 
     elif name == "chroma":
         try:
-            # Chroma Retriever 暂未实现
+            # Chroma Retriever/Indexer 已废弃，不实现
             pass
         except ImportError as e:
-            logger.warning("Failed to auto-register chroma retriever: %s", e)
+            logger.warning("Failed to auto-register chroma: %s", e)
 
 
 # ── 后端可用性检查 ───────────────────────────────────────────────────────────
 
 
 def is_backend_available(backend: str) -> tuple[bool, str]:
-    """检查后端是否可用。
-
-    Args:
-        backend: 后端名称
-
-    Returns:
-        (is_available, error_message) 元组
-    """
+    """检查后端是否可用。"""
     if backend == "lightrag":
         from core.rag.lightrag import is_lightrag_available
         return is_lightrag_available()
 
-    # 其他后端暂未实现
     return False, f"Backend '{backend}' not implemented"
 
 

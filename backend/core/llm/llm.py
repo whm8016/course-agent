@@ -6,17 +6,16 @@ import os
 from collections.abc import AsyncGenerator
 from pathlib import Path
 
-from config import (
-    DASHSCOPE_API_KEY,
-    DASHSCOPE_BASE_URL,
-    FALLBACK_API_KEY,
-    FALLBACK_BASE_URL,
-    FALLBACK_MODEL,
-    LLM_API_VERSION,
-    LLM_BINDING,
-    LLM_TIMEOUT_SEC,
-    TEXT_MODEL,
-)
+from settings import get_settings
+DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
+DASHSCOPE_BASE_URL = get_settings().llm.base_url
+FALLBACK_API_KEY = get_settings().fallback.api_key.get_secret_value()
+FALLBACK_BASE_URL = get_settings().fallback.base_url
+FALLBACK_MODEL = get_settings().fallback.model
+LLM_API_VERSION = get_settings().llm.api_version
+LLM_BINDING = get_settings().llm.binding
+LLM_TIMEOUT_SEC = get_settings().llm.timeout_sec
+TEXT_MODEL = get_settings().llm.text_model
 from core.llm.provider_factory import get_llm_client
 from core.llm.reliability import (
     CircuitOpenError,

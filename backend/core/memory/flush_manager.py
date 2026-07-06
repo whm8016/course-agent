@@ -39,7 +39,8 @@ def _get_redis() -> aioredis.Redis:
     """返回模块级 Redis 连接池（懒加载，复用同一个 pool，不需要每次 aclose）。"""
     global _redis_pool
     if _redis_pool is None:
-        from config import REDIS_URL
+        from settings import get_settings
+        REDIS_URL = get_settings().db.redis_url.get_secret_value()
         _redis_pool = aioredis.from_url(REDIS_URL, decode_responses=True)
     return _redis_pool
 
@@ -332,13 +333,13 @@ def get_flush_manager() -> MemoryFlushManager:
 
         settings = get_settings()
         _flush_manager = MemoryFlushManager(
-            max_turns=settings.mem0_flush_max_turns,
-            idle_timeout=settings.mem0_flush_idle_timeout,
+            max_turns=settings.mem0.flush_max_turns,
+            idle_timeout=settings.mem0.flush_idle_timeout,
         )
         logger.info(
             "[flush_manager] initialized max_turns=%d idle_timeout=%.1fs",
-            settings.mem0_flush_max_turns,
-            settings.mem0_flush_idle_timeout,
+            settings.mem0.flush_max_turns,
+            settings.mem0.flush_idle_timeout,
         )
     return _flush_manager
 

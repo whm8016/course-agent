@@ -11,23 +11,25 @@ logger = logging.getLogger(__name__)
 @safe_traceable(name="rag.retrieve", run_type="retriever")
 async def _execute_rag(course_id: str, query: str, **kwargs) -> ToolResult:
     """调用 LightRAG 检索，返回 ToolResult。"""
-    from core.rag.lightrag_engine import _get_instance, _build_query_param, LIGHTRAG_QUERY_MODE
+    # 未选课 / 自由问答：无课程知识库，直接短路，避免对空库误检索
+    if not course_id or course_id == "general":
+        return ToolResult(content="（未选择课程，知识库不可用）", success=False)
+    from core.rag import get_retriever
     try:
-        rag = await _get_instance(course_id)
-        mode = kwargs.get("mode") or LIGHTRAG_QUERY_MODE or "mix"
-        param = _build_query_param(mode, [], only_need_context=True)
-        if hasattr(param, "stream"):
-            param.stream = False
-        raw = await rag.aquery(query, param=param)
-        content = raw.strip() if isinstance(raw, str) else str(raw or "").strip()
-        if len(content) > 6000:
-            content = content[:6000] + "\n...(truncated)"
+        retriever = get_retriever("lightrag")
+        content = await retriever.retrieve_context(
+            course_id=course_id,
+            query=query,
+            top_k=kwargs.get("top_k", 5),
+            **kwargs,
+        )
+        if len(content) > 4000:
+            content = content[:4000] + "\n...(truncated)"
         _preview = (content[:800] + "…") if len(content) > 800 else content
         logger.info(
-            "tool_registry [rag] course=%s mode=%s query_chars=%d retrieved_chars=%d empty=%s\n"
+            "tool_registry [rag] course=%s query_chars=%d retrieved_chars=%d empty=%s\n"
             "--- RAG 检索结果预览（前 800 字）---\n%s\n--- end preview ---",
             course_id,
-            mode,
             len(query),
             len(content),
             not bool(content),
@@ -445,7 +447,13 @@ READ_SKILL_SCHEMA = {
 
 
 @safe_traceable(name="tool.execute", run_type="tool")
-async def execute_tool(name: str, course_id: str, user_id: str = "", **kwargs) -> ToolResult:
-    """工具执行统一入口：全经 ToolRegistry（内置 + MCP 已统一注册）。"""
+async def execute_tool(tool_name: str, course_id: str = "", user_id: str = "", **kwargs) -> ToolResult:
+    """工具执行统一入口：全经 ToolRegistry（内置 + MCP 已统一注册）。
+
+    形参刻意用 ``tool_name`` 而非 ``name``：工具名与业务参数命名空间必须隔离——
+    read_skill 的业务参数也叫 ``name``（技能名），若本形参同名，调用
+    ``execute_tool("read_skill", name="aihot")`` 会触发
+    ``got multiple values for argument 'name'``。course_id 改默认值便于全关键字调用。
+    """
     from core.agent.registry import get_tool_registry
-    return await get_tool_registry().execute(name, course_id=course_id, user_id=user_id, **kwargs)
+    return await get_tool_registry().execute(tool_name, course_id=course_id, user_id=user_id, **kwargs)

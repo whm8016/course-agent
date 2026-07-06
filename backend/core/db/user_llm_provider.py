@@ -5,13 +5,16 @@
 - upsert/delete（写时加密）
 - 管理 admin 视图（含 key 回填）
 
-返回的 profile dict 结构与 model_catalog.json 的 profile 一致：
+对话模型与视觉模型可走**不同供应商**（对话 deepseek，视觉 dashscope/qwen-vl），故拆成
+两组独立字段。embedding 平台统一（per-course 共享库要求一致），不在此配置。
+
+返回的 profile dict：
     {
-        "binding": str,
-        "api_key": str,   # 解密后的明文，供 provider_factory 使用
-        "base_url": str,
-        "api_version": str,
-        "models": {"text": {"model": str}, "fast": {"model": str}, "vision": {"model": str}},
+        # 对话供应商（catalog 兼容，供 get_llm_client_for_profile）
+        "binding": str, "api_key": str, "base_url": str, "api_version": str,
+        "models": {"text": {"model": str}},
+        # 视觉独立供应商
+        "vision_binding": str, "vision_api_key": str, "vision_base_url": str, "vision_model": str,
     }
 """
 from __future__ import annotations
@@ -29,29 +32,33 @@ logger = logging.getLogger(__name__)
 
 
 class UserProviderPayload(BaseModel):
-    """PUT /llm/me 请求体（用户自配 LLM provider）。"""
+    """PUT /llm/me 请求体（用户自配 LLM provider）。
 
+    对话与视觉可走不同供应商。两把 key 各自留空时保留原值（仅改模型不重输 key）。
+    """
+
+    # 对话模型供应商
     binding: str = ""
     api_key: str = ""
     base_url: str = ""
     api_version: str = ""
     text_model: str = ""
-    fast_model: str = ""
+    # 视觉模型供应商（独立，可异于对话供应商）
+    vision_binding: str = ""
+    vision_api_key: str = ""
+    vision_base_url: str = ""
     vision_model: str = ""
 
 
 async def get_active_provider_view(user_id: str) -> dict | None:
-    """查询用户活跃 provider，解密 key，返回与 catalog profile 兼容的 dict。
+    """查询用户活跃 provider，解密 key，返回对话 + 视觉两组供应商信息的 dict。
 
     Args:
         user_id: 用户 ID（空 → None）
 
     Returns:
-        profile dict（含 models 子结构）或 None（无记录）
-
-    Note:
-        返回的 dict 直接喂给 provider_factory.get_llm_client_for_profile，
-        该函数会做指纹缓存 + 回退 .env 兜底。
+        profile dict 或 None（无记录）。对话组顶层字段 catalog 兼容（直接喂
+        get_llm_client_for_profile）；视觉组用 vision_* 前缀字段，由调用方独立构造 client。
     """
     if not user_id:
         return None
@@ -65,16 +72,23 @@ async def get_active_provider_view(user_id: str) -> dict | None:
                 return None
 
             api_key_plain = decrypt_secret(prov.api_key_encrypted)
+            vision_key_plain = (
+                decrypt_secret(prov.vision_api_key_encrypted)
+                if prov.vision_api_key_encrypted
+                else ""
+            )
             return {
+                # 对话供应商
                 "binding": prov.binding or "",
                 "api_key": api_key_plain,
                 "base_url": prov.base_url or "",
                 "api_version": prov.api_version or "",
-                "models": {
-                    "text": {"model": prov.text_model or ""},
-                    "fast": {"model": prov.fast_model or ""},
-                    "vision": {"model": prov.vision_model or ""},
-                },
+                "models": {"text": {"model": prov.text_model or ""}},
+                # 视觉独立供应商
+                "vision_binding": prov.vision_binding or "",
+                "vision_api_key": vision_key_plain,
+                "vision_base_url": prov.vision_base_url or "",
+                "vision_model": prov.vision_model or "",
             }
     except Exception:
         logger.exception("get_active_provider_view failed user=%s", user_id)
@@ -100,7 +114,9 @@ async def get_provider_admin_view(user_id: str) -> dict | None:
                 "base_url": prov.base_url,
                 "api_version": prov.api_version,
                 "text_model": prov.text_model,
-                "fast_model": prov.fast_model,
+                "vision_binding": prov.vision_binding,
+                "vision_api_key": decrypt_secret(prov.vision_api_key_encrypted),
+                "vision_base_url": prov.vision_base_url,
                 "vision_model": prov.vision_model,
                 "updated_at": prov.updated_at,
                 "created_at": prov.created_at,
@@ -110,22 +126,37 @@ async def get_provider_admin_view(user_id: str) -> dict | None:
         return None
 
 
+def _resolve_key(raw: str, existing_encrypted: str) -> str:
+    """key 留空保留原值，否则加密。供对话/视觉两把 key 共用。"""
+    raw = (raw or "").strip()
+    if existing_encrypted and not raw:
+        return existing_encrypted  # 留空保留原 key
+    return encrypt_secret(raw)
+
+
 async def upsert_provider(user_id: str, payload: UserProviderPayload) -> dict:
-    """新增或更新用户 provider（写时加密 api_key）。"""
+    """新增或更新用户 provider（写时加密两把 key，各自留空保留原值）。"""
     async with AsyncSessionLocal() as db:
         row = await db.execute(
             select(UserLLMProvider).where(UserLLMProvider.user_id == user_id)
         )
         prov = row.scalar_one_or_none()
         now = time.time()
-        encrypted_key = encrypt_secret(payload.api_key)
+        encrypted_key = _resolve_key(
+            payload.api_key, prov.api_key_encrypted if prov else ""
+        )
+        encrypted_vision_key = _resolve_key(
+            payload.vision_api_key, prov.vision_api_key_encrypted if prov else ""
+        )
         if prov:
             prov.binding = payload.binding
             prov.api_key_encrypted = encrypted_key
             prov.base_url = payload.base_url
             prov.api_version = payload.api_version
             prov.text_model = payload.text_model
-            prov.fast_model = payload.fast_model
+            prov.vision_binding = payload.vision_binding
+            prov.vision_api_key_encrypted = encrypted_vision_key
+            prov.vision_base_url = payload.vision_base_url
             prov.vision_model = payload.vision_model
             prov.updated_at = now
         else:
@@ -136,7 +167,9 @@ async def upsert_provider(user_id: str, payload: UserProviderPayload) -> dict:
                 base_url=payload.base_url,
                 api_version=payload.api_version,
                 text_model=payload.text_model,
-                fast_model=payload.fast_model,
+                vision_binding=payload.vision_binding,
+                vision_api_key_encrypted=encrypted_vision_key,
+                vision_base_url=payload.vision_base_url,
                 vision_model=payload.vision_model,
                 updated_at=now,
                 created_at=now,

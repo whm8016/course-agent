@@ -49,6 +49,12 @@ class QuizCapability(BaseCapability):
                 "questions": result["questions"],
                 "metadata": result["metadata"],
             })
+            # 出题正常结束信号：pipeline 内部 run_agent_loop 已抑制中间 done，
+            # 这里补发唯一一次最终 done，供前端 handleQuizStart 收尾（推题 + 关 WS）。
+            await stream.emit({
+                "type": "done",
+                "metadata": {"mode": "quiz", "count": len(result["questions"])},
+            })
         except Exception as exc:
             log_flow("quiz.error", level=logging.ERROR,
                      elapsed_ms=int((time.perf_counter() - _t0) * 1000), error=str(exc))

@@ -1,10 +1,11 @@
-﻿"""Async database layer: SQLAlchemy 2.0 + asyncpg connection pool."""
+"""Async database layer: SQLAlchemy 2.0 + asyncpg connection pool."""
 from __future__ import annotations
 
 import logging
 import time
 import uuid
 from collections.abc import AsyncGenerator
+from enum import Enum
 
 from sqlalchemy import (
     Boolean,
@@ -26,7 +27,8 @@ from sqlalchemy.ext.asyncio import (
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
 
-from config import DATABASE_URL
+from settings import get_settings
+DATABASE_URL = get_settings().db.url.get_secret_value()
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +230,45 @@ class TeacherInvite(Base):
     created_at = Column(Float, nullable=False, default=time.time)
 
 
+class ApplicationStatus(str, Enum):
+    """教师申请状态机。DB 存 String(32)，值：pending/approved/rejected。
+
+    符合项目既有约定（CronJobState/TopicStatus 同构）：业务层用 Enum，
+    DB 列存裸字符串值，避免 SQLAlchemy Enum 类型的 schema 耦合。
+    """
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class TeacherApplication(Base):
+    """教师准入申请（申请-审批流，与邀请码即时升级并存）。
+
+    状态机 pending → approved/rejected（终态不可逆，审批接口显式守卫）。
+    approved 时审批事务把 users.role 升为 teacher。
+    """
+
+    __tablename__ = "teacher_applications"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(12))
+    user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    reason = Column(Text, nullable=False, default="")
+    status = Column(String(32), nullable=False, default=ApplicationStatus.PENDING.value)
+    reviewed_by = Column(String(32), ForeignKey("users.id"), nullable=True)
+    reviewed_at = Column(Float, nullable=True)
+    review_note = Column(Text, nullable=False, default="")
+    created_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        # 不加 user_id 全局 unique——允许 rejected 后重新申请，保留审计轨迹。
+        # 并发防重靠部分唯一索引 uq_teacher_app_pending_user（迁移里建）。
+        # 复合索引最左前缀已覆盖单列查询，故 user_id/status 不再单独 index。
+        Index("ix_teacher_app_user_status", "user_id", "status"),
+        Index("ix_teacher_app_status_created", "status", "created_at"),
+    )
+
+
 class Enrollment(Base):
     """Student ↔ Course enrollment (managed by teacher / admin)."""
 
@@ -341,8 +382,12 @@ class UserLLMProvider(Base):
     base_url = Column(String(512), nullable=False, default="")
     api_version = Column(String(32), nullable=False, default="")
     text_model = Column(String(64), nullable=False, default="")
-    fast_model = Column(String(64), nullable=False, default="")
+    fast_model = Column(String(64), nullable=False, default="")  # 遗留死字段（无消费方），保留避免迁移破坏
     vision_model = Column(String(64), nullable=False, default="")
+    # 视觉模型独立供应商（可异于对话供应商：对话走 deepseek，视觉走 dashscope/qwen-vl）
+    vision_binding = Column(String(32), nullable=False, default="")
+    vision_api_key_encrypted = Column(String(512), nullable=False, default="")  # Fernet 密文
+    vision_base_url = Column(String(512), nullable=False, default="")
     updated_at = Column(Float, nullable=False, default=time.time)
     created_at = Column(Float, nullable=False, default=time.time)
 
@@ -378,7 +423,8 @@ async def init_db():
 
     Production relies on ``alembic upgrade head``; skip create_all / column patches.
     """
-    from config import ENVIRONMENT
+    from settings import get_settings
+    ENVIRONMENT = get_settings().environment
 
     if ENVIRONMENT == "production":
         logger.info("ENVIRONMENT=production: skipping create_all (use Alembic migrations)")
@@ -567,4 +613,3 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
-

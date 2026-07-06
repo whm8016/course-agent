@@ -10,7 +10,8 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from config import DATABASE_URL
+from settings import get_settings
+DATABASE_URL = get_settings().db.url.get_secret_value()
 from core.db.database import Base
 
 config = context.config

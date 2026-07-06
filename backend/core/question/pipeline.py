@@ -21,6 +21,12 @@ from typing import Any
 from core.agentic.loop import _get_tool_schemas, run_agent_loop
 from core.context import UnifiedContext
 from core.observability import log_flow
+from core.pipeline_common import (
+    assemble_common_context,
+    build_common_context_layers,
+    describe_images,
+    resolve_profile_runtime,
+)
 from core.prompt_loader import load_prompt_dict
 from core.stream_bus import StreamBus
 
@@ -30,6 +36,15 @@ _QUIZ_PROMPT_PATH = Path(__file__).parent / "prompts" / "zh" / "pipeline.yaml"
 
 _VALID_TYPES = ("choice", "concept", "fill_in_blank", "short_answer", "written", "coding")
 _VALID_DIFFICULTY = ("easy", "medium", "hard")
+
+
+def _with_common(task_system, layers) -> str:
+    """叠加通用上下文层到 task system（solve/research/quiz 共享语义）。
+
+    通用层为空时原样返回，避免多余空行。
+    """
+    common = assemble_common_context(layers)
+    return f"{task_system}\n\n{common}" if common else task_system
 
 
 class QuizPipeline:
@@ -48,6 +63,10 @@ class QuizPipeline:
         import time as _time
         _t_total = _time.perf_counter()
 
+        # 解析对话供应商 runtime + 通用上下文层（四条 pipeline 共享步骤，pipeline_common）
+        rt = await resolve_profile_runtime(context.llm_profile_id, context.user_id)
+        layers = await build_common_context_layers(context)
+
         # explore 可用工具：仅 rag/web_search（出题不需要 ask_user）
         explore_tools = [t for t in context.enabled_tools if t in ("rag", "web_search")]
 
@@ -56,7 +75,9 @@ class QuizPipeline:
         async with stream.stage("explore", source="quiz"):
             explore_ctx = replace(
                 context,
-                user_message=f"出题要求：{requirement}",
+                user_message=await describe_images(
+                    context, f"出题要求：{requirement}", rt
+                ),
                 conversation_history=[],
                 enabled_tools=explore_tools,
                 mode="quiz",
@@ -64,9 +85,13 @@ class QuizPipeline:
             explore_outcome = await run_agent_loop(
                 context=explore_ctx,
                 stream=stream,
-                system_prompt=(cfg.get("explore") or {}).get("system", ""),
+                system_prompt=_with_common((cfg.get("explore") or {}).get("system", ""), layers),
                 tool_schemas=_get_tool_schemas(explore_ctx),
                 max_iterations=5,
+                emit_terminal_events=False,
+                client=rt.client,
+                model=rt.text_model,
+                binding=rt.binding,
             )
             exploration_trace = explore_outcome.final_text
         log_flow("question.stage.explore",
@@ -94,9 +119,13 @@ class QuizPipeline:
             plan_outcome = await run_agent_loop(
                 context=plan_ctx,
                 stream=stream,
-                system_prompt=plan_system,
+                system_prompt=_with_common(plan_system, layers),
                 tool_schemas=None,
                 max_iterations=1,
+                emit_terminal_events=False,
+                client=rt.client,
+                model=rt.text_model,
+                binding=rt.binding,
             )
             templates = _parse_templates(plan_outcome.final_text, count)
         log_flow("question.stage.plan",
@@ -123,9 +152,13 @@ class QuizPipeline:
                 quiz_outcome = await run_agent_loop(
                     context=quiz_ctx,
                     stream=stream,
-                    system_prompt=quiz_system,
+                    system_prompt=_with_common(quiz_system, layers),
                     tool_schemas=None,
                     max_iterations=1,
+                    emit_terminal_events=False,
+                    client=rt.client,
+                    model=rt.text_model,
+                    binding=rt.binding,
                 )
                 q = _parse_question(quiz_outcome.final_text, tmpl)
                 questions.append(q)

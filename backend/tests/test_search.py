@@ -70,12 +70,17 @@ class TestTypes:
 class TestConfig:
     def test_defaults(self):
         from services.search.config import resolve_search_config
+        import services.search.config as sc
 
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("SEARCH_PROVIDER", None)
             os.environ.pop("SEARCH_API_KEY", None)
             os.environ.pop("SEARCH_MAX_RESULTS", None)
-            cfg = resolve_search_config()
+            # 清 .env 经 settings 固化进模块常量的默认值（嵌套化后 SEARCH__* 会固化），
+            # 还原「无任何配置 → duckduckgo」的测试前提。
+            with patch.object(sc, "SEARCH_PROVIDER", ""), patch.object(sc, "SEARCH_API_KEY", ""), \
+                 patch.object(sc, "SEARCH_PROXY", ""):
+                cfg = resolve_search_config()
 
         assert cfg.provider == "duckduckgo"
         assert cfg.api_key == ""
@@ -141,43 +146,60 @@ class TestProviderRegistry:
 # ---------------------------------------------------------------------------
 
 class TestDuckDuckGoProvider:
-    def _make_fake_rows(self):
-        return [
+    def test_search_returns_response(self):
+        from services.search.providers import duckduckgo as dd
+
+        rows = [
             {"title": "Result 1", "href": "https://example.com/1", "body": "Snippet 1"},
             {"title": "Result 2", "href": "https://example.com/2", "body": "Snippet 2"},
         ]
+        mock_inst = MagicMock()
+        mock_inst.text.return_value = rows
 
-    def test_search_returns_response(self):
-        from services.search.providers.duckduckgo import DuckDuckGoProvider
-
-        fake_rows = self._make_fake_rows()
-        mock_ddgs = MagicMock()
-        mock_ddgs.text.return_value = fake_rows
-
-        with patch("duckduckgo_search.DDGS", return_value=mock_ddgs):
-            p = DuckDuckGoProvider()
-            resp = p.search("python tutorial", max_results=2)
+        # provider 内 `from ddgs import DDGS` 函数内导入，patch 源头 ddgs.DDGS 即可生效
+        with patch("ddgs.DDGS", return_value=mock_inst):
+            resp = dd.DuckDuckGoProvider().search("python tutorial", max_results=2)
 
         assert resp.provider == "duckduckgo"
         assert resp.query == "python tutorial"
         assert len(resp.search_results) == 2
         assert len(resp.citations) == 2
         assert resp.search_results[0].title == "Result 1"
+        assert resp.search_results[0].url == "https://example.com/1"
+        assert resp.search_results[0].snippet == "Snippet 1"
         assert resp.citations[0].reference == "[1]"
+        # query + max_results 透传给 ddgs.text
+        mock_inst.text.assert_called_once_with("python tutorial", max_results=2)
 
     def test_search_empty_results(self):
-        from services.search.providers.duckduckgo import DuckDuckGoProvider
+        from services.search.providers import duckduckgo as dd
 
-        mock_ddgs = MagicMock()
-        mock_ddgs.text.return_value = []
+        mock_inst = MagicMock()
+        mock_inst.text.return_value = []
 
-        with patch("duckduckgo_search.DDGS", return_value=mock_ddgs):
-            p = DuckDuckGoProvider()
-            resp = p.search("nothing found")
+        with patch("ddgs.DDGS", return_value=mock_inst):
+            resp = dd.DuckDuckGoProvider().search("nothing found")
 
         assert resp.search_results == []
         assert resp.citations == []
         assert resp.answer == ""
+
+    def test_search_ddgs_exception_returns_empty(self):
+        """ddgs.text() 抛异常时 provider 容错返回空结果（不向上抛，避免拖垮调用方）。
+
+        回归：旧实现手抓 html.duckduckgo.com 被反爬（403 / SSL 断连 / 空 202 挑战页）；
+        改用 ddgs 库后，库内异常由 provider 捕获、返回空 WebSearchResponse。
+        """
+        from services.search.providers import duckduckgo as dd
+
+        mock_inst = MagicMock()
+        mock_inst.text.side_effect = RuntimeError("network error")
+
+        with patch("ddgs.DDGS", return_value=mock_inst):
+            resp = dd.DuckDuckGoProvider().search("circuit analysis", max_results=2)
+
+        assert resp.search_results == []
+        assert resp.provider == "duckduckgo"
 
     def test_is_available(self):
         from services.search.providers.duckduckgo import DuckDuckGoProvider
@@ -233,20 +255,16 @@ class TestConsolidation:
 # ---------------------------------------------------------------------------
 
 class TestWebSearch:
-    def _fake_ddgs(self):
-        mock = MagicMock()
-        mock.text.return_value = [
-            {"title": "T1", "href": "https://a.com", "body": "snip1"},
-        ]
-        return mock
-
     def test_web_search_duckduckgo(self, monkeypatch):
         monkeypatch.setenv("SEARCH_PROVIDER", "duckduckgo")
         monkeypatch.setenv("SEARCH_ENABLED", "true")
 
         from services.search import web_search
 
-        with patch("duckduckgo_search.DDGS", return_value=self._fake_ddgs()):
+        rows = [{"title": "T1", "href": "https://a.com", "body": "snip1"}]
+        mock_inst = MagicMock()
+        mock_inst.text.return_value = rows
+        with patch("ddgs.DDGS", return_value=mock_inst):
             result = web_search("hello world", provider="duckduckgo")
 
         assert result["provider"] == "duckduckgo"
@@ -285,7 +303,10 @@ class TestWebSearch:
 
         from services.search import web_search
 
-        with patch("duckduckgo_search.DDGS", return_value=self._fake_ddgs()):
+        rows = [{"title": "T1", "href": "https://a.com", "body": "snip1"}]
+        mock_inst = MagicMock()
+        mock_inst.text.return_value = rows
+        with patch("ddgs.DDGS", return_value=mock_inst):
             result = web_search("save test", provider="duckduckgo", output_dir=str(tmp_path))
 
         assert "result_file" in result

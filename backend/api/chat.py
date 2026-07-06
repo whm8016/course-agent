@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import base64
 import json
 import logging
-import os
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -14,10 +11,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
 from api.courses import check_course_access
-from api.upload import assert_upload_owner, resolve_upload_path
-from core.attachment import Attachment, AttachmentType
+from api.upload import (
+    enforce_image_limit,
+    materialize_attachments,
+    resolve_attachments,
+)
+from core.attachment import Attachment
 from core.context import UnifiedContext
-from core.llm.multimodal import _guess_mime_type
 from core.db.database import get_db
 from core.db.limiter import limiter
 from core.agent.orchestrator import normalize_mode
@@ -29,12 +29,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 MAX_MESSAGE_LENGTH = 2000
-MAX_HISTORY_LENGTH = 20
-MAX_IMAGES_PER_TURN = 4  # 单轮最多图片附件数（防多图 base64 涨 token 致超时）
+MAX_HISTORY_LENGTH = 10
 
 
 class ChatRequest(BaseModel):
-    course_id: str = Field(default="stamp", description="课程 ID")
+    course_id: str = Field(default="", description="课程 ID（空=自由问答，不接入知识库）")
     message: str = Field(default="", description="用户消息")
     chat_mode: str = Field(default="chat", description="模式：chat / deep_solve / deep_research / quiz")
     history: list[dict[str, Any]] = Field(default_factory=list, description="历史消息列表")
@@ -43,6 +42,7 @@ class ChatRequest(BaseModel):
     attachments: list[Attachment] = Field(default_factory=list, description="附件列表（图片，支持多图）")
     tools: list[str] = Field(default_factory=list, description="启用的工具，如 ['rag', 'web_search']")
     model_profile_id: str | None = Field(default=None, description="本次对话使用的 LLM 供应商 profile id（对标 DeepTutor：用户下拉选中；不传走默认/active）")
+    rag_mode: str = Field(default="mix", description="LightRAG 检索模式：mix/naive/local/global，默认 mix")
 
 
 @router.post("/chat")
@@ -53,40 +53,22 @@ async def chat(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    course_id: str = body.course_id
+    course_id: str = body.course_id or "general"
     message: str = body.message
     history: list[dict] = body.history
     session_id: str | None = body.session_id
     mode: str = normalize_mode(body.chat_mode)
 
-    # 附件解析：attachments 列表优先，回退旧 image_path 单图
-    attachments: list[Attachment] = [a for a in (body.attachments or [])]
-    if body.image_path and not any(a.is_image() for a in attachments):
-        attachments.append(Attachment(type=AttachmentType.IMAGE, url=body.image_path))
+    # rag_mode 白名单校验：只允许合法的 LightRAG 查询模式，非法/空值回退 mix
+    rag_mode = (body.rag_mode or "").strip().lower()
+    if rag_mode not in {"mix", "naive", "local", "global"}:
+        rag_mode = "mix"
 
-    # 限流：单轮图片数上限（防多图 base64 涨 token 致超时）
+    # 附件解析 + 图片限流 + 物化（归属校验 + 读 base64），统一在 api.upload
+    attachments = resolve_attachments(body.attachments, body.image_path)
+    enforce_image_limit(attachments)
+    materialize_attachments(attachments, user)
     image_count = sum(1 for a in attachments if a.is_image())
-    if image_count > MAX_IMAGES_PER_TURN:
-        raise HTTPException(status_code=400, detail=f"单次最多上传 {MAX_IMAGES_PER_TURN} 张图片")
-
-    # 多租户归属校验 + URL→磁盘路径 + 读盘填 base64（图片与文档统一处理）。
-    # base64 是图片注入（multimodal）与文档文本提取（loop）的共同前提；在此一次
-    # 性填好，下游 loop 不再重复读盘。本地 /api/uploads/ 路径才校验归属 + 读盘，
-    # 外部 http(s) URL 不读（安全：不下载远端文档，图片由 multimodal 以 URL 形式发）。
-    for att in attachments:
-        url = att.url or ""
-        is_local = any(url.startswith(p) for p in ("/api/uploads/", "/uploads/"))
-        if not is_local:
-            continue
-        assert_upload_owner(url.rsplit("/", 1)[-1], user)
-        att.file_path = resolve_upload_path(url) or att.file_path
-        if att.file_path and os.path.isfile(att.file_path):
-            att.base64 = base64.b64encode(Path(att.file_path).read_bytes()).decode("ascii")
-            if att.is_image():
-                if not att.mime_type:
-                    att.mime_type = _guess_mime_type(att.filename or att.file_path)
-            elif not att.filename:
-                att.filename = os.path.basename(att.file_path)
 
     await check_course_access(db, course_id, user)
 
@@ -97,7 +79,7 @@ async def chat(
 
     log_flow("http.chat.start", user_id=str(user["id"]), course_id=course_id,
              mode=mode, session_id=session_id or "", question=message[:120],
-             attachments=image_count, tools=body.tools)
+             attachments=image_count, tools=body.tools, rag_mode=rag_mode)
 
     # 读 Mem0 记忆（L3）：用当前用户消息做 query 语义检索相关记忆注入
     from core.memory.mem0_client import build_memory_context as _mem_ctx_fn, has_any as _mem0_has_any
@@ -135,6 +117,7 @@ async def chat(
         memory_context=_mem_ctx,  # L3
         session_summary=_session_summary,  # L2
         llm_profile_id=body.model_profile_id or "",
+        rag_mode=rag_mode,
         metadata={"has_memory": _has_memory},
     )
     
@@ -142,6 +125,10 @@ async def chat(
     async def event_generator():
         trm = get_turn_runtime_manager()
         turn_id = await trm.start_turn(ctx)
+
+        # 先把 turn_id 作为独立 SSE chunk 下发给前端（不进 bus，避免 subscribe 回放
+        # _history 时重复）。前端据此调用 POST /chat/answer_now 触发"立即回答"。
+        yield f"data: {json.dumps({'type': 'turn_started', 'turn_id': turn_id}, ensure_ascii=False)}\n\n"
 
         try:
             async for event in trm.subscribe_turn(turn_id):
@@ -164,3 +151,29 @@ async def chat(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+class AnswerNowRequest(BaseModel):
+    turn_id: str = Field(..., description="要触发立即回答的 turn id（来自 turn_started 事件）")
+
+
+@router.post("/chat/answer_now")
+@limiter.limit("30/minute")
+async def answer_now(
+    request: Request,
+    body: AnswerNowRequest,
+    user: dict = Depends(get_current_user),
+):
+    """触发"立即回答"：让正在思考的 turn 在下一轮顶部基于已有信息直接作答。
+
+    前端流式过程中点"立即回答"按钮调用本端点（fire-and-forget，不中断当前 SSE 流）。
+    后端 set answer_now_event，run_agent_loop 下一轮顶部检测到即跳过工具循环直接回答，
+    答案仍经原 SSE 流下发。turn 不存在或已结束返回 404（静默，前端按钮此时多半已隐藏）。
+    """
+    trm = get_turn_runtime_manager()
+    ok = await trm.request_answer_now(body.turn_id)
+    log_flow("http.chat.answer_now", user_id=str(user["id"]),
+             turn_id=body.turn_id, ok=ok)
+    if not ok:
+        raise HTTPException(status_code=404, detail="turn 不存在或已结束")
+    return {"ok": True}

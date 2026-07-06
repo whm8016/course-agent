@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, type ReactNode } from 'react'
+import { useEffect, useState, useCallback, useRef, type ReactNode } from 'react'
 import { FiMenu } from 'react-icons/fi'
 import Sidebar from './components/layout/Sidebar'
 import ChatWindow from './components/chat/ChatWindow'
@@ -15,7 +15,7 @@ import SearchProviderAdminPage from './components/pages/SearchProviderAdminPage'
 import UserSearchSettingsPage from './components/pages/UserSearchSettingsPage'
 import NotebookPage from './components/pages/NotebookPage'
 import BotPage from './components/pages/BotPage'
-import { fetchCourses, fetchSessions, createSession, deleteSession, fetchNotifications, markNotificationRead, type BotNotificationItem } from './services/api'
+import { fetchCourses, fetchSessions, createSession, deleteSession, fetchNotifications, markNotificationRead, joinCourseByCode, type BotNotificationItem } from './services/api'
 import { isLoggedIn, getUser, logout } from './services/auth'
 import type { Course, Session, User } from './types'
 import './index.css'
@@ -38,15 +38,28 @@ export default function App() {
   const [notifUnread, setNotifUnread] = useState(0)
   const [sidebarOpen, setSidebarOpen] = useState(false)
   const [courses, setCourses] = useState<Course[]>([])
-  const [activeCourseId, setActiveCourseId] = useState<string>('')
+  const [activeCourseId, setActiveCourseId] = useState<string>('general')
   const [sessions, setSessions] = useState<Session[]>([])
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [loadError, setLoadError] = useState<string>('')
   const [coursesLoading, setCoursesLoading] = useState(false)
+  const [toast, setToast] = useState<{ type: 'success' | 'error'; msg: string } | null>(null)
+  const bootstrappedRef = useRef(false)
 
   const handleLogin = useCallback((u: User) => {
     setUser(u)
   }, [])
+
+  // 启动时同步拦截 /join/{code}：暂存课程码到 sessionStorage + 立即清 URL。
+  // 仅执行一次（ref 守卫），避免刷新/重渲染重复触发；未登录则等下方 effect 登录后消费。
+  if (!bootstrappedRef.current) {
+    bootstrappedRef.current = true
+    const m = window.location.pathname.match(/^\/join\/([A-Za-z0-9\-]+)\/?$/)
+    if (m) {
+      sessionStorage.setItem('_pending_join_code', m[1])
+      window.history.replaceState({}, '', '/')
+    }
+  }
 
   const loadNotifList = useCallback(async () => {
     try {
@@ -86,12 +99,14 @@ export default function App() {
         setCourses(list)
         setLoadError('')
         if (list.length === 0) {
-          setActiveCourseId('')
+          setActiveCourseId('general')
           return list
         }
         // 第一次加载、或当前选中的课程已被删，自动切到第一个
         setActiveCourseId((prev) => {
           if (!preserveActive) return list[0].id
+          // 自由问答（general）是虚拟课程，不在选课列表里：切到它后刷新不被强制覆盖回第一门课
+          if (prev === 'general') return 'general'
           const stillExists = prev && list.some((c) => c.id === prev)
           return stillExists ? prev : list[0].id
         })
@@ -111,6 +126,33 @@ export default function App() {
     if (!user) return
     void reloadCourses(false)
   }, [user, reloadCourses])
+
+  // 登录后消费暂存的入课码（来自 /join/{code} 分享链接）：先移除防重复入课，再调接口 + 刷新课程列表
+  useEffect(() => {
+    if (!user) return
+    const code = sessionStorage.getItem('_pending_join_code')
+    if (!code) return
+    sessionStorage.removeItem('_pending_join_code')
+    void (async () => {
+      try {
+        const result = await joinCourseByCode(code)
+        setToast({
+          type: 'success',
+          msg: result.already_enrolled ? `你已在课程《${result.name}》中` : `已成功加入课程《${result.name}》`,
+        })
+        await reloadCourses(false)
+      } catch (e) {
+        setToast({ type: 'error', msg: e instanceof Error ? e.message : '加入课程失败' })
+      }
+    })()
+  }, [user, reloadCourses])
+
+  // toast 自动消失（3.5s）
+  useEffect(() => {
+    if (!toast) return
+    const t = setTimeout(() => setToast(null), 3500)
+    return () => clearTimeout(t)
+  }, [toast])
 
   // 只要存在 indexing 状态的课程，就每 5 秒轮询一次，等就绪后前端自动放开 RAG
   useEffect(() => {
@@ -265,6 +307,17 @@ export default function App() {
   }
 
   const activeCourse = courses.find((c) => c.id === activeCourseId)
+  // 自由问答（general）：未选课时的虚拟课程，不接入知识库，让用户不选课也能问答
+  const GENERAL_COURSE: Course = {
+    id: 'general',
+    name: '自由问答',
+    icon: '💬',
+    description: '通用学习问答（未选课）',
+    kb_status: null,
+    rag_enabled: false,
+    source: 'builtin',
+  }
+  const displayCourse = activeCourse ?? (activeCourseId === 'general' ? GENERAL_COURSE : null)
   const activeSession = sessions.find((s) => s.id === activeSessionId) || null
 
   const closeSidebar = () => setSidebarOpen(false)
@@ -314,14 +367,14 @@ export default function App() {
         />
       </aside>
       <main className="flex-1 h-full overflow-hidden">
-        {activeCourse ? (
+        {displayCourse ? (
           <ChatWindow
             courseId={activeCourseId}
-            courseName={`${activeCourse.icon} ${activeCourse.name}`}
+            courseName={`${displayCourse.icon} ${displayCourse.name}`}
             sessionId={activeSessionId}
             sessionMode={activeSession?.mode}
-            ragEnabled={Boolean(activeCourse.rag_enabled)}
-            kbStatus={activeCourse.kb_status ?? null}
+            ragEnabled={Boolean(displayCourse.rag_enabled)}
+            kbStatus={displayCourse.kb_status ?? null}
             onSessionCreated={handleSessionCreated}
             onOpenSidebar={() => setSidebarOpen(true)}
           />
@@ -358,6 +411,19 @@ export default function App() {
       </main>
       {overlay && (
         <div className="fixed inset-0 z-50 bg-slate-50">{overlay}</div>
+      )}
+      {toast && (
+        <div
+          className={`fixed top-4 right-4 z-[60] max-w-sm px-4 py-3 rounded-lg shadow-lg text-sm text-white flex items-start gap-3 ${
+            toast.type === 'success' ? 'bg-green-600' : 'bg-red-600'
+          }`}
+        >
+          <span className="leading-relaxed">{toast.type === 'success' ? '✅' : '⚠️'}</span>
+          <span className="flex-1 leading-relaxed">{toast.msg}</span>
+          <button onClick={() => setToast(null)} className="text-white/80 hover:text-white shrink-0">
+            ✕
+          </button>
+        </div>
       )}
     </div>
   )

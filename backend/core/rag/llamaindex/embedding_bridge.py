@@ -3,7 +3,8 @@ embedding_bridge.py
 ───────────────────
 替代 DeepTutor 的 get_embedding_client / get_embedding_config。
 
-使用 core/llm.py 里已有的 AsyncOpenAI 客户端（指向 DashScope），
+基于 EMBEDDING__* 凭证独立构造 OpenAI 兼容客户端（不复用主 LLM client——
+主 LLM 可能是不提供 /embeddings 的 provider，如 deepseek），
 对外暴露与 DeepTutor EmbeddingClient 完全一致的接口：
 
     await get_embedding_client().embed(list[str])  ->  list[list[float]]
@@ -18,9 +19,24 @@ import math
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Any
 
-# ── 复用项目已有的 OpenAI 客户端和配置 ────────────────────────────────────────
-from core.llm.llm import client as _async_openai_client   # AsyncOpenAI 实例
-from config import EMBEDDING_MODEL, EMBEDDING_DIM, EMBEDDING_BATCH_SIZE
+# ── Embedding 专用客户端（独立于主 LLM client）──────────────────────────────
+# 旧实现 `from core.llm.llm import client` 复用主 LLM 的 OpenAI client。主 LLM
+# 切到非 embedding provider（如 deepseek）后，用该 client 调 /embeddings 会 404。
+# 这里基于 EMBEDDING__* 凭证独立构造，确保命中 DashScope 的 text-embedding 端点。
+from settings import get_settings
+from core.llm.provider_factory import get_llm_client
+
+_emb = get_settings().embedding
+EMBEDDING_MODEL = _emb.model
+EMBEDDING_DIM = _emb.dim
+EMBEDDING_BATCH_SIZE = _emb.batch_size
+EMBEDDING_API_KEY = _emb.api_key.get_secret_value()
+EMBEDDING_BASE_URL = _emb.base_url
+
+_async_openai_client = get_llm_client(
+    api_key=EMBEDDING_API_KEY,
+    base_url=EMBEDDING_BASE_URL or None,
+)
 
 logger = logging.getLogger("EmbeddingBridge")
 

@@ -110,7 +110,7 @@ def prepare_multimodal_messages(
     if not attachments:
         return messages
 
-    image_attachments = [a for a in attachments if getattr(a, "type", "") == "image"]
+    image_attachments = [a for a in attachments if a.is_image()]
     if not image_attachments:
         return messages
 

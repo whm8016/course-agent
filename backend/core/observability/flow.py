@@ -4,7 +4,7 @@
     from core.observability.flow import log_flow
 
     log_flow("agent_loop.round", iteration=2, has_tools=True, elapsed_ms=840)
-    log_flow("chat.guardrail", safe=True, risk_type="none")
+    log_flow("chat.prompt_assembled", parts=5, elapsed_ms=120)
 
 输出（JSON）：
     {
@@ -14,7 +14,7 @@
     }
 
 约定：
-- stage 命名：{domain}.{action}，例如 chat.guardrail / agent_loop.llm_round
+- stage 命名：{domain}.{action}，例如 chat.prompt_assembled / agent_loop.llm_round
 - 字符串字段会自动截断并以 _chars + _head 两个子字段写入（避免日志爆炸）
 - 数值/布尔/列表/字典直接写入
 - elapsed_ms 是保留关键字，始终作为顶层字段
@@ -49,7 +49,7 @@ def log_flow(
     """输出一条结构化流程 log。
 
     Args:
-        stage:      流程阶段标识，如 "chat.guardrail"。
+        stage:      流程阶段标识，如 "chat.prompt_assembled"。
         logger:     使用的 logger；默认用模块级 "flow" logger。
         elapsed_ms: 耗时（毫秒），作为顶层字段。
         level:      log 级别，默认 INFO；可传 logging.WARNING / logging.DEBUG。

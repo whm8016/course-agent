@@ -1,4 +1,4 @@
-"""Deep Research 数据结构（对标 DeepTutor agents/research/data_structures.py）。
+"""
 
 简化版，仅保留 research pipeline 需要的最小调度状态：
 

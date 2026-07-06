@@ -1,5 +1,5 @@
-import { useCallback, useRef, useState } from 'react'
-import { FiMessageSquare, FiSend, FiX } from 'react-icons/fi'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { FiMessageSquare, FiSend, FiSquare, FiX } from 'react-icons/fi'
 import type { QuizData, QuizQuestion } from '../../types'
 import FormattedMarkdown from '../shared/FormattedMarkdown'
 import { connectQuestionFollowup } from '../../services/questionWs'
@@ -37,6 +37,10 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const closeRef = useRef<(() => void) | null>(null)
+
+  // 卸载时关闭未完成的追问连接，避免 WebSocket 泄漏
+  useEffect(() => () => closeRef.current?.(), [])
 
   const questionType = question.options?.length ? 'choice' : 'written'
 
@@ -74,10 +78,11 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
       if (!finished) {
         finished = true
         setLoading(false)
+        closeRef.current = null
       }
     }
 
-    connectQuestionFollowup(
+    closeRef.current = connectQuestionFollowup(
       {
         question_context: buildQuestionContext(),
         history_context: historyContext,
@@ -88,6 +93,7 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
         onMessage: (event) => {
           const t = event.type
           if (t === 'token') {
+            if (closeRef.current === null) return // 已停止 / 已完成，忽略迟到的 token
             answer += String(event.content ?? '')
             setMessages((prev) => {
               const last = prev[prev.length - 1]
@@ -122,6 +128,20 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
       },
     )
   }, [input, loading, messages, buildQuestionContext])
+
+  // 停止追问流式：关闭 WS + 标记已停止（与主窗口 handleStop 行为一致）
+  const handleStop = useCallback(() => {
+    closeRef.current?.()
+    closeRef.current = null
+    setLoading(false)
+    setMessages((prev) => {
+      const last = prev[prev.length - 1]
+      if (last?.role === 'assistant' && last.content.trim()) {
+        return [...prev.slice(0, -1), { ...last, content: `${last.content}\n\n_（已停止生成）_` }]
+      }
+      return [...prev, { role: 'assistant', content: '_（已停止生成）_' }]
+    })
+  }, [])
 
   return (
     <div className="mt-3 border border-indigo-100 rounded-xl bg-indigo-50/30 overflow-hidden">
@@ -175,11 +195,14 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
         />
         <button
           type="button"
-          onClick={() => void handleSend()}
-          disabled={!input.trim() || loading}
-          className="p-1.5 rounded-lg bg-indigo-600 text-white disabled:opacity-40 transition"
+          onClick={loading ? handleStop : () => void handleSend()}
+          disabled={!loading && !input.trim()}
+          title={loading ? '停止' : '发送'}
+          className={`p-1.5 rounded-lg text-white disabled:opacity-40 disabled:cursor-not-allowed transition ${
+            loading ? 'bg-rose-600 hover:bg-rose-700' : 'bg-indigo-600 hover:bg-indigo-700'
+          }`}
         >
-          <FiSend size={12} />
+          {loading ? <FiSquare size={12} /> : <FiSend size={12} />}
         </button>
       </div>
     </div>

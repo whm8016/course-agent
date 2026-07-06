@@ -21,7 +21,10 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable, TypeVar
 
-from config import LANGSMITH_API_KEY, LANGSMITH_PROJECT, LANGSMITH_TRACING
+from settings import get_settings
+LANGSMITH_API_KEY = get_settings().langsmith_api_key.get_secret_value()
+LANGSMITH_PROJECT = get_settings().langsmith_project
+LANGSMITH_TRACING = get_settings().langsmith_tracing
 
 logger = logging.getLogger(__name__)
 

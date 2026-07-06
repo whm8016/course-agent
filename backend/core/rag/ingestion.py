@@ -14,16 +14,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, Optional
 
-from config import (
-    INGEST_CHUNK_OVERLAP,
-    INGEST_CHUNK_SIZE,
-    LLAMA_CLOUD_API_KEY,
-    LIGHTRAG_INGEST_BATCH_SIZE,
-    LIGHTRAG_INGEST_CHUNKS_SNAPSHOT,
-    LIGHTRAG_INGEST_CHUNKS_SUBDIR,
-    LIGHTRAG_SAVE_INGEST_CHUNKS,
-    LIGHTRAG_WORKDIR,
-)
+from settings import get_settings
+INGEST_CHUNK_OVERLAP = get_settings().chunking.ingest_overlap
+INGEST_CHUNK_SIZE = get_settings().chunking.ingest_size
+LLAMA_CLOUD_API_KEY = get_settings().llamaparse.cloud_api_key.get_secret_value()
+LIGHTRAG_INGEST_BATCH_SIZE = get_settings().lightrag.ingest_batch_size
+LIGHTRAG_INGEST_CHUNKS_SNAPSHOT = get_settings().lightrag.ingest_chunks_snapshot
+LIGHTRAG_INGEST_CHUNKS_SUBDIR = get_settings().lightrag.ingest_chunks_subdir
+LIGHTRAG_SAVE_INGEST_CHUNKS = get_settings().lightrag.save_ingest_chunks
+LIGHTRAG_WORKDIR = get_settings().paths.lightrag_workdir
 from core.rag.llamaindex.indexing_documents import (
     LLAMA_INDEX_CHUNK_OVERLAP,
     LLAMA_INDEX_CHUNK_SIZE,
@@ -169,6 +168,19 @@ def _split_text(
     return chunks
 
 
+def _build_source_prefix(section: str = "", file_name: str = "") -> str:
+    """构建来源前缀，注入到 chunk 文本开头，供 LightRAG 实体抽取 LLM 可见章节/文件来源。
+
+    DOCX/PPTX 有 section → 注入章节名；PDF/TXT/MD 无 section → 退化用文件名。
+    无任何来源信息时返回空串（不注入）。
+    """
+    if section:
+        return f"【章节: {section}】\n"
+    if file_name:
+        return f"【来源: {file_name}】\n"
+    return ""
+
+
 # ── 核心解析函数 ─────────────────────────────────────────────────────────────
 
 _IMAGE_PDF_THRESHOLD = 0.3  # 空文档占比超过此值时认定为图像 PDF（扫描件）
@@ -194,15 +206,19 @@ def _llamaparse_pdfs(pdf_paths: list[str]) -> list[LlamaDocument]:
     return docs
 
 
-def parse_files(file_paths: list[str]) -> tuple[list[str], dict[str, list[str]]]:
+def parse_files(file_paths: list[str]) -> tuple[list[str], list[str], dict[str, list[str]]]:
     """
-    解析文件列表，返回 (文本 chunk 列表, 按文件分段的全文 dict)。
+    解析文件列表，返回 (文本 chunk 列表, chunk 来源路径列表, 按文件分段的全文 dict)。
+
+    chunk_sources 与 chunks 等长，第 i 个元素 = 第 i 个 chunk 的来源 file_path，
+    供 ingest_to_lightrag 传给 rag.ainsert(file_paths=...) 做来源溯源。
+    每个 chunk 文本开头已注入【章节: xxx】/【来源: filename】前缀，供实体抽取 LLM 可见来源。
 
     doc_texts 供图片 VLM 摄入复用，避免重复提取：
       dict[绝对路径, list[str]]  — PDF 每页 / DOCX 每 section / PPTX 每 slide / 纯文本单元素
     """
     if not file_paths:
-        return [], {}
+        return [], [], {}
 
     documents, classification = file_paths_to_llama_documents(
         file_paths, log=logger
@@ -227,7 +243,7 @@ def parse_files(file_paths: list[str]) -> tuple[list[str], dict[str, list[str]]]
 
     if not documents:
         logger.warning("摄入解析结果为空（无有效文档）")
-        return [], {}
+        return [], [], {}
 
     # 构建 doc_texts：按文件路径分组，复用已解析的 Document 内容
     doc_texts: dict[str, list[str]] = {}
@@ -243,14 +259,39 @@ def parse_files(file_paths: list[str]) -> tuple[list[str], dict[str, list[str]]]
         chunk_size=LLAMA_INDEX_CHUNK_SIZE,
         chunk_overlap=LLAMA_INDEX_CHUNK_OVERLAP,
     ).get_nodes_from_documents(documents)
-    chunks = [n.get_content() for n in nodes if n.get_content().strip()]
+
+    # TextNode 继承 source Document 的 metadata（file_name/file_path/section）。
+    # 这里保留来源信息：chunk_sources 与 chunks 等长，供 rag.ainsert(file_paths=...)；
+    # 同时把章节/来源前缀注入 chunk 文本，让实体抽取 LLM 可见来源。
+    chunks: list[str] = []
+    chunk_sources: list[str] = []
+    for idx, n in enumerate(nodes):
+        content = n.get_content().strip()
+        if not content:
+            continue
+        meta = getattr(n, "metadata", None) or {}
+        file_path = str(meta.get("file_path", "") or "")
+        section = str(meta.get("section", "") or "")
+        file_name = str(meta.get("file_name", "") or "")
+
+        prefix = _build_source_prefix(section=section, file_name=file_name)
+        chunks.append(f"{prefix}{content}" if prefix else content)
+        # 给每个 chunk 的来源加全局唯一后缀（::chunk-<node 索引>），规避 LightRAG 的
+        # filename 去重：旧版 LightRAG 会按 file_path 判重，同一个 PDF 切出的多 chunk
+        # 贴同一个文件名 → 一个 batch 里只有第 1 个进库，其余被标 DUPLICATE:filename 丢弃
+        # （实测 16 个 chunk 的 batch 15 个被扔）。用 enumerate(nodes) 的全局序保证唯一，
+        # 跳过空 node 不影响。Windows 文件名禁用 ':'、Linux 路径也不含 '::'，故 '::chunk-'
+        # 不会与真实文件名冲突。检索端 _strip_source_suffix 会剥掉它还原真实文件名。
+        base_src = file_path if file_path else "unknown_source"
+        chunk_sources.append(f"{base_src}::chunk-{idx}")
+
     logger.info(
         "摄入解析完成: %d 个输入文件 → %d 个文档 → %d 个 chunk",
         len(file_paths),
         len(documents),
         len(chunks),
     )
-    return chunks, doc_texts
+    return chunks, chunk_sources, doc_texts
 
 
 # ── 完整摄入流水线 ───────────────────────────────────────────────────────────
@@ -268,6 +309,7 @@ def _persist_lightrag_ingest_chunks(
     file_paths: list[str],
     all_chunks: list[str],
     resume_from_chunk: int,
+    all_sources: list[str] | None = None,
 ) -> Path | None:
     """
     将摄入前切分好的文本块写入 JSON（供排查/审计；不参与 LightRAG 加载）。
@@ -287,6 +329,7 @@ def _persist_lightrag_ingest_chunks(
             "chunk_count": len(all_chunks),
             "resume_from_chunk_at_save": resume_from_chunk,
             "chunks": all_chunks,
+            "chunk_sources": all_sources if all_sources is not None else [],
         }
         latest = out_dir / "latest.json"
         text = json.dumps(payload, ensure_ascii=False, indent=2)
@@ -304,6 +347,24 @@ def _persist_lightrag_ingest_chunks(
     except OSError as e:
         logger.warning("保存摄入切块失败 course=%s: %s", course_id, e)
         return None
+
+
+async def _await_with_polling(
+    task: asyncio.Task,
+    poll_fn,  # Callable[[], Awaitable[None]] —— 每 poll_interval 秒调一次，可抛异常（如 IndexingAborted）中断等待
+    poll_interval: float = 3.0,
+) -> None:
+    """等待 task 完成，期间定期调 poll_fn（借此检查暂停/终止信号）。
+
+    asyncio 标准惯用法：wait_for 超时时默认会取消被等待的协程，这里用 shield 把
+    task 包起来，让超时只中断"等待"、不取消 task 本身——这样 poll_fn 抛出后，取消
+    与否的决定权留给调用方（见 _consumer 的 IndexingAborted 分支）。
+    """
+    while not task.done():
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=poll_interval)
+        except asyncio.TimeoutError:
+            await poll_fn()
 
 
 async def ingest_to_lightrag(
@@ -328,7 +389,7 @@ async def ingest_to_lightrag(
         resume_from_chunk: 断点续传：从第 N 个 chunk 开始（跳过前 N 个）
         control:           可选的 IndexingControl，用于在 batch 边界中止任务
     """
-    from core.rag.lightrag_engine import (
+    from core.rag.lightrag import (
         _get_instance, is_lightrag_available,
         take_llm_errors, clear_llm_errors, _is_fatal_llm_error,
     )
@@ -360,7 +421,7 @@ async def ingest_to_lightrag(
         if is_resume else f"开始解析 {len(file_paths)} 个文件…"
     await _emit(5, parse_label, resume_from_chunk, 0, 0)
     logger.info("开始解析 %d 个文件 course=%s resume_from=%d", len(file_paths), course_id, resume_from_chunk)
-    all_chunks, doc_texts = await asyncio.to_thread(parse_files, file_paths)
+    all_chunks, all_sources, doc_texts = await asyncio.to_thread(parse_files, file_paths)
 
     # Step 1b: 图片摄入（复用 doc_texts，不再重复提取文本）
     images_processed = 0
@@ -426,6 +487,7 @@ async def ingest_to_lightrag(
         file_paths,
         all_chunks,
         resume_from_chunk,
+        all_sources,
     )
 
     total = len(all_chunks)
@@ -434,6 +496,7 @@ async def ingest_to_lightrag(
 
     start = min(resume_from_chunk, total)
     chunks = all_chunks[start:]
+    sources = all_sources[start:]  # 与 chunks 同步偏移，保持一一配对
     already_done = start
 
     resume_note = f"（已跳过 {already_done} 个，续传）" if is_resume else ""
@@ -471,52 +534,85 @@ async def ingest_to_lightrag(
     rag = await _get_instance(course_id)
 
     _QUEUE_MAXSIZE = 3
-    chunk_queue: asyncio.Queue[list[str] | None] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
+    # 队列元素：(batch_chunks, batch_sources)，两者等长配对；None 为哨兵
+    chunk_queue: asyncio.Queue[tuple[list[str], list[str]] | None] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
 
     async def _producer() -> None:
-        """将 chunks 按 batch_size 切分后放入队列，结束时放入 None 作为哨兵。"""
+        """将 chunks/sources 按 batch_size 同步切分后放入队列，结束时放入 None 作为哨兵。"""
         try:
             for i in range(0, len(chunks), batch_size):
-                batch = chunks[i : i + batch_size]
-                await chunk_queue.put(batch)
+                batch_chunks = chunks[i : i + batch_size]
+                batch_sources = sources[i : i + batch_size]
+                await chunk_queue.put((batch_chunks, batch_sources))
         finally:
             await chunk_queue.put(None)
 
     async def _consumer() -> None:
-        """从队列取出 batch 并写入 LightRAG，附带 checkpoint 和错误检测。"""
+        """从队列取出 batch 写入 LightRAG；batch 边界响应暂停/终止信号 + 错误检测。"""
         nonlocal already_done
         consumed = 0
         while True:
-            batch = await chunk_queue.get()
-            if batch is None:
+            item = await chunk_queue.get()
+            if item is None:
                 break
+            batch_chunks, batch_sources = item
 
             batch_start_idx = consumed
-            consumed += len(batch)
+            consumed += len(batch_chunks)
 
-            if control is not None:
-                await control.checkpoint(chunks_done=already_done + batch_start_idx)
+            # ainsert 是原子的：一个 batch 要么整批写入要么全不计入。因此 checkpoint 的进度
+            # 恒记"本 batch 起点前"的已完成数（already_done + batch_start_idx），续传时从该
+            # 起点重跑整个 batch——不重不漏。control 为 None 时 _checkpoint 退化为 no-op，
+            # _await_with_polling 仍正常等待 task 完成（仅每 3s 多一次空轮询，可忽略）。
+            done_at_batch_start = already_done + batch_start_idx
 
-            if control is not None:
-                _insert_task = asyncio.create_task(rag.ainsert(batch))
+            async def _checkpoint() -> None:
+                if control is not None:
+                    await control.checkpoint(chunks_done=done_at_batch_start)
+                # 实时回写 LightRAG 内部进度。一个 batch 的 ainsert 内部要逐 chunk 调 LLM 做
+                # 实体/关系抽取（每 chunk 一个 "Extracting stage"，常达数分钟）；若不回写，这段
+                # 时间前端只能看到上一帧"解析完成 10%"，表现为卡死。每 3s 从 pipeline_status 读
+                # cur_batch/batchs（LightRAG 按 workspace 隔离的 multiprocessing.Manager 共享 dict，
+                # worker 进程内可直接读；web 进程读不到，故必须由 worker 写 DB）换算成全局进度。
+                # 读取失败绝不影响停止信号检查与 ainsert 本身。
                 try:
-                    while not _insert_task.done():
-                        try:
-                            await asyncio.wait_for(asyncio.shield(_insert_task), timeout=3.0)
-                        except asyncio.TimeoutError:
-                            await control.checkpoint(chunks_done=already_done + batch_start_idx)
-                except IndexingAborted:
-                    _insert_task.cancel()
-                    try:
-                        await _insert_task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-                    raise
+                    from lightrag.kg.shared_storage import get_namespace_data
+                    ps = await get_namespace_data("pipeline_status", workspace=rag.workspace)
+                    if ps.get("busy"):
+                        cur_batch = int(ps.get("cur_batch") or 0)
+                        batchs = int(ps.get("batchs") or 0)
+                        live_done = done_at_batch_start + cur_batch
+                        live_progress = 10 + int(live_done / total * 85) if total else 10
+                        live_msg = f"构建知识图谱：实体抽取 {live_done}/{total}"
+                        if batchs:
+                            live_msg += f"（本批 {cur_batch}/{batchs}）"
+                        await _emit(
+                            live_progress, live_msg, live_done, total,
+                            live_done * token_per_chunk,
+                        )
                 except Exception:
-                    _insert_task.cancel()
-                    raise
-            else:
-                await rag.ainsert(batch)
+                    logger.debug("读取 LightRAG 实时进度失败 course=%s", course_id, exc_info=True)
+
+            # 起点先查一次信号（若已暂停则不启动本 batch），再异步跑 + 每 3 秒轮询
+            await _checkpoint()
+            _insert_task = asyncio.create_task(
+                rag.ainsert(batch_chunks, file_paths=batch_sources)
+            )
+            try:
+                await _await_with_polling(_insert_task, _checkpoint, poll_interval=3.0)
+            except IndexingAborted:
+                _insert_task.cancel()
+                # LightRAG ainsert 对 cancel 响应不一致：给至多 3s 收尾，超时则放弃等待。
+                # 孤儿 task 至多把当前 batch 跑完即结束，_consumer 已退出不再消费后续 batch
+                # ——这是"跨进程取消一个不可取消的第三方调用"的务实妥协。
+                try:
+                    await asyncio.wait_for(_insert_task, timeout=3.0)
+                except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                    pass
+                raise
+            except Exception:
+                _insert_task.cancel()
+                raise
 
             errors = take_llm_errors()
             if errors:

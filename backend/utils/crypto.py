@@ -34,7 +34,7 @@ def _get_master_key() -> bytes:
     from settings import get_settings
 
     s = get_settings()
-    enc_key = s.provider_encryption_key.get_secret_value()
+    enc_key = s.security.provider_encryption_key.get_secret_value()
 
     if enc_key:
         # 用户已提供 Fernet key（直接用）
@@ -51,7 +51,7 @@ def _get_master_key() -> bytes:
             "Generate one: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
         )
 
-    jwt_secret = s.jwt_secret.get_secret_value()
+    jwt_secret = s.security.jwt_secret.get_secret_value()
     warnings.warn(
         "PROVIDER_ENCRYPTION_KEY not set — deriving from JWT_SECRET (dev only). "
         "Set a dedicated Fernet key for production to avoid key reuse.",

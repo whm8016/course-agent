@@ -18,7 +18,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from config import OUTPUT_CARDS_PATH, TEXT_MODEL
+from settings import get_settings
+OUTPUT_CARDS_PATH = get_settings().paths.output_cards_path
+TEXT_MODEL = get_settings().llm.text_model
 from core.llm.llm import client as async_openai_client
 
 logger = logging.getLogger(__name__)

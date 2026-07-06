@@ -11,16 +11,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
-from config import (
-    EMBEDDING_API_KEY,
-    EMBEDDING_BASE_URL,
-    VISION_MODEL,
-    IMAGE_INGEST_MIN_PX,
-    IMAGE_INGEST_MIN_AREA,
-    IMAGE_INGEST_MAX_PER_FILE,
-    IMAGE_INGEST_SEMAPHORE,
-    IMAGE_INGEST_WMF_MIN_BLOB,
-)
+from settings import get_settings
+INDEX_VISION_MODEL = get_settings().vision.index_model
+VISION_API_KEY = get_settings().vision.api_key.get_secret_value()
+VISION_BASE_URL = get_settings().vision.base_url
+IMAGE_INGEST_MIN_PX = get_settings().image_ingest.min_px
+IMAGE_INGEST_MIN_AREA = get_settings().image_ingest.min_area
+IMAGE_INGEST_MAX_PER_FILE = get_settings().image_ingest.max_per_file
+IMAGE_INGEST_SEMAPHORE = get_settings().image_ingest.semaphore
+IMAGE_INGEST_WMF_MIN_BLOB = get_settings().image_ingest.wmf_min_blob
 from core.rag.llamaindex.file_routing import FileTypeRouter
 
 if TYPE_CHECKING:
@@ -268,12 +267,12 @@ def _make_vision_caption_func(
 
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=EMBEDDING_API_KEY, base_url=EMBEDDING_BASE_URL)
+        client = AsyncOpenAI(api_key=VISION_API_KEY, base_url=VISION_BASE_URL)
         max_tokens = int(kwargs.pop("max_tokens", 2048))
 
         if messages:
             resp = await client.chat.completions.create(
-                model=VISION_MODEL,
+                model=INDEX_VISION_MODEL,
                 messages=messages,
                 max_tokens=max_tokens,
                 **kwargs,
@@ -297,7 +296,7 @@ def _make_vision_caption_func(
                 ],
             })
             resp = await client.chat.completions.create(
-                model=VISION_MODEL,
+                model=INDEX_VISION_MODEL,
                 messages=msgs,
                 max_tokens=max_tokens,
                 **kwargs,
@@ -308,7 +307,7 @@ def _make_vision_caption_func(
                 msgs.append({"role": "system", "content": system_prompt})
             msgs.append({"role": "user", "content": prompt})
             resp = await client.chat.completions.create(
-                model=VISION_MODEL,
+                model=INDEX_VISION_MODEL,
                 messages=msgs,
                 max_tokens=max_tokens,
                 **kwargs,

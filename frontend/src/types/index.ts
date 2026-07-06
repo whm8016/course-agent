@@ -30,13 +30,6 @@ export interface QuizData {
   questions: QuizQuestion[]
 }
 
-export interface GuardrailInfo {
-  safe: boolean
-  risk_type: string
-  risk_score: number
-  tip: string
-}
-
 export interface HallucinationInfo {
   grounded: boolean
   confidence: number
@@ -50,12 +43,11 @@ export interface AgentMetadata {
   tools_used?: string[]
   retrieve_mode?: string
   retrieve_strategy?: string
-  guardrail?: GuardrailInfo
   hallucination?: HallucinationInfo
 }
 
 export interface SSEEvent {
-  type: 'thinking' | 'thinking_chunk' | 'tool_call' | 'tool_result' | 'answer' | 'quiz' | 'done' | 'error' | 'token' | 'skill_output'
+  type: 'thinking' | 'thinking_chunk' | 'tool_call' | 'tool_result' | 'answer' | 'quiz' | 'done' | 'error' | 'token' | 'skill_output' | 'turn_started'
   content?: string
   tool?: string
   input?: Record<string, unknown>
@@ -64,6 +56,8 @@ export interface SSEEvent {
   metadata?: AgentMetadata
   stage?: string
   call_state?: string
+  /** turn_started 事件携带：本回合 turn id，供"立即回答"按钮 POST /chat/answer_now 用 */
+  turn_id?: string
 }
 
 export interface AttachmentInfo {
@@ -90,7 +84,6 @@ export interface Message {
     mode?: string
     retrieve_mode?: string
     retrieve_strategy?: string
-    guardrail?: GuardrailInfo
     hallucination?: HallucinationInfo
     stopped?: boolean
     stage?: string

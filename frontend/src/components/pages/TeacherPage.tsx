@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { authHeaders } from '../../services/auth'
 import type { User } from '../../types'
+import JoinCodeShareSection from './JoinCodeShareSection'
 import KbDetailPanel, { STATUS_LABEL, STATUS_COLOR } from './KbDetailPanel'
 import type { KB } from './KbDetailPanel'
 
@@ -67,8 +68,8 @@ export default function TeacherPage({ user, onBack }: Props) {
   const [loadingCourses, setLoadingCourses] = useState(false)
   const [loadingStudents, setLoadingStudents] = useState(false)
   const [generatingCode, setGeneratingCode] = useState(false)
-  const [copiedCode, setCopiedCode] = useState(false)
   const [llamaIndexSubmitting, setLlamaIndexSubmitting] = useState<string | null>(null)
+  const [indexSubmitting, setIndexSubmitting] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [joinCodeInput, setJoinCodeInput] = useState('')
   const [joiningCourse, setJoiningCourse] = useState(false)
@@ -240,16 +241,25 @@ export default function TeacherPage({ user, onBack }: Props) {
   }
 
   const handleIndex = async (courseId: string, force = false, resume = false) => {
+    setIndexSubmitting(courseId)
+    setError('')
     try {
       const params = new URLSearchParams()
       if (force) params.set('force', 'true')
       if (resume) params.set('resume', 'true')
       const qs = params.toString()
       await apiFetch(`/teacher/courses/${courseId}/index${qs ? '?' + qs : ''}`, { method: 'POST' })
+      // 乐观更新：接口已提前写 indexing（见后端 index_course），这里同步本地状态，
+      // 按钮区瞬间从"开始索引"切到"暂停/终止"，不必等 loadCourses 回来（消除闪烁）。
+      setSelectedKB(prev => prev && prev.course_id === courseId
+        ? { ...prev, status: 'indexing', progress_msg: '准备中…' } : prev)
+      setCourses(prev => prev.map(c => c.course_id === courseId ? { ...c, status: 'indexing' } : c))
       await loadCourses()
       if (selectedKB?.course_id === courseId) await loadKBDetail(courseId)
     } catch (e) {
       setError(e instanceof Error ? e.message : '启动索引失败')
+    } finally {
+      setIndexSubmitting(null)
     }
   }
 
@@ -304,12 +314,6 @@ export default function TeacherPage({ user, onBack }: Props) {
     } finally {
       setGeneratingCode(false)
     }
-  }
-
-  const copyCode = (code: string) => {
-    void navigator.clipboard.writeText(code)
-    setCopiedCode(true)
-    setTimeout(() => setCopiedCode(false), 2000)
   }
 
   // ── 学生管理 ──────────────────────────────────────────────────────────────────
@@ -457,9 +461,17 @@ export default function TeacherPage({ user, onBack }: Props) {
                 onStop={handleStopIndex}
                 onLlamaIndexBuild={handleLlamaIndexBuild}
                 llamaIndexSubmitting={llamaIndexSubmitting === selectedKB.course_id}
+                indexSubmitting={indexSubmitting === selectedKB.course_id}
                 onRefresh={() => loadKBDetail(selectedKB.course_id)}
                 onUploaded={async () => { await loadKBDetail(selectedKB.course_id); await loadCourses() }}
                 onUpdated={async () => { await loadKBDetail(selectedKB.course_id); await loadCourses() }}
+              />
+
+              {/* 学生入课方式：课程码 + 二维码 + 分享链接（置顶展示，避免埋在底部找不到） */}
+              <JoinCodeShareSection
+                kb={selectedKB}
+                onReset={refreshJoinCode}
+                resetting={generatingCode}
               />
 
               {/* ── 活跃度概览 ────────────────────────────────────────────── */}
@@ -608,47 +620,6 @@ export default function TeacherPage({ user, onBack }: Props) {
                     </div>
                   </>
                 )}
-              </section>
-
-              {/* 课程码区 */}
-              <section className="bg-white rounded-2xl border border-slate-200 p-6">
-                <h3 className="font-semibold text-slate-700 mb-4 flex items-center gap-2">
-                  <span>🔑</span> 课程码（学生入课凭证）
-                </h3>
-                {selectedKB.join_code ? (
-                  <div className="flex items-center gap-3">
-                    <span className="text-3xl font-mono font-bold tracking-widest text-indigo-700 bg-indigo-50 px-6 py-3 rounded-xl border border-indigo-200">
-                      {selectedKB.join_code}
-                    </span>
-                    <button
-                      onClick={() => copyCode(selectedKB.join_code!)}
-                      className="px-4 py-2 text-sm bg-slate-100 hover:bg-slate-200 rounded-lg transition"
-                    >
-                      {copiedCode ? '已复制!' : '复制'}
-                    </button>
-                    <button
-                      onClick={refreshJoinCode}
-                      disabled={generatingCode}
-                      className="px-4 py-2 text-sm bg-orange-100 text-orange-700 hover:bg-orange-200 rounded-lg transition disabled:opacity-50"
-                    >
-                      {generatingCode ? '生成中...' : '重置'}
-                    </button>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-3">
-                    <span className="text-sm text-slate-400">暂无课程码</span>
-                    <button
-                      onClick={refreshJoinCode}
-                      disabled={generatingCode}
-                      className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition disabled:opacity-50"
-                    >
-                      {generatingCode ? '生成中...' : '生成课程码'}
-                    </button>
-                  </div>
-                )}
-                <p className="text-xs text-slate-400 mt-3">
-                  学生在注册/登录后，点击侧边栏「用课程码加入」，输入以上代码即可加入本课程。
-                </p>
               </section>
 
               {/* 学生列表 */}

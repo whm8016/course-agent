@@ -2,7 +2,7 @@
 
 【改造说明（对标 DeepTutor Partner 架构）】
 旧版 bot 维护一套独立薄壳：自己造 system_prompt + 静默 StreamBus + 直调 run_agent_loop，
-绕过了主链路（Orchestrator → ChatCapability → ChatPipeline），因此丢失了安全护栏、
+绕过了主链路（Orchestrator → ChatCapability → ChatPipeline），因此丢失了
 课程 prompt、DB 记忆更新、LLM 熔断/Fallback。
 
 新版 bot 与 Web（/api/chat、/api/run）完全共享同一 Agent 引擎：
@@ -14,7 +14,6 @@
     → subscribe_turn(turn_id)   消费 ANSWER 事件，拼最终文本
 
 由此 bot 自动获得：
-  - 安全护栏（evaluate_guardrail）
   - 课程 prompt（get_course_prompt）+ bot persona 注入（metadata["bot_persona"]）
   - DB 记忆更新（TRM 自动发布 CAPABILITY_COMPLETE → v3 memory / graph_memory）
   - LLM 熔断 + 指数退避 + 多供应商 Fallback（core/llm/llm.py）

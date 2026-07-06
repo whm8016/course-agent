@@ -43,7 +43,8 @@ from core.observability.metrics import observe_turn
 from core.stream import StreamEvent, StreamEventType
 from core.stream_bus import StreamBus
 from services.session.context_builder import ContextBuilder, resolve_budget
-from config import TEXT_MODEL
+from settings import get_settings
+TEXT_MODEL = get_settings().llm.text_model
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,9 @@ class _TurnExecution:
     events: list[tuple[int, StreamEvent]] = field(default_factory=list)
     created_at: float = field(default_factory=time.monotonic)
     finished_at: float | None = None
+    # answer_now（立即回答）信号不挂在这里：它和 _reply_queues（ask_user）一样由 manager
+    # 统一管理（self._answer_now_events[turn_id]），在 start_turn 创建 execution 之前就
+    # 必须新建并注入 context.metadata，因此无法在 _TurnExecution 构造时传入。
 
 
 class TurnRuntimeManager:
@@ -72,6 +76,9 @@ class TurnRuntimeManager:
         self._lock = asyncio.Lock()
         # ask_user 暂停/恢复：turn_id → asyncio.Queue，loop 挂起时 await queue.get()
         self._reply_queues: dict[str, asyncio.Queue] = {}
+        # answer_now 信号：turn_id → asyncio.Event，前端"立即回答"按钮 set()，loop 每轮顶部
+        # 轮询。与 _reply_queues 同生命周期（start_turn 建，_run_turn finally 清）。
+        self._answer_now_events: dict[str, asyncio.Event] = {}
 
     # ------------------------------------------------------------------
     # 公开 API
@@ -100,6 +107,12 @@ class TurnRuntimeManager:
             return await reply_queue.get()
 
         context.metadata["wait_for_user_reply"] = _wait_for_user_reply
+
+        # answer_now 信号：注入 is_answer_now_requested 回调（返回 bool，非协程），
+        # run_agent_loop 每轮顶部轮询它决定是否提前直接回答。仿 wait_for_user_reply 注入模式。
+        answer_now_ev = asyncio.Event()
+        self._answer_now_events[turn_id] = answer_now_ev
+        context.metadata["is_answer_now_requested"] = answer_now_ev.is_set
 
         # bind_context BEFORE create_task：asyncio 会把当前 context 复制给子任务
         bind_context(
@@ -175,6 +188,26 @@ class TurnRuntimeManager:
         payload: dict = {"text": text or "", "answers": answers}
         await queue.put(payload)
         logger.info("TurnRuntime: submitted user reply for turn_id=%s", turn_id)
+        return True
+
+    async def request_answer_now(self, turn_id: str) -> bool:
+        """触发"立即回答"：让正在运行的 turn 的 agent loop 在下一轮顶部提前直接回答。
+
+        仿 submit_user_reply 的信号投递模式，但投递的是 asyncio.Event.set()（幂等，
+        连点安全）。run_agent_loop 每轮顶部轮询 is_answer_now_requested()——为 True 时
+        跳过后续工具循环，用已累积的 messages 发起一次无工具的直接回答（见 loop.py）。
+
+        Returns:
+            True  — turn 存在且已触发信号
+            False — turn 不存在或已结束（_answer_now_events 已被 _run_turn finally 清除）
+        """
+        ev = self._answer_now_events.get(turn_id)
+        if ev is None:
+            logger.info("TurnRuntime: request_answer_now turn_id=%s 不存在或已结束", turn_id)
+            return False
+        ev.set()
+        log_flow("turn.answer_now", turn_id=turn_id)
+        logger.info("TurnRuntime: answer_now requested for turn_id=%s", turn_id)
         return True
 
     # ------------------------------------------------------------------
@@ -265,6 +298,8 @@ class TurnRuntimeManager:
                         q.put_nowait(None)
                     except Exception:
                         pass
+                # 清理 answer_now 信号（turn 已结束，后续 request_answer_now 返回 False）
+                self._answer_now_events.pop(execution.turn_id, None)
                 if not execution.bus._closed:
                     await execution.bus.close()
 
@@ -273,6 +308,7 @@ class TurnRuntimeManager:
                     try:
                         await get_event_bus().publish(CapabilityCompleteEvent(
                             turn_id=execution.turn_id,
+                            session_id=execution.context.session_id,
                             user_id=execution.context.user_id,
                             course_id=execution.context.course_id,
                             mode=execution.context.mode or "chat",

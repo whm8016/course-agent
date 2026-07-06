@@ -13,7 +13,7 @@ Entry Points
   TurnRuntimeManager + CourseOrchestrator   (services/session/turn_runtime.py, core/orchestrator.py)
           |
   CapabilityRegistry   (core/registry.py)
-   ├── ChatCapability        ──► ChatPipeline (guardrail + run_agent_loop)
+   ├── ChatCapability        ──► ChatPipeline (system_prompt + run_agent_loop)
    ├── DeepSolveCapability   ──► single loop + solve_plan/finish_step/replan tools + SolveSession
    ├── DeepResearchCapability──► rephrase → decompose → research(queue+parallel) → reporting(citation)
    └── QuizCapability        ──► explore → plan → quiz
@@ -67,7 +67,6 @@ POST /api/chat
         ├── TurnRuntimeManager.start_turn(ctx)
         └── SSE: subscribe_turn(turn_id) → yield events
               └── (TRM drives) CourseOrchestrator → ChatCapability → ChatPipeline
-                    ├── evaluate_guardrail (safety)
                     ├── assemble system_prompt (chat.yaml loop spec + course prompt + persona + memory)
                     └── run_agent_loop(...)
 ```
@@ -80,7 +79,7 @@ Key files:
 | `services/session/turn_runtime.py` | TurnRuntimeManager — turn lifecycle + StreamBus fan-out |
 | `core/orchestrator.py` | `CourseOrchestrator` — routes context to the selected capability |
 | `core/agent/orchestrator.py` | `normalize_mode` + 辅助流式节点（summarize/vision）|
-| `core/capabilities/chat_pipeline.py` | guardrail + system_prompt assembly + run_agent_loop |
+| `core/capabilities/chat_pipeline.py` | system_prompt assembly + run_agent_loop |
 | `core/agentic/loop.py` | `run_agent_loop()` — the scheduling kernel (tool_calls, true streaming) |
 | `core/agentic/tool_dispatch.py` | parallel tool execution (≤8 concurrent) |
 | `core/agent/tool_registry.py` | rag / web_search / ask_user / solve_* + read_skill / load_tools / mcp_* dispatch |
@@ -96,7 +95,7 @@ Key files:
 
 | Capability | Pipeline | Stages (tool_calls version, code-orchestrated) |
 |---|---|---|
-| chat | `core/capabilities/chat_pipeline.py` | guardrail → run_agent_loop (single loop) |
+| chat | `core/capabilities/chat_pipeline.py` | run_agent_loop (single loop) |
 | deep_solve | `core/solve/pipeline.py` | single loop + solve_plan/finish_step/replan tools + `SolveSession` (session_id injected via contextvar) |
 | quiz | `core/question/pipeline.py` | explore → plan (JSON templates) → quiz (per-question JSON + schema validation, 6 question types) |
 | deep_research | `core/research/pipeline.py` | rephrase → decompose → research (`DynamicTopicQueue` + parallel) → reporting (outline/intro/sections/conclusion + `CitationManager`) |
@@ -169,7 +168,7 @@ Adding a new capability: implement `BaseCapability` (see `core/capability_protoc
 
 ## Bot Sub-system
 
-The IM Bot (`core/bot/`) **already shares the same Agent engine as the Web API**: `core/bot/agent/loop.py` routes through TurnRuntimeManager + CourseOrchestrator + ChatPipeline + `run_agent_loop` (no longer an independent thin shell), so it automatically inherits safety guardrails, course prompts, DB memory updates, and LLM circuit-breaker/fallback. QQ/Feishu messages flow: MessageBus → AgentLoop → TRM.
+The IM Bot (`core/bot/`) **already shares the same Agent engine as the Web API**: `core/bot/agent/loop.py` routes through TurnRuntimeManager + CourseOrchestrator + ChatPipeline + `run_agent_loop` (no longer an independent thin shell), so it automatically inherits course prompts, DB memory updates, and LLM circuit-breaker/fallback. QQ/Feishu messages flow: MessageBus → AgentLoop → TRM.
 
 ---
 
@@ -218,27 +217,19 @@ Frontend (`frontend/`, React 19 + TypeScript + Vite + Tailwind) talks to the bac
 
 ### Leader 选举（`core/leader.py`）
 
-Redis SETNX 实现，TTL 租约自动续期：
+Redis SETNX 效率型锁（单实例 Redis 足够，无需 Redlock）+ **竞选者循环 + CAS 原子续约**，TTL 30s：
+
+- **启动抢锁**：`SET worker:leader <pid-uuid> NX EX=30`（worker_id 全局唯一 —— pid 跨重启会复用）。
+- **leader 续约**：每 15s 用 **Lua CAS** 原子续约（`if GET==self then EXPIRE`），消除 `GET+EXPIRE` 竞态（否则会误续别人抢到的锁 → 双 leader 脑裂、单例跑两份）。
+- **非 leader 竞选**：每 10s 重试 SETNX（不再「启动抢一次就放弃」）。leader 卡死但未被进程管理器杀死时，锁 TTL 过期后秒级接管 —— 空窗 ≤ TTL + 竞选间隔 ≈ 40s，而非等 Gunicorn `--timeout 300` 杀进程的分钟级。
+- **状态翻转回调**：成为 leader → `on_gain` 拉单例；丢锁（CAS 返回 0）→ `on_lose` 停单例 → 重回竞选，闭环。
 
 ```python
-async def try_become_leader() -> bool:
-    # SET key=value NX EX=30
-    # 成功 → 启动续期协程（每 15s 续期一次）
-    # 失败 → 返回 False，不启动 Cron/Bot/MCP
-
-async def is_leader() -> bool:
-    # 检查当前进程是否为 leader
+register_leader_callbacks(on_gain=start_singleton_services, on_lose=stop_singleton_services)
+await try_become_leader()   # 当选走 on_gain；未当选起竞选 loop，接管时再走 on_gain
 ```
 
-**生命周期集成**（`main.py`）：
-
-```python
-_is_leader = await try_become_leader()
-if _is_leader:
-    await cron_service.start()
-    await bot_manager.auto_start_bots()
-    await mcp_manager.start_all()
-```
+`is_leader()` 动态反映当前状态（竞选接管 / 丢锁实时更新），不再是启动时的静态快照。状态上报 Prometheus `ca_leader_is_leader`（`sum==0` 即无 leader 告警）。
 
 ### 粘性会话（`frontend/nginx.conf`）
 

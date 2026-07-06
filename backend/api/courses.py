@@ -5,7 +5,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
-from core.db.cache import cache_delete, cache_get, cache_set, course_access_get, course_access_set
+from core.codes import normalize_code
+from core.db.cache import cache_delete, cache_delete_pattern, cache_get, cache_set, course_access_get, course_access_set
 from core.db.database import Enrollment, KnowledgeBase, get_db
 
 router = APIRouter()
@@ -20,7 +21,9 @@ def _kb_to_course(kb: KnowledgeBase, include_join_code: bool = False) -> dict:
         "icon": kb.icon or "📘",
         "description": kb.description or "",
         "kb_status": kb.status,
-        "rag_enabled": kb.status == "ready",
+        # chat/quiz/solve/research 只查 LightRAG；必须 LightRAG 真摄入(chunks_total>0)才算可答。
+        # 光建 LlamaIndex(status 也会变 ready)不算——否则 chat 去查空 LightRAG 吐 no-context。
+        "rag_enabled": kb.status == "ready" and (kb.chunks_total or 0) > 0,
         "source": "db",
     }
     if include_join_code:
@@ -82,6 +85,10 @@ async def check_course_access(db: AsyncSession, course_id: str, user: dict) -> N
 
     管理员直接放行；教师/学生先查 Redis 缓存（TTL 5 min），未命中才走 DB。
     """
+    # 自由问答 / 未选课：虚拟课程，任何登录用户都可访问（不挂知识库、不查 Enrollment）
+    if not course_id or course_id == "general":
+        return
+
     role = user.get("role", "student")
     user_id: str = user["id"]
 
@@ -122,11 +129,12 @@ async def check_course_access(db: AsyncSession, course_id: str, user: dict) -> N
 
 
 async def invalidate_courses_cache() -> None:
-    """供 admin / teacher 模块在创建/删除/索引完成时调用。"""
-    await cache_delete("courses:list")
-    # Per-user caches expire naturally via TTL (100s).
-    # For immediate invalidation we'd need to track all user keys,
-    # but short TTL is acceptable for this use case.
+    """供 admin / teacher 模块在创建/删除/索引完成时调用。
+
+    课程列表按用户缓存（key 为 courses:list:{user_id}），课程的可见性/状态变更会影响
+    所有学生，因此用 SCAN 匹配前缀批量失效全部用户的缓存，而非删单个不存在的固定 key。
+    """
+    await cache_delete_pattern("courses:list:*")
 
 
 class JoinCourseBody(BaseModel):
@@ -140,7 +148,7 @@ async def join_course_by_code(
     db: AsyncSession = Depends(get_db),
 ):
     """学生凭课程码自助入课。"""
-    code = body.join_code.strip().upper()
+    code = normalize_code(body.join_code)
     result = await db.execute(
         select(KnowledgeBase).where(KnowledgeBase.join_code == code)
     )

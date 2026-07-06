@@ -20,7 +20,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from config import DATABASE_URL, DB_PATH
+from settings import get_settings
+DATABASE_URL = get_settings().db.url.get_secret_value()
+DB_PATH = get_settings().paths.db_path
 
 
 def read_sqlite() -> dict[str, list[dict]]:

@@ -53,6 +53,11 @@ from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
 from api.auth import ws_authenticate
 from api.courses import check_course_access
+from api.upload import (
+    MAX_IMAGES_PER_TURN,
+    materialize_attachments,
+    resolve_attachments,
+)
 from core.context import UnifiedContext
 from core.db.database import AsyncSessionLocal
 from core.observability import bind_context, log_flow
@@ -114,10 +119,27 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
     language: str = str(payload.get("language") or "zh")
     history: list[dict] = payload.get("history") or []
     tools_raw = payload.get("tools")
-    enabled_tools: list[str] = (
-        ["rag"] if tools_raw is None else [str(t) for t in tools_raw]
-    )
+    if tools_raw is None:
+        # 前端未显式传 tools：按"只有选定才启用"原则，深度研究用 metadata.sources
+        # （用户的数据源选择）映射工具——kb→rag、web/papers→web_search；未选则不挂。
+        # 原先 None 默认 ["rag"] 会无视用户选择强行接知识库检索。
+        sources = ((payload.get("metadata") or {}).get("sources") or [])
+        enabled_tools: list[str] = []
+        if "kb" in sources:
+            enabled_tools.append("rag")
+        if "web" in sources or "papers" in sources:
+            enabled_tools.append("web_search")
+    else:
+        enabled_tools = [str(t) for t in (tools_raw or [])]
     metadata: dict = payload.get("metadata") or {}
+
+    # 附件（图片）：统一解析（列表优先，回退旧 image_path 单图填 url，走 materialize 归属校验）
+    attachments = resolve_attachments(payload.get("attachments"), payload.get("image_path"))
+    # 图片限流（防多图 base64 涨 token 致超时）；websocket 路径发 error + close，不抛 HTTPException
+    if sum(1 for a in attachments if a.is_image()) > MAX_IMAGES_PER_TURN:
+        await send({"type": "error", "message": f"单次最多上传 {MAX_IMAGES_PER_TURN} 张图片"})
+        await websocket.close()
+        return
 
     if not question:
         await send({"type": "error", "message": "question 不能为空"})
@@ -139,6 +161,8 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
 
     # ---- 7. 构造 UnifiedContext ----
     metadata.setdefault("question", question)
+    # 物化本地附件（归属校验 + 读 base64），供 pipeline 两阶段视觉 / loop 注入
+    materialize_attachments(attachments, user)
     context = UnifiedContext(
         course_id=course_id,
         user_id=str(user["id"]),
@@ -148,6 +172,7 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
         enabled_tools=enabled_tools,
         language=language,
         metadata=metadata,
+        attachments=attachments,
     )
 
     # ---- 8. 通过 TurnRuntimeManager 启动 turn ----

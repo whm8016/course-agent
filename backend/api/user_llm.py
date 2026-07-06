@@ -31,14 +31,18 @@ router = APIRouter(prefix="/llm/me", tags=["user-llm-provider"])
 
 
 class UserProviderResponse(BaseModel):
-    """用户端响应：api_key 脱敏为 is_set。"""
+    """用户端响应：api_key 脱敏为 *_set bool（对话 + 视觉两把）。"""
 
+    # 对话供应商
     binding: str = ""
     api_key_set: bool = False  # True=已设置，不回传明文
     base_url: str = ""
     api_version: str = ""
     text_model: str = ""
-    fast_model: str = ""
+    # 视觉独立供应商
+    vision_binding: str = ""
+    vision_api_key_set: bool = False
+    vision_base_url: str = ""
     vision_model: str = ""
 
 
@@ -57,7 +61,9 @@ async def get_my_provider(user: dict = Depends(get_current_user)) -> UserProvide
         base_url=view.get("base_url", ""),
         api_version=view.get("api_version", ""),
         text_model=view.get("text_model", ""),
-        fast_model=view.get("fast_model", ""),
+        vision_binding=view.get("vision_binding", ""),
+        vision_api_key_set=bool(view.get("vision_api_key")),
+        vision_base_url=view.get("vision_base_url", ""),
         vision_model=view.get("vision_model", ""),
     )
 
@@ -88,34 +94,31 @@ async def delete_my_provider(user: dict = Depends(get_current_user)) -> dict:
     return {"deleted": deleted}
 
 
-@router.post("/test")
-async def test_my_provider(
-    payload: UserProviderPayload, user: dict = Depends(get_current_user)
+async def _probe_completion(
+    *,
+    binding: str | None,
+    api_key: str,
+    base_url: str | None,
+    api_version: str | None,
+    model: str,
+    timeout: int = 20,
 ) -> dict:
-    """测试用户提交的 provider 配置连通性（不持久化）。"""
-    user_id = user.get("id")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="未认证")
+    """发极简 completion 验证对话模型连通（与 api/llm.py _probe_profile 同语义）。
 
-    # 复用 api/llm.py 的 _probe_profile 逻辑
-    binding = (payload.binding or "").strip()
-    api_key = (payload.api_key or "").strip()
-    base_url = (payload.base_url or "").strip() or None
-    api_version = (payload.api_version or "").strip() or None
-    model = payload.text_model or ""
+    用 get_llm_client（不缓存），避免测试 client 污染生产 client 缓存。
+    """
     if not model:
-        return {"ok": False, "error": "未配置 text_model"}
-
+        return {"ok": False, "model": "", "error": "未配置模型"}
     try:
         from core.llm.provider_factory import get_llm_client
 
         client = get_llm_client(
-            binding=binding or None,
+            binding=binding,
             api_key=api_key,
             base_url=base_url,
             api_version=api_version,
             model=model,
-            timeout=20,
+            timeout=timeout,
         )
         await client.chat.completions.create(
             model=model,
@@ -123,6 +126,74 @@ async def test_my_provider(
             max_tokens=1,
             stream=False,
         )
-        return {"ok": True, "binding": binding or None, "model": model}
+        return {"ok": True, "model": model, "error": ""}
     except Exception as e:
-        return {"ok": False, "error": str(e)[:300]}
+        return {"ok": False, "model": model, "error": str(e)[:300]}
+
+
+@router.post("/test")
+async def test_my_provider(
+    payload: UserProviderPayload, user: dict = Depends(get_current_user)
+) -> dict:
+    """测试用户提交的 provider 配置连通性（不持久化）。
+
+    对话模型与视觉模型各发一次极简 completion。视觉模型仅当用户填了 vision_model
+    时才测——否则生产 resolve_vision_runtime 会走全局 VISION_* 回退（不归个人配置管），
+    此处不报错。返回结构向后兼容：顶层 ok/binding/model/error 仍表示对话模型结果，
+    另附 text / vision 两栏明细。
+    """
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未认证")
+
+    # ── 对话模型 ────────────────────────────────────────────────────────
+    text_binding = (payload.binding or "").strip()
+    text_res = await _probe_completion(
+        binding=text_binding or None,
+        api_key=(payload.api_key or "").strip(),
+        base_url=(payload.base_url or "").strip() or None,
+        api_version=(payload.api_version or "").strip() or None,
+        model=(payload.text_model or "").strip(),
+    )
+
+    # ── 视觉模型（仅当填了 vision_model）────────────────────────────────
+    # 与生产 resolve_vision_runtime 分支1 一致：用 get_llm_client_for_profile 构造，
+    # 空 binding/key/base_url 自动回退全局 llm 凭证（settings.llm.*），故用户只填
+    # vision_model（视觉与对话同供应商）也能正确探测。
+    vision_model = (payload.vision_model or "").strip()
+    vision_res: dict | None = None
+    if vision_model:
+        from core.llm.capabilities import supports_vision
+        from core.llm.provider_factory import get_llm_client_for_profile
+
+        v_prof = {
+            "binding": (payload.vision_binding or "").strip(),
+            "api_key": (payload.vision_api_key or "").strip(),
+            "base_url": (payload.vision_base_url or "").strip(),
+            "api_version": "",
+        }
+        # 静态能力提示：模型名按能力表不支持图片输入时给 warning（不阻断连通测试，
+        # 因 supports_vision 基于命名约定，可能漏掉新模型）。
+        warning: str | None = None
+        if not supports_vision(v_prof["binding"] or None, vision_model):
+            warning = "按能力表该模型可能不支持图片输入，实际看图或失败（请确认模型名，如 qwen-vl-plus / gpt-4o）"
+        try:
+            v_client = get_llm_client_for_profile(v_prof, timeout=20)
+            await v_client.chat.completions.create(
+                model=vision_model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+                stream=False,
+            )
+            vision_res = {"ok": True, "model": vision_model, "error": "", "warning": warning}
+        except Exception as e:
+            vision_res = {"ok": False, "model": vision_model, "error": str(e)[:300], "warning": warning}
+
+    return {
+        "ok": text_res["ok"],  # 总体：对话通即可用（向后兼容；视觉未配不应让总体变红）
+        "binding": text_binding or None,
+        "model": text_res["model"],
+        "error": text_res["error"],
+        "text": text_res,
+        "vision": vision_res,  # None = 未配置视觉模型（走平台默认）
+    }

@@ -14,10 +14,13 @@ from sqlalchemy import Integer, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_teacher
-from api.admin import _kb_to_dict, _run_indexing, _ALLOWED_EXT, _MAX_BYTES
+from api.admin import _kb_to_dict, _ALLOWED_EXT, _MAX_BYTES
 from api.courses import invalidate_courses_cache
-from config import KB_STORE_DIR, MAX_KB_UPLOAD_MB
+from settings import get_settings
+KB_STORE_DIR = get_settings().paths.kb_store_dir
+MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
 from core.db.cache import faq_top
+from core.codes import ensure_unique_join_code
 from core.db.database import (
     Enrollment, KBFile, KnowledgeBase, Message,
     NotebookEntry, Session, User, get_db,
@@ -99,6 +102,9 @@ async def create_course(
         owner_id=teacher["id"],
     )
     db.add(kb)
+    await db.flush()
+    # 建课即自动生成课程码（替代旧的"教师手动点生成"）
+    kb.join_code = await ensure_unique_join_code(db)
     await db.flush()
     _kb_raw_dir(body.course_id).mkdir(parents=True, exist_ok=True)
     logger.info("教师创建课程 course_id=%s owner=%s", body.course_id, teacher["id"])
@@ -208,12 +214,28 @@ async def index_course(
     if resume and kb.status in ("error", "paused") and kb.chunks_done > 0:
         resume_from = kb.chunks_done
 
+    # 提前置 indexing（对标 build_llamaindex_index / llama_rag.build_llamaindex_index）：
+    # 接口返回时 DB 已是 indexing，前端 loadCourses 立即拿到 → hasIndexing 触发轮询 →
+    # 刷新页面也不丢"进行中"状态。worker(_run_indexing) 仍会再写一次，幂等兜底。
+    kb.status = "indexing"
+    kb.progress = 0
+    kb.error_msg = ""
+    kb.progress_msg = "准备中…" if resume_from == 0 else f"续传中（从第 {resume_from} 块）…"
+    if resume_from == 0:
+        kb.chunks_done = 0
+        kb.chunks_total = 0
+        kb.token_estimate = 0
+    kb.updated_at = time.time()
+    await db.flush()
+    await invalidate_courses_cache()
+
+    # 必须走 ARQ（单 worker 进程 + 索引锁串行）；Redis 故障不降级到 BackgroundTasks，
+    # 直接报错回滚，避免跨 gunicorn 进程撞 lightrag_store。
     from core.arq_pool import get_arq_pool
     arq_pool = await get_arq_pool()
-    if arq_pool is not None:
-        await arq_pool.enqueue_job("run_indexing", kb.id, course_id, file_paths, resume_from)
-    else:
-        background_tasks.add_task(_run_indexing, kb.id, course_id, file_paths, resume_from)
+    if arq_pool is None:
+        raise HTTPException(status_code=503, detail="任务队列（ARQ/Redis）不可用，请稍后重试")
+    await arq_pool.enqueue_job("run_indexing", kb.id, course_id, file_paths, resume_from)
 
     return {
         "message": "索引任务已启动" if resume_from == 0 else f"续传（从第 {resume_from} 块）",
@@ -306,11 +328,6 @@ async def remove_student(
 
 # ── 课程码管理 ─────────────────────────────────────────────────────────────────
 
-def _gen_join_code() -> str:
-    """生成 8 位大写字母数字课程码。"""
-    return uuid.uuid4().hex[:8].upper()
-
-
 @router.post("/courses/{course_id}/join-code")
 async def refresh_join_code(
     course_id: str,
@@ -319,22 +336,11 @@ async def refresh_join_code(
 ):
     """生成或重置课程码，返回新码。"""
     kb = await _get_owned_kb(db, course_id, teacher)
-    # 确保唯一（极低概率重复，循环至多 3 次）
-    for _ in range(3):
-        code = _gen_join_code()
-        clash = await db.execute(
-            select(KnowledgeBase.id).where(
-                KnowledgeBase.join_code == code,
-                KnowledgeBase.course_id != course_id,
-            )
-        )
-        if not clash.first():
-            break
-    kb.join_code = code
+    kb.join_code = await ensure_unique_join_code(db, exclude_course_id=course_id)
     kb.updated_at = time.time()
     await db.flush()
     await invalidate_courses_cache()
-    return {"course_id": course_id, "join_code": code}
+    return {"course_id": course_id, "join_code": kb.join_code}
 
 
 # ── 知识库详情（含文件列表） ──────────────────────────────────────────────────
@@ -431,12 +437,21 @@ async def pause_course_index(
         raise HTTPException(status_code=409, detail="当前没有正在进行的索引任务")
     ctrl = IndexingControl(kb.id)
     try:
-        await ctrl.request_pause()
+        await ctrl.request_pause()  # 通知 worker；事件循环被阻塞读不到也无妨
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"无法下发暂停信号：{e}")
-    kb.progress_msg = "暂停请求已发送，等待当前批次完成…"
+    # 立即落库为 paused：超大文档的 ainsert 会长时间阻塞 worker 事件循环，导致
+    # checkpoint 永远读不到信号、前端卡在"请求已发送"。这里直接置 paused 让前端
+    # 立即解脱；worker 终态写入有"不覆盖非 indexing 状态"保护，跑完不会回写。
+    done = kb.chunks_done or 0
+    total = kb.chunks_total or 0
+    kb.status = "paused"
+    kb.progress_msg = f"已暂停（已完成 {done}{f'/{total}' if total else ''} 个文本块）"
     kb.updated_at = time.time()
-    return {"message": "暂停请求已发送", "course_id": course_id}
+    await invalidate_courses_cache()
+    # 不清 Redis 控制信号：留给 worker 的 checkpoint 读到后自行 cancel 停止，
+    # worker 终止后会在 finally 里 control.clear()。这里清了反而让 worker 读不到、继续跑。
+    return {"message": "已暂停", "course_id": course_id}
 
 
 @router.post("/courses/{course_id}/index/stop")
@@ -449,12 +464,22 @@ async def stop_course_index(
     if kb.status == "indexing":
         ctrl = IndexingControl(kb.id)
         try:
-            await ctrl.request_stop()
+            await ctrl.request_stop()  # 通知 worker；事件循环被阻塞读不到也无妨
         except Exception as e:
             raise HTTPException(status_code=503, detail=f"无法下发终止信号：{e}")
-        kb.progress_msg = "终止请求已发送，等待当前批次完成…"
+        # 立即落库为 pending 并清零进度：见 pause 的说明。worker 跑完不会回写。
+        kb.status = "pending"
+        kb.progress = 0
+        kb.progress_msg = "已终止"
+        kb.chunks_done = 0
+        kb.chunks_total = 0
+        kb.token_estimate = 0
+        kb.error_msg = ""
         kb.updated_at = time.time()
-        return {"message": "终止请求已发送", "course_id": course_id}
+        await invalidate_courses_cache()
+        # 不清 Redis 控制信号：留给 worker 的 checkpoint 读到后自行 cancel 停止，
+        # worker 终止后会在 finally 里 control.clear()。这里清了反而让 worker 读不到、继续跑。
+        return {"message": "已终止", "course_id": course_id}
     if kb.status == "paused":
         kb.status = "pending"
         kb.progress = 0
@@ -479,8 +504,6 @@ async def build_llamaindex_index(
     db: AsyncSession = Depends(get_db),
 ):
     """触发 LlamaIndex 向量索引构建（后台任务）。"""
-    from api.llama_rag import _run_llamaindex_build  # 避免循环导入
-
     kb = await _get_owned_kb(db, course_id, teacher)
 
     files_result = await db.execute(select(KBFile).where(KBFile.kb_id == kb.id))
@@ -503,7 +526,13 @@ async def build_llamaindex_index(
     await db.flush()
     await invalidate_courses_cache()
 
-    background_tasks.add_task(_run_llamaindex_build, kb.id, course_id, file_paths)
+    # 必须走 ARQ（与 LightRAG 索引共用 worker 单进程 + 索引锁）；Redis 故障不降级，
+    # 直接报错回滚，避免跨 gunicorn 进程撞 llamaindex_storage。
+    from core.arq_pool import get_arq_pool
+    arq_pool = await get_arq_pool()
+    if arq_pool is None:
+        raise HTTPException(status_code=503, detail="任务队列（ARQ/Redis）不可用，请稍后重试")
+    await arq_pool.enqueue_job("run_llamaindex_build", kb.id, course_id, file_paths)
 
     return {"accepted": True, "message": "LlamaIndex 构建已提交后台", "course_id": course_id}
 
@@ -597,9 +626,13 @@ async def analytics_frequent_questions(
 
     # SQL complement: recent user messages grouped by content prefix
     thirty_days_ago = time.time() - 86400 * 30
+    # PG 严格模式要求 SELECT 与 GROUP BY 用同一表达式；func.left(...,80) 写两遍会被
+    # asyncpg 编译成两个独立 bindparam（$1 vs $6），PG 无法证明相等 → GroupingError。
+    # 提取为同一表达式对象，让 SQLAlchemy 复用同一个 bindparam。
+    _content_prefix = func.left(Message.content, 80)
     sql_rows = (await db.execute(
         select(
-            func.left(Message.content, 80).label("q"),
+            _content_prefix.label("q"),
             func.count().label("cnt"),
             func.max(Message.created_at).label("last_ts"),
         )
@@ -610,7 +643,7 @@ async def analytics_frequent_questions(
             Message.created_at >= thirty_days_ago,
             func.length(Message.content) > 4,
         )
-        .group_by(func.left(Message.content, 80))
+        .group_by(_content_prefix)
         .having(func.count() >= 2)
         .order_by(func.count().desc())
         .limit(top_n)

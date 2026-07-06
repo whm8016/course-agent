@@ -27,11 +27,15 @@ async def dispatch_tool_calls(
     enabled_tools: list[str],
     stream: StreamBus,
     user_id: str = "",
+    rag_mode: str = "",
 ) -> DispatchOutcome:
     """并行执行工具调用，返回 DispatchOutcome。
 
     若某个工具返回 pause_for_user，则 DispatchOutcome.pause=True，
     loop 负责挂起并等待用户回复。
+
+    rag_mode 非空时，注入到 rag 工具调用（覆盖 retrieve_context 默认 mode），
+    供用户在对话界面选择检索模式；其它工具不受影响。
     """
     from core.agent.tool_registry import execute_tool
 
@@ -43,7 +47,11 @@ async def dispatch_tool_calls(
             _t = time.perf_counter()
             status = "ok"
             try:
-                result = await execute_tool(tc.name, course_id=course_id, user_id=user_id, **tc.arguments)
+                # rag 工具注入用户选择的检索模式（mode 由用户每请求选，不由 LLM 决定）
+                call_kwargs = dict(tc.arguments)
+                if tc.name == "rag" and rag_mode:
+                    call_kwargs["mode"] = rag_mode
+                result = await execute_tool(tc.name, course_id=course_id, user_id=user_id, **call_kwargs)
                 content = str(result.content) if result else "（无返回结果）"
                 # pause_for_user 先存到 role=tool 消息的 _pause 临时字段，
                 # gather 后统一检测，不在并发路径里修改共享状态

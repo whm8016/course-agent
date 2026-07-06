@@ -10,12 +10,13 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from core.agentic.types import LoopOutcome
 from core.context import UnifiedContext
+from core.pipeline_common import CommonContextLayers, ProfileRuntime
 from core.research.citation_manager import CitationManager
 from core.research.data_structures import (
     DEFAULT_QUEUE_MAX_LENGTH,
@@ -275,7 +276,21 @@ def test_pipeline_run_end_to_end():
         from core.stream_bus import StreamBus
 
         stream = StreamBus()
-        with patch("core.research.pipeline.run_agent_loop", new=_mock_loop_factory()):
+        with (
+            patch("core.research.pipeline.run_agent_loop", new=_mock_loop_factory()),
+            patch(
+                "core.research.pipeline.resolve_profile_runtime",
+                new=AsyncMock(return_value=ProfileRuntime()),
+            ),
+            patch(
+                "core.research.pipeline.build_common_context_layers",
+                new=AsyncMock(return_value=CommonContextLayers()),
+            ),
+            patch(
+                "core.research.pipeline.describe_images",
+                new=AsyncMock(side_effect=lambda c, t, r: t),
+            ),
+        ):
             result = await pipeline.run(
                 topic="研究导数与积分", context=ctx, stream=stream
             )

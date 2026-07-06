@@ -12,7 +12,8 @@ from typing import Any
 
 import redis.asyncio as aioredis
 
-from config import REDIS_URL
+from settings import get_settings
+REDIS_URL = get_settings().db.redis_url.get_secret_value()
 
 logger = logging.getLogger(__name__)
 

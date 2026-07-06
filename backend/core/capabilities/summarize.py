@@ -1,8 +1,10 @@
 """
-Summarize Capability
-====================
+Summarize Capability（DEPRECATED）
+=================================
 
-薄壳：对当前会话历史生成学习小结。对齐 DeepTutor 独立 Capability 模式。
+前端 CAPABILITIES 仅暴露 chat/deep_solve/quiz/research，本能力未在前端入口暴露。
+本壳保留以兼容旧 mode=summarize 调用；其实现 _stream_summarize_events 走独立 chat_stream
+路径（无 agent loop/profile/skill/memory），功能落后于主路径，后续应迁移或移除。
 """
 from __future__ import annotations
 

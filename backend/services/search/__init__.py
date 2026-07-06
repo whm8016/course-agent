@@ -30,7 +30,8 @@ SUPPORTED_SEARCH_PROVIDERS = {
 
 def _get_web_search_config() -> dict:
     import os as _os
-    from config import SEARCH_ENABLED
+    from settings import get_settings
+    SEARCH_ENABLED = get_settings().search.enabled
     # 测试用 monkeypatch 设置环境变量时能生效
     env_enabled = _os.environ.get("SEARCH_ENABLED", "")
     if env_enabled:

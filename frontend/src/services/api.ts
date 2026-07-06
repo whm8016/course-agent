@@ -37,6 +37,19 @@ export async function fetchCourses(): Promise<Course[]> {
   return Array.isArray(data.courses) ? data.courses : []
 }
 
+export async function joinCourseByCode(
+  joinCode: string,
+): Promise<{ course_id: string; name: string; already_enrolled: boolean }> {
+  const res = await fetch('/api/courses/join', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ join_code: joinCode }),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  return res.json()
+}
+
 // ---------------------------------------------------------------------------
 // Sessions (auth-protected)
 // ---------------------------------------------------------------------------
@@ -137,6 +150,7 @@ export async function chatStream(
   enabledTools: string[] = [],
   modelProfileId?: string,
   attachments?: AttachmentInfo[],
+  ragMode: string = 'mix',
 ): Promise<{ aborted: boolean }> {
   const isAbortError = (err: unknown) => {
     if (err instanceof DOMException) return err.name === 'AbortError'
@@ -175,6 +189,7 @@ export async function chatStream(
         tools: enabledTools,
         model_profile_id: modelProfileId || null,
         attachments: attachments ?? [],
+        rag_mode: ragMode || 'mix',
       }),
     })
   } catch (err) {
@@ -297,6 +312,25 @@ export async function chatStream(
     }
   }
   return { aborted }
+}
+
+/**
+ * 触发"立即回答"：让正在思考的 turn 在下一轮顶部基于已有信息直接作答。
+ * 流式过程中前端"立即回答"按钮调用（fire-and-forget，不中断当前 SSE 流）。
+ * 返回是否成功触发（turn 存在且未结束）；404/网络异常返回 false，前端静默处理。
+ */
+export async function requestAnswerNow(turnId: string): Promise<boolean> {
+  try {
+    const res = await fetch('/api/chat/answer_now', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ turn_id: turnId }),
+    })
+    checkUnauthorized(res)
+    return res.ok
+  } catch {
+    return false
+  }
 }
 
 
@@ -1007,6 +1041,10 @@ export interface LlmProbeResult {
   binding?: string | null
   model?: string
   error?: string
+  // 用户级 provider 测试扩展（/llm/me/test 同时探测对话 + 视觉两路）；
+  // admin 的 /probe 不返回这两个字段 → undefined，前端据此区分是否展示视觉栏。
+  text?: { ok: boolean; model: string; error: string }
+  vision?: { ok: boolean; model: string; error: string; warning?: string | null } | null
 }
 
 export async function fetchLlmProviders(): Promise<LlmProviderSpec[]> {
@@ -1074,6 +1112,72 @@ export async function testLlmProfile(profileId: string): Promise<LlmProbeResult>
 
 export async function probeLlmProfile(payload: LlmProfilePayload): Promise<LlmProbeResult> {
   const res = await fetch('/api/llm/probe', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  return res.json()
+}
+
+// ── 用户级 LLM provider（/llm/me，多租户隔离；覆盖平台默认）────────────────
+// 学生可自配 binding/key/text/fast/vision 模型；embedding 平台统一不开放（per-course
+// 共享库要求 embedding 一致）。vision 模型用于「主回答模型不支持视觉」时的两阶段图片描述。
+export interface UserProviderView {
+  // 对话供应商
+  binding: string
+  api_key_set: boolean
+  base_url: string
+  api_version: string
+  text_model: string
+  // 视觉独立供应商
+  vision_binding: string
+  vision_api_key_set: boolean
+  vision_base_url: string
+  vision_model: string
+}
+
+export interface UserProviderPayload {
+  // 对话供应商
+  binding: string
+  api_key: string
+  base_url: string
+  api_version: string
+  text_model: string
+  // 视觉独立供应商（可异于对话供应商：对话走 deepseek，视觉走 dashscope/qwen-vl）
+  vision_binding: string
+  vision_api_key: string
+  vision_base_url: string
+  vision_model: string
+}
+
+export async function fetchMyLlmProvider(): Promise<UserProviderView> {
+  const res = await fetch('/api/llm/me', { headers: authHeaders() })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  return res.json()
+}
+
+export async function upsertMyLlmProvider(payload: UserProviderPayload): Promise<unknown> {
+  const res = await fetch('/api/llm/me', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  return res.json()
+}
+
+export async function deleteMyLlmProvider(): Promise<void> {
+  const res = await fetch('/api/llm/me', { method: 'DELETE', headers: authHeaders() })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+}
+
+export async function testMyLlmProvider(payload: UserProviderPayload): Promise<LlmProbeResult> {
+  const res = await fetch('/api/llm/me/test', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify(payload),

@@ -5,7 +5,9 @@ from starlette.requests import Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
-from config import REDIS_URL, TESTING
+from settings import get_settings
+REDIS_URL = get_settings().db.redis_url.get_secret_value()
+TESTING = get_settings().testing
 
 # TESTING=1 disables rate-limiting so tests don't hit 429 on rapid registrations.
 _TESTING = TESTING

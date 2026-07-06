@@ -1,14 +1,20 @@
 """RAG 评测主入口脚本。
 
 Usage:
-    # 全量评测（5 模式 x 4 指标）
+    # 自动合成评测集 + 跑核心指标（推荐，针对一门已建索引的课）
+    python -m scripts.eval_rag.run_eval --course <course_id> --generate 15
+
+    # 合成时直接扫描一个文档目录（不连库）
+    python -m scripts.eval_rag.run_eval --docs-dir ./data/kb/my_course --generate 15
+
+    # 用现成的人工评测集（qa_dataset.json）评测
     python -m scripts.eval_rag.run_eval
 
     # 只跑零成本指标（快速验证）
     python -m scripts.eval_rag.run_eval --metrics context_precision,context_recall
 
-    # 指定模式和课程
-    python -m scripts.eval_rag.run_eval --modes fs,mix --course circuit_analysis
+    # 指定模式
+    python -m scripts.eval_rag.run_eval --modes naive,local,mix --course circuit_analysis
 
     # 清除缓存重新查询
     python -m scripts.eval_rag.run_eval --no-cache
@@ -49,14 +55,27 @@ async def main():
         help=f"课程 ID（默认: {config.COURSE_ID})",
     )
     parser.add_argument(
+        "--generate",
+        type=int,
+        default=None,
+        metavar="N",
+        help="先用 RAGAS 基于该课知识库自动合成 N 道 QA 再评测（需 --course 有知识库，或 --docs-dir）",
+    )
+    parser.add_argument(
+        "--docs-dir",
+        default=None,
+        help="合成评测集时直接扫描该目录文档（不连库；与 --course 二选一，--course 优先）",
+    )
+    parser.add_argument(
         "--modes",
         default="naive,local,global,mix",
         help="评测模式列表（逗号分隔）",
     )
     parser.add_argument(
         "--metrics",
-        default="context_precision,context_recall,faithfulness,answer_relevancy",
-        help="评测指标列表（逗号分隔）",
+        default="faithfulness,context_precision",
+        help="评测指标列表（逗号分隔）；默认只跑 faithfulness(防幻觉)+context_precision 省成本，"
+             "全量可用 context_precision,context_recall,faithfulness,answer_relevancy",
     )
     parser.add_argument(
         "--no-cache",
@@ -71,12 +90,25 @@ async def main():
     args = parser.parse_args()
 
     # ---- Step 1: 加载评测集 ----
-    logger.info("加载评测集: %s", config.DATASET_PATH)
-    if not config.DATASET_PATH.exists():
-        logger.error("评测集文件不存在: %s", config.DATASET_PATH)
-        sys.exit(1)
+    if args.generate:
+        # 自动合成路线：基于课程知识库出题，无需手写标准答案
+        from scripts.eval_rag.dataset_generator import generate_dataset
 
-    qa_items = json.loads(config.DATASET_PATH.read_text("utf-8"))
+        logger.info("自动合成评测集: %d 道（course=%s, docs_dir=%s）",
+                    args.generate, args.course, args.docs_dir)
+        qa_items = await generate_dataset(
+            course_id=args.course,
+            docs_dir=args.docs_dir,
+            n=args.generate,
+        )
+    else:
+        # 人工评测集（qa_dataset.json）
+        logger.info("加载人工评测集: %s", config.DATASET_PATH)
+        if not config.DATASET_PATH.exists():
+            logger.error("评测集文件不存在: %s", config.DATASET_PATH)
+            logger.error("提示：用 --generate N 自动合成评测集")
+            sys.exit(1)
+        qa_items = json.loads(config.DATASET_PATH.read_text("utf-8"))
     logger.info("评测集大小: %d 条", len(qa_items))
 
     # 分类统计

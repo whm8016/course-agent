@@ -50,7 +50,7 @@ async def _run_lightrag_query(
     course_id: str, question: str, mode: str
 ) -> dict[str, Any]:
     """LightRAG 查询（naive / local / global / mix）。"""
-    from core.rag.lightrag_engine import query_with_lightrag
+    from core.rag.retriever.lightrag import query_with_lightrag
 
     result = await query_with_lightrag(course_id, question, mode=mode)
 

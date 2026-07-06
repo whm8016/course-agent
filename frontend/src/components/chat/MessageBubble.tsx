@@ -139,12 +139,6 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
           <QuizCard quiz={message.metadata.quiz} courseId={courseId} />
         )}
 
-        {message.metadata?.guardrail && !message.metadata.guardrail.safe && (
-          <div className="mt-2 px-3 py-1.5 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-700">
-            <span className="font-medium">安全提示：</span>{message.metadata.guardrail.tip}
-          </div>
-        )}
-
         {message.metadata?.hallucination && message.metadata.hallucination.tip && (
           <div className="mt-2 px-3 py-1.5 rounded-lg bg-blue-50 border border-blue-200 text-xs text-blue-700">
             <span className="font-medium">可信度：</span>

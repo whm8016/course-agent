@@ -123,6 +123,12 @@ async def test_finish_round_no_tools(ctx, bus):
     assert "answer" in event_types
     assert "done" in event_types
 
+    # 无工具直接回答也应逐 chunk 真流式（修复点）：3 个 content chunk → 3 个 token 事件，
+    # 一一对应；而非把整段生成完后按固定字符数切片的伪流式。
+    token_events = [e for e in events if e["type"] == "token"]
+    assert len(token_events) == 3, f"真流式应逐 chunk 发 token，实际 {len(token_events)} 个"
+    assert "".join(e["content"] for e in token_events) == "快速排序是一种高效的排序算法。"
+
 
 # ---------------------------------------------------------------------------
 # 场景 2：一轮工具调用 + 一轮 finish
@@ -362,7 +368,8 @@ async def test_loop_keeps_text_model_with_image(tmp_path, bus):
     """ctx 带图 → run_agent_loop 仍用 TEXT_MODEL（对标 DeepTutor：chat 始终同一模型，
     不因有图硬切 VISION_MODEL），但图片照常乐观注入进 messages（content 为含
     image_url 的 list）。模型不支持时由 Stage-2 降级处理（见场景 7）。"""
-    from config import TEXT_MODEL
+    from settings import get_settings
+    TEXT_MODEL = get_settings().llm.text_model
     from core.attachment import from_image_path
 
     img = tmp_path / "q.png"
@@ -412,7 +419,8 @@ async def test_loop_keeps_text_model_with_image(tmp_path, bus):
 async def test_loop_stage2_image_fallback(tmp_path, bus):
     """模型拒绝图片输入（异常命中 image 关键词）且 not supports_vision →
     剥掉图片用同一 TEXT_MODEL 重试纯文本成功（对标 DeepTutor Stage-2 fallback）。"""
-    from config import TEXT_MODEL
+    from settings import get_settings
+    TEXT_MODEL = get_settings().llm.text_model
     from core.attachment import from_image_path
 
     img = tmp_path / "q.png"
@@ -465,3 +473,123 @@ async def test_loop_stage2_image_fallback(tmp_path, bus):
         for p in second_user["content"]
     )
     assert outcome.completed is True
+
+
+# ---------------------------------------------------------------------------
+# 场景 8：answer_now（立即回答）—— 工具轮后第二轮顶部检测到信号，跳过工具直接回答
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_answer_now_short_circuits_after_tool_round(ctx, bus):
+    """前端"立即回答"触发后，第二轮顶部检测到 is_answer_now_requested()==True，
+    跳过工具循环，传 schemas + tool_choice="none" 直接回答（显式禁工具，避免 DeepSeek 在
+    tools=None 时吐 DSML 文本标签）；emit stage=answer_now 的 thinking；done.metadata.answer_now==True。"""
+    tool_chunks = [_make_chunk(tool_calls=[{
+        "id": "call_an", "name": "rag",
+        "arguments": json.dumps({"query": "test"}),
+    }])]
+    answer_chunks = [_make_chunk("基于已有信息的即时答案。")]
+
+    call_count = 0
+    captured_tools: list[Any] = []
+    captured_tool_choice: list[Any] = []
+
+    async def _fake_create(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        captured_tools.append(kwargs.get("tools"))
+        captured_tool_choice.append(kwargs.get("tool_choice"))
+        mock = MagicMock()
+        mock.__aiter__ = (
+            (lambda self: _async_iter(tool_chunks)) if call_count == 1
+            else (lambda self: _async_iter(answer_chunks))
+        )
+        return mock
+
+    fake_tool_result = MagicMock()
+    fake_tool_result.content = "检索结果"
+    fake_tool_result.pause_for_user = None
+
+    # 第一轮(iter 0)检查返回 False → 执行工具；第二轮(iter 1)返回 True → answer_now
+    probe = {"n": 0}
+
+    def _ans_now():
+        probe["n"] += 1
+        return probe["n"] > 1
+
+    ctx.metadata["is_answer_now_requested"] = _ans_now
+
+    with patch("core.agentic.loop._default_client") as mock_client, \
+         patch("core.agent.tool_registry.execute_tool", AsyncMock(return_value=fake_tool_result)):
+        mock_client.chat.completions.create = _fake_create
+        outcome = await run_agent_loop(
+            context=ctx, stream=bus, system_prompt="你是助教",
+            tool_schemas=[{"type": "function",
+                           "function": {"name": "rag", "description": "检索", "parameters": {}}}],
+        )
+
+    # 第二次 create 是 answer_now 直接回答：保留 schemas 但 tool_choice="none"（显式禁工具，
+    # 避免 DeepSeek 在 tools=None 时退化为吐 DSML 文本标签）。首轮 tool_choice 为默认 "auto"。
+    assert captured_tools[1] is not None
+    assert captured_tools[0] == captured_tools[1]   # 两轮 schemas 一致（都来自 tool_schemas）
+    assert captured_tool_choice[0] == "auto"        # 正常轮默认
+    assert captured_tool_choice[1] == "none"        # answer_now 显式禁工具
+    assert "即时答案" in outcome.final_text
+
+    events = await _collect_events(bus)
+    # answer_now thinking 提示（stage=answer_now）
+    assert any(e["type"] == "thinking" and e.get("stage") == "answer_now" for e in events)
+    # done metadata 标记 answer_now
+    done_events = [e for e in events if e["type"] == "done"]
+    assert done_events and done_events[0]["metadata"]["answer_now"] is True
+
+
+# ---------------------------------------------------------------------------
+# 场景 9：emit_terminal_events=False（research 子 loop）时 answer_now 检查点被跳过
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_answer_now_skipped_when_not_terminal(ctx, bus):
+    """emit_terminal_events=False 的子 loop（如 research 的 rephrase/decompose）不受
+    answer_now 信号影响——避免子 loop 拿局部上下文误答。"""
+    finish_chunks = [_make_chunk("子任务结果。")]
+
+    async def _fake_create(**kwargs):
+        mock = MagicMock()
+        mock.__aiter__ = lambda self: _async_iter(finish_chunks)
+        return mock
+
+    ctx.metadata["is_answer_now_requested"] = lambda: True  # 恒真也不应触发
+
+    with patch("core.agentic.loop._default_client") as mock_client:
+        mock_client.chat.completions.create = _fake_create
+        outcome = await run_agent_loop(
+            context=ctx, stream=bus, system_prompt="你是助教",
+            tool_schemas=None, emit_terminal_events=False,
+        )
+
+    events = await _collect_events(bus)
+    # 检查点被跳过：无 answer_now 相关 thinking
+    assert not any(e.get("stage") == "answer_now" for e in events)
+    assert "子任务结果" in outcome.final_text
+
+
+# ---------------------------------------------------------------------------
+# 场景 10：TurnRuntimeManager.request_answer_now 边界
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_request_answer_now_boundary():
+    """request_answer_now：未知 turn_id 返回 False；已注册 event set 后返回 True。"""
+    import asyncio
+    from services.session.turn_runtime import TurnRuntimeManager
+
+    mgr = TurnRuntimeManager()
+    # 未知 turn_id（turn 不存在或已结束）
+    assert await mgr.request_answer_now("nonexistent") is False
+
+    # 手动注册 event（模拟 start_turn 注入），set 后 is_set()==True
+    ev = asyncio.Event()
+    mgr._answer_now_events["t_live"] = ev
+    assert await mgr.request_answer_now("t_live") is True
+    assert ev.is_set() is True

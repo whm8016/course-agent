@@ -5,11 +5,13 @@ ADD/UPDATE/DELETE/NOOP 决策、冲突解决、graph memory 等，且经过生�
 mem0 的 pgvector provider 启动时自建 memories 表（CREATE EXTENSION + 建表），
 所以项目不再需要自管记忆 schema。
 
-主链路调用：
-  get_memory()                                    -> AsyncMemory 单例（同步初始化）
-  await m.add(messages, user_id=...)              每轮对话后提取记忆
-  await m.search(query, user_id=..., top_k=)      注入/检索
-  await m.get_all(user_id=...) / delete / update  CRUD
+主链路调用（mem0 新版 get_all/search 用 filters={"user_id":...} 传用户，
+add/delete_all 仍接受顶层 user_id=，delete/update 按 memory_id）：
+  get_memory()                                              -> AsyncMemory 单例（同步初始化）
+  await m.add(messages, user_id=...)                        每轮对话后提取记忆
+  await m.search(query, filters={"user_id": ...}, top_k=)   注入/检索
+  await m.get_all(filters={"user_id": ...})                 CRUD 列表
+  await m.delete(memory_id) / m.update(memory_id, data)     删/改单条
 
 增强特性（通过配置开关）：
   - 时间衰减评分：recency_decay_lambda 参数让新记忆得分更高
@@ -47,11 +49,11 @@ def should_skip_user_message(user_message: str) -> bool:
     if not user_stripped:
         return True
 
-    skip_patterns = settings.mem0_add_skip_patterns.split(",")
+    skip_patterns = settings.mem0.add_skip_patterns.split(",")
     if user_stripped in skip_patterns:
         return True
 
-    if len(user_stripped) < settings.mem0_add_min_length and len(user_stripped) < 5:
+    if len(user_stripped) < settings.mem0.add_min_length and len(user_stripped) < 5:
         return True
 
     return False
@@ -59,16 +61,15 @@ def should_skip_user_message(user_message: str) -> bool:
 
 def _build_config() -> dict:
     """构造 mem0 config：pgvector 指向项目 PG + openai-compat LLM/embedder 指 DashScope。"""
-    from config import (
-        DATABASE_URL,
-        DASHSCOPE_API_KEY,
-        DASHSCOPE_BASE_URL,
-        EMBEDDING_API_KEY,
-        EMBEDDING_BASE_URL,
-        EMBEDDING_MODEL,
-        LIGHTRAG_EMBEDDING_DIM,
-        TEXT_MODEL,
-    )
+    from settings import get_settings
+    DATABASE_URL = get_settings().db.url.get_secret_value()
+    DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
+    DASHSCOPE_BASE_URL = get_settings().llm.base_url
+    EMBEDDING_API_KEY = get_settings().embedding.api_key.get_secret_value()
+    EMBEDDING_BASE_URL = get_settings().embedding.base_url
+    EMBEDDING_MODEL = get_settings().embedding.model
+    LIGHTRAG_EMBEDDING_DIM = get_settings().lightrag.embedding_dim
+    TEXT_MODEL = get_settings().llm.text_model
 
     # DATABASE_URL 形如 postgresql+asyncpg://postgres:postgres@postgres:5432/course_agent
     parsed = up.urlparse(DATABASE_URL.replace("+asyncpg", "+psycopg2"))
@@ -161,7 +162,7 @@ async def add_turn(user_id: str, user_message: str, assistant_message: str) -> N
         logger.info("[mem0] add_turn COMPLETE user_id=%s stored_count=0 (no new facts)", user_id)
 
 
-async def build_memory_context(user_id: str, query_text: str, *, top_k: int = 6, max_chars: int = 2000) -> str:
+async def build_memory_context(user_id: str, query_text: str, *, top_k: int = 5, max_chars: int = 1500) -> str:
     """注入对话：用 query_text 语义检索该用户相关记忆，拼成文本。无相关则空串。
 
     增强特性（通过配置开关）：
@@ -177,8 +178,8 @@ async def build_memory_context(user_id: str, query_text: str, *, top_k: int = 6,
 
         # 时间衰减参数（从配置读取）
         decay_lambda = 0.0
-        if settings.mem0_time_decay_enabled:
-            decay_lambda = settings.mem0_time_decay_lambda
+        if settings.mem0.time_decay_enabled:
+            decay_lambda = settings.mem0.time_decay_lambda
 
         logger.info(
             "[mem0] build_memory_context SEARCH user_id=%s query=%s top_k=%d decay_lambda=%.4f",
@@ -196,7 +197,7 @@ async def build_memory_context(user_id: str, query_text: str, *, top_k: int = 6,
         return ""
 
     # 矛盾检测清理（如果启用）
-    if settings.mem0_conflict_detect_enabled and len(results) >= 2:
+    if settings.mem0.conflict_detect_enabled and len(results) >= 2:
         results = await _detect_and_clean_conflicts(user_id, results, settings)
 
     items = [r.get("memory") for r in (results or []) if r.get("memory")]
@@ -231,8 +232,8 @@ async def _detect_and_clean_conflicts(user_id: str, results: list[dict], setting
     Returns:
         过滤后的记忆列表（排除矛盾的旧记忆）
     """
-    threshold = settings.mem0_conflict_similarity_threshold
-    min_days_gap = settings.mem0_conflict_min_days_gap
+    threshold = settings.mem0.conflict_similarity_threshold
+    min_days_gap = settings.mem0.conflict_min_days_gap
 
     # 需要排除的记忆 ID
     exclude_ids: set[str] = set()
@@ -321,7 +322,7 @@ async def get_all_text(user_id: str) -> str:
         return "(未登录)"
     m = get_memory()
     logger.info("[mem0] get_all_text FETCH user_id=%s", user_id)
-    results = await m.get_all(user_id=user_id, top_k=200)
+    results = await m.get_all(filters={"user_id": user_id}, top_k=200)
     rows = [r for r in (results.get("results", []) if isinstance(results, dict) else (results or [])) if r.get("memory")]
     if not rows:
         logger.info("[mem0] get_all_text NO_RESULTS user_id=%s", user_id)
@@ -340,7 +341,7 @@ async def has_any(user_id: str) -> bool:
         return False
     try:
         m = get_memory()
-        results = await m.get_all(user_id=user_id, top_k=1)
+        results = await m.get_all(filters={"user_id": user_id}, top_k=1)
         items = results.get("results", []) if isinstance(results, dict) else (results or [])
         has = bool(items)
         logger.debug("[mem0] has_any user_id=%s has_memory=%s", user_id, has)

@@ -11,19 +11,13 @@
     indexer = get_indexer("lightrag")
     result = await indexer.index(course_id, file_paths)
 """
+from __future__ import annotations
+
 from core.rag.types import (
     RetrievalResult,
     IndexResult,
     ChunkMeta,
     DocumentFragment,
-)
-from core.rag.rag_config import (
-    ChunkingConfig,
-    EmbeddingConfig,
-    LightRAGConfig,
-    get_chunking_config,
-    get_embedding_config,
-    get_lightrag_config,
 )
 from core.rag.registry import (
     get_retriever,
@@ -34,15 +28,11 @@ from core.rag.registry import (
     list_available_backends,
 )
 
-# ── 向后兼容：导出原 lightrag_engine 的公共 API ───────────────────────────────
+# ── 向后兼容：导出原 lightrag_engine 的公共 API（deprecated）───────────────────
 # 调用方仍可使用旧导入路径，待 Phase 5 迁移完成后移除
 
-from core.rag.lightrag_engine import (
+from core.rag.lightrag import (
     is_lightrag_available,
-    query_with_lightrag,
-    retrieve_with_lightrag,
-    stream_answer_with_contexts,
-    index_course_with_lightrag,
     get_course_entities,
     get_course_relations,
 )
@@ -53,13 +43,6 @@ __all__ = [
     "IndexResult",
     "ChunkMeta",
     "DocumentFragment",
-    # Config
-    "ChunkingConfig",
-    "EmbeddingConfig",
-    "LightRAGConfig",
-    "get_chunking_config",
-    "get_embedding_config",
-    "get_lightrag_config",
     # Registry
     "get_retriever",
     "get_indexer",
@@ -67,12 +50,8 @@ __all__ = [
     "register_indexer",
     "is_backend_available",
     "list_available_backends",
-    # Backward compatibility (deprecated, will remove in Phase 5)
+    # LightRAG internals (deprecated, will remove in Phase 5)
     "is_lightrag_available",
-    "query_with_lightrag",
-    "retrieve_with_lightrag",
-    "stream_answer_with_contexts",
-    "index_course_with_lightrag",
     "get_course_entities",
     "get_course_relations",
 ]

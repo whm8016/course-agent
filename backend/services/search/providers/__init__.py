@@ -112,7 +112,7 @@ def get_default_provider(**kwargs) -> BaseSearchProvider:
     Returns:
         BaseSearchProvider: Default provider instance.
     """
-    from config import resolve_search_config
+    from services.search.config import resolve_search_config
 
     provider_name = resolve_search_config().provider.lower()
     return get_provider(provider_name, **kwargs)

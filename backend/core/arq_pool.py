@@ -32,7 +32,8 @@ async def get_arq_pool():
     if _pool is not None:
         return _pool
 
-    from config import REDIS_URL
+    from settings import get_settings
+    REDIS_URL = get_settings().db.redis_url.get_secret_value()
 
     # memory:// 是测试占位，ARQ 不支持
     if not REDIS_URL or REDIS_URL.startswith("memory://"):

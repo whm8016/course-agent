@@ -22,7 +22,7 @@ from typing import Any
 
 from pydantic import BaseModel, SecretStr
 
-from config import BASE_DIR
+from settings import BASE_DIR
 
 CATALOG_PATH = os.getenv(
     "MODEL_CATALOG_PATH", os.path.join(BASE_DIR, "data", "model_catalog.json")

@@ -152,6 +152,14 @@ function StageRow({
   )
 }
 
+function toolLabel(tool: string): string {
+  if (tool === 'solve_plan') return '解题计划'
+  if (tool === 'solve_finish_step') return '完成步骤'
+  if (tool === 'rag') return '检索知识库'
+  if (tool === 'web_search') return '联网搜索'
+  return tool
+}
+
 function ToolCallRow({ step }: { step: Message }) {
   const tool = String(step.metadata?.tool ?? 'tool')
   const input = step.metadata?.toolInput as Record<string, unknown> | undefined
@@ -168,16 +176,7 @@ function ToolCallRow({ step }: { step: Message }) {
   } else {
     summary = JSON.stringify(input ?? {}).slice(0, 80)
   }
-  const label =
-    tool === 'solve_plan'
-      ? '解题计划'
-      : tool === 'solve_finish_step'
-        ? '完成步骤'
-        : tool === 'rag'
-          ? '检索知识库'
-          : tool === 'web_search'
-            ? '联网搜索'
-            : tool
+  const label = toolLabel(tool)
   return (
     <div className="flex items-start gap-2 py-0.5 text-[12px] text-slate-500">
       <span className="shrink-0">🔧</span>
@@ -187,10 +186,53 @@ function ToolCallRow({ step }: { step: Message }) {
   )
 }
 
+function ToolCallGroup({ steps, isStreaming }: { steps: Message[]; isStreaming?: boolean }) {
+  const labels = steps.map((s) => toolLabel(String(s.metadata?.tool ?? 'tool')))
+  const allSame = labels.every((l) => l === labels[0])
+  const groupLabel = allSame ? labels[0] : '工具调用'
+
+  // 流式进行中默认展开（看实时进度），结束后默认收起；用户点击可手动覆盖（对齐 StageRow）
+  const [open, setOpen] = useState(() => Boolean(isStreaming))
+  const [userOverride, setUserOverride] = useState(false)
+  useEffect(() => {
+    if (userOverride) return
+    setOpen(Boolean(isStreaming))
+  }, [isStreaming, userOverride])
+
+  const toggle = () => {
+    setUserOverride(true)
+    setOpen((v) => !v)
+  }
+
+  return (
+    <div>
+      <div
+        className="flex items-center gap-2 py-0.5 text-[12px] font-medium text-slate-500 cursor-pointer hover:text-slate-700"
+        onClick={toggle}
+      >
+        <ChevronDown size={12} className={`shrink-0 transition-transform ${open ? '' : '-rotate-90'}`} />
+        <span className="shrink-0">🔧</span>
+        <span>{groupLabel} · {steps.length} 次</span>
+        {isStreaming && <Loader2 size={11} className="animate-spin text-indigo-400" />}
+      </div>
+      {open && (
+        <div className="ml-5 mt-0.5 space-y-0.5">
+          {steps.map((s, i) => (
+            <ToolCallRow key={`tc-${i}`} step={s} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function ThinkingProcess({ steps, isStreaming }: Props) {
   const groups = buildStageGroups(steps)
   const toolSteps = steps.filter((s) => s.type === 'tool_call')
   if (groups.length === 0 && toolSteps.length === 0) return null
+
+  // 多轮工具调用（≥3）折叠成一组，避免撑爆聊天区；少量（≤2）则平铺，不过度设计
+  const collapseTools = toolSteps.length >= 3
 
   return (
     <div className="mb-3 space-y-0.5 border-b border-slate-100 pb-3">
@@ -202,9 +244,11 @@ export default function ThinkingProcess({ steps, isStreaming }: Props) {
           isStreaming={isStreaming}
         />
       ))}
-      {toolSteps.map((s, i) => (
-        <ToolCallRow key={`tc-${i}`} step={s} />
-      ))}
+      {collapseTools ? (
+        <ToolCallGroup steps={toolSteps} isStreaming={isStreaming} />
+      ) : (
+        toolSteps.map((s, i) => <ToolCallRow key={`tc-${i}`} step={s} />)
+      )}
     </div>
   )
 }

@@ -22,21 +22,32 @@ import time
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import TEXT_MODEL
+from settings import get_settings
+TEXT_MODEL = get_settings().llm.text_model
 from core.db.database import Session, Message
 from core.llm.llm import client as async_openai_client
 
 logger = logging.getLogger(__name__)
 
-_COMPRESS_PROMPT = """你是对话摘要助手。把下面的师生对话压缩为 300-500 字的摘要。
+_COMPRESS_PROMPT = """你是对话摘要助手。将下面的对话内容渐进式整合到已有摘要中，输出一份完整的更新摘要。
 
-重点保留：
-1. 讨论了哪些话题/知识点（按时间顺序）
-2. 学生的核心疑惑和已解决的问题
-3. 尚未解决的遗留问题
-4. 任何约定（"下次继续讲 XX"）
+规则：
+1. 保留已有摘要中仍然有效的信息，去除已过时或被纠正的内容
+2. 将新对话中的关键信息按时间顺序追加
+3. 控制总长度在 300-500 字
+4. 使用以下结构输出（如果某节无内容则写"无"）
 
-不要保留具体的解题步骤细节，只保留结论和进展。
+## 会话主题
+（本次会话讨论了哪些主题/领域，按时间顺序列出）
+
+## 关键结论与决定
+（双方达成的共识、得出的结论、做出的决定）
+
+## 未解决的问题
+（仍在讨论中或尚未回答的问题）
+
+## 约定与后续
+（任何关于后续行动的约定，如"下次继续讨论 XX"）
 
 ---
 
@@ -45,12 +56,12 @@ _COMPRESS_PROMPT = """你是对话摘要助手。把下面的师生对话压缩�
 
 ---
 
-新增对话（需要压缩的部分）：
+新增对话：
 {new_messages}
 
 ---
 
-请输出整合后的完整摘要（包含已有摘要 + 新增部分的压缩）："""
+请输出整合后的完整摘要："""
 
 
 class SessionSummaryManager:
@@ -224,18 +235,18 @@ def get_summary_manager() -> SessionSummaryManager:
     """返回全局 SessionSummaryManager 单例。"""
     global _summary_manager
     if _summary_manager is None:
-        from settings.base import get_settings
-        settings = get_settings()
+        # 嵌套配置 settings.summary（config-nested-refactor）：字段 window/buffer/interval。
+        # 此前误用扁平 settings.summary_window_size → AttributeError 被 _maybe_compress_summary
+        # 静默吞掉，导致 L2 摘要从不生成、不落库、langsmith 也 trace 不到 _do_compress。
+        cfg = get_settings().summary
         _summary_manager = SessionSummaryManager(
-            window_size=settings.summary_window_size,
-            buffer_size=settings.summary_buffer_size,
-            compress_interval=settings.summary_compress_interval,
+            window_size=cfg.window_size,
+            buffer_size=cfg.buffer_size,
+            compress_interval=cfg.compress_interval,
         )
         logger.info(
             "[L2] SessionSummaryManager initialized window=%d buffer=%d interval=%d",
-            settings.summary_window_size,
-            settings.summary_buffer_size,
-            settings.summary_compress_interval,
+            cfg.window_size, cfg.buffer_size, cfg.compress_interval,
         )
     return _summary_manager
 

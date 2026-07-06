@@ -30,7 +30,9 @@ from pathlib import Path
 # 确保 backend/ 在 sys.path 中
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config import FAQ_CACHE_THRESHOLD, REDIS_URL
+from settings import get_settings
+FAQ_CACHE_THRESHOLD = get_settings().question.faq_cache_threshold
+REDIS_URL = get_settings().db.redis_url.get_secret_value()
 from core.llm.llm import chat_complete
 import hashlib
 import redis.asyncio as aioredis

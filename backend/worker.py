@@ -68,25 +68,40 @@ async def run_indexing(
     """LightRAG 知识库索引后台任务。"""
     import time
     from core.observability import bind_context, log_flow
-    job_id = str(ctx.get("job_id", kb_id or ""))
-    bind_context(job_id=job_id, course_id=course_id)
-    t0 = time.perf_counter()
-    log_flow("worker.indexing.start", job_id=job_id, course_id=course_id,
-             kb_id=kb_id, files=len(file_paths), resume_from_chunk=resume_from_chunk)
+    from core.rag.lightrag import acquire_index_dlock, release_index_dlock
+
+    # 分布式索引锁：跨 worker 进程互斥（多容器/多进程也能护住），根治多任务并发
+    # ainsert 同一份 lightrag_store 导致的"重复文档"刷屏与卡死。被占 = 已有任务在跑，
+    # 直接跳过（DB status 仍是 indexing，前端继续等原任务）。
+    lock, renew = await acquire_index_dlock(course_id)
+    if lock is None:
+        logger.warning(
+            "课程 %s 已有索引任务在运行（分布式锁），跳过本次 job_id=%s",
+            course_id, ctx.get("job_id"),
+        )
+        return
     try:
-        from api.admin import _run_indexing
-        await _run_indexing(kb_id, course_id, file_paths, resume_from_chunk)
-        _el = int((time.perf_counter() - t0) * 1000)
-        log_flow("worker.indexing.complete", job_id=job_id, course_id=course_id, elapsed_ms=_el)
-        from core.observability.metrics import observe_worker_job
-        observe_worker_job("indexing", "ok", _el)
-    except Exception as exc:
-        _el = int((time.perf_counter() - t0) * 1000)
-        log_flow("worker.indexing.error", logger=logger, level=logging.ERROR,
-                 job_id=job_id, error=str(exc), elapsed_ms=_el)
-        from core.observability.metrics import observe_worker_job
-        observe_worker_job("indexing", "error", _el)
-        raise
+        job_id = str(ctx.get("job_id", kb_id or ""))
+        bind_context(job_id=job_id, course_id=course_id)
+        t0 = time.perf_counter()
+        log_flow("worker.indexing.start", job_id=job_id, course_id=course_id,
+                 kb_id=kb_id, files=len(file_paths), resume_from_chunk=resume_from_chunk)
+        try:
+            from api.admin import _run_indexing
+            await _run_indexing(kb_id, course_id, file_paths, resume_from_chunk)
+            _el = int((time.perf_counter() - t0) * 1000)
+            log_flow("worker.indexing.complete", job_id=job_id, course_id=course_id, elapsed_ms=_el)
+            from core.observability.metrics import observe_worker_job
+            observe_worker_job("indexing", "ok", _el)
+        except Exception as exc:
+            _el = int((time.perf_counter() - t0) * 1000)
+            log_flow("worker.indexing.error", logger=logger, level=logging.ERROR,
+                     job_id=job_id, error=str(exc), elapsed_ms=_el)
+            from core.observability.metrics import observe_worker_job
+            observe_worker_job("indexing", "error", _el)
+            raise
+    finally:
+        await release_index_dlock(lock, renew)
 
 
 async def run_llamaindex_build(
@@ -98,21 +113,60 @@ async def run_llamaindex_build(
     """LlamaIndex 向量索引后台任务。"""
     import time
     from core.observability import bind_context, log_flow
-    job_id = str(ctx.get("job_id", kb_id or ""))
-    bind_context(job_id=job_id, course_id=course_id)
-    t0 = time.perf_counter()
-    log_flow("worker.llamaindex.start", job_id=job_id, course_id=course_id,
-             kb_id=kb_id, files=len(file_paths))
+    from core.rag.lightrag import acquire_index_dlock, release_index_dlock
+
+    # 分布式索引锁：与 run_indexing 共用 course 级锁，同一课程不能同时跑两种索引。
+    lock, renew = await acquire_index_dlock(course_id)
+    if lock is None:
+        logger.warning(
+            "课程 %s 已有索引任务在运行（分布式锁），跳过本次 job_id=%s",
+            course_id, ctx.get("job_id"),
+        )
+        return
     try:
-        from api.llama_rag import _run_llamaindex_build
-        await _run_llamaindex_build(kb_id, course_id, file_paths)
-        log_flow("worker.llamaindex.complete", job_id=job_id, course_id=course_id,
-                 elapsed_ms=int((time.perf_counter() - t0) * 1000))
-    except Exception as exc:
-        log_flow("worker.llamaindex.error", logger=logger, level=logging.ERROR,
-                 job_id=job_id, error=str(exc),
-                 elapsed_ms=int((time.perf_counter() - t0) * 1000))
-        raise
+        job_id = str(ctx.get("job_id", kb_id or ""))
+        bind_context(job_id=job_id, course_id=course_id)
+        t0 = time.perf_counter()
+        log_flow("worker.llamaindex.start", job_id=job_id, course_id=course_id,
+                 kb_id=kb_id, files=len(file_paths))
+        try:
+            from api.llama_rag import _run_llamaindex_build
+            await _run_llamaindex_build(kb_id, course_id, file_paths)
+            log_flow("worker.llamaindex.complete", job_id=job_id, course_id=course_id,
+                     elapsed_ms=int((time.perf_counter() - t0) * 1000))
+        except Exception as exc:
+            log_flow("worker.llamaindex.error", logger=logger, level=logging.ERROR,
+                     job_id=job_id, error=str(exc),
+                     elapsed_ms=int((time.perf_counter() - t0) * 1000))
+            raise
+        finally:
+            # 终态兜底：_run_llamaindex_build 内部静默吞所有异常（_mark_final 自带 try/except），
+            # 若 DB 写入 3 次重试仍失败，status 会卡在 indexing、worker 却报 complete。这里在
+            # 任务结束后复查 DB，仍为 indexing 才强制改 error（不覆盖 ready/paused/pending 等已落
+            # 终态或被用户主动干预的状态），给用户重试入口，杜绝永久卡死。
+            try:
+                from core.db.database import AsyncSessionLocal, KnowledgeBase
+                from sqlalchemy import select
+                async with AsyncSessionLocal() as db:
+                    async with db.begin():
+                        r = await db.execute(
+                            select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
+                        )
+                        kb = r.scalar_one_or_none()
+                        if kb and kb.status == "indexing":
+                            logger.warning(
+                                "LlamaIndex 终态兜底：status 仍为 indexing，强制改为 error kb_id=%s",
+                                kb_id,
+                            )
+                            kb.status = "error"
+                            kb.error_msg = "索引任务已结束但终态回写失败，请重试"
+                            kb.updated_at = time.time()
+                from api.courses import invalidate_courses_cache
+                await invalidate_courses_cache()
+            except Exception:
+                logger.exception("LlamaIndex 终态兜底失败 kb_id=%s", kb_id)
+    finally:
+        await release_index_dlock(lock, renew)
 
 
 # ---------------------------------------------------------------------------
@@ -126,8 +180,8 @@ async def cron_flush_memory(ctx) -> None:
     from settings.base import get_settings
 
     settings = get_settings()
-    max_turns = settings.mem0_flush_max_turns
-    idle_timeout = settings.mem0_flush_idle_timeout
+    max_turns = settings.mem0.flush_max_turns
+    idle_timeout = settings.mem0.flush_idle_timeout
 
     t0 = time.perf_counter()
     logger.debug("[worker] cron_flush_memory start max_turns=%d idle_timeout=%.1fs",
@@ -140,7 +194,8 @@ async def cron_flush_memory(ctx) -> None:
         r = ctx.get("redis")
         if r is None:
             import redis.asyncio as aioredis
-            from config import REDIS_URL
+            from settings import get_settings
+            REDIS_URL = get_settings().db.redis_url.get_secret_value()
             r = aioredis.from_url(REDIS_URL, decode_responses=True)
 
         flushed = await scan_and_flush(r, max_turns, idle_timeout)
@@ -164,7 +219,8 @@ async def flush_all_pending_job(ctx) -> None:
         r = ctx.get("redis")
         if r is None:
             import redis.asyncio as aioredis
-            from config import REDIS_URL
+            from settings import get_settings
+            REDIS_URL = get_settings().db.redis_url.get_secret_value()
             r = aioredis.from_url(REDIS_URL, decode_responses=True)
 
         flushed = await flush_all_pending(r)
@@ -183,7 +239,8 @@ async def flush_all_pending_job(ctx) -> None:
 class WorkerSettings:
     """arq WorkerSettings：`python -m arq worker.WorkerSettings` 读取此配置。"""
 
-    from config import REDIS_URL as _redis_url
+    from settings import get_settings
+    _redis_url = get_settings().db.redis_url.get_secret_value()
     import urllib.parse as _up
 
     _parsed = _up.urlparse(_redis_url)
@@ -207,5 +264,5 @@ class WorkerSettings:
     from settings.base import get_settings
     _settings = get_settings()
     cron_jobs = [
-        cron(cron_flush_memory, second=set(range(0, 60, _settings.mem0_flush_scan_interval))),
+        cron(cron_flush_memory, second=set(range(0, 60, _settings.mem0.flush_scan_interval))),
     ]

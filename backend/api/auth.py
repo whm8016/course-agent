@@ -16,7 +16,14 @@ from core.db.auth import (
     decode_token,
     get_user_by_id,
 )
-from core.db.database import AsyncSessionLocal, get_db, TeacherInvite
+from core.codes import normalize_code
+from core.db.database import (
+    AsyncSessionLocal,
+    ApplicationStatus,
+    TeacherApplication,
+    TeacherInvite,
+    get_db,
+)
 from core.db.limiter import limiter
 
 logger = logging.getLogger(__name__)
@@ -113,7 +120,7 @@ async def register(request: Request, body: RegisterBody, db: AsyncSession = Depe
 
     if body.invite_code:
         result = await db.execute(
-            select(TeacherInvite).where(TeacherInvite.code == body.invite_code)
+            select(TeacherInvite).where(TeacherInvite.code == normalize_code(body.invite_code))
         )
         invite_row = result.scalar_one_or_none()
         if not invite_row:
@@ -138,6 +145,71 @@ async def register(request: Request, body: RegisterBody, db: AsyncSession = Depe
 
     token = create_token(user["id"], user["username"])
     return {"token": token, "user": user}
+
+
+class ApplyTeacherBody(BaseModel):
+    reason: str = Field(..., min_length=1, max_length=500)
+
+
+@router.post("/apply-teacher", status_code=201)
+@limiter.limit("5/minute")
+async def apply_teacher(
+    request: Request,
+    body: ApplyTeacherBody,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """学生提交教师身份申请，等待管理员审批（与邀请码即时升级并存）。"""
+    # 守卫1：已是教师/管理员，无需申请
+    if user.get("role") in ("teacher", "admin"):
+        raise HTTPException(status_code=409, detail="您已是教师或管理员")
+    # 守卫2：已有待审批申请（业务层校验；DB 部分唯一索引兜底并发双击）
+    existing = await db.execute(
+        select(TeacherApplication).where(
+            TeacherApplication.user_id == user["id"],
+            TeacherApplication.status == ApplicationStatus.PENDING.value,
+        )
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="您已提交申请，请等待审批")
+    application = TeacherApplication(
+        user_id=user["id"],
+        reason=body.reason.strip(),
+        status=ApplicationStatus.PENDING.value,
+    )
+    db.add(application)
+    await db.flush()
+    logger.info("用户 %s 提交教师申请 app=%s", user["id"], application.id)
+    return {
+        "id": application.id,
+        "status": application.status,
+        "message": "申请已提交，等待管理员审批",
+    }
+
+
+@router.get("/teacher-applications/me")
+async def my_teacher_application(
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """查看当前用户最新的教师申请状态（无申请则 status=None）。"""
+    result = await db.execute(
+        select(TeacherApplication)
+        .where(TeacherApplication.user_id == user["id"])
+        .order_by(TeacherApplication.created_at.desc())
+        .limit(1)
+    )
+    app = result.scalar_one_or_none()
+    if not app:
+        return {"status": None}
+    return {
+        "id": app.id,
+        "status": app.status,
+        "reason": app.reason,
+        "created_at": app.created_at,
+        "reviewed_at": app.reviewed_at,
+        "review_note": app.review_note,
+    }
 
 
 @router.post("/login")

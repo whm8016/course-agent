@@ -1,29 +1,44 @@
 """Admin API：知识库管理 & 用户管理（仅管理员可访问）。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_admin
 from api.courses import invalidate_courses_cache
-from config import FAQ_CACHE_THRESHOLD, KB_STORE_DIR, MAX_KB_UPLOAD_MB
-from core.rag.rag_llama import llamaindex_index_path
+from settings import get_settings
+FAQ_CACHE_THRESHOLD = get_settings().question.faq_cache_threshold
+KB_STORE_DIR = get_settings().paths.kb_store_dir
+MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
+LLAMA_INDEX_KB_ROOT = get_settings().paths.llama_index_kb_root
+from core.rag import is_lightrag_available
 from core.llm.prompts import invalidate_course_prompt_cache
-from core.db.database import AsyncSessionLocal, KBFile, KnowledgeBase, TeacherInvite, User, get_db
+from core.codes import ensure_unique_join_code, generate_code
+from core.db.database import (
+    AsyncSessionLocal,
+    ApplicationStatus,
+    BotNotification,
+    KBFile,
+    KnowledgeBase,
+    TeacherApplication,
+    TeacherInvite,
+    User,
+    get_db,
+)
 from core.db.cache import faq_top
 from core.rag.ingestion import (
     IndexingAborted,
     IndexingControl,
     ingest_to_lightrag,
-    llama_available,
 )
 
 logger = logging.getLogger(__name__)
@@ -65,7 +80,12 @@ def _kb_to_dict(kb: KnowledgeBase) -> dict:
         "is_visible": bool(kb.is_visible),
         "owner_id": kb.owner_id,
         "join_code": kb.join_code,
-        "llamaindex_built": (llamaindex_index_path(kb.course_id) / "docstore.json").exists(),
+        "lightrag_built": bool(kb.file_count > 0),
+        # LlamaIndex 是否已建：以索引产物 docstore.json 是否落盘为准（无独立 DB 列）。
+        # 前端据此显示"LlamaIndex 索引已完成"绿勾、切换"首次构建/重新构建"按钮。
+        "llamaindex_built": (
+            Path(LLAMA_INDEX_KB_ROOT) / kb.course_id / "llamaindex_storage" / "docstore.json"
+        ).exists(),
     }
 
 
@@ -138,8 +158,17 @@ async def _run_indexing(
     control = IndexingControl(kb_id)
     await control.clear()
 
+    # 全新索引（非续传）：清空 LightRAG 旧数据，杜绝 ainsert 整批判重
+    # （"Duplicate document" → failed entries）。续传绝不能清，会抹掉进度。
+    if resume_from_chunk == 0:
+        from core.rag.lightrag import purge_course_workspace
+        await purge_course_workspace(course_id)
+
     abort_action: str | None = None
     abort_chunks_done = 0
+    # 预置"未正常结束"兜底：任何未被显式覆盖的退出路径都至少写成 error，绝不留在 indexing。
+    final_status: str = "error"
+    final_err: str = "索引任务未正常结束"
     try:
         summary = await ingest_to_lightrag(
             course_id,
@@ -161,6 +190,18 @@ async def _run_indexing(
             final_status = "pending"
             logger.info("索引已终止 kb_id=%s", kb_id)
         final_err = ""
+    except asyncio.CancelledError:
+        # CancelledError 是 BaseException 子类，上面 except Exception 捕获不到。
+        # ARQ worker 超时/OOM/重启会取消任务，若不在本分支兜底，异常直接冒泡 →
+        # 下方终态回写不执行 → status 永久卡 indexing（前端一直"构建中"且无救）。
+        logger.warning("索引任务被取消 kb_id=%s course=%s", kb_id, course_id)
+        final_status = "error"
+        final_err = "索引任务被中断（worker 超时/OOM/重启），可重试"
+        # 捕获后取消计数仍在，后续 await（control.clear / 终态回写）会立即再抛
+        # CancelledError。uncancel 清除计数，保证下方清理与回写能真正跑完。
+        task = asyncio.current_task()
+        if task is not None:
+            task.uncancel()
     except Exception as e:
         logger.exception("索引失败 kb_id=%s course=%s", kb_id, course_id)
         final_status = "error"
@@ -169,14 +210,26 @@ async def _run_indexing(
         # 不论结果如何，清掉信号，避免下次启动立即被旧信号中断
         await control.clear()
 
-    # 2. 更新最终状态
-    async with AsyncSessionLocal() as db:
-        async with db.begin():
-            result = await db.execute(
-                select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
-            )
-            kb = result.scalar_one_or_none()
-            if kb:
+    # 2. 更新最终状态 —— 用 shield 保护回写协程，避免任务取消时 await 被二次取消；
+    #    外层兜底 CancelledError/Exception，确保 _run_indexing 不会因回写失败而抛出，
+    #    从而保证 indexing 一定会被改写成终态（ready/error/paused/pending），杜绝卡死。
+    async def _apply_final() -> None:
+        async with AsyncSessionLocal() as db:
+            async with db.begin():
+                result = await db.execute(
+                    select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
+                )
+                kb = result.scalar_one_or_none()
+                if not kb:
+                    return
+                # 期间若被 pause/stop 接口强制改态（≠indexing），说明用户已主动干预，
+                # 不覆盖——否则被强制终止的任务跑完会回写 ready/paused，与用户意图冲突。
+                if kb.status != "indexing":
+                    logger.info(
+                        "索引终态被外部干预 kb=%s 当前=%s，不覆盖为 %s",
+                        kb_id, kb.status, final_status,
+                    )
+                    return
                 kb.status = final_status
                 kb.error_msg = final_err
                 kb.updated_at = time.time()
@@ -193,6 +246,13 @@ async def _run_indexing(
                     kb.chunks_total = 0
                     kb.token_estimate = 0
 
+    try:
+        await asyncio.shield(_apply_final())
+    except asyncio.CancelledError:
+        logger.warning("终态回写外层收到取消信号 kb_id=%s（shield 内已尽力完成）", kb_id)
+    except Exception:
+        logger.exception("索引终态回写失败 kb_id=%s course=%s", kb_id, course_id)
+
     # 索引结束（ready / error / paused / pending），重要：ready 时前端要切到 LightRAG 路径
     await invalidate_courses_cache()
 
@@ -202,10 +262,8 @@ async def _run_indexing(
 @router.get("/info")
 async def admin_info(_: dict = Depends(get_current_admin)):
     """返回管理后台基本信息。"""
-    from core.rag.lightrag_engine import is_lightrag_available
     rag_ok, rag_reason = is_lightrag_available()
     return {
-        "llama_index_available": llama_available(),
         "lightrag_available": rag_ok,
         "lightrag_reason": rag_reason if not rag_ok else "",
         "kb_store_dir": KB_STORE_DIR,
@@ -258,6 +316,9 @@ async def create_kb(
         is_visible=body.is_visible,
     )
     db.add(kb)
+    await db.flush()
+    # 与教师建课一致：建库即自动生成课程码（管理员库历史漏生成，前端凭此渲染二维码）
+    kb.join_code = await ensure_unique_join_code(db)
     await db.flush()
 
     _kb_raw_dir(body.course_id).mkdir(parents=True, exist_ok=True)
@@ -486,15 +547,31 @@ async def index_kb(
         resume_from = kb.chunks_done
         logger.info("断点续传 course_id=%s 从 chunk %d 继续", course_id, resume_from)
 
-    # 优先使用 ARQ 持久化队列；Redis 不可用时降级为 BackgroundTasks
+    # 提前置 indexing（对标 llama_rag.build_llamaindex_index）：接口返回时 DB 已是
+    # indexing，前端 loadCourses 立即拿到 → hasIndexing 触发轮询 → 刷新页面也不丢
+    # "进行中"状态。worker(_run_indexing) 仍会再写一次，幂等兜底。
+    kb.status = "indexing"
+    kb.progress = 0
+    kb.error_msg = ""
+    kb.progress_msg = "准备中…" if resume_from == 0 else f"续传中（从第 {resume_from} 块）…"
+    if resume_from == 0:
+        kb.chunks_done = 0
+        kb.chunks_total = 0
+        kb.token_estimate = 0
+    kb.updated_at = time.time()
+    await db.flush()
+    await invalidate_courses_cache()
+
+    # 必须走 ARQ：索引只在单一 worker 进程跑，配合进程内索引锁才能串行、不撞
+    # lightrag_store。Redis 故障时不再静默降级到 BackgroundTasks（那会跑到 gunicorn
+    # 多进程，跨进程写同一份文件 → 重复文档刷屏 / 数据损坏 / 卡死）——直接报错并
+    # 让 get_db 回滚 status，前端收到 503 可重试。
     from core.arq_pool import get_arq_pool
     arq_pool = await get_arq_pool()
-    if arq_pool is not None:
-        await arq_pool.enqueue_job("run_indexing", kb.id, course_id, file_paths, resume_from)
-        logger.info("ARQ 索引任务已入队 course_id=%s files=%d", course_id, len(file_paths))
-    else:
-        background_tasks.add_task(_run_indexing, kb.id, course_id, file_paths, resume_from)
-        logger.info("BackgroundTasks 索引任务已启动 course_id=%s files=%d", course_id, len(file_paths))
+    if arq_pool is None:
+        raise HTTPException(status_code=503, detail="任务队列（ARQ/Redis）不可用，请稍后重试")
+    await arq_pool.enqueue_job("run_indexing", kb.id, course_id, file_paths, resume_from)
+    logger.info("ARQ 索引任务已入队 course_id=%s files=%d", course_id, len(file_paths))
 
     return {
         "message": "索引任务已启动" if resume_from == 0 else f"续传任务已启动（从第 {resume_from} 个文本块）",
@@ -521,14 +598,23 @@ async def pause_index(
 
     ctrl = IndexingControl(kb.id)
     try:
-        await ctrl.request_pause()
+        await ctrl.request_pause()  # 通知 worker；事件循环被阻塞读不到也无妨
     except Exception as e:
         raise HTTPException(status_code=503, detail=f"无法下发暂停信号（Redis 异常）：{e}")
 
-    kb.progress_msg = "暂停请求已发送，等待当前批次完成…"
+    # 立即落库为 paused：超大文档的 ainsert 会长时间阻塞 worker 事件循环，导致
+    # checkpoint 永远读不到信号、前端卡在"请求已发送"。这里直接置 paused 让前端
+    # 立即解脱；worker 终态写入有"不覆盖非 indexing 状态"保护，跑完不会回写。
+    done = kb.chunks_done or 0
+    total = kb.chunks_total or 0
+    kb.status = "paused"
+    kb.progress_msg = f"已暂停（已完成 {done}{f'/{total}' if total else ''} 个文本块）"
     kb.updated_at = time.time()
-    logger.info("收到暂停请求 course_id=%s", course_id)
-    return {"message": "暂停请求已发送", "course_id": course_id}
+    logger.info("已暂停 course_id=%s", course_id)
+    await invalidate_courses_cache()
+    # 不清 Redis 控制信号：留给 worker 的 checkpoint 读到后自行 cancel 停止，
+    # worker 终止后会在 finally 里 control.clear()。这里清了反而让 worker 读不到、继续跑。
+    return {"message": "已暂停", "course_id": course_id}
 
 
 @router.post("/kb/{course_id}/index/stop")
@@ -547,14 +633,24 @@ async def stop_index(
     if kb.status == "indexing":
         ctrl = IndexingControl(kb.id)
         try:
-            await ctrl.request_stop()
+            await ctrl.request_stop()  # 通知 worker；事件循环被阻塞读不到也无妨
         except Exception as e:
             raise HTTPException(status_code=503, detail=f"无法下发终止信号（Redis 异常）：{e}")
 
-        kb.progress_msg = "终止请求已发送，等待当前批次完成…"
+        # 立即落库为 pending 并清零进度：见 pause 的说明。worker 跑完不会回写。
+        kb.status = "pending"
+        kb.progress = 0
+        kb.progress_msg = "已终止"
+        kb.chunks_done = 0
+        kb.chunks_total = 0
+        kb.token_estimate = 0
+        kb.error_msg = ""
         kb.updated_at = time.time()
-        logger.info("收到终止请求 course_id=%s", course_id)
-        return {"message": "终止请求已发送", "course_id": course_id}
+        logger.info("已终止 course_id=%s", course_id)
+        await invalidate_courses_cache()
+        # 不清 Redis 控制信号：留给 worker 的 checkpoint 读到后自行 cancel 停止，
+        # worker 终止后会在 finally 里 control.clear()。这里清了反而让 worker 读不到、继续跑。
+        return {"message": "已终止", "course_id": course_id}
 
     if kb.status == "paused":
         kb.status = "pending"
@@ -636,7 +732,7 @@ async def create_invite_codes(
     expires_at = now + body.expires_hours * 3600 if body.expires_hours else None
 
     for _ in range(body.count):
-        code = uuid.uuid4().hex[:8].upper()
+        code = generate_code(8)
         invite = TeacherInvite(
             code=code,
             created_by=admin["id"],
@@ -670,6 +766,123 @@ async def list_invite_codes(
         }
         for inv in invites
     ]
+
+
+# ── 教师申请审批 ───────────────────────────────────────────────────────────────
+
+class ReviewApplicationBody(BaseModel):
+    note: str = Field("", max_length=500)
+
+
+@router.get("/teacher-applications")
+async def list_teacher_applications(
+    status: str | None = Query(None, pattern=r"^(pending|approved|rejected)$"),
+    _: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """列出教师申请（可按状态过滤），join User 取用户名/显示名。"""
+    stmt = select(TeacherApplication, User.username, User.display_name).join(
+        User, User.id == TeacherApplication.user_id
+    )
+    if status:
+        stmt = stmt.where(TeacherApplication.status == status)
+    stmt = stmt.order_by(TeacherApplication.created_at.desc())
+    rows = (await db.execute(stmt)).all()
+    return [
+        {
+            "id": app.id,
+            "user_id": app.user_id,
+            "username": username,
+            "display_name": display_name,
+            "reason": app.reason,
+            "status": app.status,
+            "reviewed_by": app.reviewed_by,
+            "reviewed_at": app.reviewed_at,
+            "review_note": app.review_note,
+            "created_at": app.created_at,
+        }
+        for app, username, display_name in rows
+    ]
+
+
+async def _load_pending_application(
+    db: AsyncSession, app_id: str
+) -> TeacherApplication:
+    """加载申请并校验状态机：仅 pending 可审批（显式守卫，终态不可逆）。"""
+    result = await db.execute(
+        select(TeacherApplication).where(TeacherApplication.id == app_id)
+    )
+    app = result.scalar_one_or_none()
+    if not app:
+        raise HTTPException(status_code=404, detail="申请不存在")
+    if app.status != ApplicationStatus.PENDING.value:
+        raise HTTPException(
+            status_code=409,
+            detail=f"申请当前状态为 {app.status}，无法审批（仅 pending 可操作）",
+        )
+    return app
+
+
+@router.post("/teacher-applications/{app_id}/approve")
+async def approve_teacher_application(
+    app_id: str,
+    admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """通过申请：升 users.role=teacher + 写站内通知。
+
+    单 session 内 app.status + user.role + BotNotification 三写同 commit，
+    天然原子（get_db 依赖统一 commit；异常自动 rollback）。
+    """
+    app = await _load_pending_application(db, app_id)
+    user_result = await db.execute(select(User).where(User.id == app.user_id))
+    user = user_result.scalar_one()
+    app.status = ApplicationStatus.APPROVED.value
+    app.reviewed_by = admin["id"]
+    app.reviewed_at = time.time()
+    user.role = "teacher"
+    user.is_admin = False
+    db.add(
+        BotNotification(
+            user_id=app.user_id,
+            bot_id="",  # 前端 bot_id 为空时显示"通知"
+            content="✅ 您的教师申请已通过，现在可以使用教师功能。",
+        )
+    )
+    await db.flush()
+    logger.info("审批通过 app=%s user=%s → teacher", app_id, app.user_id)
+    return {
+        "id": app.id,
+        "status": app.status,
+        "user_id": app.user_id,
+        "role": "teacher",
+    }
+
+
+@router.post("/teacher-applications/{app_id}/reject")
+async def reject_teacher_application(
+    app_id: str,
+    body: ReviewApplicationBody,
+    admin: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """拒绝申请：保持 student + 写拒绝通知（可附理由），允许后续重新申请。"""
+    app = await _load_pending_application(db, app_id)
+    app.status = ApplicationStatus.REJECTED.value
+    app.reviewed_by = admin["id"]
+    app.reviewed_at = time.time()
+    app.review_note = body.note.strip()
+    note_suffix = f"（理由：{body.note.strip()}）" if body.note.strip() else ""
+    db.add(
+        BotNotification(
+            user_id=app.user_id,
+            bot_id="",
+            content=f"❌ 您的教师申请未通过{note_suffix}，可修改理由后重新申请。",
+        )
+    )
+    await db.flush()
+    logger.info("审批拒绝 app=%s user=%s", app_id, app.user_id)
+    return {"id": app.id, "status": app.status}
 
 
 # ── 高频问题看板 ───────────────────────────────────────────────────────────────

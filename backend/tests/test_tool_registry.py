@@ -123,3 +123,27 @@ def test_global_singleton_has_builtins():
     reg = get_tool_registry()
     assert reg.has("rag")
     assert reg.has("solve_plan")
+
+
+def test_execute_business_param_named_name_no_clash(fresh_registry):
+    """回归：工具名形参不得与 read_skill 的 ``name`` 业务参数撞名。
+
+    历史 bug：``execute_tool`` / ``ToolRegistry.execute`` 的工具名形参曾叫 ``name``，
+    而 read_skill 的业务参数也叫 ``name``（技能名）。dispatch 实际调用
+    ``execute("read_skill", name="aihot")`` 时，位置实参 "read_skill" 与关键字实参
+    name="aihot" 都绑向同名形参 → ``got multiple values for argument 'name'``。
+    工具名形参改名为 ``tool_name`` 后此处必须通过。
+    """
+
+    async def fake_read_skill(*, course_id="", user_id="", name="", **kw):
+        return ToolResult(content=f"skill:{name}")
+
+    fresh_registry.register(ToolEntry(name="read_skill", schema={}, executor=fake_read_skill))
+
+    async def run():
+        # 模拟 dispatch_tool_calls 真实调用形态：工具名走位置，业务 name 走关键字
+        r = await fresh_registry.execute("read_skill", course_id="c", user_id="u", name="aihot")
+        assert r.success is True
+        assert r.content == "skill:aihot"
+
+    asyncio.run(run())

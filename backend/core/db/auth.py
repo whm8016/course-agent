@@ -11,7 +11,10 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config import JWT_SECRET, JWT_EXPIRE_HOURS, ADMIN_USERNAME
+from settings import get_settings
+JWT_SECRET = get_settings().security.jwt_secret.get_secret_value()
+JWT_EXPIRE_HOURS = get_settings().security.jwt_expire_hours
+ADMIN_USERNAME = get_settings().security.admin_username
 from core.db.database import User
 
 logger = logging.getLogger(__name__)

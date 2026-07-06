@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { authHeaders } from '../../services/auth'
 import type { User } from '../../types'
+import JoinCodeShareSection from './JoinCodeShareSection'
 import KbDetailPanel, { STATUS_LABEL, STATUS_COLOR, formatTime } from './KbDetailPanel'
 import type { KB } from './KbDetailPanel'
 
@@ -38,8 +39,20 @@ interface InviteCode {
   created_at: number
 }
 
+interface TeacherApplication {
+  id: string
+  user_id: string
+  username: string
+  display_name: string
+  reason: string
+  status: 'pending' | 'approved' | 'rejected'
+  review_note: string
+  created_at: number
+  reviewed_at: number | null
+}
+
 export default function AdminPage({ user, onBack }: Props) {
-  const [tab, setTab] = useState<'kb' | 'users' | 'invites' | 'faq'>('kb')
+  const [tab, setTab] = useState<'kb' | 'applications' | 'users' | 'invites' | 'faq'>('kb')
   const [faqCourseId, setFaqCourseId] = useState('')
   const [faqItems, setFaqItems] = useState<{ question: string; count: number; course_id?: string; course_name?: string }[]>([])
   const [faqThreshold, setFaqThreshold] = useState(3)
@@ -64,10 +77,15 @@ export default function AdminPage({ user, onBack }: Props) {
   const [error, setError] = useState('')
   const [showCreateModal, setShowCreateModal] = useState(false)
   const [llamaIndexSubmitting, setLlamaIndexSubmitting] = useState<string | null>(null)
+  const [indexSubmitting, setIndexSubmitting] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [inviteCodes, setInviteCodes] = useState<InviteCode[]>([])
   const [inviteLoading, setInviteLoading] = useState(false)
   const [generatingInvite, setGeneratingInvite] = useState(false)
+  const [applications, setApplications] = useState<TeacherApplication[]>([])
+  const [appLoading, setAppLoading] = useState(false)
+  const [appFilter, setAppFilter] = useState<'pending' | 'approved' | 'rejected'>('pending')
+  const [reviewing, setReviewing] = useState<string | null>(null)
   const [roleChanging, setRoleChanging] = useState<string | null>(null)
 
   // ── 加载数据 ──────────────────────────────────────────────────────────────
@@ -114,6 +132,45 @@ export default function AdminPage({ user, onBack }: Props) {
     }
   }
 
+  const loadApplications = async () => {
+    setAppLoading(true)
+    try {
+      const data = await apiFetch(`/admin/teacher-applications?status=${appFilter}`) as TeacherApplication[]
+      setApplications(data)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '加载申请失败')
+    } finally {
+      setAppLoading(false)
+    }
+  }
+
+  const approveApp = async (appId: string) => {
+    setReviewing(appId)
+    try {
+      await apiFetch(`/admin/teacher-applications/${appId}/approve`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })
+      await loadApplications()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '通过失败')
+    } finally {
+      setReviewing(null)
+    }
+  }
+
+  const rejectApp = async (appId: string) => {
+    // window.prompt：null=用户取消（放弃操作），''=空理由确认拒绝，其余=带理由拒绝
+    const note = window.prompt('请输入拒绝理由（将通知申请者，可留空）')
+    if (note === null) return
+    setReviewing(appId)
+    try {
+      await apiFetch(`/admin/teacher-applications/${appId}/reject`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ note }) })
+      await loadApplications()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '拒绝失败')
+    } finally {
+      setReviewing(null)
+    }
+  }
+
   const changeUserRole = async (userId: string, newRole: string) => {
     setRoleChanging(userId)
     try {
@@ -148,6 +205,11 @@ export default function AdminPage({ user, onBack }: Props) {
   useEffect(() => {
     if (tab === 'invites') void loadInviteCodes()
   }, [tab])
+
+  // 申请列表同时依赖 tab 与筛选状态：切到该 Tab 或切换 pending/approved/rejected 都重载
+  useEffect(() => {
+    if (tab === 'applications') void loadApplications()
+  }, [tab, appFilter])
 
   // ── 轮询正在索引的知识库（依赖用 hasIndexing + 课程 id，避免每次 loadKBs 后重建定时器）──
 
@@ -195,16 +257,25 @@ export default function AdminPage({ user, onBack }: Props) {
   }
 
   const handleIndex = async (courseId: string, force = false, resume = false) => {
+    setIndexSubmitting(courseId)
+    setError('')
     try {
       const params = new URLSearchParams()
       if (force) params.set('force', 'true')
       if (resume) params.set('resume', 'true')
       const qs = params.toString()
       await apiFetch(`/admin/kb/${courseId}/index${qs ? '?' + qs : ''}`, { method: 'POST' })
+      // 乐观更新：接口已提前写 indexing（见后端 index_kb），这里同步本地状态，
+      // 按钮区瞬间从"开始索引"切到"暂停/终止"，不必等 loadKBs 回来（消除闪烁）。
+      setSelectedKB(prev => prev && prev.course_id === courseId
+        ? { ...prev, status: 'indexing', progress_msg: '准备中…' } : prev)
+      setKbs(prev => prev.map(k => k.course_id === courseId ? { ...k, status: 'indexing' } : k))
       await loadKBs()
       if (selectedKB?.course_id === courseId) await loadKBDetail(courseId)
     } catch (e) {
       setError(e instanceof Error ? e.message : '启动索引失败')
+    } finally {
+      setIndexSubmitting(null)
     }
   }
 
@@ -251,7 +322,7 @@ export default function AdminPage({ user, onBack }: Props) {
           <p className="text-xs text-slate-400 mt-0.5">{user.display_name}</p>
         </div>
         <nav className="flex md:flex-col md:flex-1 p-2 md:p-3 gap-1 md:space-y-1 overflow-x-auto">
-          {(['kb', 'users', 'invites', 'faq'] as const).map(t => (
+          {(['kb', 'applications', 'users', 'invites', 'faq'] as const).map(t => (
             <button
               key={t}
               onClick={() => {
@@ -264,7 +335,7 @@ export default function AdminPage({ user, onBack }: Props) {
                   : 'text-slate-600 hover:bg-slate-50'
               }`}
             >
-              {t === 'kb' ? '知识库管理' : t === 'users' ? '用户管理' : t === 'invites' ? '教师邀请码' : '高频问题'}
+              {t === 'kb' ? '知识库管理' : t === 'applications' ? '教师申请' : t === 'users' ? '用户管理' : t === 'invites' ? '教师邀请码' : '高频问题'}
             </button>
           ))}
           <button
@@ -345,6 +416,8 @@ export default function AdminPage({ user, onBack }: Props) {
                   选择左侧知识库查看详情
                 </div>
               ) : (
+                <>
+                <JoinCodeShareSection kb={selectedKB} />
                 <KbDetailPanel
                   kb={selectedKB}
                   apiBase="/admin/kb"
@@ -355,10 +428,12 @@ export default function AdminPage({ user, onBack }: Props) {
                   onStop={handleStopIndex}
                   onLlamaIndexBuild={handleLlamaIndexBuild}
                   llamaIndexSubmitting={llamaIndexSubmitting === selectedKB.course_id}
+                  indexSubmitting={indexSubmitting === selectedKB.course_id}
                   onRefresh={() => loadKBDetail(selectedKB.course_id)}
                   onUploaded={async () => { await loadKBDetail(selectedKB.course_id); await loadKBs() }}
                   onUpdated={async () => { await loadKBDetail(selectedKB.course_id); await loadKBs() }}
                 />
+                </>
               )}
             </div>
           </>
@@ -546,6 +621,104 @@ export default function AdminPage({ user, onBack }: Props) {
                         </td>
                       </tr>
                     ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        ) : tab === 'applications' ? (
+          <div className="flex-1 overflow-y-auto p-6">
+            {error && (
+              <div className="mb-4 p-3 bg-red-50 text-red-600 text-sm rounded-lg flex justify-between">
+                <span>{error}</span>
+                <button onClick={() => setError('')} className="ml-2">✕</button>
+              </div>
+            )}
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold text-slate-800">教师申请审批</h2>
+              <div className="flex gap-1 bg-slate-100 rounded-lg p-1">
+                {(['pending', 'approved', 'rejected'] as const).map(f => (
+                  <button
+                    key={f}
+                    onClick={() => setAppFilter(f)}
+                    className={`px-3 py-1 rounded-md text-xs transition ${
+                      appFilter === f ? 'bg-white text-indigo-700 font-medium shadow-sm' : 'text-slate-500 hover:text-slate-700'
+                    }`}
+                  >
+                    {f === 'pending' ? '待审批' : f === 'approved' ? '已通过' : '已拒绝'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <p className="text-sm text-slate-500 mb-4">
+              学生注册时勾选"申请教师权限"提交的申请，通过后自动获得教师权限并发送站内通知。邀请码仍可作为快速通道使用（见"教师邀请码"标签页）。
+            </p>
+            {appLoading ? (
+              <p className="text-sm text-slate-400">加载中...</p>
+            ) : applications.length === 0 ? (
+              <p className="text-sm text-slate-400">
+                暂无{appFilter === 'pending' ? '待审批' : appFilter === 'approved' ? '已通过' : '已拒绝'}的申请。
+              </p>
+            ) : (
+              <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+                <table className="w-full text-sm">
+                  <thead className="bg-slate-50 border-b border-slate-200">
+                    <tr>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500">用户名</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500">显示名</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500">申请理由</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 w-28">提交时间</th>
+                      <th className="text-left px-4 py-3 text-xs font-medium text-slate-500 w-44">操作</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {applications.map(app => {
+                      const statusColor: Record<string, string> = {
+                        pending: 'bg-yellow-100 text-yellow-700',
+                        approved: 'bg-green-100 text-green-700',
+                        rejected: 'bg-red-100 text-red-700',
+                      }
+                      const statusLabel: Record<string, string> = {
+                        pending: '待审批', approved: '已通过', rejected: '已拒绝',
+                      }
+                      return (
+                        <tr key={app.id} className="hover:bg-slate-50 align-top">
+                          <td className="px-4 py-3 font-medium text-slate-800">{app.username}</td>
+                          <td className="px-4 py-3 text-slate-600">{app.display_name || '—'}</td>
+                          <td className="px-4 py-3 text-slate-600 max-w-md">
+                            <p className="whitespace-pre-wrap break-words">{app.reason || '（未填写）'}</p>
+                            {app.status === 'rejected' && app.review_note && (
+                              <p className="mt-1 text-xs text-red-500">拒绝理由：{app.review_note}</p>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-slate-400 text-xs">{formatTime(app.created_at)}</td>
+                          <td className="px-4 py-3">
+                            {app.status === 'pending' ? (
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => void approveApp(app.id)}
+                                  disabled={reviewing === app.id}
+                                  className="text-xs bg-green-600 text-white px-3 py-1.5 rounded-lg hover:bg-green-700 disabled:opacity-50 transition"
+                                >
+                                  {reviewing === app.id ? '处理中...' : '通过'}
+                                </button>
+                                <button
+                                  onClick={() => void rejectApp(app.id)}
+                                  disabled={reviewing === app.id}
+                                  className="text-xs border border-red-200 text-red-600 px-3 py-1.5 rounded-lg hover:bg-red-50 disabled:opacity-50 transition"
+                                >
+                                  拒绝
+                                </button>
+                              </div>
+                            ) : (
+                              <span className={`text-xs px-2 py-0.5 rounded-full ${statusColor[app.status]}`}>
+                                {statusLabel[app.status]}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>

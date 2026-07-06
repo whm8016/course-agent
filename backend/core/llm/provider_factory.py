@@ -20,7 +20,10 @@ from typing import Any
 
 from openai import AsyncAzureOpenAI, AsyncOpenAI
 
-from config import LLM_BINDING, DASHSCOPE_API_KEY, LLM_TIMEOUT_SEC
+from settings import get_settings
+LLM_BINDING = get_settings().llm.binding
+DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
+LLM_TIMEOUT_SEC = get_settings().llm.timeout_sec
 from core.llm.provider_registry import find_by_name, find_by_model
 
 logger = logging.getLogger(__name__)

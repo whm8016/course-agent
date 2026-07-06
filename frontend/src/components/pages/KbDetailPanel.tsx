@@ -143,6 +143,8 @@ interface Props {
   /** 不传则隐藏 LlamaIndex 构建按钮 */
   onLlamaIndexBuild?: (courseId: string) => void
   llamaIndexSubmitting?: boolean
+  /** LightRAG 索引（onIndex）提交中 */
+  indexSubmitting?: boolean
   onRefresh: () => void
   onUploaded: () => void
   onUpdated: () => void
@@ -151,7 +153,7 @@ interface Props {
 export default function KbDetailPanel({
   kb, apiBase,
   onDelete, onDeleteFile, onIndex, onPause, onStop,
-  onLlamaIndexBuild, llamaIndexSubmitting = false,
+  onLlamaIndexBuild, llamaIndexSubmitting = false, indexSubmitting = false,
   onRefresh, onUploaded, onUpdated,
 }: Props) {
   const [uploading, setUploading] = useState(false)
@@ -414,6 +416,18 @@ export default function KbDetailPanel({
           </div>
         )}
 
+        {/* 两套索引分工说明：讲清谁喂 AI、谁不影响 AI，避免用户建错 */}
+        <div className="mt-4 flex items-start gap-2 text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 leading-relaxed">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 shrink-0 text-slate-400">
+            <circle cx="12" cy="12" r="10" /><line x1="12" y1="16" x2="12" y2="12" /><line x1="12" y1="8" x2="12.01" y2="8" />
+          </svg>
+          <span>
+            <b className="text-slate-700">本知识库有两套索引：</b>
+            ① <b className="text-indigo-600">LightRAG</b>（下方主操作）—— <b>AI 问答 / 出题 / 解题都依赖它</b>，必须摄入后 AI 才能引用课程内容；
+            ② <b className="text-teal-600">LlamaIndex</b>（底部「高级」区）—— <b>不影响 AI 对话</b>，仅供管理员手动搜索使用。
+          </span>
+        </div>
+
         <div className="mt-4 flex items-center flex-wrap gap-2">
           {/* ready + 已构建：显示完成徽章 */}
           {kb.status === 'ready' && kb.file_count > 0 && hasLightRagIngested && (
@@ -446,21 +460,51 @@ export default function KbDetailPanel({
           {kb.status === 'pending' && (
             <button
               onClick={() => onIndex(kb.course_id, false, false)}
-              className="text-sm bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition"
+              disabled={indexSubmitting}
+              className="flex items-center gap-1.5 text-sm bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition disabled:opacity-50"
             >
-              开始索引（LightRAG）
+              {indexSubmitting ? (
+                <>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                    className="animate-spin" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                  </svg>
+                  启动索引中…
+                </>
+              ) : (
+                <>开始索引（LightRAG）</>
+              )}
             </button>
           )}
 
-          {/* indexing：LlamaIndex 构建中 */}
+          {/* indexing：LlamaIndex 构建中 — 终止按钮兜底（LlamaIndex 不支持暂停续传，但
+              stop 接口对任何 indexing 都直接落库 pending，任务异常卡死时靠它自救） */}
           {kb.status === 'indexing' && kb.progress_msg?.includes('LlamaIndex') && (
-            <span className="flex items-center gap-1.5 text-sm text-teal-600">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-                className="animate-spin" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-              </svg>
-              LlamaIndex 构建中，请稍候…
-            </span>
+            <>
+              <span className="flex items-center gap-1.5 text-sm text-teal-600">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                  className="animate-spin" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                </svg>
+                LlamaIndex 构建中，请稍候…
+              </span>
+              <button
+                onClick={() => requestConfirm({
+                  action: () => onStop(kb.course_id),
+                  title: '终止索引',
+                  message: '确认终止索引？已完成的进度将被清除。',
+                  confirmLabel: '确认终止',
+                  variant: 'danger',
+                })}
+                className="flex items-center gap-1 text-sm text-red-600 border border-red-300 bg-red-50 px-3 py-1.5 rounded-lg hover:bg-red-100 transition"
+                title="终止索引（清空进度）"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="6" width="12" height="12" rx="1" />
+                </svg>
+                终止
+              </button>
+            </>
           )}
 
           {/* indexing：LightRAG 主流程 — 暂停 + 终止 */}
@@ -548,96 +592,104 @@ export default function KbDetailPanel({
             </>
           )}
 
-          {/* LlamaIndex 完成徽章 */}
-          {onLlamaIndexBuild && kb.status !== 'indexing' && kb.file_count > 0 && llamaIndexBuildComplete && (
-            <span className="inline-flex items-center gap-1.5 text-sm font-medium text-teal-800 bg-teal-100/80 border border-teal-200/80 px-3 py-1.5 rounded-lg">
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-teal-600">
-                <path d="M20 6L9 17l-5-5" />
-              </svg>
-              LlamaIndex 索引已完成
-            </span>
-          )}
-
-          {/* LlamaIndex 首次构建按钮 */}
-          {onLlamaIndexBuild && kb.status !== 'indexing' && kb.file_count > 0 && !llamaIndexBuildComplete && (
-            <button
-              type="button"
-              onClick={() => onLlamaIndexBuild(kb.course_id)}
-              disabled={llamaIndexSubmitting}
-              className="flex items-center gap-1.5 text-sm text-teal-700 border border-teal-300 bg-teal-50 px-3 py-1.5 rounded-lg hover:bg-teal-100 transition disabled:opacity-50"
-            >
-              {llamaIndexSubmitting ? (
-                <>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
-                    className="animate-spin" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M21 12a9 9 0 1 1-6.219-8.56" />
-                  </svg>
-                  正在提交…
-                </>
-              ) : (
-                <>
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
-                  </svg>
-                  LlamaIndex 构建索引
-                </>
-              )}
-            </button>
-          )}
-
           <p className="text-xs text-slate-400 ml-1">
             {kb.file_count} 个文件 · 更新于 {formatTime(kb.updated_at)}
           </p>
         </div>
 
-        {/* 高级操作（重建索引） */}
-        {kb.status === 'ready' && kb.file_count > 0 && (hasLightRagIngested || llamaIndexBuildComplete) && (
+        {/* 高级 · 向量检索 LlamaIndex：不影响 AI 对话，仅供管理员手动搜索/后续扩展使用。
+            故意折叠 + 标红警示，避免用户误以为「建了它 AI 就能答」——AI 只认 LightRAG。 */}
+        {onLlamaIndexBuild && kb.file_count > 0 && kb.status !== 'indexing' && (
+          <details className="mt-3 border border-teal-100 bg-teal-50/40 rounded-lg px-3 py-2">
+            <summary className="text-xs text-teal-700 cursor-pointer hover:text-teal-800 select-none font-medium">
+              高级 · LlamaIndex 向量检索{llamaIndexBuildComplete ? '（已构建）' : ''}
+            </summary>
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <span className="text-xs text-teal-600 leading-relaxed w-full">
+                ⚠️ 不影响 AI 对话，仅供管理员手动搜索使用。
+              </span>
+              {llamaIndexBuildComplete ? (
+                <>
+                  <span className="inline-flex items-center gap-1.5 text-sm font-medium text-teal-800 bg-teal-100/80 border border-teal-200/80 px-3 py-1.5 rounded-lg">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" className="text-teal-600">
+                      <path d="M20 6L9 17l-5-5" />
+                    </svg>
+                    LlamaIndex 索引已完成
+                  </span>
+                  <button
+                    type="button"
+                    disabled={llamaIndexSubmitting}
+                    onClick={() => requestConfirm({
+                      action: () => onLlamaIndexBuild(kb.course_id),
+                      title: '重新构建 LlamaIndex',
+                      message: '重新构建将清空当前 LlamaIndex 索引数据并重新生成。此过程可能需要较长时间，确定继续？',
+                      confirmLabel: '确认重建',
+                      variant: 'warning',
+                    })}
+                    className="flex items-center gap-1.5 text-sm text-amber-700 border border-amber-300 bg-amber-50 px-3 py-1.5 rounded-lg hover:bg-amber-100 transition disabled:opacity-50"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="23 4 23 10 17 10" />
+                      <polyline points="1 20 1 14 7 14" />
+                      <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                    </svg>
+                    {llamaIndexSubmitting ? '提交重建中…' : '重新构建 LlamaIndex'}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onLlamaIndexBuild(kb.course_id)}
+                  disabled={llamaIndexSubmitting}
+                  className="flex items-center gap-1.5 text-sm text-teal-700 border border-teal-300 bg-teal-50 px-3 py-1.5 rounded-lg hover:bg-teal-100 transition disabled:opacity-50"
+                >
+                  {llamaIndexSubmitting ? (
+                    <>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"
+                        className="animate-spin" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+                      </svg>
+                      启动构建中…
+                    </>
+                  ) : (
+                    <>
+                      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12" />
+                      </svg>
+                      LlamaIndex 构建索引
+                    </>
+                  )}
+                </button>
+              )}
+            </div>
+          </details>
+        )}
+
+        {/* 高级操作（重建 LightRAG）：仅 LightRAG 已摄入时显示。LlamaIndex 重建已并入上方其折叠区。 */}
+        {kb.status === 'ready' && kb.file_count > 0 && hasLightRagIngested && (
           <details className="mt-3 border-t border-slate-100 pt-3">
             <summary className="text-xs text-slate-400 cursor-pointer hover:text-slate-600 select-none">
-              高级操作（重建索引）
+              高级操作（重建 LightRAG）
             </summary>
             <div className="mt-2 flex flex-wrap gap-2">
-              {hasLightRagIngested && (
-                <button
-                  type="button"
-                  onClick={() => requestConfirm({
-                    action: () => onIndex(kb.course_id, false, false),
-                    title: '重新构建 LightRAG',
-                    message: '重新构建将清空当前知识图谱，按现有文件重新摄入 LightRAG。此过程可能需要较长时间，确定继续？',
-                    confirmLabel: '确认重建',
-                    variant: 'warning',
-                  })}
-                  className="flex items-center gap-1.5 text-sm text-amber-700 border border-amber-300 bg-amber-50 px-3 py-1.5 rounded-lg hover:bg-amber-100 transition"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="23 4 23 10 17 10" />
-                    <polyline points="1 20 1 14 7 14" />
-                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                  </svg>
-                  重新构建 LightRAG
-                </button>
-              )}
-              {onLlamaIndexBuild && llamaIndexBuildComplete && (
-                <button
-                  type="button"
-                  disabled={llamaIndexSubmitting}
-                  onClick={() => requestConfirm({
-                    action: () => onLlamaIndexBuild!(kb.course_id),
-                    title: '重新构建 LlamaIndex',
-                    message: '重新构建将清空当前 LlamaIndex 索引数据并重新生成。此过程可能需要较长时间，确定继续？',
-                    confirmLabel: '确认重建',
-                    variant: 'warning',
-                  })}
-                  className="flex items-center gap-1.5 text-sm text-amber-700 border border-amber-300 bg-amber-50 px-3 py-1.5 rounded-lg hover:bg-amber-100 transition disabled:opacity-50"
-                >
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="23 4 23 10 17 10" />
-                    <polyline points="1 20 1 14 7 14" />
-                    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
-                  </svg>
-                  {llamaIndexSubmitting ? '正在提交…' : '重新构建 LlamaIndex'}
-                </button>
-              )}
+              <button
+                type="button"
+                onClick={() => requestConfirm({
+                  action: () => onIndex(kb.course_id, false, false),
+                  title: '重新构建 LightRAG',
+                  message: '重新构建将清空当前知识图谱，按现有文件重新摄入 LightRAG。此过程可能需要较长时间，确定继续？',
+                  confirmLabel: '确认重建',
+                  variant: 'warning',
+                })}
+                className="flex items-center gap-1.5 text-sm text-amber-700 border border-amber-300 bg-amber-50 px-3 py-1.5 rounded-lg hover:bg-amber-100 transition"
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="23 4 23 10 17 10" />
+                  <polyline points="1 20 1 14 7 14" />
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                </svg>
+                重新构建 LightRAG
+              </button>
             </div>
           </details>
         )}

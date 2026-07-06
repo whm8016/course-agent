@@ -1,15 +1,28 @@
-"""集中式配置（pydantic-settings）—— 全项目单一事实源。
+"""集中式配置（pydantic-settings 组合模式）—— 全项目单一事实源。
 
-设计要点：
-- 字段名采用 snake_case，对齐历史 env 名（pydantic-settings 大小写不敏感，
-  dashscope_api_key 自动匹配 DASHSCOPE_API_KEY），零行为变化。
-- secrets 用 SecretStr，print(get_settings()) 不泄密；shim 层 get_secret_value() 还原 str。
-- bool 统一经 _truthy（复刻旧 config.py 的 ("1","true","yes","on") 约定）。
-- model_catalog 拍平（catalog 优先 → env 兜底）、LangSmith env 同步、JWT/CORS prod 校验、
-  RAG_BACKEND 平台判断、AGENTIC_RAG_BACKEND legacy alias —— 全部原样移植自旧 config.py。
-- 实例化即校验 → fail-fast（错类型/坏 prod 配置当场 ValidationError/RuntimeError）。
+架构（业界标准组合式）：
+- 顶层 ``Settings(BaseSettings)`` + ``env_nested_delimiter="__"``。
+- 各职责拆为嵌套 ``BaseModel`` 子组（LLM/Vision/Embedding/Fallback/DB/
+  Security/Paths/Chunking/LightRAG/Rag/LlamaParse/TutorBot/QQBot/Feishu/
+  Search/ImageIngest/Mem0/Summary/Question）。
+- ``.env`` 用分隔式注入名：``LLM__API_KEY`` → ``settings.llm.api_key``、
+  ``DB__URL`` → ``settings.db.url``、``SECURITY__JWT_SECRET`` →
+  ``settings.security.jwt_secret`` …（严格新名，不兼容旧扁平名）。
 
-get_settings() 为 lru_cache 单例；config.py 已降级为读取本模块的零破坏 shim。
+例外：``langsmith_*`` 与 ``environment``/``log_level``/``testing``/
+``backend_workers``/``max_upload_mb``/``max_kb_upload_mb`` 保留顶层扁平字段。
+其中 langsmith 因 langchain SDK 硬性读 ``os.environ["LANGSMITH_API_KEY"]``
+扁平名（时序难控），保持扁平 + 提供 ``settings.langsmith`` property 视图。
+
+设计要点（继承自旧扁平 Settings）：
+- secrets 用 SecretStr，print 不泄密；shim/消费方 ``.get_secret_value()`` 还原。
+- bool 统一经 ``_truthy``；origins 逗号分隔。
+- model_catalog 拍平（catalog 优先 → env 兜底）、LangSmith env 同步、
+  JWT/CORS prod 校验、RAG backend 平台判断、跨组 fallback
+  （embedding←llm、vision←embedding）—— 全部保留。
+- 实例化即校验 → fail-fast。
+
+``get_settings()`` 为 lru_cache 单例；``config.py`` shim 读取本模块转发。
 """
 from __future__ import annotations
 
@@ -19,14 +32,14 @@ import warnings
 from functools import lru_cache
 from typing import Annotated, Any
 
-from pydantic import BeforeValidator, SecretStr, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 # ---------------------------------------------------------------------------
-# 公共类型：bool 复刻旧 config.py 的 truthy 约定；str secret 去首尾空白
+# 公共类型：bool 复刻旧 truthy 约定；str secret 去首尾空白；origins 逗号分隔
 # ---------------------------------------------------------------------------
 def _truthy(v: Any) -> bool:
     if isinstance(v, bool):
@@ -41,7 +54,7 @@ def _strip(v: Any) -> Any:
 
 
 def _split_origins(v: Any) -> Any:
-    """逗号分隔 → list（复刻旧 config.py：空/* → ["*"]）。NoDecode 防止 JSON 解析。"""
+    """逗号分隔 → list（空/* → ["*"]）。NoDecode 防止 JSON 解析。"""
     if isinstance(v, str):
         raw = v.strip()
         if not raw or raw == "*":
@@ -56,9 +69,9 @@ OriginsList = Annotated[list[str], NoDecode, BeforeValidator(_split_origins)]
 
 
 # ---------------------------------------------------------------------------
-# LangSmith env 同步（原样移植 config._sync_langsmith_env）
-#  必须在 Settings 读取 LANGSMITH_* 前跑：归一化 truthy、互填 *_TRACING_V2、
-#   互填 LANGSMITH_API_KEY/LANGCHAIN_API_KEY，并清 langsmith.utils 缓存。
+# LangSmith env 同步（原样保留：模块级，读/写扁平 os.environ 供 langchain SDK）
+#   归一化 truthy、互填 *_TRACING_V2、互填 LANGSMITH_API_KEY/LANGCHAIN_API_KEY，
+#   并清 langsmith.utils 缓存。langsmith_* 仍是顶层扁平字段（见模块 docstring 例外）。
 # ---------------------------------------------------------------------------
 def _sync_langsmith_env() -> None:
     truthy = ("1", "true", "yes", "on")
@@ -98,7 +111,7 @@ _sync_langsmith_env()
 
 
 # ---------------------------------------------------------------------------
-# model_catalog 拍平（原样移植 config._load_model_catalog）
+# model_catalog 拍平（原样保留：读 active profile 扁平化为 LLM 配置字典）
 # ---------------------------------------------------------------------------
 def _load_model_catalog() -> dict[str, str]:
     """读取 data/model_catalog.json 的 active profile，扁平化为 LLM 配置字典。
@@ -143,70 +156,92 @@ def _load_model_catalog() -> dict[str, str]:
     }
 
 
-class Settings(BaseSettings):
-    """全项目配置单例。字段分组按原 config.py 的注释段落排列。"""
+# ===========================================================================
+# 嵌套子组 BaseModel
+# ===========================================================================
 
-    model_config = SettingsConfigDict(
-        env_file=(os.path.join(BASE_DIR, ".env"),),
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-    )
 
-    # ── 日志 / 环境 ────────────────────────────────────────────────────────
-    log_level: str = "INFO"
-    environment: str = "development"
-    llm_timeout_sec: int = 120
-    faq_cache_threshold: int = 3
+class LLMConfig(BaseModel):
+    """主 LLM 供应商 + 生成参数 + 可靠性（retry / circuit breaker）。"""
 
-    # ── RAG backend 选择（平台相关 + legacy）──────────────────────────────
-    rag_backend: str = ""
-    agentic_rag_backend: str = ""
-    agentic_kb_tool: str = ""  # legacy alias，仅 validator 读
-
-    # ── LLM / 多供应商（catalog 优先 → env 兜底，见 _apply_catalog）────────
-    llm_binding: str = "dashscope"
-    dashscope_api_key: StrippedSecret = SecretStr("")
-    dashscope_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    llm_api_version: str = ""
+    binding: str = "dashscope"
+    api_key: StrippedSecret = SecretStr("")
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    api_version: str = ""
     text_model: str = "qwen-plus"
     fast_model: str = "qwen-turbo"
-    vision_model: str = "qwen-vl-plus"
-    embedding_model: str = "text-embedding-v3"
-    embedding_api_key: StrippedSecret = SecretStr("")  # 空 → 回退 dashscope key
-    embedding_base_url: str = ""  # 空 → 回退 dashscope base_url
-    fallback_api_key: StrippedSecret = SecretStr("")
-    fallback_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    fallback_model: str = "qwen-plus"
-
-    # ── LightRAG 分角色 LLM（1.5.4+）────────────────────────────────────────
-    extract_model: str = "qwen-turbo"  # EXTRACT 角色：实体提取，用低成本模型
-    keyword_model: str = "qwen-turbo"  # KEYWORD 角色：关键词提取，用低成本模型
-
-    # ── LLM 可靠性 / 生成参数（收编原硬编码：llm.py RetryConfig、loop.py 字面量）──
-    llm_retry_max: int = 3
-    llm_retry_base_delay: float = 1.0
-    llm_retry_max_delay: float = 30.0
-    llm_retry_exponential_base: float = 2.0
-    llm_circuit_failure_threshold: int = 5
-    llm_circuit_success_threshold: int = 2
-    llm_circuit_open_timeout: float = 30.0
-    llm_temperature: float = 0.7
-    llm_max_tokens: int = 8192
+    # LightRAG 分角色 LLM（1.5.4+）：低成本模型
+    extract_model: str = "qwen-turbo"  # EXTRACT 角色：实体提取
+    keyword_model: str = "qwen-turbo"  # KEYWORD 角色：关键词提取
+    # 生成参数 / 超时（收编原硬编码）
+    temperature: float = 0.7
+    max_tokens: int = 8192
+    timeout_sec: int = 120
+    # retry
+    retry_max: int = 3
+    retry_base_delay: float = 1.0
+    retry_max_delay: float = 30.0
+    retry_exponential_base: float = 2.0
+    # circuit breaker
+    circuit_failure_threshold: int = 5
+    circuit_success_threshold: int = 2
+    circuit_open_timeout: float = 30.0
+    # agent
     agent_max_iterations: int = 10
     agent_token_chunk_size: int = 8
 
-    # ── 用户级 provider 主加密密钥（Fernet；prod 必填，见 _check_prod）─────
+
+class VisionConfig(BaseModel):
+    """两阶段视觉模型（qwen-vl 系列）。凭证独立于 llm，空 → 回退 embedding。"""
+
+    model: str = "qwen-vl-plus"  # 对话图像查询默认
+    index_model: str = "qwen-vl-plus"  # 索引知识库提图（凭证与对话共用）
+    api_key: StrippedSecret = SecretStr("")
+    base_url: str = ""
+
+
+class EmbeddingConfig(BaseModel):
+    """Embedding（单一默认，不分裂）。"""
+
+    model: str = "text-embedding-v3"
+    api_key: StrippedSecret = SecretStr("")  # 空 → 回退 llm.api_key
+    base_url: str = ""  # 空 → 回退 llm.base_url
+    dim: int = 1024
+    batch_size: int = 16
+
+
+class FallbackConfig(BaseModel):
+    """fallback provider（主 provider 失败时切换）。"""
+
+    api_key: StrippedSecret = SecretStr("")
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: str = "qwen-plus"
+
+
+class DatabaseConfig(BaseModel):
+    """PostgreSQL + Redis。"""
+
+    url: SecretStr = SecretStr(
+        "postgresql+asyncpg://postgres:postgres@localhost:5432/course_agent"
+    )
+    redis_url: SecretStr = SecretStr("redis://localhost:6379/0")
+    pool_size: int = 10
+    max_overflow: int = 15
+
+
+class SecurityConfig(BaseModel):
+    """安全：JWT / CORS / 管理员 / 用户 provider 加密密钥。"""
+
+    jwt_secret: SecretStr = SecretStr("dev-secret-change-in-production")
+    jwt_expire_hours: int = 72
+    allowed_origins: OriginsList = ["*"]
+    admin_username: str = "admin"
     provider_encryption_key: SecretStr = SecretStr("")
 
-    # ── RAG tuning ─────────────────────────────────────────────────────────
-    chunk_size: int = 500
-    chunk_overlap: int = 80
-    top_k: int = 4
-    ingest_chunk_size: int = 900
-    ingest_chunk_over_lap: int = 60
 
-    # ── Paths ──────────────────────────────────────────────────────────────
+class PathsConfig(BaseModel):
+    """运行期路径（默认空，Settings validator 用 BASE_DIR 组装）。"""
+
     upload_dir: str = ""
     knowledge_dir: str = ""
     vectorstore_dir: str = ""
@@ -216,135 +251,233 @@ class Settings(BaseSettings):
     lightrag_workdir: str = ""
     kb_store_dir: str = ""
     tutorbot_workspace_dir: str = ""
+    search_config_path: str = ""
+    mcp_config_path: str = ""
+    mcp_sessions_dir: str = ""
+    output_cards_path: str = ""
 
-    # ── PostgreSQL + Redis ─────────────────────────────────────────────────
-    database_url: SecretStr = SecretStr(
-        "postgresql+asyncpg://postgres:postgres@localhost:5432/course_agent"
-    )
-    redis_url: SecretStr = SecretStr("redis://localhost:6379/0")
-    db_pool_size: int = 10
-    db_max_overflow: int = 15
 
-    # ── Security ───────────────────────────────────────────────────────────
-    jwt_secret: SecretStr = SecretStr("dev-secret-change-in-production")
-    jwt_expire_hours: int = 72
-    allowed_origins: OriginsList = ["*"]
-    admin_username: str = "admin"
+class ChunkingConfig(BaseModel):
+    """RAG 切块调参。"""
 
-    # ── Upload limits ──────────────────────────────────────────────────────
-    max_upload_mb: int = 10
-    max_kb_upload_mb: int = 50
+    size: int = 500
+    overlap: int = 80
+    top_k: int = 4
+    ingest_size: int = 900
+    ingest_overlap: int = 60
 
-    # ── LightRAG ───────────────────────────────────────────────────────────
-    lightrag_enabled: TruthyBool = False
-    lightrag_query_mode: str = "mix"
-    lightrag_top_k: int = 20
-    lightrag_timeout_sec: int = 120
-    lightrag_embedding_dim: int = 1024
-    lightrag_auto_index_ttl_sec: int = 120
-    lightrag_stream_context_limit: int = 4
-    lightrag_stream_context_max_chars: int = 800
-    lightrag_agentic_rag_max_chars: int = 10000
-    lightrag_enable_rerank: TruthyBool = False
-    lightrag_save_ingest_chunks: TruthyBool = True
-    lightrag_ingest_chunks_subdir: str = "ingest_chunks"
-    lightrag_ingest_chunks_snapshot: TruthyBool = False
-    lightrag_ingest_batch_size: int = 16
-    lightrag_max_async: int = 8
-    lightrag_lru_capacity: int = 10
 
-    # ── LlamaParse / LlamaIndex ────────────────────────────────────────────
-    llama_cloud_api_key: SecretStr = SecretStr("")  # 兼容 LLAMAPARSE_API_KEY 别名
-    llamaparse_api_key: SecretStr = SecretStr("")  # 仅 validator 读，作 fallback
+class LightRAGConfig(BaseModel):
+    """LightRAG 后端配置 + 安全阈值 + 计算方法。"""
+
+    enabled: TruthyBool = False
+    query_mode: str = "mix"
+    top_k: int = 20
+    timeout_sec: int = 120
+    embedding_dim: int = 1024
+    auto_index_ttl_sec: int = 120
+    stream_context_limit: int = 4
+    stream_context_max_chars: int = 800
+    agentic_rag_max_chars: int = 10000
+    enable_rerank: TruthyBool = True
+    # ingestion
+    save_ingest_chunks: TruthyBool = True
+    ingest_chunks_subdir: str = "ingest_chunks"
+    ingest_chunks_snapshot: TruthyBool = False
+    ingest_batch_size: int = 16
+    max_async: int = 8
+    lru_capacity: int = 10  # 同时驻留内存的最大课程数（按 worker 缩放，见 Settings.lightrag_lru_capacity_scaled）
+    # 安全阈值（防 API 拒绝）
+    safe_top_k: int = 6
+    chunk_top_k: int = 5
+    max_total_tokens: int = 14000
+    max_entity_tokens: int = 3000
+    max_relation_tokens: int = 3000
+    max_history_messages: int = 8
+    max_history_chars: int = 8000
+    llm_system_max_chars: int = 24000
+
+    # ── 计算方法（原 core/rag/rag_config.py 的 get_safe_top_k 等，内聚至此）──
+    def safe_top_k_value(self) -> int:
+        """min(top_k, safe_top_k) —— aquery 的 top_k 安全上限。"""
+        return min(self.top_k, self.safe_top_k)
+
+    def chunk_top_k_value(self) -> int:
+        """min(chunk_top_k, safe_top_k_value())。"""
+        return min(self.chunk_top_k, self.safe_top_k_value())
+
+    def max_tokens_config(self) -> dict[str, int]:
+        """对应 LightRAG QueryParam 的 max tokens 字典。"""
+        return {
+            "total": self.max_total_tokens,
+            "entity": self.max_entity_tokens,
+            "relation": self.max_relation_tokens,
+        }
+
+
+class RagConfig(BaseModel):
+    """RAG backend 选择（平台相关 + legacy alias）。
+
+    backend 的平台解析在 Settings._apply_legacy_and_fallbacks 里做（嵌套
+    BaseModel 的 field_validator 对默认值不触发，故用 model_validator）。
+    """
+
+    backend: str = ""
+    agentic_backend: str = ""
+    agentic_kb_tool: str = ""  # legacy alias，仅 Settings validator 读
+
+
+class LlamaParseConfig(BaseModel):
+    """LlamaParse / LlamaIndex（图像 PDF / 扫描件解析）。"""
+
+    cloud_api_key: SecretStr = SecretStr("")  # 兼容 LLAMA_CLOUD_API_KEY 语义
+    parse_api_key: SecretStr = SecretStr("")  # 作 cloud_api_key 的 fallback
     question_use_llamaindex: TruthyBool = True
 
-    # ── Question coordinator ───────────────────────────────────────────────
-    question_tool_web_search: TruthyBool = True
-    question_tool_rag: TruthyBool = True
-    question_tool_code_execution: TruthyBool = True
 
-    # ── LangSmith / observability ──────────────────────────────────────────
+class TutorBotConfig(BaseModel):
+    """TutorBot 社交平台集成。"""
+
+    enabled: TruthyBool = False
+    heartbeat_enabled: TruthyBool = True
+    heartbeat_interval_sec: int = 1800
+
+
+class QQBotConfig(BaseModel):
+    """QQ Bot (botpy SDK)。"""
+
+    enabled: TruthyBool = False
+    app_id: SecretStr = SecretStr("")
+    secret: SecretStr = SecretStr("")
+    allow_from: str = "*"
+
+
+class FeishuConfig(BaseModel):
+    """飞书 Bot (lark-oapi SDK, WebSocket)。"""
+
+    enabled: TruthyBool = False
+    app_id: SecretStr = SecretStr("")
+    app_secret: SecretStr = SecretStr("")
+    encrypt_key: SecretStr = SecretStr("")
+    verification_token: SecretStr = SecretStr("")
+    allow_from: str = "*"
+
+
+class SearchConfig(BaseModel):
+    """web search 服务。"""
+
+    enabled: TruthyBool = True
+    provider: str = "duckduckgo"
+    api_key: SecretStr = SecretStr("")
+    base_url: str = ""
+    max_results: int = 5
+    proxy: str = ""
+
+
+class ImageIngestConfig(BaseModel):
+    """LlamaIndex 图片提取参数。"""
+
+    min_px: int = 80
+    min_area: int = 15000
+    max_per_file: int = 120
+    semaphore: int = 5
+    wmf_min_blob: int = 2000
+
+
+class Mem0Config(BaseModel):
+    """Mem0 记忆：时间衰减 / 矛盾检测 / 跳过模式 / 批量刷新。"""
+
+    time_decay_enabled: TruthyBool = False
+    time_decay_lambda: float = 0.005  # 衰减系数（半衰期约 139 天）
+    conflict_detect_enabled: TruthyBool = True
+    conflict_similarity_threshold: float = 0.85
+    conflict_min_days_gap: int = 7
+    add_skip_patterns: str = "好的,谢谢,嗯,ok,明白了,收到,好,知道了,继续"
+    add_min_length: int = 10
+    flush_max_turns: int = 3
+    flush_idle_timeout: float = 120.0
+    flush_scan_interval: int = 30
+
+
+class SummaryConfig(BaseModel):
+    """Session L2 摘要。"""
+
+    window_size: int = 5
+    buffer_size: int = 2
+    compress_interval: int = 3
+
+
+class QuestionConfig(BaseModel):
+    """Question coordinator (AgentCoordinator)。"""
+
+    tool_web_search: TruthyBool = True
+    tool_rag: TruthyBool = True
+    tool_code_execution: TruthyBool = True
+    faq_cache_threshold: int = 3
+
+    @property
+    def default_tool_flags(self) -> dict[str, bool]:
+        return {
+            "web_search": self.tool_web_search,
+            "rag": self.tool_rag,
+            "code_execution": self.tool_code_execution,
+        }
+
+
+class LangSmithView(BaseModel):
+    """langsmith 分组只读视图（字段仍为顶层扁平，见模块 docstring 例外）。"""
+
+    tracing: bool = False
+    api_key: SecretStr = SecretStr("")
+    project: str = ""
+
+
+# ===========================================================================
+# 顶层 Settings
+# ===========================================================================
+class Settings(BaseSettings):
+    """全项目配置单例（组合式嵌套）。"""
+
+    model_config = SettingsConfigDict(
+        env_file=(os.path.join(BASE_DIR, ".env"),),
+        env_file_encoding="utf-8",
+        env_nested_delimiter="__",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # ── 顶层扁平字段（env 不嵌套）──────────────────────────────────────────
+    log_level: str = "INFO"
+    environment: str = "development"
+    testing: TruthyBool = False
+    backend_workers: int = 4  # 承接原 _os.getenv("BACKEND_WORKERS")，供 LRU 缩放
+    max_upload_mb: int = 10
+    max_kb_upload_mb: int = 50
+    # langsmith 扁平字段（langchain SDK 读 os.environ 扁平名，例外）
     langsmith_tracing: TruthyBool = False
-    langsmith_api_key: SecretStr = SecretStr("")
+    langsmith_api_key: StrippedSecret = SecretStr("")
     langsmith_project: str = ""
 
-    # ── TutorBot 社交平台集成 ──────────────────────────────────────────────
-    tutorbot_enabled: TruthyBool = False
-    tutorbot_heartbeat_enabled: TruthyBool = True
-    tutorbot_heartbeat_interval_sec: int = 1800
-
-    # ── QQ Bot ─────────────────────────────────────────────────────────────
-    qq_bot_enabled: TruthyBool = False
-    qq_app_id: SecretStr = SecretStr("")
-    qq_secret: SecretStr = SecretStr("")
-    qq_allow_from: str = "*"
-
-    # ── Feishu Bot ─────────────────────────────────────────────────────────
-    feishu_bot_enabled: TruthyBool = False
-    feishu_app_id: SecretStr = SecretStr("")
-    feishu_app_secret: SecretStr = SecretStr("")
-    feishu_encrypt_key: SecretStr = SecretStr("")
-    feishu_verification_token: SecretStr = SecretStr("")
-    feishu_allow_from: str = "*"
-
-    # ── Search（web search 服务）────────────────────────────────────────────
-    search_enabled: TruthyBool = True
-    search_provider: str = "duckduckgo"
-    search_api_key: SecretStr = SecretStr("")
-    search_base_url: str = ""
-    search_max_results: int = 5
-    search_proxy: str = ""
-    search_config_path: str = ""  # data/search_config.json 路径
-
-    # ── MCP（Model Context Protocol）──────────────────────────────────────────
-    mcp_config_path: str = ""  # data/mcp.json 路径
-    mcp_sessions_dir: str = ""  # MCP sessions 存储目录
-
-    # ── Image ingestion（LLamaIndex 图片提取）────────────────────────────────
-    image_ingest_min_px: int = 80
-    image_ingest_min_area: int = 15000
-    image_ingest_max_per_file: int = 120
-    image_ingest_semaphore: int = 5
-    image_ingest_wmf_min_blob: int = 2000
-
-    # ── Embedding bridge───────────────────────────────────────────────────────
-    embedding_dim: int = 1024
-    embedding_batch_size: int = 16
-
-    # ── LightRAG SAFE_* 参数（运行时限制，防止过载）─────────────────────────
-    lightrag_safe_top_k: int = 10
-    lightrag_chunk_top_k: int = 8
-    lightrag_max_total_tokens: int = 22000
-    lightrag_max_entity_tokens: int = 4000
-    lightrag_max_relation_tokens: int = 4000
-    lightrag_max_history_messages: int = 8
-    lightrag_max_history_chars: int = 8000
-    lightrag_llm_system_max_chars: int = 24000
-
-    # ── Output cards（技能输出卡片存储）──────────────────────────────────────
-    output_cards_path: str = ""  # 默认在 validator 中设置
-
-    # ── Testing flag───────────────────────────────────────────────────────────
-    testing: TruthyBool = False
-
-    # ── Mem0 时间衰减评分 ──────────────────────────────────────────────────────
-    mem0_time_decay_enabled: TruthyBool = False  # 开关（默认关闭=原版行为）
-    mem0_time_decay_lambda: float = 0.005  # 衰减系数（半衰期约 139 天）
-    mem0_conflict_detect_enabled: TruthyBool = False  # 矛盾检测开关
-    mem0_conflict_similarity_threshold: float = 0.85  # 文本相似度阈值
-    mem0_conflict_min_days_gap: int = 7  # 最小时间差（天）
-    mem0_add_skip_patterns: str = "好的,谢谢,嗯,ok,明白了,收到,好,知道了,继续"  # 跳过 add 的模式（逗号分隔）
-    mem0_add_min_length: int = 10  # 用户消息最小长度
-
-    # ── Mem0 批量刷新 ──────────────────────────────────────────────────────────
-    mem0_flush_max_turns: int = 3  # 累积 N 轮后 flush
-    mem0_flush_idle_timeout: float = 120.0  # 静默 T 秒后 flush
-    mem0_flush_scan_interval: int = 30  # ARQ cron 扫描间隔（秒）
-
-    # ── Session L2 摘要 ─────────────────────────────────────────────────────────
-    summary_window_size: int = 10  # L1 窗口大小（轮）
-    summary_buffer_size: int = 2  # 超出窗口多少条才触发压缩
-    summary_compress_interval: int = 5  # 每隔 N 轮才重新压缩
+    # ── 嵌套子组 ──────────────────────────────────────────────────────────
+    llm: LLMConfig = Field(default_factory=LLMConfig)
+    vision: VisionConfig = Field(default_factory=VisionConfig)
+    embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
+    fallback: FallbackConfig = Field(default_factory=FallbackConfig)
+    db: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    security: SecurityConfig = Field(default_factory=SecurityConfig)
+    paths: PathsConfig = Field(default_factory=PathsConfig)
+    chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
+    lightrag: LightRAGConfig = Field(default_factory=LightRAGConfig)
+    rag: RagConfig = Field(default_factory=RagConfig)
+    llamaparse: LlamaParseConfig = Field(default_factory=LlamaParseConfig)
+    tutorbot: TutorBotConfig = Field(default_factory=TutorBotConfig)
+    qq_bot: QQBotConfig = Field(default_factory=QQBotConfig)
+    feishu: FeishuConfig = Field(default_factory=FeishuConfig)
+    search: SearchConfig = Field(default_factory=SearchConfig)
+    image_ingest: ImageIngestConfig = Field(default_factory=ImageIngestConfig)
+    mem0: Mem0Config = Field(default_factory=Mem0Config)
+    summary: SummaryConfig = Field(default_factory=SummaryConfig)
+    question: QuestionConfig = Field(default_factory=QuestionConfig)
 
     # ------------------------------------------------------------------
     # validators
@@ -359,50 +492,57 @@ class Settings(BaseSettings):
     def _lower_env(cls, v: str) -> str:
         return v.strip().lower()
 
-    @field_validator("rag_backend", mode="after")
-    @classmethod
-    def _resolve_rag_backend(cls, v: str) -> str:
-        raw = (v or "").strip().lower()
-        if raw in ("chroma", "fs"):
-            return raw
-        return "fs" if sys.platform == "win32" else "chroma"
-
     @model_validator(mode="after")
     def _apply_legacy_and_fallbacks(self) -> "Settings":
-        # AGENTIC_RAG_BACKEND legacy alias（AGENTIC_KB_TOOL=llamaindex_rag → llamaindex）
-        arg = (self.agentic_rag_backend or "").strip().lower()
-        legacy = (self.agentic_kb_tool or "").strip().lower()
-        if arg in ("lightrag", "llamaindex"):
-            self.agentic_rag_backend = arg
-        elif legacy == "llamaindex_rag":
-            self.agentic_rag_backend = "llamaindex"
+        # RAG backend 平台解析（chroma/fs，否则按 sys.platform）
+        raw_be = (self.rag.backend or "").strip().lower()
+        if raw_be in ("chroma", "fs"):
+            self.rag.backend = raw_be
         else:
-            self.agentic_rag_backend = "lightrag"
+            self.rag.backend = "fs" if sys.platform == "win32" else "chroma"
+
+        # AGENTIC_RAG_BACKEND legacy alias（AGENTIC_KB_TOOL=llamaindex_rag → llamaindex）
+        arg = (self.rag.agentic_backend or "").strip().lower()
+        legacy = (self.rag.agentic_kb_tool or "").strip().lower()
+        if arg in ("lightrag", "llamaindex"):
+            self.rag.agentic_backend = arg
+        elif legacy == "llamaindex_rag":
+            self.rag.agentic_backend = "llamaindex"
+        else:
+            self.rag.agentic_backend = "lightrag"
 
         # LLAMA_CLOUD_API_KEY fallback to LLAMAPARSE_API_KEY
-        if not self.llama_cloud_api_key.get_secret_value() and self.llamaparse_api_key.get_secret_value():
-            self.llama_cloud_api_key = self.llamaparse_api_key
+        if not self.llamaparse.cloud_api_key.get_secret_value() and self.llamaparse.parse_api_key.get_secret_value():
+            self.llamaparse.cloud_api_key = self.llamaparse.parse_api_key
 
         # EMBEDDING_* 回退主 LLM 凭证
-        if not self.embedding_api_key.get_secret_value():
-            self.embedding_api_key = self.dashscope_api_key
-        if not self.embedding_base_url:
-            self.embedding_base_url = self.dashscope_base_url
+        if not self.embedding.api_key.get_secret_value():
+            self.embedding.api_key = self.llm.api_key
+        if not self.embedding.base_url:
+            self.embedding.base_url = self.llm.base_url
+
+        # VISION_* 回退 EMBEDDING_*：qwen-vl 系列与 text-embedding 同属阿里 dashscope，默认
+        # 复用 embedding 凭证。注意主 LLM 可能是 deepseek/openai 等不支持 vision 的供应商，
+        # 不能作 vision 回退。索引提图 + 问答全局回退共用；可在 .env 配独立覆盖。
+        if not self.vision.api_key.get_secret_value():
+            self.vision.api_key = self.embedding.api_key
+        if not self.vision.base_url:
+            self.vision.base_url = self.embedding.base_url
 
         # 路径默认值（依赖 BASE_DIR，在此组装）
-        self.upload_dir = self.upload_dir or os.path.join(BASE_DIR, "uploads")
-        self.knowledge_dir = self.knowledge_dir or os.path.join(BASE_DIR, "knowledge")
-        self.vectorstore_dir = self.vectorstore_dir or os.path.join(BASE_DIR, "vectorstore")
-        self.db_path = self.db_path or os.path.join(BASE_DIR, "data", "sessions.db")
-        self.question_log_dir = self.question_log_dir or os.path.join(BASE_DIR, "logs", "question")
-        self.llama_index_kb_root = self.llama_index_kb_root or os.path.join(BASE_DIR, "data", "knowledge_bases")
-        self.lightrag_workdir = self.lightrag_workdir or os.path.join(BASE_DIR, "lightrag_store")
-        self.kb_store_dir = self.kb_store_dir or os.path.join(BASE_DIR, "kb_store")
-        self.tutorbot_workspace_dir = self.tutorbot_workspace_dir or os.path.join(BASE_DIR, "data", "tutorbot")
-        self.search_config_path = self.search_config_path or os.path.join(BASE_DIR, "data", "search_config.json")
-        self.mcp_config_path = self.mcp_config_path or os.path.join(BASE_DIR, "data", "mcp.json")
-        self.mcp_sessions_dir = self.mcp_sessions_dir or os.path.join(BASE_DIR, "data", "sessions")
-        self.output_cards_path = self.output_cards_path or os.path.join(BASE_DIR, "data", "output_cards.json")
+        self.paths.upload_dir = self.paths.upload_dir or os.path.join(BASE_DIR, "uploads")
+        self.paths.knowledge_dir = self.paths.knowledge_dir or os.path.join(BASE_DIR, "knowledge")
+        self.paths.vectorstore_dir = self.paths.vectorstore_dir or os.path.join(BASE_DIR, "vectorstore")
+        self.paths.db_path = self.paths.db_path or os.path.join(BASE_DIR, "data", "sessions.db")
+        self.paths.question_log_dir = self.paths.question_log_dir or os.path.join(BASE_DIR, "logs", "question")
+        self.paths.llama_index_kb_root = self.paths.llama_index_kb_root or os.path.join(BASE_DIR, "data", "knowledge_bases")
+        self.paths.lightrag_workdir = self.paths.lightrag_workdir or os.path.join(BASE_DIR, "lightrag_store")
+        self.paths.kb_store_dir = self.paths.kb_store_dir or os.path.join(BASE_DIR, "kb_store")
+        self.paths.tutorbot_workspace_dir = self.paths.tutorbot_workspace_dir or os.path.join(BASE_DIR, "data", "tutorbot")
+        self.paths.search_config_path = self.paths.search_config_path or os.path.join(BASE_DIR, "data", "search_config.json")
+        self.paths.mcp_config_path = self.paths.mcp_config_path or os.path.join(BASE_DIR, "data", "mcp.json")
+        self.paths.mcp_sessions_dir = self.paths.mcp_sessions_dir or os.path.join(BASE_DIR, "data", "sessions")
+        self.paths.output_cards_path = self.paths.output_cards_path or os.path.join(BASE_DIR, "data", "output_cards.json")
         return self
 
     @model_validator(mode="after")
@@ -414,30 +554,31 @@ class Settings(BaseSettings):
             val = cat.get(key, "")
             return val if val not in ("", None) else current
 
-        self.llm_binding = or_env("binding", self.llm_binding) or "dashscope"
+        self.llm.binding = or_env("binding", self.llm.binding) or "dashscope"
         if cat.get("api_key"):
-            self.dashscope_api_key = SecretStr(str(cat["api_key"]).strip())
-        self.dashscope_base_url = or_env("base_url", self.dashscope_base_url)
-        self.llm_api_version = or_env("api_version", self.llm_api_version)
-        self.text_model = or_env("text_model", self.text_model)
-        self.fast_model = or_env("fast_model", self.fast_model)
-        self.vision_model = or_env("vision_model", self.vision_model)
-        self.embedding_model = or_env("embedding_model", self.embedding_model)
+            self.llm.api_key = SecretStr(str(cat["api_key"]).strip())
+        self.llm.base_url = or_env("base_url", self.llm.base_url)
+        self.llm.api_version = or_env("api_version", self.llm.api_version)
+        self.llm.text_model = or_env("text_model", self.llm.text_model)
+        self.llm.fast_model = or_env("fast_model", self.llm.fast_model)
+        # vision 不从 catalog 覆盖：config.VISION_MODEL 是「全局独立视觉描述模型」
+        # （走 VISION_API_KEY/BASE_URL，默认回退 EMBEDDING_*；供 ingestion image_extractor +
+        # chat 两阶段全局回退共用），与 catalog 各 profile 的 vision 模型语义不同。
+        self.embedding.model = or_env("embedding_model", self.embedding.model)
         if cat.get("embedding_api_key"):
-            self.embedding_api_key = SecretStr(str(cat["embedding_api_key"]).strip())
+            self.embedding.api_key = SecretStr(str(cat["embedding_api_key"]).strip())
         if cat.get("embedding_base_url"):
-            self.embedding_base_url = str(cat["embedding_base_url"])
+            self.embedding.base_url = str(cat["embedding_base_url"])
         if cat.get("fallback_api_key"):
-            self.fallback_api_key = SecretStr(str(cat["fallback_api_key"]).strip())
-        self.fallback_base_url = or_env("fallback_base_url", self.fallback_base_url)
-        self.fallback_model = or_env("fallback_model", self.fallback_model)
+            self.fallback.api_key = SecretStr(str(cat["fallback_api_key"]).strip())
+        self.fallback.base_url = or_env("fallback_base_url", self.fallback.base_url)
+        self.fallback.model = or_env("fallback_model", self.fallback.model)
 
-        # ── 告警：catalog 有真实 key 但 .env 无对应值 ───────────────────────────
-        # 提示用户迁移到 .env（catalog 将在 .gitignore 中）
-        env_dashscope_key = os.getenv("DASHSCOPE_API_KEY", "").strip()
-        if cat.get("api_key") and not env_dashscope_key:
+        # ── 告警：catalog 有真实 key 但 .env 无对应值 ───────────────────────
+        env_llm_key = os.getenv("LLM__API_KEY", "").strip()
+        if cat.get("api_key") and not env_llm_key:
             warnings.warn(
-                "model_catalog.json contains API key but DASHSCOPE_API_KEY is not set in .env. "
+                "model_catalog.json contains API key but LLM__API_KEY is not set in .env. "
                 "Consider migrating the key to .env for security (catalog is gitignored).",
                 stacklevel=1,
             )
@@ -446,31 +587,30 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _check_prod(self) -> "Settings":
-        """prod 安全门 + dev 告警（原样移植旧 config.py 的 JWT/CORS 校验）。"""
+        """prod 安全门 + dev 告警（JWT/CORS/PROVIDER_ENCRYPTION_KEY 校验）。"""
         is_prod = self.environment == "production"
 
-        if is_prod and self.jwt_secret.get_secret_value() == "dev-secret-change-in-production":
+        if is_prod and self.security.jwt_secret.get_secret_value() == "dev-secret-change-in-production":
             raise RuntimeError(
-                "FATAL: JWT_SECRET must be set to a strong value in production. "
-                "Set the JWT_SECRET environment variable."
+                "FATAL: SECURITY__JWT_SECRET must be set to a strong value in production. "
+                "Set the SECURITY__JWT_SECRET environment variable."
             )
-        elif self.jwt_secret.get_secret_value() == "dev-secret-change-in-production":
+        elif self.security.jwt_secret.get_secret_value() == "dev-secret-change-in-production":
             warnings.warn(
                 "JWT_SECRET is using the insecure default value! "
-                "Set a strong JWT_SECRET environment variable before deploying to production.",
+                "Set a strong SECURITY__JWT_SECRET environment variable before deploying to production.",
                 stacklevel=1,
             )
 
-        if is_prod and (not self.allowed_origins or self.allowed_origins == ["*"]):
+        if is_prod and (not self.security.allowed_origins or self.security.allowed_origins == ["*"]):
             raise RuntimeError(
-                "FATAL: ALLOWED_ORIGINS must be set to specific origins in production. "
-                "Example: ALLOWED_ORIGINS=https://yourdomain.com"
+                "FATAL: SECURITY__ALLOWED_ORIGINS must be set to specific origins in production. "
+                "Example: SECURITY__ALLOWED_ORIGINS=https://yourdomain.com"
             )
 
-        # 用户级 provider 主密钥：prod 必填（否则用户 key 无法安全加密）
-        if is_prod and not self.provider_encryption_key.get_secret_value():
+        if is_prod and not self.security.provider_encryption_key.get_secret_value():
             raise RuntimeError(
-                "FATAL: PROVIDER_ENCRYPTION_KEY must be set in production to encrypt "
+                "FATAL: SECURITY__PROVIDER_ENCRYPTION_KEY must be set in production to encrypt "
                 "user-level LLM API keys. Generate one: "
                 "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
             )
@@ -478,11 +618,25 @@ class Settings(BaseSettings):
         return self
 
     # ------------------------------------------------------------------
-    # 便捷分组视图（供新代码 settings.llm.* 之类访问；shim 走扁平字段）
+    # 便捷分组视图 / 计算属性
     # ------------------------------------------------------------------
     @property
     def is_production(self) -> bool:
         return self.environment == "production"
+
+    @property
+    def langsmith(self) -> LangSmithView:
+        """langsmith 分组视图（字段为顶层扁平，SDK 兼容）。"""
+        return LangSmithView(
+            tracing=self.langsmith_tracing,
+            api_key=self.langsmith_api_key,
+            project=self.langsmith_project,
+        )
+
+    @property
+    def lightrag_lru_capacity_scaled(self) -> int:
+        """LRU 容量按 worker 数缩放（多 worker 下避免超额驻留）。"""
+        return max(2, self.lightrag.lru_capacity // max(1, self.backend_workers))
 
 
 @lru_cache(maxsize=1)

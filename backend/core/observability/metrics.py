@@ -5,8 +5,7 @@
 
 用法：
     from core.observability.metrics import (
-        observe_turn_duration, inc_guardrail_blocked,
-        observe_llm_ttft, observe_tool_call,
+        observe_turn, observe_llm_round, observe_tool_call,
     )
 
 查看指标（无需 Grafana）：
@@ -16,7 +15,7 @@
 """
 from __future__ import annotations
 
-from prometheus_client import Counter, Histogram
+from prometheus_client import Gauge, Histogram
 
 # --------------------------------------------------------------------------
 # Turn（整体回合）
@@ -59,16 +58,6 @@ TOOL_CALL_DURATION = Histogram(
 )
 
 # --------------------------------------------------------------------------
-# Safety guardrail
-# --------------------------------------------------------------------------
-
-GUARDRAIL_BLOCKED = Counter(
-    "ca_guardrail_blocked_total",
-    "Number of requests blocked by the safety guardrail",
-    labelnames=["risk_type"],
-)
-
-# --------------------------------------------------------------------------
 # Worker jobs
 # --------------------------------------------------------------------------
 
@@ -92,6 +81,17 @@ MCP_TOOL_DURATION = Histogram(
 
 
 # --------------------------------------------------------------------------
+# Leader election（多 worker 单例收敛：Cron/Bot/MCP 仅 leader 运行）
+# --------------------------------------------------------------------------
+
+LEADER_STATUS = Gauge(
+    "ca_leader_is_leader",
+    "1 if this worker currently holds the leader lock (runs Cron/Bot/MCP)",
+    labelnames=["worker_id"],
+)
+
+
+# --------------------------------------------------------------------------
 # Convenience helpers
 # --------------------------------------------------------------------------
 
@@ -109,13 +109,13 @@ def observe_tool_call(tool_name: str, status: str, elapsed_ms: int) -> None:
     TOOL_CALL_DURATION.labels(tool_name=tool_name, status=status).observe(elapsed_ms / 1000)
 
 
-def inc_guardrail_blocked(risk_type: str) -> None:
-    GUARDRAIL_BLOCKED.labels(risk_type=risk_type).inc()
-
-
 def observe_worker_job(job_type: str, status: str, elapsed_ms: int) -> None:
     WORKER_JOB_DURATION.labels(job_type=job_type, status=status).observe(elapsed_ms / 1000)
 
 
 def observe_mcp_tool(server: str, status: str, elapsed_ms: int) -> None:
     MCP_TOOL_DURATION.labels(server=server, status=status).observe(elapsed_ms / 1000)
+
+
+def set_leader_status(worker_id: str, is_leader: bool) -> None:
+    LEADER_STATUS.labels(worker_id=worker_id).set(1 if is_leader else 0)

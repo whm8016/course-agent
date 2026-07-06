@@ -6,14 +6,13 @@ import os as _os
 from dataclasses import dataclass
 from pathlib import Path
 
-from config import (
-    SEARCH_API_KEY,
-    SEARCH_BASE_URL,
-    SEARCH_CONFIG_PATH,
-    SEARCH_MAX_RESULTS,
-    SEARCH_PROVIDER,
-    SEARCH_PROXY,
-)
+from settings import get_settings
+SEARCH_API_KEY = get_settings().search.api_key.get_secret_value()
+SEARCH_BASE_URL = get_settings().search.base_url
+SEARCH_CONFIG_PATH = get_settings().paths.search_config_path
+SEARCH_MAX_RESULTS = get_settings().search.max_results
+SEARCH_PROVIDER = get_settings().search.provider
+SEARCH_PROXY = get_settings().search.proxy
 
 
 @dataclass(frozen=True)

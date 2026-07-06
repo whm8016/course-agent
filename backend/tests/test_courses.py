@@ -54,3 +54,45 @@ async def test_join_course_duplicate(
     )
     assert r.status_code == 200
     assert r.json()["already_enrolled"] is True
+
+
+@pytest.mark.asyncio
+async def test_join_accepts_dashed_code(
+    client: AsyncClient, auth_headers: dict, course_with_code: dict
+):
+    """带 4-4 分隔符的课程码仍能入课（normalize 去连字符）。"""
+    raw = course_with_code["join_code"]
+    dashed = f"{raw[:4]}-{raw[4:]}"
+    r = await client.post(
+        "/api/courses/join",
+        headers=auth_headers,
+        json={"join_code": dashed},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == course_with_code["name"]
+
+
+@pytest.mark.asyncio
+async def test_join_accepts_lowercase_and_spaces(
+    client: AsyncClient, auth_headers: dict, course_with_code: dict
+):
+    """小写 + 前后空格的课程码仍能入课（normalize 转大写、去空白）。"""
+    raw = course_with_code["join_code"]
+    messy = f"  {raw.lower()}  "
+    r = await client.post(
+        "/api/courses/join",
+        headers=auth_headers,
+        json={"join_code": messy},
+    )
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.asyncio
+async def test_join_invalid_code_404(client: AsyncClient, auth_headers: dict):
+    """不存在的课程码 → 404。"""
+    r = await client.post(
+        "/api/courses/join",
+        headers=auth_headers,
+        json={"join_code": "NOPE-NOPE"},
+    )
+    assert r.status_code == 404

@@ -134,35 +134,63 @@ async def set_active_route(payload: ActiveRequest, user: dict = Depends(get_curr
 
 
 async def _probe_profile(prof: dict, timeout: int = 20) -> dict:
-    """用 profile 配置发极简 completion 验证连通（不持久化、不入 client 缓存）。"""
-    from core.llm.catalog import profile_text_model
+    """用 profile 配置发极简 completion 验证对话 + 视觉两路连通（不持久化、不入缓存）。
+
+    admin profile 的视觉模型与对话模型共用同一 binding/api_key/base_url（不拆独立
+    视觉供应商，区别于学生 /llm/me）。返回结构与 /llm/me/test 对齐：顶层=对话结果
+    （向后兼容），另附 text/vision 明细；vision 未配则为 None。
+    """
+    from core.llm.catalog import profile_text_model, profile_vision_model
     from core.llm.provider_factory import get_llm_client
 
     binding = (prof.get("binding") or "").strip()
     api_key = (prof.get("api_key") or "").strip()
     base_url = (prof.get("base_url") or "").strip() or None
     api_version = (prof.get("api_version") or "").strip() or None
-    model = profile_text_model(prof)
-    if not model:
-        return {"ok": False, "error": "未配置 text model"}
-    try:
-        client = get_llm_client(
-            binding=binding or None,
-            api_key=api_key,
-            base_url=base_url,
-            api_version=api_version,
-            model=model,
-            timeout=timeout,
-        )
-        await client.chat.completions.create(
-            model=model,
-            messages=[{"role": "user", "content": "ping"}],
-            max_tokens=1,
-            stream=False,
-        )
-        return {"ok": True, "binding": binding or None, "model": model}
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:300]}
+
+    async def _ping(model: str, warning: str | None) -> dict:
+        if not model:
+            return {"ok": False, "model": "", "error": "未配置模型", "warning": warning}
+        try:
+            client = get_llm_client(
+                binding=binding or None,
+                api_key=api_key,
+                base_url=base_url,
+                api_version=api_version,
+                model=model,
+                timeout=timeout,
+            )
+            await client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": "ping"}],
+                max_tokens=1,
+                stream=False,
+            )
+            return {"ok": True, "model": model, "error": "", "warning": warning}
+        except Exception as e:
+            return {"ok": False, "model": model, "error": str(e)[:300], "warning": warning}
+
+    text_model = profile_text_model(prof)
+    text_res = await _ping(text_model, None)
+
+    vision_res: dict | None = None
+    vision_model = profile_vision_model(prof)
+    if vision_model:
+        from core.llm.capabilities import supports_vision
+
+        warning = None
+        if not supports_vision(binding or None, vision_model):
+            warning = "按能力表该模型可能不支持图片输入，实际看图或失败（如 qwen-vl-plus / gpt-4o）"
+        vision_res = await _ping(vision_model, warning)
+
+    return {
+        "ok": text_res["ok"],
+        "binding": binding or None,
+        "model": text_model,
+        "error": text_res["error"],
+        "text": text_res,
+        "vision": vision_res,
+    }
 
 
 @router.post("/profiles/{profile_id}/test")
@@ -182,6 +210,9 @@ async def probe_route(payload: ProfilePayload, user: dict = Depends(get_current_
         "api_key": payload.api_key,
         "base_url": payload.base_url,
         "api_version": payload.api_version,
-        "models": {"text": {"model": payload.text_model}},
+        "models": {
+            "text": {"model": payload.text_model},
+            "vision": {"model": payload.vision_model},
+        },
     }
     return await _probe_profile(prof)

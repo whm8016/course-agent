@@ -9,13 +9,13 @@ import os
 # Prevent transformers (pulled in by langsmith pytest plugin) from loading TF/Keras
 os.environ.setdefault("USE_TF", "0")
 
-# Set all env vars before importing backend modules
-os.environ.setdefault("DATABASE_URL", "sqlite+aiosqlite:///:memory:")
-os.environ.setdefault("JWT_SECRET", "test-secret-pytest-only-32chars!!")
+# Set all env vars before importing backend modules（嵌套式 env 名，对齐 settings 组合式重构）
+os.environ.setdefault("DB__URL", "sqlite+aiosqlite:///:memory:")
+os.environ.setdefault("SECURITY__JWT_SECRET", "test-secret-pytest-only-32chars!!")
 os.environ.setdefault("ENVIRONMENT", "development")
-os.environ.setdefault("REDIS_URL", "memory://")
-os.environ.setdefault("DASHSCOPE_API_KEY", "sk-test")
-os.environ.setdefault("ALLOWED_ORIGINS", "*")
+os.environ.setdefault("DB__REDIS_URL", "memory://")
+os.environ.setdefault("LLM__API_KEY", "sk-test")
+os.environ.setdefault("SECURITY__ALLOWED_ORIGINS", "*")
 os.environ.setdefault("TESTING", "1")
 
 import pytest

@@ -2,7 +2,7 @@
 
 Pydantic 模型 + 持久化。配置全局共享（``data/mcp.json``）：所有课程/用户
 连接同一组 server。MCP server 是基础设施（数学计算/查词典），非课程内容，
-故部署级而非 per-course。忠实移植 DeepTutor services/mcp/config.py，
+故部署级而非 per-course。
 路径从 admin path service 改为项目 data 目录。
 """
 from __future__ import annotations
@@ -14,7 +14,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from config import MCP_CONFIG_PATH
+from settings import get_settings
+MCP_CONFIG_PATH = get_settings().paths.mcp_config_path
 
 _SERVER_NAME_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
 

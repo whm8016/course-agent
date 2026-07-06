@@ -120,7 +120,10 @@ export default function Sidebar({
 
       <div className="p-3 border-b border-slate-100">
         <CourseSelector
-          courses={courses}
+          courses={[
+            { id: 'general', name: '自由问答', icon: '💬', description: '通用学习问答（未选课）', source: 'builtin' },
+            ...courses.filter((c) => c.id !== 'general'),
+          ]}
           activeCourseId={activeCourseId}
           onSelect={handleSelectCourse}
         />
@@ -253,12 +256,12 @@ export default function Sidebar({
             MCP 服务器配置
           </button>
         )}
-        {role === 'admin' && onLlmProvider && (
+        {onLlmProvider && (
           <button
             onClick={onLlmProvider}
             className="w-full text-xs text-center text-fuchsia-600 hover:text-fuchsia-800 py-1 rounded hover:bg-fuchsia-50 transition mb-1"
           >
-            🤖 模型供应商
+            🤖 {role === 'admin' ? '模型供应商' : '我的模型配置'}
           </button>
         )}
         {role === 'admin' && onSearchAdmin && (

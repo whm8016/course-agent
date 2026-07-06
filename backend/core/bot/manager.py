@@ -162,7 +162,10 @@ class TutorBotManager:
             # 确保归属正确（防止外部传入的 config 缺 owner_id）
             config.owner_id = config.owner_id or owner_id
 
-        from config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL, TEXT_MODEL
+        from settings import get_settings
+        DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
+        DASHSCOPE_BASE_URL = get_settings().llm.base_url
+        TEXT_MODEL = get_settings().llm.text_model
         from core.bot.agent.loop import AgentLoop
         from core.bot.heartbeat.service import HeartbeatService
         from core.bot.providers.openai_compat import OpenAICompatProvider
@@ -234,7 +237,9 @@ class TutorBotManager:
         async def _hb_notify(response: str) -> None:
             await instance.notify_queue.put(response)
 
-        from config import TUTORBOT_HEARTBEAT_ENABLED, TUTORBOT_HEARTBEAT_INTERVAL_SEC
+        from settings import get_settings
+        TUTORBOT_HEARTBEAT_ENABLED = get_settings().tutorbot.heartbeat_enabled
+        TUTORBOT_HEARTBEAT_INTERVAL_SEC = get_settings().tutorbot.heartbeat_interval_sec
         heartbeat_enabled = TUTORBOT_HEARTBEAT_ENABLED
         if heartbeat_enabled:
             interval = TUTORBOT_HEARTBEAT_INTERVAL_SEC
