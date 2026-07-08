@@ -127,11 +127,20 @@ async def get_provider_admin_view(user_id: str) -> dict | None:
 
 
 def _resolve_key(raw: str, existing_encrypted: str) -> str:
-    """key 留空保留原值，否则加密。供对话/视觉两把 key 共用。"""
+    """key 留空保留原值，否则加密。供对话/视觉两把 key 共用。
+
+    M-45：encrypt_secret 在异常（prod 无主密钥/Fernet 故障）下返回空串。旧实现直接落
+    库空串 → 用户以为存了 key，运行时 LLM 调用 401，且静默无提示。现对「非空 raw 却
+    加密出空串」显式报错，让 upsert_provider 把它变成 4xx，拒绝落库无效配置。
+    """
     raw = (raw or "").strip()
     if existing_encrypted and not raw:
         return existing_encrypted  # 留空保留原 key
-    return encrypt_secret(raw)
+    encrypted = encrypt_secret(raw)
+    if raw and not encrypted:
+        # 加密失败：raw 非空却得到空密文 → 不允许静默存空 key
+        raise ValueError("API key 加密失败：检查 PROVIDER_ENCRYPTION_KEY 是否配置")
+    return encrypted
 
 
 async def upsert_provider(user_id: str, payload: UserProviderPayload) -> dict:

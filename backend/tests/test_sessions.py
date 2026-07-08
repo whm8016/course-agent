@@ -16,7 +16,12 @@ async def test_create_session_requires_course_access(client: AsyncClient, auth_h
 
 
 @pytest.mark.asyncio
-async def test_session_ownership_isolation(client: AsyncClient):
+async def test_session_ownership_isolation(client: AsyncClient, admin_headers: dict):
+    """admin 创建的 session，普通用户无权访问（403）。
+
+    H-18 连带：admin 不再靠「注册 username=admin 自动提权」获得，改用 conftest 的
+    admin_headers fixture（注册后经安全通道授予 admin 角色），消除对废弃行为的依赖。
+    """
     u1 = f"sess_u1_{__import__('os').urandom(3).hex()}"
 
     r1 = await client.post(
@@ -25,24 +30,9 @@ async def test_session_ownership_isolation(client: AsyncClient):
     )
     h1 = {"Authorization": f"Bearer {r1.json()['token']}"}
 
-    # Admin can create session on builtin course (seeded stamp/circuit)
-    admin_reg = await client.post(
-        "/api/auth/register",
-        json={"username": "admin", "password": "adminpass123"},
-    )
-    if admin_reg.status_code == 409:
-        admin_login = await client.post(
-            "/api/auth/login",
-            json={"username": "admin", "password": "adminpass123"},
-        )
-        admin_token = admin_login.json()["token"]
-    else:
-        admin_token = admin_reg.json()["token"]
-    admin_h = {"Authorization": f"Bearer {admin_token}"}
-
     created = await client.post(
         "/api/sessions",
-        headers=admin_h,
+        headers=admin_headers,
         json={"course_id": "stamp", "title": "admin session"},
     )
     assert created.status_code == 200

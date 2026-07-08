@@ -33,11 +33,29 @@ DATABASE_URL = get_settings().db.url.get_secret_value()
 logger = logging.getLogger(__name__)
 
 def _engine_kwargs() -> dict:
+    """连接池参数：SQLite 单连接；Postgres 接入 settings 并按 worker 缩放。
+
+    H-17/M-46：旧实现裸读 os.getenv("DB_POOL_SIZE")，既没接 settings，也不按
+    backend_workers 缩放——4 worker × (10+15) = 100 连接，轻易打爆 Postgres
+    max_connections（默认 100）。现从 settings.db.pool_size/max_overflow 取基准值，
+    再按 settings.backend_workers 整除（下限 2），使每 worker 自适应：
+
+        pool_size_per_worker   = max(2, pool_size   // workers)
+        max_overflow_per_worker= max(1, max_overflow // workers)
+        总连接上限 = workers × (pool_size_per_worker + max_overflow_per_worker)
+
+    例：pool=10, overflow=15, workers=4 → 每 worker (2+3)=5 → 4 worker 共 20 连接。
+    SQLite 不走池（StaticPool/NullPool 由方言默认），保持 check_same_thread=False。
+    """
     if DATABASE_URL.startswith("sqlite"):
         return {"connect_args": {"check_same_thread": False}}
+    s = get_settings()
+    workers = max(1, s.backend_workers)
+    pool_size = max(2, s.db.pool_size // workers)
+    max_overflow = max(1, s.db.max_overflow // workers)
     return {
-        "pool_size": int(__import__("os").getenv("DB_POOL_SIZE", "10")),
-        "max_overflow": int(__import__("os").getenv("DB_MAX_OVERFLOW", "15")),
+        "pool_size": pool_size,
+        "max_overflow": max_overflow,
         "pool_pre_ping": True,
         "pool_recycle": 1800,
     }
@@ -605,7 +623,15 @@ async def close_db():
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
-    """FastAPI dependency that yields an async session."""
+    """FastAPI 依赖：yield 一个 async session。
+
+    M-42 风险：FastAPI 依赖的 yield 后半段（commit/关闭）延迟到响应**完全发送**后才执行。
+    对于 StreamingResponse / SSE（如 ``/chat``），这意味着 session 在整个流式输出期间
+    （数十秒～分钟）一直挂着连接，多并发可打满连接池。
+
+    正确做法：SSE / 长流端点**不要**用 ``Depends(get_db)``，改用 :func:`session_scope`
+    在需要查询的片段内开闭，查完立即归还连接，流式阶段不持有任何 DB 连接。
+    """
     async with AsyncSessionLocal() as session:
         try:
             yield session
@@ -613,3 +639,42 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
+
+
+class _SessionScope:
+    """短生命周期 session 上下文（M-42）。
+
+    用法::
+
+        async with session_scope() as db:
+            await check_course_access(db, course_id, user)
+
+    进入即开连接，退出即 commit/关闭（异常回滚）。专供 SSE / 长流端点用，避免
+    ``Depends(get_db)`` 把连接挂到流结束。语义对齐项目既有 ``async with
+    AsyncSessionLocal()`` 模式，只是给出语义化入口 + 统一异常处理。
+    """
+
+    def __init__(self) -> None:
+        self._session: AsyncSession | None = None
+
+    async def __aenter__(self) -> AsyncSession:
+        self._session = AsyncSessionLocal()
+        await self._session.__aenter__()
+        return self._session
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        if self._session is None:
+            return
+        try:
+            if exc_type is None:
+                await self._session.commit()
+            else:
+                await self._session.rollback()
+        finally:
+            await self._session.__aexit__(exc_type, exc, tb)
+            self._session = None
+
+
+def session_scope() -> _SessionScope:
+    """返回短生命周期 session 上下文管理器（见 :class:`_SessionScope`）。"""
+    return _SessionScope()

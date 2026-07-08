@@ -171,7 +171,9 @@ async def answer_now(
     答案仍经原 SSE 流下发。turn 不存在或已结束返回 404（静默，前端按钮此时多半已隐藏）。
     """
     trm = get_turn_runtime_manager()
-    ok = await trm.request_answer_now(body.turn_id)
+    # 传 user_id 做归属校验：turn 不属于当前用户 → trm 返回 False → 404。
+    # 防止 B 用户拿 A 的 turn_id 触发 A 的对话提前作答（Turn IDOR）。
+    ok = await trm.request_answer_now(body.turn_id, user_id=str(user["id"]))
     log_flow("http.chat.answer_now", user_id=str(user["id"]),
              turn_id=body.turn_id, ok=ok)
     if not ok:

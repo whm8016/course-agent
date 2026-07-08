@@ -1,0 +1,96 @@
+{
+  "uid": "loadtest-overview",
+  "title": "压测总览（Google SRE 四黄金信号）",
+  "tags": ["loadtest"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "5s",
+  "time": { "from": "now-15m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "TTFT 首 token 延迟 P50/P95/P99",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le, mode) (rate(ca_llm_first_token_seconds_bucket[1m])))", "legendFormat": "P50 {{mode}}" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le, mode) (rate(ca_llm_first_token_seconds_bucket[1m])))", "legendFormat": "P95 {{mode}}" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le, mode) (rate(ca_llm_first_token_seconds_bucket[1m])))", "legendFormat": "P99 {{mode}}" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "整 turn 耗时 P95（按 mode/status）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.95, sum by (le, mode, status) (rate(ca_turn_duration_seconds_bucket[1m])))", "legendFormat": "P95 {{mode}}/{{status}}" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "流量 turn/s",
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(ca_turn_duration_seconds_count[1m]))", "legendFormat": "turns/s" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "错误率 5xx（应 <0.1%）",
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(http_requests_total{status=~\"5..\"}[1m]))", "legendFormat": "5xx/s" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Leader 收敛（应恰好 1）",
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+      "fieldConfig": { "defaults": { "unit": "short", "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 }, { "color": "red", "value": 2 } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [
+        { "refId": "A", "expr": "sum(ca_leader_is_leader)", "legendFormat": "leader count" }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "饱和度·DB 连接池 checkedout（每 worker，应 <容量 80%）",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "ca_db_pool_checkedout", "legendFormat": "{{worker}}" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "饱和度·LightRAG 实例池（in_use / instances）",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 16 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "ca_lightrag_instances", "legendFormat": "instances" },
+        { "refId": "B", "expr": "ca_lightrag_in_use", "legendFormat": "in_use" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "RSS 内存（浸泡泄漏检测：应平稳不爬升）",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "targets": [
+        { "refId": "A", "expr": "process_resident_memory_bytes", "legendFormat": "{{instance}}" }
+      ]
+    }
+  ]
+}

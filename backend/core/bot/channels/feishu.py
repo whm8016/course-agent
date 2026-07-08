@@ -6,7 +6,6 @@ import json
 import logging
 import re
 import threading
-from collections import OrderedDict
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -100,7 +99,6 @@ class FeishuChannel(BaseChannel):
         self._client: Any = None
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
-        self._processed_message_ids: OrderedDict[str, None] = OrderedDict()
         self._loop: asyncio.AbstractEventLoop | None = None
 
     async def start(self) -> None:
@@ -169,6 +167,15 @@ class FeishuChannel(BaseChannel):
 
     async def stop(self) -> None:
         self._running = False
+        # M-36：join WS 线程（带 3s 超时），避免 stop 后线程仍占用 WS 连接 / 反复重连。
+        # daemon 线程进程退出时会被强杀，但显式 join 让连接尽快释放、日志干净。
+        # 超时不抛错——极端情况下线程仍在 sleep(5)，最多 5s 后自行退出（_running 已 False）。
+        thread = self._ws_thread
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=3.0)
+            if thread.is_alive():
+                logger.warning("Feishu WS thread did not stop within 3s (will exit on its own)")
+        self._ws_thread = None
         logger.info("Feishu bot stopped")
 
     # --- Smart format detection ---
@@ -262,12 +269,13 @@ class FeishuChannel(BaseChannel):
             sender = event.sender
 
             message_id = message.message_id
-            if message_id in self._processed_message_ids:
-                return
-            self._processed_message_ids[message_id] = None
+            # H-14：去重下沉到 Redis（claim_processed 原子 SET NX），leader failover 后
+            # 旧 leader 已处理的 message_id 在新 leader 上仍命中，平台重发不会重复处理。
+            # 内存 OrderedDict 已移除——多 worker 下进程内存不共享，无法防跨进程重复。
+            from core.bot.channels.dedup import claim_processed
 
-            while len(self._processed_message_ids) > 1000:
-                self._processed_message_ids.popitem(last=False)
+            if not await claim_processed(self.name, message_id):
+                return
 
             if sender.sender_type == "bot":
                 return

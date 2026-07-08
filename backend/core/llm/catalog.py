@@ -15,8 +15,10 @@ chat_pipeline 的 profile 解析逻辑）——立即生效、无需重启、不
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import tempfile
 import threading
 from typing import Any
 
@@ -117,13 +119,69 @@ def load_catalog() -> dict[str, Any]:
 
 
 def save_catalog(data: dict[str, Any]) -> None:
-    """写回 catalog（线程安全；保留 _comment / _examples 等额外字段）。"""
+    """写回 catalog（线程安全；保留 _comment / _examples 等额外字段）。
+
+    M-20：用临时文件 + os.replace 原子替换，杜绝 load_catalog 读到「写了一半」的
+    半截 JSON（JSONDecodeError 回退空 catalog → 丢失所有 profile）。os.replace 在
+    Windows/Linux 均为原子的目标文件替换。
+    """
     data.setdefault("profiles", [])
     data.setdefault("active_profile", "default")
     with _write_lock:
-        os.makedirs(os.path.dirname(CATALOG_PATH) or ".", exist_ok=True)
-        with open(CATALOG_PATH, "w", encoding="utf-8") as f:
+        directory = os.path.dirname(CATALOG_PATH) or "."
+        os.makedirs(directory, exist_ok=True)
+        # 临时文件与目标同目录，保证 os.replace 是同分区原子改名
+        fd, tmp_path = tempfile.mkstemp(prefix=".catalog_", suffix=".tmp", dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, CATALOG_PATH)
+        except Exception:
+            # 写失败清理临时文件，不留垃圾
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+
+@contextlib.contextmanager
+def _atomic_update() -> Any:
+    """load→modify→save 临界区上下文（M-20：消除 TOCTOU 丢更新）。
+
+    with _atomic_update() as data:
+        data["profiles"].append(...)   # 在锁内修改
+    # 退出时自动 save_catalog（仍持 _write_lock）
+
+    此前 upsert/delete/set_active 各自 load_catalog → 改 dict → save_catalog，三步之间
+    另一线程可能已写入，本线程的 save 会覆盖对方修改（丢更新）。现在整个「读-改-写」
+    在 _write_lock 内原子完成。
+    """
+    with _write_lock:
+        data = load_catalog()
+        yield data
+        # 写回（_write_lock 可重入？threading.Lock 不可重入——save_catalog 内部再
+        # acquire 会死锁。故 _save_inplace 直接在已持锁状态下写文件，不再 acquire）。
+        _save_inplace(data)
+
+
+def _save_inplace(data: dict[str, Any]) -> None:
+    """save_catalog 的无锁内核（_atomic_update 已持 _write_lock 时调用）。"""
+    data.setdefault("profiles", [])
+    data.setdefault("active_profile", "default")
+    directory = os.path.dirname(CATALOG_PATH) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(prefix=".catalog_", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, CATALOG_PATH)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 def active_profile_id(catalog: dict[str, Any] | None = None) -> str:
@@ -236,40 +294,38 @@ def normalize_profile_payload(raw: dict[str, Any]) -> dict[str, Any]:
 
 def upsert_profile(profile_id: str, payload: dict[str, Any]) -> dict[str, Any]:
     """新增 / 更新指定 id 的 profile（写回 JSON）。返回写入后的 profile 原始对象。"""
-    data = load_catalog()
-    profiles = data.setdefault("profiles", [])
     profile = normalize_profile_payload({**payload, "id": profile_id})
-    for i, p in enumerate(profiles):
-        if isinstance(p, dict) and p.get("id") == profile_id:
-            profiles[i] = profile
-            break
-    else:
-        profiles.append(profile)
-    save_catalog(data)
+    with _atomic_update() as data:
+        profiles = data.setdefault("profiles", [])
+        for i, p in enumerate(profiles):
+            if isinstance(p, dict) and p.get("id") == profile_id:
+                profiles[i] = profile
+                break
+        else:
+            profiles.append(profile)
     return profile
 
 
 def delete_profile(profile_id: str) -> bool:
-    data = load_catalog()
-    profiles = data.get("profiles") or []
-    remaining = [p for p in profiles if not (isinstance(p, dict) and p.get("id") == profile_id)]
-    if len(remaining) == len(profiles):
-        return False
-    data["profiles"] = remaining
-    if data.get("active_profile") == profile_id:
-        data["active_profile"] = remaining[0]["id"] if remaining else "default"
-    save_catalog(data)
+    with _atomic_update() as data:
+        profiles = data.get("profiles") or []
+        remaining = [p for p in profiles if not (isinstance(p, dict) and p.get("id") == profile_id)]
+        if len(remaining) == len(profiles):
+            return False
+        data["profiles"] = remaining
+        if data.get("active_profile") == profile_id:
+            data["active_profile"] = remaining[0]["id"] if remaining else "default"
     return True
 
 
 def set_active(profile_id: str) -> bool:
-    data = load_catalog()
-    if not any(
-        isinstance(p, dict) and p.get("id") == profile_id for p in data.get("profiles") or []
-    ):
-        return False
-    data["active_profile"] = profile_id
-    save_catalog(data)
+    with _atomic_update() as data:
+        if not any(
+            isinstance(p, dict) and p.get("id") == profile_id
+            for p in data.get("profiles") or []
+        ):
+            return False
+        data["active_profile"] = profile_id
     return True
 
 

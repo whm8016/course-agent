@@ -26,6 +26,15 @@ from core.bot.config.paths import get_bot_workspace_root
 logger = logging.getLogger(__name__)
 
 
+class NotLeaderError(RuntimeError):
+    """非 leader worker 尝试启停单例服务（bot）时抛出。
+
+    多 worker + LB 下，bot 实例只能由 leader 持有（否则两个 worker 各持一份同一
+    bot → split-brain：同一 IM 消息被双方各处理一遍、心跳双跑、cron 双触发）。
+    API 层捕获此异常 → 返回 409，让客户端/LB 把请求重试到 leader worker。
+    """
+
+
 @dataclass
 class BotConfig:
     """Configuration for a single TutorBot instance."""
@@ -150,6 +159,17 @@ class TutorBotManager:
         uid = _uid(owner_id, bot_id)
         if uid in self._bots and self._bots[uid].running:
             return self._bots[uid]
+
+        # 多 worker 门控（H-12/H-13）：仅 leader 可持有运行中的 bot 实例。
+        # follower 拒绝启动 → 抛 NotLeaderError，API 层转 409 让客户端重试到 leader，
+        # 杜绝「LB 把请求打到 follower、follower 也拉起一份 bot」的 split-brain。
+        # is_leader() 动态反映竞选状态（leader failover 后新 leader 实时为 True）。
+        from core.leader import is_leader
+
+        if not is_leader():
+            raise NotLeaderError(
+                "本 worker 不是 leader，无法启停 bot 实例；请将请求重试到 leader worker。"
+            )
 
         self._ensure_bot_dirs(owner_id, bot_id)
 
@@ -319,13 +339,26 @@ class TutorBotManager:
         return True
 
     async def delete_bot(self, owner_id: str, bot_id: str) -> bool:
-        """删除 bot：先停（若在跑）再删持久化配置目录。"""
+        """删除 bot：先停（若在跑）→ 清理 cron 定时任务（M-37）→ 删持久化配置目录。"""
         uid = _uid(owner_id, bot_id)
         if uid in self._bots:
             await self.stop_bot(owner_id, bot_id)
         bot_dir = self._bot_dir(owner_id, bot_id)
         if not bot_dir.exists():
             return False
+
+        # M-37：清理该 bot 的所有 cron 定时任务，避免「bot 已删但定时任务残留」
+        # 持续触发（owner_key 对齐 api/bot.py:_reminder_owner_key 的构造）。
+        try:
+            from services.cron.service import get_cron_service
+
+            owner_key = f"partner:{owner_id}:{bot_id}" if owner_id else f"partner::{bot_id}"
+            removed = get_cron_service().remove_owner_jobs(owner_key)
+            if removed:
+                logger.info("Removed %d cron job(s) for deleted bot '%s'", removed, bot_id)
+        except Exception:
+            logger.exception("Failed to clean cron jobs for deleted bot '%s'", bot_id)
+
         import shutil
         shutil.rmtree(bot_dir)
         logger.info("TutorBot '%s' deleted (owner=%s)", bot_id, owner_id or "(legacy)")
@@ -501,7 +534,16 @@ class TutorBotManager:
         )
 
     async def auto_start_bots(self) -> None:
-        """Start bots marked with auto_start: true（所有 owner + legacy）。"""
+        """Start bots marked with auto_start: true（所有 owner + legacy）。
+
+        多 worker 门控（H-12/H-13）：理论上只由 leader 的 on_gain 回调拉起，但这里
+        再防御性校验一次 is_leader()——非 leader 直接跳过，杜绝 follower 误启动。
+        """
+        from core.leader import is_leader
+
+        if not is_leader():
+            logger.info("auto_start_bots skipped: current worker is not leader")
+            return
         for bid in self._discover_legacy_bot_ids():
             await self._maybe_auto_start("", bid)
         for owner_id in self._discover_owners():

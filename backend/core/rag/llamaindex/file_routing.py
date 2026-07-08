@@ -110,6 +110,11 @@ class FileTypeRouter:
     PPTX_EXTENSIONS = {".pptx"}
     IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".tiff", ".tif"}
 
+    # M-27：legacy 二进制格式（.doc/.ppt）仅支持 OOXML 解析（python-docx/python-pptx），
+    # 这两类无法解析。上传层应已拒绝（见 api/admin._ALLOWED_EXT）；此处列出用于在
+    # classify_files 的 unsupported 分支给出针对性提示，便于排查上游漏网情况。
+    LEGACY_UNSUPPORTED = {".doc", ".ppt", ".xls", ".wps"}
+
     @classmethod
     def get_document_type(cls, file_path: str) -> DocumentType:
         """Classify a single file by its type."""
@@ -176,6 +181,15 @@ class FileTypeRouter:
             f"{len(parser_files)} parser, {len(text_files)} text, {len(docx_files)} docx, "
             f"{len(pptx_files)} pptx, {len(image_files)} image, {len(unsupported)} unsupported"
         )
+        # M-27：识别 legacy 格式（.doc/.ppt 等），给针对性 warning——这类文件无解析
+        # handler，会被静默丢弃。若此处出现，说明上游上传校验漏网。
+        legacy_hits = [p for p in unsupported if Path(p).suffix.lower() in cls.LEGACY_UNSUPPORTED]
+        if legacy_hits:
+            logger.warning(
+                "检测到 legacy 格式文件（无解析 handler，将被跳过）：%s。"
+                "请转换为 .docx/.pptx 后重新上传。",
+                [Path(p).name for p in legacy_hits],
+            )
 
         return FileClassification(
             parser_files=parser_files,

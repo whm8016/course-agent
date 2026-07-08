@@ -23,6 +23,7 @@ from core.rag.types import RetrievalResult, ChunkMeta
 from core.rag.retriever.base import Retriever
 from core.rag.lightrag import (
     _get_instance,
+    _release_instance,
     is_lightrag_available,
 )
 
@@ -262,6 +263,9 @@ class LightRAGRetriever(Retriever):
         except Exception as exc:
             logger.error("LightRAGRetriever.retrieve failed: %s", exc, exc_info=True)
             return []
+        finally:
+            # H-10：释放引用计数，让实例可被 LRU 淘汰（_get_instance 已 +1）
+            await _release_instance(course_id)
 
     async def retrieve_context(
         self,
@@ -303,6 +307,8 @@ class LightRAGRetriever(Retriever):
         except Exception as exc:
             logger.error("LightRAGRetriever.retrieve_context failed: %s", exc, exc_info=True)
             return ""
+        finally:
+            await _release_instance(course_id)
 
     async def query(
         self,
@@ -358,6 +364,8 @@ class LightRAGRetriever(Retriever):
         except Exception as exc:
             logger.error("LightRAGRetriever.query failed: %s", exc, exc_info=True)
             return {"answer": "", "contexts": [], "mode": mode or "mix", "error": str(exc)}
+        finally:
+            await _release_instance(course_id)
 
 
 # ── 向后兼容函数（deprecated，将从 lightrag_engine.py 迁移）────────────────────────

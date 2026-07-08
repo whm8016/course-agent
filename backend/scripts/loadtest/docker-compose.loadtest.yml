@@ -1,0 +1,168 @@
+# =============================================================================
+# 上线前压测环境（全隔离，对齐生产 docker-compose.yml 形态）：
+#   1× backend（gunicorn -w4）+ 1× worker（arq）+ nginx(前置代理) + postgres(pgvector)
+#   + redis + prometheus + grafana
+#
+# 为什么是这套（不是之前的 4 容器）：
+#   生产真实形态见 docker-compose.yml：单 backend 容器 gunicorn -w4(:8002) + 独立 worker
+#   容器(arq) + frontend nginx(:80)。压测要"压真实要上线的东西"，故逐项对齐：
+#     1. backend：gunicorn -k UvicornWorker -w $BACKEND_WORKERS(=4)，与生产 docker-compose.yml:64
+#        一致（之前的"4 容器各 1 worker"是无证据臆想的多 Pod 形态，已废弃）。
+#     2. worker：arq 进程消费 run_indexing / run_llamaindex_build / flush_all_pending_job
+#        （worker.py:269）。不加它则 KB 索引/记忆 flush 链路跑不了、且 H-7~H-9 无法复验。
+#     3. nginx：保留作前置代理（生产链路 nginx→backend），buffering off 保证 SSE/TTFT 真实。
+#
+# 已知 trade-off：项目用普通 prometheus_client（未接 prometheus_multiprocess），gunicorn 4 worker
+#   各独立 REGISTRY，/metrics 默认只能抓到 4 个 worker 之一。但不影响 Locust 客户端测的总
+#   RPS/P95/失败率（go/no-go 核心）。要看全量需接 multiprocess（生产代码改动，另议）。
+#
+# build：压测容器 build 自 backend/Dockerfile（与生产一致），而非已删除的单体根 Dockerfile。
+#
+# 端口：nginx 宿主 8000 / backend 宿主 8102(容器内 8002) / postgres 5433 / redis 6380
+#   / prometheus 9090 / grafana 3000。均错开本机开发容器（8002/5432/6379）。
+#
+# 启动（在本文件所在目录 backend/scripts/loadtest/ 下执行）：
+#   docker compose -f docker-compose.loadtest.yml up -d --build
+#   docker compose -f docker-compose.loadtest.yml logs -f backend
+# 看某 worker 指标：curl http://localhost:8102/metrics | grep ca_
+# Locust 入口：       http://localhost:8000  （nginx 前置代理到 backend）
+# Prometheus：        http://localhost:9090
+# Grafana：           http://localhost:3000  （admin/admin）
+# 停止并清库：        docker compose -f docker-compose.loadtest.yml down -v
+# =============================================================================
+
+x-backend-common: &backend-common
+  build:
+    context: ../..        # = backend/（从 backend/scripts/loadtest/ 往上两级）；Dockerfile 即 backend/Dockerfile
+    dockerfile: Dockerfile
+  # 逐字节对齐生产 docker-compose.yml:64（gunicorn -k UvicornWorker -w4）；gunicorn 默认就不记
+  # access log（accesslog 默认 None）无需额外参数——曾误加不存在的 --no-access-log 致启动失败。
+  command: ["sh", "-c", "uv run --no-dev gunicorn main:app -k uvicorn.workers.UvicornWorker -w $${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
+  env_file:
+    - .env.loadtest
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  healthcheck:
+    # /api/health 查 db+redis+llm-key 三项（容器内 8002）。
+    test:
+      - CMD-SHELL
+      - "python -c \"import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8002/api/health',timeout=5).status==200 else 1)\""
+    interval: 10s
+    timeout: 6s
+    retries: 15
+    start_period: 45s
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: course_agent_loadtest
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - pgdata_loadtest:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d course_agent_loadtest"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    ports:
+      - "5433:5432"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    ports:
+      - "6380:6379"
+
+  # mem0 外部依赖 mock：embedding + 记忆提取 LLM（默认不依赖，embedding 走真千问、
+  # 记忆提取走真 DeepSeek）。要切纯 mock：把 LLM__/EMBEDDING__ base_url 指回 mem0-mock:8080。
+  mem0-mock:
+    image: python:3.12-slim
+    volumes:
+      - ./mem0_mock_server.py:/app/mem0_mock_server.py:ro
+    command: ["python", "/app/mem0_mock_server.py"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request as u,sys; sys.exit(0 if u.urlopen('http://127.0.0.1:8080/',timeout=3).status==200 else 1)\""]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # backend：gunicorn -w4（对齐生产）。1 个容器，非 4 容器。不设 BACKEND_WORKER_ID →
+  # 采样器 main.py:251 fallback 到 pid 区分 4 worker。
+  backend:
+    <<: *backend-common
+    ports:
+      - "8102:8002"   # 宿主 8102（避开开发 8002）；容器内 8002
+
+  # worker：arq 后台任务进程（对齐生产 docker-compose.yml 的 worker 服务）。
+  # 消费 run_indexing / run_llamaindex_build / flush_all_pending_job + cron_flush_memory。
+  # 不复用 *backend-common（那含 /api/health healthcheck，arq 没有）；无 healthcheck（生产也没有）。
+  worker:
+    build:
+      context: ../..      # 同 backend，复用 backend/Dockerfile
+      dockerfile: Dockerfile
+    env_file:
+      - .env.loadtest
+    command: ["uv", "run", "--no-dev", "python", "-m", "arq", "worker.WorkerSettings"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # nginx 前置代理（对齐生产链路 nginx→backend）：buffering off 保证 SSE/TTFT 真实。
+  # upstream 单 backend（见 nginx.loadtest.conf）。
+  nginx:
+    image: nginx:1.27-bookworm
+    volumes:
+      - ./nginx.loadtest.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+    ports:
+      - "9090:9090"
+    depends_on:
+      - backend
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+
+volumes:
+  pgdata_loadtest:
+  grafana_data:

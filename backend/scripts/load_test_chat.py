@@ -261,7 +261,7 @@ async def main():
                 tokens.append(token)
             else:
                 print(f"  WARNING: student {i:02d} auth failed, skipping")
-            # register rate limit = 10/min, login = 15/min; be conservative
+            # register rate limit = 30/min, login = 40/min; be conservative
             if i % 8 == 0:
                 print("  (等待 65s 避免注册限流...)")
                 await asyncio.sleep(65)

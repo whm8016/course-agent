@@ -28,6 +28,26 @@ logger = logging.getLogger(__name__)
 T = TypeVar("T")
 
 
+def _resolve_backend_workers() -> int:
+    """解析 worker 数（M-16：统一 BACKEND_WORKERS 与 settings.backend_workers 同一来源）。
+
+    优先级：env BACKEND_WORKERS（uvicorn/gunicorn -w 注入，最准）> settings.backend_workers
+    > 4（兜底）。最小 1（防除零）。此前 __init__ 只读 env，settings.backend_workers 的值被忽略，
+    两者不一致时熔断器阈值与 LRU 缩放口径分裂。
+    """
+    import os
+
+    raw = os.getenv("BACKEND_WORKERS")
+    if raw and raw.strip().isdigit():
+        return max(1, int(raw))
+    try:
+        from settings.base import get_settings
+
+        return max(1, get_settings().backend_workers)
+    except Exception:  # pragma: no cover - settings 缺失兜底
+        return 4
+
+
 class CircuitState(Enum):
     """熔断器状态"""
     CLOSED = "closed"      # 正常状态，允许请求通过
@@ -78,16 +98,44 @@ class CircuitBreaker:
     def __init__(self, name: str, config: CircuitBreakerConfig | None = None):
         self.name = name
 
-        # 多 worker 下调整阈值: 总阈值 / worker 数 (轻量方案)
-        _workers = int(__import__("os").getenv("BACKEND_WORKERS", "4"))
+        # 多 worker 下调整阈值: 总阈值 / worker 数 (轻量方案)。读 BACKEND_WORKERS 与
+        # settings.backend_workers 保持同一来源（M-16）：env 优先，回退 settings，再回退 4。
+        _workers = _resolve_backend_workers()
         _default_config = CircuitBreakerConfig()
         if config is None:
             config = CircuitBreakerConfig(
-                failure_threshold=max(2, _default_config.failure_threshold // _workers),
+                failure_threshold=_default_config.failure_threshold,
                 success_threshold=_default_config.success_threshold,
                 open_timeout=_default_config.open_timeout,
                 half_open_max_calls=_default_config.half_open_max_calls,
             )
+        # M-14：failure_threshold 是「并发维度」阈值——多 worker 下每进程独立计数，
+        # 总阈值会放大 N 倍，故统一按 worker 缩放（此前仅 config=None 路径缩放，get_llm_circuit_breaker
+        # 显式传 config 时被跳过，多 worker 下熔断迟钝）。success_threshold / open_timeout
+        # 是「恢复探测」语义，与并发无关，不缩放。下限 2 避免单次抖动即熔断。
+        config = CircuitBreakerConfig(
+            failure_threshold=max(2, config.failure_threshold // _workers),
+            success_threshold=config.success_threshold,
+            open_timeout=config.open_timeout,
+            half_open_max_calls=config.half_open_max_calls,
+        )
+
+        # H-11 守卫：success_threshold > half_open_max_calls 会导致 HALF_OPEN 死锁
+        # （探测名额耗尽后无法累计足够 success 关闭熔断）。强制抬升 half_open_max_calls
+        # 至少等于 success_threshold，保证串行探测能凑齐成功次数。
+        if config.success_threshold > config.half_open_max_calls:
+            logger.warning(
+                "CircuitBreaker [%s]: half_open_max_calls(%d) < success_threshold(%d)，"
+                "抬升至 success_threshold 以避免 HALF_OPEN 死锁",
+                name, config.half_open_max_calls, config.success_threshold,
+            )
+            config = CircuitBreakerConfig(
+                failure_threshold=config.failure_threshold,
+                success_threshold=config.success_threshold,
+                open_timeout=config.open_timeout,
+                half_open_max_calls=config.success_threshold,
+            )
+
         self.config = config
         self.state = CircuitState.CLOSED
         self.failure_count = 0
@@ -132,11 +180,16 @@ class CircuitBreaker:
         async with self._lock:
             if self.state == CircuitState.HALF_OPEN:
                 self.success_count += 1
+                # H-11 修复：释放本次探测占用的 half_open_calls 名额，使串行多次探测能
+                # 累计到 success_threshold（旧实现只增不减 → 名额耗尽 → 第二次探测被拒 →
+                # 永久卡 HALF_OPEN）。HALF_OPEN 期间 call() 串行持锁放行，递减不会越界。
+                self.half_open_calls = max(0, self.half_open_calls - 1)
                 if self.success_count >= self.config.success_threshold:
                     logger.info(f"CircuitBreaker [{self.name}]: HALF_OPEN -> CLOSED")
                     self.state = CircuitState.CLOSED
                     self.failure_count = 0
                     self.success_count = 0
+                    self.half_open_calls = 0
             else:
                 self.failure_count = 0
 
@@ -154,6 +207,9 @@ class CircuitBreaker:
                 )
                 self.state = CircuitState.OPEN
                 self.success_count = 0
+                # H-11：释放探测占用名额，避免下次 OPEN→HALF_OPEN 时 half_open_calls
+                # 仍为 1 导致探测被拒（死锁残留）。
+                self.half_open_calls = 0
             elif self.failure_count >= self.config.failure_threshold:
                 logger.warning(
                     f"CircuitBreaker [{self.name}]: CLOSED -> OPEN "

@@ -85,6 +85,16 @@ class DashScopeEmbeddingClient:
                 input=batch,
             )
 
+            # M-25：校验返回向量数与输入 batch 等长。某些 provider 在超限/截断时会静默
+            # 返回少于输入的向量（或按 index 错位），若不校验，错位/缺失向量会污染
+            # 向量库，且后续 sorted-by-index 无法发现（少返回的直接丢）。不匹配直接抛错，
+            # 让上层重试，绝不把残缺结果写入。
+            if len(resp.data) != len(batch):
+                raise RuntimeError(
+                    f"Embedding 返回长度不匹配：期望 {len(batch)}，实际 {len(resp.data)}"
+                    f"（model={EMBEDDING_MODEL}，batch={len(batch)}）"
+                )
+
             # 按 index 排序，保证顺序与输入一致
             ordered = sorted(resp.data, key=lambda d: d.index)
             for item in ordered:

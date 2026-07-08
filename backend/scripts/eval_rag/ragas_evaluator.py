@@ -1,17 +1,26 @@
-"""RAGAS Evaluator —— 对各模式的查询结果计算 RAGAS 指标。
+"""RAGAS Evaluator —— ragas 0.4.3 evaluate() 适配。
 
-支持 ragas >= 0.2（自动检测 API 版本）：
-  - v0.4+: 使用 EvaluationDataset + SingleTurnSample，LangChain LLM 直接传入
-  - v0.2.x: 使用 EvaluationDataset + evaluate()
-  - v0.1.x: 使用 HuggingFace Dataset + evaluate()
+LLM：llm_factory(model, client=OpenAI(...)) → InstructorLLM。阅卷走 DeepSeek（_build_openai_client）。
+Embedding：_DimensionalOpenAIEmbeddings 固定注入 dimensions（修 answer_relevancy=0，Bug 2），
+           走千问独立 client（_build_embed_client），与 LLM 不同 provider。
+Metrics：ragas 0.4.3 的 evaluate() 用 isinstance(m, Metric) 校验。collections 版类基类是
+         BaseMetric（不是 Metric），传给 evaluate 会被拒绝。故标准指标用 ragas.metrics
+         模块级单例（LLM/embedding 由 evaluate(llm=, embeddings=) 注入），factual_correctness/
+         noise_sensitivity 标准单例已移除、用 ragas.metrics._xxx 旧实现类（仍是 Metric），
+         AspectCritic 自定义 definition 构造。
 
-指标：context_precision, context_recall, faithfulness, answer_relevancy
+注意：dataset_generator 合成走 ragas 原生 TestsetGenerator(llm=, embedding_model=)（async embedding
+用 AsyncOpenAI），与阅卷 evaluate 共用 _build_ragas_llm/_build_ragas_embeddings，不走 langchain。
 """
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any
+
+try:
+    from ragas.embeddings import OpenAIEmbeddings
+except ImportError:  # ragas 未装时 import evaluator 仍可用（调用 evaluate 时才报错）
+    OpenAIEmbeddings = object  # type: ignore[assignment,misc]
 
 from . import config
 
@@ -19,174 +28,271 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# LLM / Embedding 配置
+# 固定 dimensions 的 Embedding（Bug 2 修复）
 # ---------------------------------------------------------------------------
-def _build_llm():
-    """构建 LangChain ChatOpenAI 实例，直接传给 ragas evaluate()。"""
-    from langchain_openai import ChatOpenAI
+class _DimensionalOpenAIEmbeddings(OpenAIEmbeddings):
+    """固定注入 dimensions 的 OpenAIEmbeddings（DashScope text-embedding-v3 需要）。
 
-    # 确保 OPENAI_API_KEY 环境变量存在（LangChain 内部会检查）
-    api_key = config.LLM_API_KEY
-    if api_key and not os.environ.get("OPENAI_API_KEY"):
-        os.environ["OPENAI_API_KEY"] = api_key
-
-    return ChatOpenAI(
-        model=config.LLM_MODEL,
-        api_key=api_key,
-        base_url=config.LLM_BASE_URL,
-        temperature=0,
-    )
-
-
-def _build_embeddings():
-    """构建 LangChain OpenAIEmbeddings 实例。"""
-    from langchain_openai import OpenAIEmbeddings
-
-    return OpenAIEmbeddings(
-        model=config.EMBED_MODEL,
-        api_key=config.EMBED_API_KEY,
-        base_url=config.EMBED_BASE_URL,
-    )
-
-
-# ---------------------------------------------------------------------------
-# 获取指标对象
-# ---------------------------------------------------------------------------
-def _get_metrics(metric_names: list[str]) -> list[Any]:
-    """根据名称列表获取 RAGAS 指标对象（已初始化的实例）。
-
-    ragas 0.4 中 `from ragas.metrics import context_precision` 返回实例（有 deprecation 警告但可用）。
+    ragas OpenAIEmbeddings 透传 **kwargs 到 client.embeddings.create，但 metric 调用
+    embed 时不传 dimensions。DashScope text-embedding-v3 在不传 dimensions 时（尤其
+    langchain 旧路径）可能返回异常向量 → answer_relevancy 内部 cosine 相似度全 0。
+    在 4 个 embed 方法里 setdefault dimensions，确保显式传。
     """
-    try:
-        import ragas.metrics as m
-        mapping = {
-            "context_precision": getattr(m, "context_precision", None),
-            "context_recall": getattr(m, "context_recall", None),
-            "faithfulness": getattr(m, "faithfulness", None),
-            "answer_relevancy": getattr(m, "answer_relevancy", None),
-        }
-        metrics = []
-        for name in metric_names:
-            obj = mapping.get(name)
-            if obj is None:
-                logger.warning("未知指标: %s，跳过", name)
-                continue
-            metrics.append(obj)
-        if metrics:
-            return metrics
-    except Exception as e:
-        logger.warning("旧版 ragas.metrics import 失败: %s", e)
 
-    # 新版 fallback
-    logger.info("尝试新版 ragas.metrics.collections import...")
-    try:
-        from ragas.metrics.collections.context_precision import ContextPrecision
-        from ragas.metrics.collections.context_recall import ContextRecall
-        from ragas.metrics.collections.faithfulness import Faithfulness
-        from ragas.metrics.collections.answer_relevancy import AnswerRelevancy
+    def __init__(self, client: Any, model: str, dimensions: int, cache: Any = None):
+        super().__init__(client=client, model=model, cache=cache)
+        self._dimensions = dimensions
 
-        llm = _build_llm()
-        mapping = {
-            "context_precision": ContextPrecision(llm=llm),
-            "context_recall": ContextRecall(llm=llm),
-            "faithfulness": Faithfulness(llm=llm),
-            "answer_relevancy": AnswerRelevancy(llm=llm),
-        }
-        metrics = []
-        for name in metric_names:
-            obj = mapping.get(name)
-            if obj is None:
-                logger.warning("未知指标: %s，跳过", name)
-                continue
-            metrics.append(obj)
-        return metrics
-    except Exception as e:
-        logger.error("获取 metrics 失败: %s", e)
-        return []
+    def embed_text(self, text: str, **kwargs: Any):
+        kwargs.setdefault("dimensions", self._dimensions)
+        return super().embed_text(text, **kwargs)
+
+    async def aembed_text(self, text: str, **kwargs: Any):
+        kwargs.setdefault("dimensions", self._dimensions)
+        return await super().aembed_text(text, **kwargs)
+
+    def embed_texts(self, texts: list[str], **kwargs: Any):
+        kwargs.setdefault("dimensions", self._dimensions)
+        return super().embed_texts(texts, **kwargs)
+
+    async def aembed_texts(self, texts: list[str], **kwargs: Any):
+        kwargs.setdefault("dimensions", self._dimensions)
+        return await super().aembed_texts(texts, **kwargs)
+
+    # langchain 接口适配：answer_relevancy 等标准指标调 embed_query/embed_documents，
+    # 而 ragas OpenAIEmbeddings 只有 embed_text/embed_texts。二者返回类型一致，直接转发。
+    def embed_query(self, text: str, **kwargs: Any):
+        return self.embed_text(text, **kwargs)
+
+    def embed_documents(self, texts: list[str], **kwargs: Any):
+        return self.embed_texts(texts, **kwargs)
+
+    async def aembed_query(self, text: str, **kwargs: Any):
+        return await self.aembed_text(text, **kwargs)
+
+    async def aembed_documents(self, texts: list[str], **kwargs: Any):
+        return await self.aembed_texts(texts, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# OpenAI client（DashScope 兼容）—— LLM 与 Embedding 共用
+# ---------------------------------------------------------------------------
+def _build_openai_client():
+    """构造 LLM 专用 OpenAI 兼容 client（DeepSeek，供阅卷/合成 LLM 用）。"""
+    from openai import OpenAI
+
+    return OpenAI(api_key=config.LLM_API_KEY, base_url=config.LLM_BASE_URL)
+
+
+def _build_embed_client():
+    """构造 embedding 专用 OpenAI 兼容 client（千问 DashScope，与 LLM 不同 provider）。
+
+    不能复用 _build_openai_client：LLM 走 DeepSeek base_url，embedding 走千问，
+    混用会把 embedding 请求打到 DeepSeek 报错（混合 provider 下的隐藏坑）。
+    """
+    from openai import OpenAI
+
+    return OpenAI(api_key=config.EMBED_API_KEY, base_url=config.EMBED_BASE_URL)
+
+
+def _build_embed_async_client():
+    """async embedding client（千问 DashScope），供合成路径的 async embedding。
+
+    ragas OpenAIEmbeddings 的 aembed_* 要求 async client（同步 client 会 raise
+    "Cannot use aembed_texts() with a synchronous client"）。合成 generate_with_chunks
+    走 async 路径，故单独用 AsyncOpenAI；阅卷 evaluate 用同步 _build_embed_client 不变。
+    """
+    from openai import AsyncOpenAI
+
+    return AsyncOpenAI(api_key=config.EMBED_API_KEY, base_url=config.EMBED_BASE_URL)
+
+
+# ---------------------------------------------------------------------------
+# RAGAS InstructorLLM / Embeddings（阅卷 evaluate + 合成 generate 共用）
+# ---------------------------------------------------------------------------
+def _build_ragas_llm(model: str | None = None, *, max_tokens: int | None = None):
+    """llm_factory → InstructorBaseRagasLLM（collections metrics 只接受这种）。
+
+    model 默认 JUDGE_LLM_MODEL（阅卷用强推理 deepseek-v4-pro）；合成出题可传
+    GEN_LLM_MODEL（flash，省成本）。
+    max_tokens 默认 JUDGE_LLM_MAX_TOKENS（4096）；合成路径传 GEN_LLM_MAX_TOKENS（8192）。
+    必须显式传：ragas 默认 max_tokens=1024，NERExtractor / claims 分解等结构化输出会超限被截断
+    → instructor IncompleteOutputException（合成 NER 步骤直接拉崩 generate_with_chunks）。
+    """
+    from ragas.llms import llm_factory
+
+    return llm_factory(
+        model=model or config.JUDGE_LLM_MODEL,
+        client=_build_openai_client(),
+        max_tokens=max_tokens or config.JUDGE_LLM_MAX_TOKENS,
+    )
+
+
+def _build_ragas_embeddings(*, async_client: bool = False):
+    """RAGAS embeddings（固定 dimensions，走千问 embed client）。
+
+    async_client=True 用 AsyncOpenAI（供合成 generate_with_chunks 的 async 路径）；
+    默认 False 用同步 client（供阅卷 evaluate，sync embed_text）。
+    """
+    client = _build_embed_async_client() if async_client else _build_embed_client()
+    return _DimensionalOpenAIEmbeddings(
+        client=client,
+        model=config.EMBED_MODEL,
+        dimensions=config.EMBED_DIMENSIONS,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 获取 collections 指标对象
+# ---------------------------------------------------------------------------
+# AspectCritic 自定义领域指标的评判标准（definition 注入 instruction）
+_TEACHING_ACCURACY_DEFINITION = (
+    "回答在教学上准确、无误导：专业术语使用正确，公式/定理引用准确，"
+    "不存在可能误导学生的表述（概念混淆、量纲错误、符号错误等）。"
+)
+_SAFETY_DEFINITION = (
+    "回答不包含可能导致实验安全事故的错误指导，例如短路保护提示缺失、"
+    "电压极性错误、测量量程选择不当、危险操作未加警示。"
+)
+
+
+def _get_metrics(metric_names: list[str], llm: Any, embeddings: Any) -> list[Any]:
+    """根据名称列表返回 ragas 0.4.3 指标（evaluate 要求 isinstance(m, Metric)）。
+
+    ragas 0.4.3 的 evaluate() 用 isinstance(m, Metric) 校验。collections 版类
+    （Faithfulness(llm=...) 等）基类是 BaseMetric 而非 Metric，会被拒绝。故：
+      - 标准指标用 ragas.metrics 模块级单例（faithfulness/context_precision/context_recall/
+        answer_relevancy），LLM 与 embedding 由 evaluate(llm=, embeddings=) 统一注入；
+      - factual_correctness / noise_sensitivity 标准单例已移除，用 ragas.metrics._xxx
+        旧实现类构造（仍是 Metric，自带 llm）；
+      - AspectCritic 需自定义 definition，构造实例（是 Metric）。
+
+    支持指标：
+      - context_precision / context_recall：检索质量（tier1）
+      - faithfulness：生成防幻觉（tier2）
+      - factual_correctness：事实对齐度（tier2，claim 分解 + NLI，mode=f1）
+      - noise_sensitivity：无关文档误答敏感度（tier3，mode=irrelevant）
+      - answer_relevancy：回答相关性（需 embedding）
+      - teaching_accuracy / safety：AspectCritic 领域定制（binary 1/0）
+    """
+    from ragas.metrics import (
+        AspectCritic,
+        answer_relevancy,
+        context_precision,
+        context_recall,
+        faithfulness,
+    )
+    from ragas.metrics._factual_correctness import FactualCorrectness
+    from ragas.metrics._noise_sensitivity import NoiseSensitivity
+
+    factory: dict[str, Any] = {
+        # 标准单例：LLM/embedding 由 evaluate(llm=, embeddings=) 注入，不在此构造
+        "context_precision": lambda: context_precision,
+        "context_recall": lambda: context_recall,
+        "faithfulness": lambda: faithfulness,
+        "answer_relevancy": lambda: answer_relevancy,
+        # 标准单例已移除的进阶指标：用旧实现类构造（仍是 Metric，自带 llm）
+        "factual_correctness": lambda: FactualCorrectness(llm=llm, mode="f1"),
+        "noise_sensitivity": lambda: NoiseSensitivity(llm=llm, mode="irrelevant"),
+        # AspectCritic 领域定制（需 definition）
+        "teaching_accuracy": lambda: AspectCritic(
+            name="teaching_accuracy",
+            definition=_TEACHING_ACCURACY_DEFINITION,
+            llm=llm,
+        ),
+        "safety": lambda: AspectCritic(
+            name="safety", definition=_SAFETY_DEFINITION, llm=llm
+        ),
+    }
+    metrics: list[Any] = []
+    for name in metric_names:
+        f = factory.get(name)
+        if f is None:
+            logger.warning("未知指标: %s，跳过", name)
+            continue
+        try:
+            metrics.append(f())
+        except Exception as e:
+            logger.error("构造指标 %s 失败: %s", name, e)
+    return metrics
 
 
 # ---------------------------------------------------------------------------
 # 构建评测数据集
 # ---------------------------------------------------------------------------
-def _build_eval_dataset(
-    qa_items: list[dict], mode_results: list[dict]
-) -> Any:
-    """构建 EvaluationDataset（ragas v0.2+）。"""
-    try:
-        from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
+def _build_eval_dataset(qa_items: list[dict], mode_results: list[dict]) -> Any:
+    """构建 EvaluationDataset（ragas v0.2+ SingleTurnSample）。"""
+    from ragas.dataset_schema import EvaluationDataset, SingleTurnSample
 
-        samples = []
-        for item, result in zip(qa_items, mode_results):
-            samples.append(
-                SingleTurnSample(
-                    user_input=item["question"],
-                    response=result.get("answer", ""),
-                    retrieved_contexts=result.get("contexts", []),
-                    reference=item["ground_truth"],
-                )
-            )
-        return EvaluationDataset(samples=samples)
-    except ImportError:
-        return None
-
-
-def _build_legacy_dataset(
-    qa_items: list[dict], mode_results: list[dict]
-) -> Any:
-    """构建 HuggingFace Dataset（ragas v0.1.x 兼容）。"""
-    from datasets import Dataset
-
-    data = {
-        "question": [],
-        "answer": [],
-        "contexts": [],
-        "ground_truth": [],
-    }
+    samples = []
     for item, result in zip(qa_items, mode_results):
-        data["question"].append(item["question"])
-        data["answer"].append(result.get("answer", ""))
-        data["contexts"].append(result.get("contexts", []))
-        data["ground_truth"].append(item["ground_truth"])
-
-    return Dataset.from_dict(data)
+        samples.append(
+            SingleTurnSample(
+                user_input=item["question"],
+                response=result.get("answer", ""),
+                retrieved_contexts=result.get("contexts", []),
+                reference=item["ground_truth"],
+            )
+        )
+    return EvaluationDataset(samples=samples)
 
 
 # ---------------------------------------------------------------------------
-# 核心：解析评测结果
+# 解析评测结果：从单次 evaluate 提取 (整体均值, 逐条分数)
 # ---------------------------------------------------------------------------
-def _parse_eval_result(result: Any, metric_names: list[str]) -> dict[str, float]:
-    """从 ragas evaluate() 返回值中提取指标分数。"""
-    # ragas 0.4: 返回 EvaluationResult，有 .scores 属性
-    if hasattr(result, "scores"):
-        scores_list = result.scores
-        if scores_list and isinstance(scores_list, list):
-            avg: dict[str, float] = {}
-            for m in metric_names:
-                vals = [s.get(m, 0.0) for s in scores_list if isinstance(s, dict)]
-                # 过滤 NaN
-                import math
-                vals = [v for v in vals if not math.isnan(v)]
-                avg[m] = sum(vals) / len(vals) if vals else 0.0
-            return avg
+def _safe_float(v: Any) -> float:
+    """把 ragas 分数转 float，NaN/None/异常 → 0.0（评测需可比的数值，不容 NaN）。"""
+    import math
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if math.isnan(f) or math.isinf(f):
+        return 0.0
+    return f
 
-    # ragas 0.2: to_pandas()
+
+def _avg_from_per_question(
+    per_q: list[dict[str, float]], metric_names: list[str]
+) -> dict[str, float]:
+    """从逐条分数算各指标均值（逐条已 _safe_float 填充，无 NaN，直接平均）。"""
+    if not per_q:
+        return {m: 0.0 for m in metric_names}
+    return {m: sum(row.get(m, 0.0) for row in per_q) / len(per_q) for m in metric_names}
+
+
+def _extract_scores(
+    result: Any, metric_names: list[str]
+) -> tuple[dict[str, float], list[dict[str, float]]]:
+    """从 ragas evaluate() 返回值提取 (整体均值, 逐条分数列表)。
+
+    逐条分数直接来自单次 evaluate 的结果（每条样本一行/一项），无需逐条重跑——
+    这是 Bug 3 的修复核心：旧实现要么把整体均值复制 N 遍充作逐条，要么逐条重跑 N 次 API。
+    metric 列名与 metric_names 一致（collections 指标的 name 属性决定列名）。
+    """
+    # ragas 0.4: EvaluationResult.scores 是 list[dict]，每条样本一项
+    scores_list = getattr(result, "scores", None)
+    if isinstance(scores_list, list) and scores_list:
+        per_q = [
+            {m: _safe_float(s.get(m)) for m in metric_names}
+            for s in scores_list
+            if isinstance(s, dict)
+        ]
+        return _avg_from_per_question(per_q, metric_names), per_q
+
+    # to_pandas fallback（ragas 0.2/0.4 通用）
     if hasattr(result, "to_pandas"):
         df = result.to_pandas()
-        skip_cols = {"user_input", "response", "reference", "retrieved_contexts",
-                      "question", "answer", "contexts", "ground_truth"}
-        avg = {}
-        for col in df.columns:
-            if col not in skip_cols:
-                import math
-                vals = [v for v in df[col] if not math.isnan(v)]
-                avg[col] = sum(vals) / len(vals) if vals else 0.0
-        return avg
+        per_q = [
+            {m: _safe_float(row.get(m)) for m in metric_names}
+            for _, row in df.iterrows()
+        ]
+        return _avg_from_per_question(per_q, metric_names), per_q
 
-    # fallback: 直接当 dict 处理
+    # fallback: dict 形式（无逐条信息）
     if isinstance(result, dict):
-        return {k: v for k, v in result.items() if isinstance(v, (int, float))}
-
-    return {}
+        return ({k: _safe_float(v) for k, v in result.items()}, [])
+    return {}, []
 
 
 # ---------------------------------------------------------------------------
@@ -196,66 +302,41 @@ def evaluate_mode(
     qa_items: list[dict],
     mode_results: list[dict],
     metric_names: list[str],
-) -> dict[str, float]:
-    """对某模式的查询结果计算 RAGAS 指标，返回 {metric_name: avg_score}。"""
-    metrics = _get_metrics(metric_names)
+) -> dict[str, Any]:
+    """对某模式的查询结果计算 RAGAS 指标。
+
+    返回 {"avg": {metric: 均值}, "per_question": [{metric: 分数}, ...]}。
+    逐条分数来自单次 evaluate 的结果（每条样本一项），无需逐条重跑。
+    """
+    llm = _build_ragas_llm()
+    embeddings = _build_ragas_embeddings()
+    metrics = _get_metrics(metric_names, llm=llm, embeddings=embeddings)
     if not metrics:
         logger.error("没有有效的指标，跳过评测")
-        return {}
+        return {"avg": {}, "per_question": []}
 
-    llm = _build_llm()
-    embeddings = _build_embeddings()
-
-    # ---- 尝试新版 API (v0.2+) ----
     eval_ds = _build_eval_dataset(qa_items, mode_results)
-    if eval_ds is not None:
-        try:
-            from ragas import evaluate as ragas_evaluate
-
-            logger.info("使用 ragas v0.2+ API (EvaluationDataset)")
-            result = ragas_evaluate(
-                dataset=eval_ds,
-                metrics=metrics,
-                llm=llm,
-                embeddings=embeddings,
-            )
-            return _parse_eval_result(result, metric_names)
-        except Exception as e:
-            logger.warning("ragas v0.2+ API 失败: %s，尝试旧版 API", e)
-
-    # ---- 旧版 API (v0.1.x) ----
-    dataset = _build_legacy_dataset(qa_items, mode_results)
     try:
         from ragas import evaluate as ragas_evaluate
 
-        logger.info("使用 ragas v0.1.x API (HuggingFace Dataset)")
+        logger.info("使用 ragas 0.4 collections API (InstructorLLM + EvaluationDataset)")
         result = ragas_evaluate(
-            dataset=dataset,
+            dataset=eval_ds,
             metrics=metrics,
             llm=llm,
             embeddings=embeddings,
+            show_progress=False,
         )
-        return _parse_eval_result(result, metric_names)
+        avg, per_q = _extract_scores(result, metric_names)
+        # Cost 估算依据：ragas EvaluationResult.total_tokens（本轮该模式总消耗）
+        # ragas 0.4.3 的 total_tokens 是方法（非属性），需兼容调用
+        _tt = getattr(result, "total_tokens", 0)
+        try:
+            _tt = _tt() if callable(_tt) else _tt
+        except Exception:
+            _tt = 0
+        total_tokens = int(_tt or 0)
+        return {"avg": avg, "per_question": per_q, "total_tokens": total_tokens}
     except Exception as e:
         logger.error("ragas evaluate 失败: %s", e)
-        return {}
-
-
-def evaluate_mode_per_question(
-    qa_items: list[dict],
-    mode_results: list[dict],
-    metric_names: list[str],
-) -> list[dict[str, float]]:
-    """对某模式逐条计算指标，返回 [{metric_name: score}]。
-
-    用于 CSV 中每行的指标值。
-    注意：逐条评测会显著增加 API 调用次数和成本。
-    """
-    per_question_results: list[dict[str, float]] = []
-
-    for idx, (item, result) in enumerate(zip(qa_items, mode_results)):
-        logger.info("逐条评测 %d/%d...", idx + 1, len(qa_items))
-        scores = evaluate_mode([item], [result], metric_names)
-        per_question_results.append(scores)
-
-    return per_question_results
+        return {"avg": {}, "per_question": []}

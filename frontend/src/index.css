@@ -217,16 +217,36 @@ body {
   margin: 1.5em 0;
 }
 
-/* 用户气泡（深蓝背景）内的公式、文字全部继承白色 */
+/* 用户气泡（bg-ink 深色背景 #2F3437）。
+   根因：.markdown-body 把正文/标题/加粗/链接 hover 的 color 钉成 --color-ink 系
+   深色；而 Tailwind 的 text-white 处于 @layer，优先级低于未分层的 .markdown-body，
+   永远赢不了 → 黑底黑字看不见。这里逐元素刷回白色，特异性 ≥ .markdown-body 对应
+   规则、且同样未分层，保证稳赢。*/
+.markdown-user,
+.markdown-user p,
+.markdown-user strong,
+.markdown-user h1,
+.markdown-user h2,
+.markdown-user h3,
+.markdown-user li,
+.markdown-user blockquote,
+.markdown-user pre {
+  color: #fff;
+}
+.markdown-user a,
+.markdown-user a:hover {
+  color: #fff;            /* 链接靠下划线区分；hover 不再变深而消失 */
+  opacity: 0.9;
+}
 .markdown-user .katex,
 .markdown-user .katex-html,
 .markdown-user .katex * {
-  color: inherit !important;
+  color: inherit !important;  /* 公式继承上面的白色 */
 }
 .markdown-user p {
   margin: 0.25em 0;
 }
 .markdown-user code {
   background: rgba(255, 255, 255, 0.15);
-  color: inherit;
+  color: #fff;
 }

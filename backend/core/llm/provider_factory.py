@@ -22,6 +22,7 @@ from openai import AsyncAzureOpenAI, AsyncOpenAI
 from settings import get_settings
 LLM_BINDING = get_settings().llm.binding
 DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
+DASHSCOPE_BASE_URL = get_settings().llm.base_url
 LLM_TIMEOUT_SEC = get_settings().llm.timeout_sec
 from core.llm.provider_registry import find_by_name, find_by_model
 
@@ -135,7 +136,10 @@ def get_llm_client_for_profile(
     profile = profile or {}
     binding = (profile.get("binding") or "").strip() or LLM_BINDING
     api_key = (profile.get("api_key") or "").strip() or DASHSCOPE_API_KEY
-    base_url = (profile.get("base_url") or "").strip() or None
+    # M-19：base_url 空值回退 .env（DASHSCOPE_BASE_URL），与 api_key 对称。catalog 的
+    # active=default profile 通常 base_url 为空，意图复用平台默认端点；此前只回退 None，
+    # 落到 spec.default_api_base（官方端点），忽略了 .env 自配的代理/私有端点。
+    base_url = (profile.get("base_url") or "").strip() or (DASHSCOPE_BASE_URL or None)
     api_version = (profile.get("api_version") or "").strip() or None
 
     fp = _profile_fingerprint(binding, api_key, base_url, api_version, timeout)

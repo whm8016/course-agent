@@ -29,7 +29,15 @@ logger = logging.getLogger(__name__)
 _PREFIX = "mem_flush:"
 _TS_SUFFIX = ":ts"
 _META_SUFFIX = ":meta"
-_TTL = 600  # key 最长存活 10 分钟（兜底防泄漏）
+# H-9: 待落盘的对话数据本身是业务数据，TTL 仅作"防泄漏兜底"。
+# 原 600s(10min) 太短——worker 宕机/重启超过 10 分钟即静默丢数据。
+# 改为 86400s(24h)：足够覆盖夜间故障窗口；数据量小（每条 ~百字节 JSON），
+# 即便积压也不会撑爆 Redis。
+_TTL = 86400
+# M-13: per-key 分布式锁的后缀与超时。锁只在 flush 期间持有，用于多 worker 互斥。
+# 30s 远大于单次 flush 耗时，又能在持有者崩溃后自动释放，避免死锁。
+_LOCK_SUFFIX = ":lock"
+_LOCK_TTL = 30
 
 
 _redis_pool: aioredis.Redis | None = None
@@ -139,6 +147,10 @@ async def _flush_turns(user_id: str, course_id: str, turns: list[dict]) -> None:
         from core.memory.graph_memory import update_graphs_from_conversation
         from core.db.database import AsyncSessionLocal
 
+        # M-12: AsyncSessionLocal 退出时默认 rollback（不 commit），
+        # 而 update_graphs_from_conversation → save_graphs 内部只 execute(update)，
+        # 不自己 commit。原代码漏 commit → graph 更新全部静默丢失。
+        # 在整个循环结束后统一 commit 一次（批量语义，单事务）。
         async with AsyncSessionLocal() as db:
             for turn in turns:
                 try:
@@ -154,6 +166,13 @@ async def _flush_turns(user_id: str, course_id: str, turns: list[dict]) -> None:
                         "[flush_manager] graph_memory update failed turn error=%s",
                         e
                     )
+            try:
+                await db.commit()
+            except Exception as e:
+                # commit 失败属可恢复：数据仍在 Redis key 里，下次 cron 会重试。
+                # 这里 rollback 后退出 with（防止脏事务残留）。
+                logger.warning("[flush_manager] graph_memory commit failed user=%s error=%s", user_id, e)
+                await db.rollback()
         logger.info("[flush_manager] graph_memory update complete user=%s", user_id)
     except Exception as e:
         logger.warning("[flush_manager] graph_memory update failed user=%s error=%s", user_id, e)
@@ -162,6 +181,65 @@ async def _flush_turns(user_id: str, course_id: str, turns: list[dict]) -> None:
         "[flush_manager] FLUSH COMPLETE user=%s turns=%d",
         user_id, len(turns)
     )
+
+
+async def _scan_all_keys(r: aioredis.Redis, match: str, count: int = 200) -> list[str]:
+    """循环 SCAN 直到 cursor 归 0，返回所有匹配 key。
+
+    H-8: 原实现 `cursor, keys = await r.scan(...)` 只调一次，依赖单次返回。
+    Redis SCAN 在大 keyspace 下会分批返回（cursor != 0 表示还有），
+    单次调用只拿到第一批（~count 个），导致超量的 buffer key 被漏扫、永不 flush。
+    这里按 `while cursor:` 持续翻页直到游标归 0。
+    """
+    all_keys: list[str] = []
+    cursor: int | bytes = 0
+    while True:
+        cursor, batch = await r.scan(cursor=cursor, match=match, count=count)
+        all_keys.extend(batch)
+        # cursor 可能是 bytes（部分客户端）或 int；统一以"是否归 0"判断。
+        c = int(cursor) if cursor else 0
+        if c == 0:
+            break
+    return all_keys
+
+
+async def _flush_one(
+    r: aioredis.Redis,
+    key: str,
+    turns: list[dict],
+    meta: dict,
+) -> bool:
+    """带 per-key 互斥锁的安全 flush。
+
+    H-7 + M-13 的核心修复点。流程（顺序至关重要）：
+      1. SET NX 抢 per-key 锁（拿不到说明别的 worker 正在 flush，跳过避免重复落盘）
+      2. flush 成功后才删 Redis key（原代码先删后写，flush 失败即永久丢数据）
+      3. finally 释放锁（防崩溃残留：锁带 TTL，崩溃也会自动过期）
+
+    Returns:
+        True = 已 flush（或数据已被本 worker 处理）；False = 抢锁失败被跳过。
+    """
+    lock_key = f"{key}{_LOCK_SUFFIX}"
+
+    # 1. 抢 per-key 锁（SET NX + EX，原子）
+    got_lock = await r.set(lock_key, "1", ex=_LOCK_TTL, nx=True)
+    if not got_lock:
+        logger.info("[flush_manager] flush_one SKIP key=%s reason=locked-by-other", key)
+        return False
+
+    try:
+        # 2. 先 flush 成功，再删 key（H-7：flush 失败则保留 key 等下次重试）
+        await _flush_turns(meta.get("user_id", ""), meta.get("course_id", ""), turns)
+
+        # flush 成功后才删除数据 key（含 :ts 和 :meta），数据安全落盘
+        await r.delete(key, f"{key}{_TS_SUFFIX}", f"{key}{_META_SUFFIX}")
+        return True
+    finally:
+        # 3. 释放锁（best-effort；锁有 TTL 兜底，删失败也不致死锁）
+        try:
+            await r.delete(lock_key)
+        except Exception as e:
+            logger.warning("[flush_manager] flush_one unlock failed key=%s error=%s", key, e)
 
 
 async def scan_and_flush(r: aioredis.Redis, max_turns: int, idle_timeout: float) -> int:
@@ -175,10 +253,16 @@ async def scan_and_flush(r: aioredis.Redis, max_turns: int, idle_timeout: float)
     Returns:
         flush 的 key 数量
     """
-    cursor, keys = await r.scan(match=f"{_PREFIX}*", count=200)
+    # H-8: 循环 SCAN 翻页，避免单次返回导致漏扫
+    keys = await _scan_all_keys(r, match=f"{_PREFIX}*", count=200)
 
-    # 过滤出数据 key（排除 :ts 和 :meta 后缀）
-    data_keys = [k for k in keys if not k.endswith(_TS_SUFFIX) and not k.endswith(_META_SUFFIX)]
+    # 过滤出数据 key（排除 :ts / :meta / :lock 后缀）
+    data_keys = [
+        k for k in keys
+        if not k.endswith(_TS_SUFFIX)
+        and not k.endswith(_META_SUFFIX)
+        and not k.endswith(_LOCK_SUFFIX)
+    ]
 
     flushed_count = 0
     now = time.time()
@@ -199,19 +283,19 @@ async def scan_and_flush(r: aioredis.Redis, max_turns: int, idle_timeout: float)
                 meta_str = await r.get(f"{key}{_META_SUFFIX}")
                 meta = json.loads(meta_str or "{}")
 
-                # 删除 key（包括 :ts 和 :meta）
-                await r.delete(key, f"{key}{_TS_SUFFIX}", f"{key}{_META_SUFFIX}")
-
-                # 执行 flush
-                await _flush_turns(meta.get("user_id", ""), meta.get("course_id", ""), turns)
-                flushed_count += 1
+                # 安全 flush（带 per-key 锁 + 先写后删）
+                done = await _flush_one(r, key, turns, meta)
+                if done:
+                    flushed_count += 1
 
                 logger.info(
-                    "[flush_manager] cron flush key=%s turns=%d idle=%.1fs",
-                    key, len(turns), idle
+                    "[flush_manager] cron flush key=%s turns=%d idle=%.1fs done=%s",
+                    key, len(turns), idle, done
                 )
 
         except Exception as e:
+            # 可恢复：保留 key 等下次 cron 重试（注意：这里若 _flush_one 已抢锁但
+            # flush 抛异常，key 不会被删，数据安全；锁由 finally / TTL 释放）
             logger.warning("[flush_manager] cron flush key=%s error=%s", key, e)
 
     return flushed_count
@@ -226,8 +310,13 @@ async def flush_all_pending(r: aioredis.Redis) -> int:
     Returns:
         flush 的 key 数量
     """
-    cursor, keys = await r.scan(match=f"{_PREFIX}*", count=500)
-    data_keys = [k for k in keys if not k.endswith(_TS_SUFFIX) and not k.endswith(_META_SUFFIX)]
+    keys = await _scan_all_keys(r, match=f"{_PREFIX}*", count=500)
+    data_keys = [
+        k for k in keys
+        if not k.endswith(_TS_SUFFIX)
+        and not k.endswith(_META_SUFFIX)
+        and not k.endswith(_LOCK_SUFFIX)
+    ]
 
     flushed_count = 0
     for key in data_keys:
@@ -238,10 +327,10 @@ async def flush_all_pending(r: aioredis.Redis) -> int:
             meta_str = await r.get(f"{key}{_META_SUFFIX}")
             meta = json.loads(meta_str or "{}")
 
-            await r.delete(key, f"{key}{_TS_SUFFIX}", f"{key}{_META_SUFFIX}")
-
-            await _flush_turns(meta.get("user_id", ""), meta.get("course_id", ""), turns)
-            flushed_count += 1
+            # 复用安全 flush（H-7 先写后删 + M-13 per-key 锁）
+            done = await _flush_one(r, key, turns, meta)
+            if done:
+                flushed_count += 1
 
         except Exception as e:
             logger.warning("[flush_manager] flush_all key=%s error=%s", key, e)
@@ -253,8 +342,13 @@ async def flush_all_pending(r: aioredis.Redis) -> int:
 async def stats() -> dict:
     """返回 Redis buffer 状态（用于监控/调试）。"""
     r = _get_redis()
-    cursor, keys = await r.scan(match=f"{_PREFIX}*", count=500)
-    data_keys = [k for k in keys if not k.endswith(_TS_SUFFIX) and not k.endswith(_META_SUFFIX)]
+    keys = await _scan_all_keys(r, match=f"{_PREFIX}*", count=500)
+    data_keys = [
+        k for k in keys
+        if not k.endswith(_TS_SUFFIX)
+        and not k.endswith(_META_SUFFIX)
+        and not k.endswith(_LOCK_SUFFIX)
+    ]
 
     buffers = {}
     for key in data_keys:
@@ -300,8 +394,13 @@ class MemoryFlushManager:
         if ":" not in user_id:
             pattern = f"{_PREFIX}{user_id}*"
 
-        cursor, keys = await r.scan(match=pattern, count=100)
-        data_keys = [k for k in keys if not k.endswith(_TS_SUFFIX) and not k.endswith(_META_SUFFIX)]
+        keys = await _scan_all_keys(r, match=pattern, count=100)
+        data_keys = [
+            k for k in keys
+            if not k.endswith(_TS_SUFFIX)
+            and not k.endswith(_META_SUFFIX)
+            and not k.endswith(_LOCK_SUFFIX)
+        ]
 
         for key in data_keys:
             try:
@@ -310,8 +409,8 @@ class MemoryFlushManager:
                 meta_str = await r.get(f"{key}{_META_SUFFIX}")
                 meta = json.loads(meta_str or "{}")
 
-                await r.delete(key, f"{key}{_TS_SUFFIX}", f"{key}{_META_SUFFIX}")
-                await _flush_turns(meta.get("user_id", ""), meta.get("course_id", ""), turns)
+                # 复用安全 flush（H-7 先写后删 + M-13 per-key 锁）
+                await _flush_one(r, key, turns, meta)
             except Exception as e:
                 logger.warning("[flush_manager] flush_user key=%s error=%s", key, e)
 
@@ -351,5 +450,7 @@ __all__ = [
     "scan_and_flush",
     "flush_all_pending",
     "_flush_turns",
+    "_scan_all_keys",
+    "_flush_one",
     "stats",
 ]

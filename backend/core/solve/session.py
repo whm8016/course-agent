@@ -75,6 +75,19 @@ class SolveSession:
     def all_done(self) -> bool:
         return bool(self.steps) and all(step.done for step in self.steps)
 
+    def reset(self) -> None:
+        """清空 plan / 进度 / replan 计数，回到「未解题」初态（max_replans 保留）。
+
+        M-7：solve pipeline 入口（每 turn 一次）调用，防止 sid 撞车时读到上一轮的 stale
+        plan——session 存在进程内 OrderedDict，key 由 turn_id/message_id 解析而来，若同
+        turn 重试 / message_id 复用 / LRU 驱逐后同 sid 再入，get_session 会复用旧 session。
+        reset 不能放进 get_session（同 turn 内 solve 工具会多次读它读写状态，那里重置会清掉
+        刚写的 plan），只能由 pipeline 入口每 turn 调一次。
+        """
+        self.analysis = ""
+        self.steps = []
+        self.replans = 0
+
 
 _SESSIONS: "OrderedDict[str, SolveSession]" = OrderedDict()
 _MAX_SESSIONS = 256

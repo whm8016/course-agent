@@ -112,6 +112,15 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.6",
 ]
+# ── RAG 评测专用（scripts/eval_rag/）──────────────────────
+# 评测是离线分析工具，非生产运行时依赖，故独立成组，不污染生产环境：
+#   uv pip install -e ".[eval]"
+eval = [
+    "ragas>=0.4,<0.5",  # <0.5 上限：防止 metrics 迁移到 collections API 破坏 _get_metrics 的标准单例/私有模块导入
+    "rapidfuzz",  # ragas generate_with_chunks 的 transforms 依赖（算 chunk 间字符串重叠度）
+    "numpy",
+    "scipy",  # Welch t-test 回归检测
+]
 
 [project.urls]
 Homepage = "https://github.com/your-org/course-agent"

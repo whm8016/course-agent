@@ -26,5 +26,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # 旧架构已弃用，不重建
-    pass
+    # M-44：本迁移是破坏性的（DROP v3 三表），数据无法恢复，故不可逆。
+    # 旧实现 ``pass`` 会让 ``alembic downgrade`` 静默「成功」——版本号回退了但表没回来，
+    # 运维误以为已回滚。现显式 raise，强制人工介入（如确需重建空表骨架，DBA 手写 DDL）。
+    raise NotImplementedError(
+        "008 是破坏性迁移（DROP v3 memory 三表），数据已永久丢失，不可自动回滚。"
+        " v3 子系统已被 Mem0 取代，schema 不再保留于代码库，无法精确重建。"
+        " 如需回退版本号，请 DBA 手工 CREATE TABLE 重建空骨架后再 stamp。"
+    )

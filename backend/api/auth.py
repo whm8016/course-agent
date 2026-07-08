@@ -133,7 +133,7 @@ async def get_optional_user(
 # ---------------------------------------------------------------------------
 
 @router.post("/register")
-@limiter.limit("10/minute")
+@limiter.limit("30/minute")
 async def register(request: Request, body: RegisterBody, db: AsyncSession = Depends(get_db)):
     role = "student"
     invite_row = None
@@ -233,7 +233,7 @@ async def my_teacher_application(
 
 
 @router.post("/login")
-@limiter.limit("15/minute")
+@limiter.limit("40/minute")
 async def login(
     request: Request,
     body: LoginBody,

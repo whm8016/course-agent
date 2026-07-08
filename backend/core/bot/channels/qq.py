@@ -2,7 +2,6 @@
 
 import asyncio
 import logging
-from collections import deque
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
@@ -78,7 +77,6 @@ class QQChannel(BaseChannel):
         super().__init__(config, bus)
         self.config: QQConfig = config
         self._client: Any = None
-        self._processed_ids: deque = deque(maxlen=1000)
         self._msg_seq: int = 1
         self._chat_type_cache: dict[str, str] = {}
 
@@ -149,9 +147,13 @@ class QQChannel(BaseChannel):
 
     async def _on_message(self, data: "C2CMessage | GroupMessage", is_group: bool = False) -> None:
         try:
-            if data.id in self._processed_ids:
+            # H-14：去重下沉到 Redis（claim_processed 原子 SET NX），leader failover 后
+            # 旧 leader 已处理的 message_id 在新 leader 上仍命中，平台重发不会重复处理。
+            # 内存 deque 已移除——多 worker 下进程内存不共享，无法防跨进程重复。
+            from core.bot.channels.dedup import claim_processed
+
+            if not await claim_processed(self.name, data.id):
                 return
-            self._processed_ids.append(data.id)
 
             content = (data.content or "").strip()
             if not content:

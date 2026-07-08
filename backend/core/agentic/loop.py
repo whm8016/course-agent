@@ -30,7 +30,7 @@ TEXT_MODEL = get_settings().llm.text_model
 from core.agentic.tool_dispatch import dispatch_tool_calls
 from core.agentic.types import DispatchOutcome, LoopOutcome, RoundResult, ToolCall
 from core.context import UnifiedContext
-from core.llm.llm import _create_with_image_fallback, client as _default_client
+from core.llm.llm import _create_with_image_fallback, _llm_circuit_breaker, client as _default_client
 from core.llm.multimodal import prepare_multimodal_messages
 from core.observability import log_flow
 from core.observability.metrics import observe_llm_round
@@ -174,7 +174,13 @@ async def _one_round(
     _tool_call_seen = False              # 本轮 delta 是否出现过 tool_calls（出现后停发答案 token）
     _tag_leak_seen = False               # 本轮 content 是否嗅探到 DSML 标签泄漏（见 _strip_dsml_tags）
 
-    stream = await _create_with_image_fallback(_client, kwargs, binding, model)
+    # H-16：自配/profile client（llm_client 非 None）不接入全局熔断器。
+    # 判定信号 = _one_round 的 llm_client 参数：None → 全局默认 client（平台所有未自配
+    # 用户共用，挂了要快速失败防雪崩，熔断）；非 None → 用户自配/profile 解析出的独立
+    # client（用户私有资源，平台不替它兜底，让真实错误冒给用户；也避免自配失败把全局
+    # default 熔断器打 OPEN 误伤其他用户）。
+    _circuit = None if llm_client is not None else _llm_circuit_breaker
+    stream = await _create_with_image_fallback(_client, kwargs, binding, model, circuit_breaker=_circuit)
     async for chunk in stream:
         choices = getattr(chunk, "choices", None) or []
         if not choices:
@@ -388,6 +394,9 @@ async def run_agent_loop(
     messages = _build_messages(system_prompt, context, binding=eff_binding)
     tools_used: list[str] = []
     final_text = ""
+    # M-4：兜底用——最后一轮若没产出最终文字（见下方「空回复兜底」），回退到本轮模型已生成的
+    # 旁白/推理，避免用户得到空 answer。优先取最后一段非空 content（工具轮的旁白）。
+    last_nonempty_content = ""
     iteration = 0
     seen_tool_result = False  # 是否已触发过工具调用（决定下一轮 reasoning 的 stage）
     answer_now_triggered = False  # 是否因前端"立即回答"而提前直接回答（done metadata 标记）
@@ -487,6 +496,9 @@ async def run_agent_loop(
             # 答案流，最终由 answer 事件用 final_text 覆盖归正。
             if result.content.strip() and not result.streamed_live:
                 await stream.emit({"type": "thinking", "content": result.content})
+            # M-4：记录本轮非空旁白，作为「轮次耗尽仍无最终文字」时的兜底来源
+            if result.content.strip():
+                last_nonempty_content = result.content
 
             # 将 assistant 消息（含 tool_calls）追加到对话历史
             messages.append({
@@ -544,6 +556,8 @@ async def run_agent_loop(
         else:
             # 无工具调用 → 本轮为最终答案轮
             final_text = result.content
+            if result.content.strip():
+                last_nonempty_content = result.content
             # 每轮都已通过 live_sink 真流式透传（streamed_live 恒 True），无需补发；
             # 下面的切片回退仅作防御性 fallback（理论上不再触发），保留兜底。
             if not result.streamed_live:
@@ -556,6 +570,14 @@ async def run_agent_loop(
              tools_used=list(dict.fromkeys(tools_used)),
              answer_chars=len(final_text),
              elapsed_ms=int((time.perf_counter() - _loop_t0) * 1000))
+
+    # M-4 空回复兜底：循环走完仍无最终文字（轮次预算耗尽且最后一轮模型既没吐文字也没正常 break，
+    # 或最后一轮 content 为空），回退到本轮模型已生成的旁白；旁白也空则用明确提示语。
+    # 不让用户得到空 answer——宁可给一句可读的兜底，也不留空白。
+    if not final_text.strip():
+        final_text = last_nonempty_content.strip() or "（抱歉，本轮未能生成有效回复，请重试或换个问法。）"
+        log_flow("agent_loop.empty_final_fallback",
+                 fallback_chars=len(final_text), iterations=iteration + 1)
 
     if emit_terminal_events:
         await stream.emit({"type": "answer", "content": final_text})

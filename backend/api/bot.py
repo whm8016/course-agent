@@ -18,8 +18,9 @@ from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user, is_admin_user
-from core.db.database import BotNotification, UserSocialBinding, get_db
-from core.bot.manager import get_bot_manager, BotConfig
+from api.courses import check_course_access
+from core.db.database import BotNotification, Enrollment, UserSocialBinding, get_db
+from core.bot.manager import get_bot_manager, BotConfig, NotLeaderError
 from core.bot.notification import NotificationService
 from services.cron.service import CronJob, CronOwner, CronSchedule, get_cron_service
 
@@ -104,6 +105,22 @@ def _resolve_owner(manager, owner_id: str, bot_id: str, is_admin: bool) -> str:
     raise HTTPException(status_code=404, detail=f"Bot '{bot_id}' not found")
 
 
+def _require_leader_or_409() -> None:
+    """多 worker 门控（H-12/H-13）：bot 启停必须由 leader 处理。
+
+    非_leader worker 收到 bot 启停请求 → 返回 409（带 Retry-After 语义），让前端/LB
+    把请求重试到 leader worker，而不是在 follower 上误拉起 bot 造成 split-brain。
+    单 worker 部署时本 worker 即 leader，恒为 True，无副作用。
+    """
+    from core.leader import is_leader
+
+    if not is_leader():
+        raise HTTPException(
+            status_code=409,
+            detail="当前 worker 不是 leader，无法操作 bot 实例，请稍后重试。",
+        )
+
+
 # --- Bot CRUD ---
 
 @router.get("/list")
@@ -174,6 +191,7 @@ async def create_bot(req: BotCreateRequest, user: dict = Depends(get_current_use
             status_code=400, detail="bot_id 需匹配 ^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$"
         )
     manager = get_bot_manager()
+    _require_leader_or_409()
     owner = _owner_of(user)
     config = BotConfig(
         name=req.name,
@@ -192,6 +210,7 @@ async def create_bot(req: BotCreateRequest, user: dict = Depends(get_current_use
 async def start_bot(bot_id: str, user: dict = Depends(get_current_user)):
     """Start a stopped bot."""
     manager = get_bot_manager()
+    _require_leader_or_409()
     actual_owner = _resolve_owner(manager, _owner_of(user), bot_id, _is_admin(user))
     instance = await manager.start_bot(actual_owner, bot_id)
     return {"status": "started", "bot": instance.to_dict()}
@@ -258,6 +277,7 @@ async def get_bot_history(bot_id: str, limit: int = 100, user: dict = Depends(ge
 async def send_message(bot_id: str, req: BotMessageRequest, user: dict = Depends(get_current_user)):
     """Send a message to a bot and get the response (carries caller identity)."""
     manager = get_bot_manager()
+    _require_leader_or_409()
     owner = _owner_of(user)
     actual_owner = _resolve_owner(manager, owner, bot_id, _is_admin(user))
     try:
@@ -265,6 +285,10 @@ async def send_message(bot_id: str, req: BotMessageRequest, user: dict = Depends
             actual_owner, bot_id, req.content, chat_id=req.chat_id, user_id=owner
         )
         return {"response": response}
+    except NotLeaderError:
+        raise HTTPException(
+            status_code=409, detail="当前 worker 不是 leader，请稍后重试。"
+        )
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -277,17 +301,52 @@ async def send_notification(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Push notification to a student or broadcast to a course."""
+    """Push notification to a student or broadcast to a course.
+
+    M-50 多租户归属校验：教师只能向**自己拥有的课程**广播、向**自己课程里的学生**
+    单发。此前仅校验角色，任意教师传他人 course_id / 任意 user_id 即可越权群发或
+    私发——会把无关学生卷进陌生教师的推送里（IDOR）。admin 放行（跨课程管理语义）。
+    """
     if not (_is_admin(user) or user.get("role") == "teacher"):
         raise HTTPException(status_code=403, detail="仅教师/管理员可发送通知")
+
+    if req.course_id:
+        # 广播目标课程：教师须是该课 owner（admin 放行），非 owner → 403
+        await check_course_access(db, req.course_id, user)
+
+    if req.user_id and not _is_admin(user):
+        # 单发对象必须是该教师某门已开课程里的学生——否则教师可给任意用户发私信。
+        # join Enrollment：该学生选过此教师 owner 的任一课程才算合法对象。
+        from core.db.database import KnowledgeBase
+
+        enrolled = (
+            await db.execute(
+                select(Enrollment.id)
+                .join(KnowledgeBase, KnowledgeBase.course_id == Enrollment.course_id)
+                .where(
+                    Enrollment.student_id == req.user_id,
+                    KnowledgeBase.owner_id == _owner_of(user),
+                )
+                .limit(1)
+            )
+        ).first()
+        if enrolled is None:
+            # 不区分"用户不存在"与"非你的学生"，避免探测存在性
+            raise HTTPException(status_code=403, detail="该学生不在你的课程中")
+
     manager = get_bot_manager()
     svc = NotificationService(manager)
+    caller_owner = _owner_of(user)  # M-41：优先用发起者自己的 bot 作发送载体
 
     if req.user_id:
-        sent_to = await svc.push_to_student(db, req.user_id, req.content, platform=req.platform)
+        sent_to = await svc.push_to_student(
+            db, req.user_id, req.content, platform=req.platform, prefer_owner=caller_owner
+        )
         return {"status": "sent", "platforms": sent_to}
     elif req.course_id:
-        count = await svc.broadcast(db, req.course_id, req.content)
+        count = await svc.broadcast(
+            db, req.course_id, req.content, prefer_owner=caller_owner
+        )
         return {"status": "broadcast", "notified_count": count}
     else:
         raise HTTPException(status_code=400, detail="Either user_id or course_id is required")

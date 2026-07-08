@@ -67,6 +67,8 @@ def generate_markdown(
     avg_scores: dict[str, dict[str, float]],
     per_question_scores: dict[str, list[dict[str, float]]],
     metric_names: list[str],
+    course_name: str | None = None,
+    summary: dict | None = None,
 ) -> Path:
     """生成 Markdown 报告，返回文件路径。"""
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -84,7 +86,11 @@ def generate_markdown(
     # ---- 1. 评测配置 ----
     lines.append("## 1. 评测配置")
     lines.append("")
-    lines.append(f"- 课程：`{config.COURSE_ID}`（电路分析基础实验）")
+    # 课程显示名从参数传入（避免硬编码"电路分析基础实验"这类只对单一课程成立的字样）
+    course_label = f"`{config.COURSE_ID}`"
+    if course_name and course_name != config.COURSE_ID:
+        course_label += f"（{course_name}）"
+    lines.append(f"- 课程：{course_label}")
     lines.append(f"- 评测集：{len(qa_items)} 条")
     cat_counts: dict[str, int] = {}
     for item in qa_items:
@@ -160,6 +166,30 @@ def generate_markdown(
         lines.append(f"- {f}")
     lines.append("")
 
+    # ---- 附录 A：指标分布（P50/P90/P95）—— 均值掩盖长尾 ----
+    if summary and summary.get("distributions"):
+        lines.append("## 附录 A：指标分布（P50/P90/P95）")
+        lines.append("")
+        lines.append("> 均值掩盖长尾：faithfulness 均值 0.85 但 P10 低，意味着部分回答严重幻觉。")
+        lines.append("> 看 P90/P95 和 std 才能发现长尾风险。")
+        lines.append("")
+        lines.append(_build_distribution_table(modes, summary["distributions"], metric_names))
+        lines.append("")
+
+    # ---- 附录 B：延迟分布（ms）—— Phase 3.5 runner 层采集 ----
+    if summary and summary.get("latency"):
+        lines.append("## 附录 B：延迟分布（ms）")
+        lines.append("")
+        lines.append(_build_latency_table(modes, summary["latency"]))
+        lines.append("")
+
+    # ---- 附录 C：vs 历史基线（Δ）—— Phase 4 历史趋势对比 ----
+    if summary and summary.get("has_baseline") and summary.get("delta"):
+        lines.append("## 附录 C：vs 历史基线（Δ = 本次 - 上次）")
+        lines.append("")
+        lines.append(_build_delta_table(modes, summary["delta"], metric_names))
+        lines.append("")
+
     md_path.write_text("\n".join(lines), "utf-8")
     logger.info("Markdown 报告已生成: %s", md_path)
     return md_path
@@ -185,6 +215,71 @@ def _build_score_table(
             f"{mode_scores.get(m, 0):.4f}" for m in metric_names
         ) + " |"
         lines.append(row)
+    return "\n".join(lines)
+
+
+_DIST_COLS = ("mean", "std", "p50", "p90", "p95", "min", "max")
+_LAT_COLS = ("p50", "p90", "p95", "max")
+_LAT_STAGES = ("retrieve_ms", "query_ms", "total_ms")
+_LAT_STAGE_LABEL = {"retrieve_ms": "检索", "query_ms": "生成", "total_ms": "合计"}
+
+
+def _build_distribution_table(
+    modes: list[str],
+    distributions: dict[str, dict[str, dict[str, float]]],
+    metric_names: list[str],
+) -> str:
+    """构建指标分布表：每个 mode×metric 一行，列 mean/std/P50/P90/P95/min/max。"""
+    lines = [
+        "| 模式 | 指标 | " + " | ".join(c.upper() for c in _DIST_COLS) + " |",
+        "| --- | --- | " + " | ".join(["---"] * len(_DIST_COLS)) + " |",
+    ]
+    for mode in modes:
+        mode_dist = distributions.get(mode, {})
+        for m in metric_names:
+            d = mode_dist.get(m, {})
+            row = f"| {mode} | {m} | " + " | ".join(
+                f"{d.get(c, 0):.4f}" for c in _DIST_COLS
+            ) + " |"
+            lines.append(row)
+    return "\n".join(lines)
+
+
+def _build_latency_table(
+    modes: list[str], latency: dict[str, dict[str, dict[str, float]]]
+) -> str:
+    """构建延迟分布表：每个 mode×阶段，列 P50/P90/P95/max（ms）。"""
+    lines = [
+        "| 模式 | 阶段 | " + " | ".join(c.upper() for c in _LAT_COLS) + " |",
+        "| --- | --- | " + " | ".join(["---"] * len(_LAT_COLS)) + " |",
+    ]
+    for mode in modes:
+        mode_lat = latency.get(mode, {})
+        for stage in _LAT_STAGES:
+            d = mode_lat.get(stage, {})
+            row = f"| {mode} | {_LAT_STAGE_LABEL[stage]} | " + " | ".join(
+                f"{d.get(c, 0):.0f}" for c in _LAT_COLS
+            ) + " |"
+            lines.append(row)
+    return "\n".join(lines)
+
+
+def _build_delta_table(
+    modes: list[str], delta: dict[str, dict[str, float]], metric_names: list[str]
+) -> str:
+    """构建 vs 历史基线 delta 表：Δ>0 改善，Δ<0 退化（下降超 0.02 标 ⚠️）。"""
+    lines = [
+        "| 模式 | " + " | ".join(metric_names) + " |",
+        "| --- | " + " | ".join(["---"] * len(metric_names)) + " |",
+    ]
+    for mode in modes:
+        d = delta.get(mode, {})
+        cells = []
+        for m in metric_names:
+            v = d.get(m, 0.0)
+            mark = " ⚠️" if v < -0.02 else ""
+            cells.append(f"{v:+.4f}{mark}")
+        lines.append(f"| {mode} | " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 

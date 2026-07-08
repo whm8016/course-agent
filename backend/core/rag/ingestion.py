@@ -389,8 +389,38 @@ async def ingest_to_lightrag(
         resume_from_chunk: 断点续传：从第 N 个 chunk 开始（跳过前 N 个）
         control:           可选的 IndexingControl，用于在 batch 边界中止任务
     """
+    # 可用性先校验，避免无谓地 lease 一个实例
+    from core.rag.lightrag import is_lightrag_available, lease_instance
+
+    ok, reason = is_lightrag_available()
+    if not ok:
+        raise RuntimeError(f"LightRAG 不可用: {reason}")
+
+    # H-10：整个摄入期间持有一个实例引用（lease），离开 with 块自动释放计数。
+    # 图片摄入(Step 1b)与文本摄入(Step 2)共用同一 rag，避免重复 +1。
+    async with lease_instance(course_id) as rag:
+        return await _ingest_body(
+            course_id, file_paths, batch_size, on_progress,
+            resume_from_chunk, control, rag,
+        )
+
+
+async def _ingest_body(
+    course_id: str,
+    file_paths: list[str],
+    batch_size: int,
+    on_progress: ProgressCallback,
+    resume_from_chunk: int,
+    control: Optional[IndexingControl],
+    rag,
+) -> dict:
+    """ingest_to_lightrag 的函数体（lease_instance 已保证引用计数配对）。
+
+    拆出本函数仅为让 lease_instance 的 async with 能干净包裹整个摄入流程；
+    rag 由调用方注入，本函数不再自行 _get_instance。
+    """
     from core.rag.lightrag import (
-        _get_instance, is_lightrag_available,
+        is_lightrag_available,
         take_llm_errors, clear_llm_errors, _is_fatal_llm_error,
     )
 
@@ -409,10 +439,12 @@ async def ingest_to_lightrag(
     _t0 = time.perf_counter()
     log_flow("index.start", course_id=course_id, files=len(file_paths),
              resume_from_chunk=resume_from_chunk)
+    # 可用性已在调用方（ingest_to_lightrag）校验过，但防御性再查一次
     ok, reason = is_lightrag_available()
     if not ok:
         raise RuntimeError(f"LightRAG 不可用: {reason}")
 
+    # 索引开始前清空 LLM 错误缓冲（避免上一轮残留误判为致命错误）
     clear_llm_errors()
 
     # Step 1: 解析文件（CPU 密集，放线程池）——同时返回 doc_texts 供图片阶段复用
@@ -424,57 +456,69 @@ async def ingest_to_lightrag(
     all_chunks, all_sources, doc_texts = await asyncio.to_thread(parse_files, file_paths)
 
     # Step 1b: 图片摄入（复用 doc_texts，不再重复提取文本）
+    # rag 由调用方通过 lease_instance 注入，Step 1b 与 Step 2 共用同一实例（H-10）。
     images_processed = 0
-    try:
-        from core.rag.llamaindex.image_extractor import ingest_images_from_files
+    img_cache = _lightrag_ingest_chunks_dir(course_id) / "image_desc_cache.json"
 
-        rag_for_images = await _get_instance(course_id)
-        img_cache = _lightrag_ingest_chunks_dir(course_id) / "image_desc_cache.json"
-        await _emit(
-            8,
-            f"开始提取文档中的图片并写入知识图谱（{len(file_paths)} 个源文件）…",
-            resume_from_chunk,
-            max(len(all_chunks), 1),
-            0,
+    # M-28：断点续传时图片在首次索引已写入知识图谱（raganything 按 entity_name
+    # ainsert，重复跑会产生重复实体/边）。续传场景下跳过图片摄入，仅继续文本 chunk。
+    # 判据：resume_from_chunk>0 即为续传（与文本续传同源触发）。
+    skip_images_on_resume = resume_from_chunk > 0
+    if skip_images_on_resume:
+        logger.info(
+            "续传模式：跳过图片知识图谱重摄入（首次索引已写入）course=%s",
+            course_id,
         )
 
-        async def _on_image_progress(done: int, total: int) -> None:
-            if total <= 0:
-                return
-            pct = 8 + int(done / total * 2)
+    if not skip_images_on_resume:
+        try:
+            from core.rag.llamaindex.image_extractor import ingest_images_from_files
+
             await _emit(
-                pct,
-                f"图片知识图谱：{done}/{total} 张",
+                8,
+                f"开始提取文档中的图片并写入知识图谱（{len(file_paths)} 个源文件）…",
                 resume_from_chunk,
-                max(len(all_chunks), total),
+                max(len(all_chunks), 1),
                 0,
             )
 
-        images_processed = await ingest_images_from_files(
-            file_paths,
-            rag_for_images,
-            cache_path=str(img_cache),
-            doc_texts=doc_texts,
-            on_image_done=_on_image_progress,
-            control=control,
-        )
-        if images_processed:
-            logger.info(
-                "图片知识图谱摄入 course=%s images=%d",
-                course_id,
-                images_processed,
+            async def _on_image_progress(done: int, total: int) -> None:
+                if total <= 0:
+                    return
+                pct = 8 + int(done / total * 2)
+                await _emit(
+                    pct,
+                    f"图片知识图谱：{done}/{total} 张",
+                    resume_from_chunk,
+                    max(len(all_chunks), total),
+                    0,
+                )
+
+            images_processed = await ingest_images_from_files(
+                file_paths,
+                rag,
+                cache_path=str(img_cache),
+                doc_texts=doc_texts,
+                on_image_done=_on_image_progress,
+                control=control,
             )
-    except ImportError:
-        logger.warning("raganything 未安装，跳过图片知识图谱摄入 course=%s", course_id)
-    except IndexingAborted:
-        raise
-    except Exception as exc:
-        logger.warning(
-            "图片知识图谱摄入失败（继续文本索引）course=%s: %s",
-            course_id,
-            exc,
-            exc_info=True,
-        )
+            if images_processed:
+                logger.info(
+                    "图片知识图谱摄入 course=%s images=%d",
+                    course_id,
+                    images_processed,
+                )
+        except ImportError:
+            logger.warning("raganything 未安装，跳过图片知识图谱摄入 course=%s", course_id)
+        except IndexingAborted:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "图片知识图谱摄入失败（继续文本索引）course=%s: %s",
+                course_id,
+                exc,
+                exc_info=True,
+            )
 
     if not all_chunks and images_processed == 0:
         logger.warning("解析结果为空 course=%s", course_id)
@@ -531,7 +575,7 @@ async def ingest_to_lightrag(
         "开始写入 LightRAG: %d 个 chunk（跳过 %d），batch_size=%d，course=%s",
         len(chunks), already_done, batch_size, course_id,
     )
-    rag = await _get_instance(course_id)
+    # rag 由 lease_instance 注入，无需再 _get_instance（H-10）
 
     _QUEUE_MAXSIZE = 3
     # 队列元素：(batch_chunks, batch_sources)，两者等长配对；None 为哨兵
@@ -605,6 +649,10 @@ async def ingest_to_lightrag(
                 # LightRAG ainsert 对 cancel 响应不一致：给至多 3s 收尾，超时则放弃等待。
                 # 孤儿 task 至多把当前 batch 跑完即结束，_consumer 已退出不再消费后续 batch
                 # ——这是"跨进程取消一个不可取消的第三方调用"的务实妥协。
+                # M-30：abort 时当前 batch 可能已有部分 chunk 写入图谱（LightRAG 无事务回滚）。
+                # 不主动回滚——续传从本 batch 起点重跑整个 batch（done_at_batch_start），
+                # LightRAG 按 chunk content 去重，已写入的 chunk 重跑时被识别为 duplicate 跳过，
+                # partial batch 在续传中幂等收敛，不会产生重复实体。
                 try:
                     await asyncio.wait_for(_insert_task, timeout=3.0)
                 except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
@@ -625,6 +673,16 @@ async def ingest_to_lightrag(
                         f"遇到致命错误，索引中止（已完成 {done_so_far}/{total} 个文本块）",
                         done_so_far, total, done_so_far * token_per_chunk,
                     )
+                    # M-29：图片摄入在文本之前（Step 1b）已写入知识图谱。文本致命失败时，
+                    # 图谱里已存在图片实体但缺少文本知识，处于"不完整"状态。
+                    # raganything 的 process_multimodal_content 是"边处理边 ainsert"，
+                    # 无法低成本回滚已写入的图片实体。此处显式告警，提示需排查/重索引。
+                    if images_processed:
+                        logger.error(
+                            "文本索引致命失败，但 %d 张图片已先写入知识图谱（图谱可能不完整），"
+                            "course=%s。修复 LLM 配置后建议重新索引以补齐文本知识。",
+                            images_processed, course_id,
+                        )
                     raise RuntimeError(f"LLM API 致命错误，索引中止: {err_msg[:300]}")
                 else:
                     logger.warning("非致命 LLM 错误（继续）: %s", errors[0])

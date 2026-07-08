@@ -8,7 +8,7 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -22,6 +22,7 @@ KB_STORE_DIR = get_settings().paths.kb_store_dir
 MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
 LLAMA_INDEX_KB_ROOT = get_settings().paths.llama_index_kb_root
 from core.rag import is_lightrag_available
+from core.db.limiter import limiter
 from core.llm.prompts import invalidate_course_prompt_cache
 from core.codes import ensure_unique_join_code, generate_code
 from core.db.database import (
@@ -46,8 +47,32 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-_ALLOWED_EXT = {".pdf", ".txt", ".md", ".docx", ".doc", ".pptx", ".ppt"}
+# M-27：去掉 .doc/.ppt——file_routing 仅支持 OOXML 的 .docx/.pptx，legacy 二进制
+# 格式（.doc/.ppt）无解析 handler，上传后会在 classify_files 阶段归入 unsupported
+# 被静默丢弃（用户以为上传成功，索引时却丢失）。在上传层直接拒绝，给出明确错误。
+_ALLOWED_EXT = {".pdf", ".txt", ".md", ".docx", ".pptx"}
 _MAX_BYTES = MAX_KB_UPLOAD_MB * 1024 * 1024
+
+
+def _safe_upload_name(raw_name: str | None) -> str:
+    """M-51：清洗知识库上传的客户端文件名，防 path traversal。
+
+    原先 ``f"{uuid}_{file.filename}"`` 直接拼接未清洗的 ``file.filename``，
+    若客户端传 ``../evil.pdf`` 或含路径分隔符的名字，会写出 raw_dir 之外（path traversal）。
+    这里直接拒 ``..``/``/``/``\\``/控制字符/空名——发现即 400 明确告知，不静默改写
+    （与 api/upload.py 的 _safe_basename 同源策略，比 basename 兜底更严格、可审计）。
+    """
+    name = (raw_name or "").strip()
+    if (
+        not name
+        or name in (".", "..")
+        or "/" in name
+        or "\\" in name
+        or ".." in name
+        or any(ord(ch) < 32 for ch in name)
+    ):
+        raise HTTPException(status_code=400, detail="无效的文件名")
+    return name
 
 # 注：暂停/终止控制信号通过 Redis 跨 worker 传递，
 # 不再依赖进程内字典。详见 core.ingestion.IndexingControl。
@@ -449,18 +474,20 @@ async def upload_files(
                 detail=f"文件 '{file.filename}' 超过大小限制 {MAX_KB_UPLOAD_MB} MB",
             )
 
-        safe_name = f"{uuid.uuid4().hex[:8]}_{file.filename}"
+        # M-51：清洗客户端文件名（防 ../ 穿越 / 控制字符），再拼 uuid 前缀落盘
+        clean_name = _safe_upload_name(file.filename)
+        safe_name = f"{uuid.uuid4().hex[:8]}_{clean_name}"
         file_path = raw_dir / safe_name
         file_path.write_bytes(content)
 
         kb_file = KBFile(
             kb_id=kb.id,
-            original_name=file.filename or safe_name,
+            original_name=clean_name,
             file_path=str(file_path),
             file_size=len(content),
         )
         db.add(kb_file)
-        saved_names.append(file.filename or safe_name)
+        saved_names.append(clean_name)
 
     await db.flush()
 
@@ -513,8 +540,10 @@ async def delete_file(
 # ── 触发索引 ──────────────────────────────────────────────────────────────────
 
 @router.post("/kb/{course_id}/index")
+@limiter.limit("6/minute")
 async def index_kb(
     course_id: str,
+    request: Request,
     force: bool = False,
     resume: bool = False,
     _: dict = Depends(get_current_admin),

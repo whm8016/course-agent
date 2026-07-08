@@ -77,6 +77,27 @@ _active_task: asyncio.Task | None = None  # 当前活动 loop（renew 或 campai
 _on_gain: Callable[[], Awaitable[None]] | None = None
 _on_lose: Callable[[], Awaitable[None]] | None = None
 
+# 关停标志（C-1/C-3）：应用进入 shutdown 流程后置位。lifespan shutdown 第一行经
+# mark_shutting_down() 置位，是「即将死亡」的最早信号——比 _is_leader=False、比
+# stop_singleton_services 都早。start_singleton_services 在每个 await 后检查它，
+# 发现已关停则回滚已启动服务、绝不置位 _singletons_started，避免单例在死亡 worker
+# 上被拉起又无人停止。
+_shutting_down: bool = False
+
+
+def mark_shutting_down() -> None:
+    """标记应用正在关停（lifespan shutdown 第一行调用）。
+
+    置位后不可逆：本进程必然退出，单例服务绝不应再被启动。幂等。
+    """
+    global _shutting_down
+    _shutting_down = True
+
+
+def is_shutting_down() -> bool:
+    """是否已进入关停流程（start_singleton_services 的检查点读它）。"""
+    return _shutting_down
+
 
 def register_leader_callbacks(
     on_gain: Callable[[], Awaitable[None]],
@@ -201,15 +222,28 @@ def _ensure_client() -> None:
 async def _renew_lease_loop() -> None:
     """leader 续约 loop：每 15s CAS 原子续约；锁被别人持则 _lose_leader 切竞选。
 
-    Redis 连接异常时**不丢锁**（只 log 重试）—— lease 语义下保持 leader 身份，
-    待 Redis 恢复；若锁确实过期被别人抢，下次 CAS 返回 0 自然 _lose_leader。
+    Redis 连接异常时**短暂不丢锁**（lease 语义保持 leader 身份，待 Redis 恢复）。
+    但若中断持续超过一个 lease TTL（M-1）：锁在 Redis 侧早已过期被别人抢，本 worker
+    却仍 `_is_leader=True`、继续当 leader → 双 leader 窗口。故引入续约失败时间窗：
+    自首次失败起累积 >= TTL 即主动 `_lose_leader`——此时锁必然已不在我们名下，
+    主动让位比「装作还是 leader」安全得多。短抖动（< TTL）仍保持身份，不误伤。
     """
     try:
+        fail_since: float | None = None  # 续约连续失败起始时间（monotonic）；成功则重置为 None
         while True:
             await asyncio.sleep(_RENEW_INTERVAL)
             try:
                 _ensure_client()
                 if _redis_client is None:
+                    # 无 client 视同失败，纳入时间窗统计（M-1）
+                    if fail_since is None:
+                        fail_since = asyncio.get_event_loop().time()
+                    elif asyncio.get_event_loop().time() - fail_since >= _LEASE_TTL:
+                        logger.warning(
+                            "Leader renew: redis unavailable > TTL; relinquishing to avoid split brain"
+                        )
+                        await _lose_leader()
+                        return
                     logger.warning("Leader renew: redis unavailable; retry next cycle")
                     continue
                 renewed = await _redis_client.eval(
@@ -221,6 +255,7 @@ async def _renew_lease_loop() -> None:
                 )
                 if renewed:
                     logger.debug("Leader lease renewed for worker %s", _worker_id)
+                    fail_since = None  # 成功，重置失败窗
                 else:
                     # 锁已被别人持或过期 → 丢锁、切竞选
                     await _lose_leader()
@@ -228,6 +263,16 @@ async def _renew_lease_loop() -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                # M-1：连续失败超过 TTL 才丢锁；短抖动仅 log 重试、保持身份
+                if fail_since is None:
+                    fail_since = asyncio.get_event_loop().time()
+                elif asyncio.get_event_loop().time() - fail_since >= _LEASE_TTL:
+                    logger.warning(
+                        "Leader renew: failures persisted > TTL; relinquishing to avoid split brain: %s",
+                        exc,
+                    )
+                    await _lose_leader()
+                    return
                 logger.warning("Leader lease renewal failed (will retry): %s", exc)
     except asyncio.CancelledError:
         logger.info("Leader renew task cancelled")
@@ -288,11 +333,29 @@ async def shutdown_leader() -> None:
     """清理 leader 资源（应用 shutdown 时调用）。"""
     global _redis_client, _is_leader, _active_task
 
-    # 先停选举 loop（续约/竞选），避免释放锁期间又续约或抢锁
-    if _active_task is not None and not _active_task.done():
+    # C-1/C-3：置位关停标志（双保险——lifespan shutdown 第一行也会置位）。后续
+    # 即便有残留回调试图 start_singleton_services，也会因 is_shutting_down() 早退。
+    mark_shutting_down()
+
+    # 先停选举 loop（续约/竞选），避免释放锁期间又续约或抢锁。
+    # M-2：旧实现用 ``asyncio.shield(_active_task)`` 包裹——若 cancel 的瞬间 task 正在
+    # ``_lose_leader()`` 里（如 CAS 续约返回 0），``_lose_leader`` 会 spawn 一个**新竞选
+    # task** 并赋给 ``_active_task``；shield 反而保护了这个本该被取消的新 task，导致
+    # shutdown 后竞选继续、可能重新抢锁变 leader。改为：捕获 cancel 前的旧引用，
+    # await 其退出后，再把内部 reassign 出来的新 task 一并 cancel，确保无残留 loop。
+    task_to_stop = _active_task
+    if task_to_stop is not None and not task_to_stop.done():
+        task_to_stop.cancel()
+        try:
+            await asyncio.wait_for(task_to_stop, timeout=2.0)
+        except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+            pass
+    # cancel 期间 _lose_leader/_become_leader 可能已把 _active_task 重赋为新 loop；
+    # shutdown 流程必须把它也停掉，否则本进程已死、竞选 loop 仍在抢锁。
+    if _active_task is not None and _active_task is not task_to_stop and not _active_task.done():
         _active_task.cancel()
         try:
-            await asyncio.wait_for(asyncio.shield(_active_task), timeout=2.0)
+            await asyncio.wait_for(_active_task, timeout=1.0)
         except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
             pass
     _active_task = None
@@ -331,4 +394,6 @@ __all__ = [
     "is_leader",
     "shutdown_leader",
     "register_leader_callbacks",
+    "mark_shutting_down",
+    "is_shutting_down",
 ]

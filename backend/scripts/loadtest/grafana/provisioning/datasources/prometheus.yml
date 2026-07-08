@@ -1,0 +1,10 @@
+# Grafana 数据源自动 provisioning：启动即配好 Prometheus，无需手动加。
+# 被 docker-compose.loadtest.yml 的 grafana 容器挂载到 /etc/grafana/provisioning/datasources。
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true

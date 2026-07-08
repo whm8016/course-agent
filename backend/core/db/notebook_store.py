@@ -233,6 +233,17 @@ async def rename_category(db: AsyncSession, user_id: str, category_id: int, name
 
 
 async def delete_category(db: AsyncSession, user_id: str, category_id: int) -> bool:
+    # H-5：先校验 category 归属，非 owner 直接 return False，绝不碰连接表。
+    # 旧实现先无条件删 NotebookEntryCategory 再删 category，攻击者传他人 category_id
+    # 会把受害者的"题目-分类"关联全部抹掉（仅 category 因 user_id 过滤没删），造成数据破坏。
+    own = await db.execute(
+        select(NotebookCategory.id).where(
+            NotebookCategory.id == category_id,
+            NotebookCategory.user_id == user_id,
+        )
+    )
+    if own.scalar_one_or_none() is None:
+        return False
     await db.execute(
         delete(NotebookEntryCategory).where(NotebookEntryCategory.category_id == category_id)
     )

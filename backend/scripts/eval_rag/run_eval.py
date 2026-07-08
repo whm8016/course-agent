@@ -32,8 +32,8 @@ import sys
 from dotenv import load_dotenv
 load_dotenv()
 
-# 确保 LIGHTRAG_ENABLED=True
-os.environ.setdefault("LIGHTRAG_ENABLED", "true")
+# pydantic settings 用双下划线分隔嵌套字段（lightrag.enabled），单下划线不生效
+os.environ.setdefault("LIGHTRAG__ENABLED", "true")
 
 # 设置 OPENAI_API_KEY（LangChain 内部需要）
 from scripts.eval_rag import config  # noqa: E402
@@ -83,9 +83,16 @@ async def main():
         help="清除缓存，重新查询所有模式",
     )
     parser.add_argument(
-        "--per-question",
+        "--production-parity",
         action="store_true",
-        help="逐条计算指标（更精确但更慢）",
+        help="contexts 走生产路径 retrieve_context(naive, top_k=5)，精确对齐 _execute_rag；"
+             "默认走 retrieve()（按 mode 图谱检索），衡量 LightRAG 自身生成质量",
+    )
+    parser.add_argument(
+        "--top-k",
+        type=int,
+        default=None,
+        help="检索 top_k（默认读 config.EVAL_TOP_K=5，对齐生产）",
     )
     args = parser.parse_args()
 
@@ -131,34 +138,78 @@ async def main():
         qa_items,
         modes,
         no_cache=args.no_cache,
+        top_k=args.top_k,
+        production_parity=args.production_parity,
     )
 
     # ---- Step 3-4: RAGAS 指标计算 ----
-    from scripts.eval_rag.ragas_evaluator import evaluate_mode, evaluate_mode_per_question
+    # evaluate_mode 单次跑完直接返回 {avg, per_question}：逐条分数来自同一次 evaluate
+    # 的结果（每条样本一项），无需逐条重跑，也不再把整体均值复制 N 遍（Bug 3 修复）
+    from scripts.eval_rag.ragas_evaluator import evaluate_mode
 
-    # 整体平均分
     avg_scores: dict[str, dict[str, float]] = {}
+    per_question_scores: dict[str, list[dict[str, float]]] = {}
+    total_tokens_by_mode: dict[str, int] = {}
     for mode in modes:
         logger.info("计算 %s 模式的指标...", mode)
-        scores = evaluate_mode(qa_items, all_results[mode], metric_names)
-        avg_scores[mode] = scores
-        logger.info("%s 模式结果: %s", mode, scores)
+        res = evaluate_mode(qa_items, all_results[mode], metric_names)
+        avg_scores[mode] = res["avg"]
+        per_question_scores[mode] = res["per_question"]
+        total_tokens_by_mode[mode] = res.get("total_tokens", 0)
+        logger.info("%s 模式结果: %s", mode, res["avg"])
 
-    # 逐条指标（可选，用于 CSV）
-    per_question_scores: dict[str, list[dict[str, float]]] = {}
-    if args.per_question:
+    # 成本估算（Phase 3.6：按 total_tokens 粗估，input/output 混合平均单价）
+    total_tokens = sum(total_tokens_by_mode.values())
+    est_cost = total_tokens / 1_000_000 * config.COST_PER_M_TOKENS
+    logger.info("本轮评测总 token: %d，估算成本: $%.4f（单价 $%s/M）",
+                total_tokens, est_cost, config.COST_PER_M_TOKENS)
+
+    # ---- Step 4.5: 分布 + 延迟 + 历史对比 + 落盘（Phase 4）----
+    from datetime import datetime
+    from scripts.eval_rag import stats
+
+    # 历史要先读（此时 results/ 仍是上次结果），再落盘当前，避免读到刚写的自己
+    last_summary = stats.load_last_summary()
+    last_avg = (last_summary or {}).get("avg_scores")
+
+    distributions: dict[str, dict[str, dict[str, float]]] = {}
+    latency: dict[str, dict[str, dict[str, float]]] = {}
+    for mode in modes:
+        distributions[mode] = stats.compute_distribution_by_metric(
+            per_question_scores[mode], metric_names
+        )
+        latency[mode] = stats.compute_latency_distribution(all_results[mode])
+
+    delta = stats.diff_avg_against(avg_scores, last_avg, metric_names)
+    if last_avg:
+        logger.info("历史对比（vs 上次 %s）:", last_summary.get("timestamp", "?"))
         for mode in modes:
-            logger.info("逐条计算 %s 模式的指标...", mode)
-            pq_scores = evaluate_mode_per_question(
-                qa_items, all_results[mode], metric_names
+            line = f"  {mode:10s} | " + " | ".join(
+                f"{m}: {delta[mode].get(m, 0):+.4f}" for m in metric_names
             )
-            per_question_scores[mode] = pq_scores
+            logger.info(line)
     else:
-        # 用整体平均分作为每条的近似值（节省 API 成本）
-        for mode in modes:
-            per_question_scores[mode] = [
-                avg_scores.get(mode, {}) for _ in qa_items
-            ]
+        logger.info("无历史结果（首次运行），跳过 delta 对比")
+
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    summary = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "course": args.course,
+        "modes": modes,
+        "metrics": metric_names,
+        "avg_scores": avg_scores,
+        "distributions": distributions,
+        "latency": latency,
+        "delta": delta,
+        "has_baseline": last_avg is not None,
+        "total_tokens_by_mode": total_tokens_by_mode,
+        "total_tokens": total_tokens,
+        "est_cost": est_cost,
+    }
+    config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    summary_path = config.RESULTS_DIR / f"eval_summary_{ts}.json"
+    summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), "utf-8")
+    logger.info("Summary JSON: %s", summary_path)
 
     # ---- Step 5: 生成报告 ----
     from scripts.eval_rag.report_generator import generate_csv, generate_markdown
@@ -179,6 +230,8 @@ async def main():
         avg_scores,
         per_question_scores,
         metric_names,
+        course_name=args.course,
+        summary=summary,
     )
 
     logger.info("=" * 60)
@@ -195,6 +248,20 @@ async def main():
             f"{m}: {scores.get(m, 0):.4f}" for m in metric_names
         )
         logger.info(line)
+
+    # ---- Step 6: CI 质量门禁（Phase 5）----
+    # 全部达标 exit 0（CI 通过），任一不达标 exit 1（阻断 CI）。日志用 ASCII 避免 GBK 控制台编码问题
+    # sys 用顶层第 29 行的 import；这里不再局部 import，否则会让 sys 变成 main() 的局部名，
+    # 导致第 117 行（数据集缺失 fallback）的 sys.exit 报 UnboundLocalError
+    from scripts.eval_rag.quality_gate import check_quality_gate
+    passed, failures = check_quality_gate(summary)
+    if passed:
+        logger.info("[PASS] 质量门禁：全部指标达标")
+    else:
+        logger.warning("[FAIL] 质量门禁：以下指标不达标：")
+        for msg in failures:
+            logger.warning("  - %s", msg)
+    sys.exit(0 if passed else 1)
 
 
 if __name__ == "__main__":

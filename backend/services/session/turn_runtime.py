@@ -139,6 +139,8 @@ class TurnRuntimeManager:
         self,
         turn_id: str,
         after_seq: int = 0,
+        *,
+        user_id: str | None = None,
     ) -> AsyncIterator[StreamEvent]:
         """订阅指定 turn 的事件流，支持断线后按 seq 回放。
 
@@ -146,12 +148,15 @@ class TurnRuntimeManager:
             turn_id:   由 start_turn() 返回的 ID。
             after_seq: 从第几个事件开始（0 = 全部）。已完成的事件从内存列表回放，
                        新事件从 fan-out bus 实时接收。
+            user_id:   可选，发起订阅的当前登录用户 id。提供时做 turn 归属校验：
+                       turn 不属于该用户则视为不存在（KeyError），防止 B 重连订阅
+                       A 的 turn_id 偷看事件流（IDOR）。
 
         Raises:
-            KeyError: turn_id 不存在。
+            KeyError: turn_id 不存在，或归属校验未通过。
         """
         execution = self._executions.get(turn_id)
-        if execution is None:
+        if execution is None or not self._turn_belongs_to(execution, user_id):
             raise KeyError(f"未知 turn_id: {turn_id}")
 
         seq = 0
@@ -174,13 +179,27 @@ class TurnRuntimeManager:
         turn_id: str,
         text: str | None = None,
         answers: list[dict] | None = None,
+        *,
+        user_id: str | None = None,
     ) -> bool:
         """向正在等待 ask_user 回复的 turn 投递用户回答。
 
+        Args:
+            user_id: 可选，发起回复的当前登录用户 id。提供时做 turn 归属校验（同
+                     request_answer_now），防止 B 用户拿 A 的 turn_id 向 A 的 ask_user
+                     投递回复、操纵 A 的对话（Turn IDOR，与 answer_now 同源）。
+
         Returns:
-            True  — 成功投递（turn 存在且处于 pause 状态）
-            False — turn 不存在或已结束
+            True  — 成功投递（turn 存在、归属相符且处于 pause 状态）
+            False — turn 不存在/已结束，或归属校验未通过
         """
+        if user_id is not None:
+            execution = self._executions.get(turn_id)
+            if execution is None or not self._turn_belongs_to(execution, user_id):
+                logger.warning(
+                    "TurnRuntime: submit_user_reply turn_id=%s 不存在/已结束/归属不符", turn_id
+                )
+                return False
         queue = self._reply_queues.get(turn_id)
         if queue is None:
             logger.warning("TurnRuntime: submit_user_reply turn_id=%s 不存在或已结束", turn_id)
@@ -190,17 +209,35 @@ class TurnRuntimeManager:
         logger.info("TurnRuntime: submitted user reply for turn_id=%s", turn_id)
         return True
 
-    async def request_answer_now(self, turn_id: str) -> bool:
+    async def request_answer_now(
+        self, turn_id: str, *, user_id: str | None = None
+    ) -> bool:
         """触发"立即回答"：让正在运行的 turn 的 agent loop 在下一轮顶部提前直接回答。
 
         仿 submit_user_reply 的信号投递模式，但投递的是 asyncio.Event.set()（幂等，
         连点安全）。run_agent_loop 每轮顶部轮询 is_answer_now_requested()——为 True 时
         跳过后续工具循环，用已累积的 messages 发起一次无工具的直接回答（见 loop.py）。
 
+        Args:
+            turn_id: 由 start_turn() 返回的 ID。
+            user_id: 可选，发起"立即回答"的当前登录用户 id。提供时做 turn 归属校验：
+                     turn 不属于该用户则当作不存在返回 False（防 IDOR——B 用户拿 A 的
+                     turn_id 触发 A 的对话提前作答）。
+
         Returns:
-            True  — turn 存在且已触发信号
-            False — turn 不存在或已结束（_answer_now_events 已被 _run_turn finally 清除）
+            True  — turn 存在、归属相符且已触发信号
+            False — turn 不存在/已结束，或归属校验未通过
         """
+        # 归属校验：仅当调用方提供 user_id（API 层）时才要求 _executions 命中且归属相符。
+        # 未提供 user_id（内部/旧调用方）走原始路径——仅以 _answer_now_events 是否存在为判，
+        # 保持对直接注入 event 的内部测试兼容。
+        if user_id is not None:
+            execution = self._executions.get(turn_id)
+            if execution is None or not self._turn_belongs_to(execution, user_id):
+                logger.info(
+                    "TurnRuntime: request_answer_now turn_id=%s 不存在/已结束/归属不符", turn_id
+                )
+                return False
         ev = self._answer_now_events.get(turn_id)
         if ev is None:
             logger.info("TurnRuntime: request_answer_now turn_id=%s 不存在或已结束", turn_id)
@@ -209,6 +246,14 @@ class TurnRuntimeManager:
         log_flow("turn.answer_now", turn_id=turn_id)
         logger.info("TurnRuntime: answer_now requested for turn_id=%s", turn_id)
         return True
+
+    @staticmethod
+    def _turn_belongs_to(execution: _TurnExecution, user_id: str | None) -> bool:
+        """turn 归属判定：未提供 user_id 时（旧调用方/内部用）一律放行，保持兼容；
+        提供时要求 turn.context.user_id 严格相等。归属不符即视为"turn 不属于你"。"""
+        if user_id is None:
+            return True
+        return str(execution.context.user_id or "") == str(user_id)
 
     # ------------------------------------------------------------------
     # 内部实现

@@ -1,5 +1,6 @@
 """Session management for conversation history."""
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime
 import json
@@ -65,10 +66,14 @@ class Session:
 class SessionManager:
     """Manages conversation sessions persisted as JSONL files."""
 
+    # M-39：内存 LRU 上限——防止「海量 session_key（每个 IM 群/用户一个）」无限堆积
+    # 致内存泄漏。超出按 LRU 驱逐最久未访问的缓存项（磁盘 JSONL 仍保留，下次访问重载）。
+    _MAX_CACHE_SIZE = 256
+
     def __init__(self, workspace: Path):
         self.workspace = workspace
         self.sessions_dir = _ensure_dir(workspace / "sessions")
-        self._cache: dict[str, Session] = {}
+        self._cache: OrderedDict[str, Session] = OrderedDict()
 
     def _get_session_path(self, key: str) -> Path:
         safe_key = _safe_filename(key.replace(":", "_"))
@@ -76,6 +81,8 @@ class SessionManager:
 
     def get_or_create(self, key: str) -> Session:
         if key in self._cache:
+            # LRU：访问即移到队尾（最新）
+            self._cache.move_to_end(key)
             return self._cache[key]
 
         session = self._load(key)
@@ -83,7 +90,13 @@ class SessionManager:
             session = Session(key=key)
 
         self._cache[key] = session
+        self._evict_if_needed()
         return session
+
+    def _evict_if_needed(self) -> None:
+        """超过 _MAX_CACHE_SIZE 时淘汰队首（最久未访问）；被淘汰的 session 磁盘仍留存。"""
+        while len(self._cache) > self._MAX_CACHE_SIZE:
+            self._cache.popitem(last=False)
 
     def _load(self, key: str) -> Session | None:
         path = self._get_session_path(key)
@@ -141,6 +154,9 @@ class SessionManager:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
         self._cache[session.key] = session
+        # LRU：刚写过的 session 移到队尾（最新）
+        self._cache.move_to_end(session.key)
+        self._evict_if_needed()
 
     def invalidate(self, key: str) -> None:
         self._cache.pop(key, None)

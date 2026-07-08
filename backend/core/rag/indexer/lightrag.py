@@ -16,10 +16,14 @@ from core.rag.types import IndexResult
 from core.rag.indexer.base import Indexer
 from core.rag.lightrag import (
     _get_instance,
+    _release_instance,
     is_lightrag_available,
     _build_signature,
     get_cached_signature,
     set_cached_signature,
+    hydrate_signature,
+    persist_signature,
+    invalidate_signature,
 )
 
 logger = logging.getLogger(__name__)
@@ -126,9 +130,11 @@ class LightRAGIndexer(Indexer):
                     error="no_files",
                 )
 
-            # 检查签名缓存
+            # 检查签名缓存（M-33：先从 Redis hydrate 进内存，再读内存）
             signature = _build_signature(all_files)
             cache_key = f"{course_id}|{resolved_dir}"
+            if not force:
+                await hydrate_signature(cache_key)
             if not force and get_cached_signature(cache_key) == signature:
                 logger.info("LightRAG index skipped (unchanged): course=%s", course_id)
                 return IndexResult(
@@ -151,8 +157,9 @@ class LightRAGIndexer(Indexer):
                 await rag.ainsert(docs, ids=ids, file_paths=text_file_paths)
                 indexed_docs = len(docs)
 
-            # 更新签名缓存
+            # 更新签名缓存（M-33：内存 + Redis 持久化，重启后仍能命中跳过重索引）
             set_cached_signature(cache_key, signature)
+            await persist_signature(cache_key)
 
             logger.info(
                 "LightRAG indexed course=%s files=%d docs=%d source_dir=%s",
@@ -175,6 +182,9 @@ class LightRAGIndexer(Indexer):
                 status="error",
                 error=str(exc),
             )
+        finally:
+            # H-10：_get_instance 在本 try 内 +1，无论成功/异常都释放
+            await _release_instance(course_id)
 
     async def delete(self, course_id: str) -> bool:
         """删除课程索引。
@@ -183,11 +193,11 @@ class LightRAGIndexer(Indexer):
         此方法仅清除签名缓存。
         """
         cache_key_prefix = f"{course_id}|"
-        # 清除签名缓存
+        # 清除签名缓存（M-33：内存 + Redis 都清；原仅清内存，重启后 Redis 残留会误判"未变"）
         from core.rag.lightrag.instance_pool import _index_signatures
         keys_to_remove = [k for k in _index_signatures if k.startswith(cache_key_prefix)]
         for key in keys_to_remove:
-            del _index_signatures[key]
+            await invalidate_signature(key)
 
         logger.info("LightRAGIndexer.delete course=%s (signature cache cleared)", course_id)
         return True

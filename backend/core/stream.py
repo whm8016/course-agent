@@ -39,6 +39,12 @@ class StreamEventType(str, Enum):
     RESULT = "result"
     DONE = "done"
     QUIZ = "quiz"
+    # 出题 pipeline 的逐题事件：quiz_question（一道题生成成功）、quiz_question_error
+    # （单题失败/校验无效——M-8 单题容错）。此前 pipeline 已 emit 这两个 type，但枚举
+    # 里缺失，from_dict 把未知 type 降级成 token，前端（ChatWindow.tsx 监听 quiz_question）
+    # 实际收不到，逐题事件静默丢失。补枚举让事件原样透传。
+    QUIZ_QUESTION = "quiz_question"
+    QUIZ_QUESTION_ERROR = "quiz_question_error"
 
     # 错误 / 会话
     ERROR = "error"

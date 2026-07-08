@@ -1,0 +1,15 @@
+# Prometheus 抓取配置：scrape 单 backend 的 /metrics（gunicorn -w4，容器网络内用 service 名）。
+# 项目用普通 prometheus_client（无 multiprocess）：4 worker 各独立 REGISTRY，/metrics 只抓到
+# 其中之一（不影响 Locust 客户端测的总 RPS/P95/失败率）。要看全量需接 prometheus_multiprocess。
+global:
+  scrape_interval: 5s       # 压测 5s 抓一次，足够看延迟/饱和度趋势
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: backend
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - backend:8002
+        labels:
+          group: loadtest

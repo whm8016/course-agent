@@ -21,6 +21,7 @@ reporting 四阶段，去除 label 协议层：每阶段用 run_agent_loop（too
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -156,6 +157,28 @@ def _extract_traces_from_knowledge(
 def _strip_source_markers(text: str) -> str:
     """把摘要里的 ``[来源: ...]`` 标记去掉，留干净正文（用于报告 evidence 注入）。"""
     return _SOURCE_MARKER_RE.sub("", text or "").strip()
+
+
+def _fork_for_block(context: UnifiedContext, **overrides: Any) -> UnifiedContext:
+    """为并行 research block 派生隔离 context（M-5）。
+
+    dataclasses.replace 是浅拷贝：attachments / metadata 等可变嵌套字段仍指向原 context 的
+    同一对象。run_agent_loop → _build_messages 会原地改 Attachment（doc 文件清空 base64）、
+    并行 block 共享同一份时，先跑的 block 清空 base64 会让后跑的 block 丢掉附件内容。
+
+    这里对 attachments 做深拷贝（每个 block 拿到独立的 Attachment 对象副本，互不影响），
+    metadata 也深拷贝（防 block 内写 metadata 互相覆盖）。其余字段由 replace 正常处理。
+    仅在 _research_block（唯一并行入口）用；串行阶段（rephrase/decompose/reporting）浅拷贝
+    无并发风险，保持裸 replace 不变。
+    """
+    forked = replace(
+        context,
+        attachments=copy.deepcopy(context.attachments),
+        metadata=copy.deepcopy(context.metadata),
+    )
+    if overrides:
+        forked = replace(forked, **overrides)
+    return forked
 
 
 # ── Pipeline ───────────────────────────────────────────────────────────────────
@@ -404,6 +427,29 @@ class ResearchPipeline:
                 logger.warning("research 调度超过安全上限 %d 轮，中止", safety_cap)
                 break
 
+    async def _flush_child_stream(
+        self, stream: StreamBus, child: StreamBus, block: TopicBlock
+    ) -> None:
+        """把子 bus 缓冲的事件整体 flush 到主 stream（M-10 块级事件隔离的收尾）。
+
+        发 progress 边界事件标记本块归属（block_id / sub_topic），再按原顺序把子 bus 的
+        全部事件逐条 emit 到主 stream。因 flush 在 _research_block 末尾串行执行（gather 内
+        各 block 各自走到自己的 flush），同一 block 的事件在主 stream 上是连续的一段，不会
+        与其它 block 交错。
+        """
+        await stream.emit({
+            "type": "progress", "stage": "researching",
+            "status": "block_start",
+            "block_id": block.block_id, "sub_topic": block.sub_topic,
+        })
+        for event in child._history:
+            await stream.emit(event)
+        await stream.emit({
+            "type": "progress", "stage": "researching",
+            "status": "block_end",
+            "block_id": block.block_id, "sub_topic": block.sub_topic,
+        })
+
     async def _research_block(
         self,
         *,
@@ -436,17 +482,25 @@ class ResearchPipeline:
         ) or "  (无)"
         user_prompt = (step_cfg.get("user_template", "")).format(sibling_topics=siblings)
 
-        ctx = replace(
+        ctx = _fork_for_block(
             context,
             user_message=user_prompt,
             conversation_history=[],
             enabled_tools=tools,
             mode="research",
         )
+
+        # M-10：并行 block 事件隔离——给本块一个独立子 StreamBus，run_agent_loop 的所有事件
+        # （thinking/tool_call/tool_result/token）先缓冲在子 bus，块跑完后整体（按原顺序、
+        # 不与其它块交错）flush 回主 stream。否则多块 asyncio.gather 并行时，各块事件按
+        # await 调度交错塞进主 bus._history，前端拿到的 token 序列会跨子主题混在一起，无法
+        # 归属。牺牲块内逐字真流式（research 块本就是后台检索子任务，emit_terminal_events
+        # =False，非交互），换取块级事件不交错。
+        child_stream = StreamBus()
         try:
             outcome = await run_agent_loop(
                 context=ctx,
-                stream=stream,
+                stream=child_stream,
                 system_prompt=system_prompt,
                 tool_schemas=_get_tool_schemas(ctx) if tools else None,
                 max_iterations=self.block_max_iterations,
@@ -459,6 +513,9 @@ class ResearchPipeline:
             logger.exception("research 块 %s 失败", block.block_id)
             queue.mark_failed(block.block_id)
             return
+        finally:
+            # 块结束（含异常）：把子 bus 缓冲的事件整体 flush 到主 stream（顺序保持，不交错）
+            await self._flush_child_stream(stream, child_stream, block)
 
         block.knowledge = (outcome.final_text or "").strip()
         for trace in _extract_traces_from_knowledge(block.knowledge, block):

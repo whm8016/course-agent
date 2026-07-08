@@ -114,6 +114,8 @@ Each capability externalizes its prompts to `core/<cap>/prompts/zh/*.yaml`, load
 | `answer` / `done` | full final answer / turn end (includes tools_used, mode, iterations) |
 | `stage_start` / `stage_end` | stage boundaries (explore/plan/quiz/rephrase/...) |
 | `quiz_question` / `result` | per-question in quiz / capability finalization |
+| `quiz_question_error` | a single quiz question failed/invalid (M-8/M-9: per-question fault tolerance — other questions still generate) |
+| `progress` | sub-stage progress; in research, parallel blocks emit `block_start`/`block_end` with `block_id` (M-10: per-block event isolation — each block's events flush as one contiguous segment, not interleaved) |
 | `error` | unrecoverable failure |
 
 ---
@@ -212,7 +214,7 @@ Frontend (`frontend/`, React 19 + TypeScript + Vite + Tailwind) talks to the bac
 | TutorBotManager ×4 | IM 消息重复处理 | Leader 选举，仅 leader 启动 Bot |
 | MCP Connection ×4 | stdio 子进程 ×4 | Leader 选举，仅 leader 启动 MCP |
 | TurnRuntime KeyError | SSE 断线重连路由到不同 worker → `_executions` 找不到 | Nginx `ip_hash` 粘性会话 |
-| Semaphore/Circuit Breaker 语义减弱 | 每个进程独立 Semaphore(25) → 总并发 100 | 参数缩放：`max_concurrent // workers` |
+| Circuit Breaker 语义减弱 | 每个进程独立 failure_threshold → 总阈值放大 N 倍 | 参数缩放：`failure_threshold // workers`（最小 2） |
 | LightRAG LRU 缓存 | 4 份缓存，内存占用 ×4 | 容量缩放：`capacity // workers` |
 
 ### Leader 选举（`core/leader.py`）
@@ -246,7 +248,6 @@ TurnRuntime 的 `_executions` 字典在进程内，断线重连必须回到同�
 
 | 资源 | 单 worker 值 | 多 worker 公式 |
 |------|-------------|---------------|
-| LLM Semaphore | 25 | `25 // workers`（最小 1） |
 | Circuit Breaker failure_threshold | 5 | `5 // workers`（最小 2） |
 | LightRAG LRU capacity | 128 | `128 // workers`（最小 2） |
 
@@ -330,3 +331,27 @@ Key points:
 - **Scope**: only the chat / deep_solve turn is per-request switchable (both route through `/api/chat` → ChatPipeline). Embedding / LightRAG / Bot subsystems keep using the startup constants — .
 
 Management API (`api/llm.py`, admin): CRUD profiles + `/probe` test connection + `/active` default; `/profiles/selectable` feeds the dropdown (**api_key stripped**). Catalog read/write layer: `core/llm/catalog.py` (live file reads → API writes visible next request). Frontend: `LlmProviderPage` (admin CRUD+test) + `ChatWindow` model dropdown (all users).
+
+## RAG 评估系统（`scripts/eval_rag/`）
+
+离线评测 LightRAG 各检索模式（naive/local/global/mix）与生产路径的检索 + 生成质量，用 RAGAS 0.4.3 量化，CI 质量门禁阻断回归。
+
+**模块组成**：
+- `config.py` — DashScope LLM/embedding 配置、指标分层（tier1 检索 / tier2 生成 / tier3 鲁棒性+领域）、`QUALITY_GATES` 阈值。
+- `rag_runner.py` — 两步查询：`retrieve()` 取上下文（纯检索，无 LLM）+ `query()` 取答案；延迟分阶段采集（retrieve_ms/query_ms）。`--production-parity` 走生产路径 `retrieve_context(naive, top_k=5)` 对齐 `_execute_rag`。
+- `ragas_evaluator.py` — collections API（`llm_factory` → InstructorLLM），8 个指标：context_precision/recall、faithfulness、factual_correctness(f1)、noise_sensitivity、answer_relevancy、teaching_accuracy/safety（AspectCritic）。embed 子类显式注入 dimensions（DashScope text-embedding-v3 不传会致 answer_relevancy 内部 cosine 全 0）。
+- `stats.py` — numpy 分布（P50/P90/P95/std）+ scipy Welch t-test 回归检测 + 历史基线 delta。
+- `quality_gate.py` — `check_quality_gate(summary)` 按 `QUALITY_GATES` 检查（`<metric>_min/_max` 取所有 mode 最差值；`latency__<field>__<stat>` 取最大），不达标 `sys.exit(1)` 阻断 CI。本轮未评测的指标跳过，不误判。
+- `report_generator.py` — CSV + Markdown 报告，附录含分布 / 延迟 / 历史 delta 表。
+- `production_feedback.py` — 生产问笔回流（见下「Phase 6 诚实边界」）。
+
+**关键修复（vs 旧实现）**：
+- 上下文不再用 answer 自我证明（Bug 1）：contexts 独立来自 `retrieve()`，answer 来自 `query()`。
+- embed 显式 dimensions（Bug 2）：否则 answer_relevancy 内部 cosine 全 0。
+- 逐条真实分数（Bug 3）：来自同一次 evaluate 的 per-question scores，不再把整体均值复制 N 遍。
+- `LLM_API_KEY` 优先读 `DASHSCOPE_API_KEY`（Bug 6），而非 embedding 专用 key。
+- `LIGHTRAG__ENABLED` 用双下划线（Bug 4）：pydantic settings 嵌套字段必须双下划线。
+
+**Phase 6 诚实边界**：`production_feedback.py` 从 `messages` 表导出真实 (question, answer) + 启发式初筛可疑低质量（过短 / 拒绝话术 / 错误标记），产出**无 ground_truth 的待标注候选池**（`datasets/v3_production_candidates.json`）。本项目**无点踩/差评功能，RAG 命中信号（empty/retrieved_chars）只打日志不落库**，故这是真实问答导出 + 零成本粗筛，**非用户负反馈闭环**；真正的闭环需要 messages.metadata 写入 RAG 命中字段 + 前端点踩按钮（独立功能，不在本脚本范围）。初筛顺序为 empty → refusal(语义) → too_short(长度)，确保短拒绝（"我不知道"）命中高置信 refusal 而非被长度截胡。
+
+**测试**：`tests/test_ragas_eval_smoke.py`（14，mock LightRAG/RAGAS 纯逻辑 + 两步查询）+ `tests/test_production_feedback.py`（8，配对 / 初筛纯函数）。真实分数需在有 DashScope key 的环境跑 `python -m scripts.eval_rag.run_eval`。

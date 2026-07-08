@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -28,6 +29,18 @@ from core.db.database import Session, Message
 from core.llm.llm import client as async_openai_client
 
 logger = logging.getLogger(__name__)
+
+# M-11：per-session 压缩锁。main.py 每次 CAPABILITY_COMPLETE 都 create_task 触发
+# _maybe_compress_summary，同一 session 多轮 turn 并发触发会同时读 session.summary、各调
+# LLM、各自 commit 写 summary_up_to_msg_id → 后者覆盖前者、增量丢失、游标错乱。
+# 单事件循环下 dict.setdefault 是原子的，锁按 session_id 隔离；maybe_compress 入口非阻塞
+# 探测，已有压缩在进行则本轮让路（下次 turn 再压），避免并发覆盖。
+_compress_locks: dict[str, asyncio.Lock] = {}
+
+
+def _get_compress_lock(session_id: str) -> asyncio.Lock:
+    """返回（按需创建）某 session 的压缩锁。单事件循环下 setdefault 原子。"""
+    return _compress_locks.setdefault(session_id, asyncio.Lock())
 
 _COMPRESS_PROMPT = """你是对话摘要助手。将下面的对话内容渐进式整合到已有摘要中，输出一份完整的更新摘要。
 
@@ -98,6 +111,24 @@ class SessionSummaryManager:
         Returns:
             是否执行了压缩
         """
+        # M-11：per-session 并发压缩防护。同一 session 已有压缩在进行时，本轮让路
+        # （下次 turn 再压），避免两个并发 maybe_compress 同时读旧 summary、各自调 LLM、
+        # 各自 commit 导致后者覆盖前者、summary_up_to_msg_id 游标错乱、增量丢失。
+        # 非阻塞探测：locked() 检查与 async with 之间无 await，单事件循环下无 TOCTOU。
+        lock = _get_compress_lock(session_id)
+        if lock.locked():
+            logger.debug("[L2] compress already in progress session=%s; skip this round", session_id)
+            return False
+
+        async with lock:
+            return await self._maybe_compress_locked(db, session_id)
+
+    async def _maybe_compress_locked(
+        self,
+        db: AsyncSession,
+        session_id: str,
+    ) -> bool:
+        """实际的压缩逻辑（已持 per-session 锁，由 maybe_compress 调用）。"""
         # 1. 获取 session 和消息列表
         session = await db.get(Session, session_id)
         if not session:
@@ -251,4 +282,9 @@ def get_summary_manager() -> SessionSummaryManager:
     return _summary_manager
 
 
-__all__ = ["SessionSummaryManager", "get_summary_manager"]
+__all__ = [
+    "SessionSummaryManager",
+    "get_summary_manager",
+    "_get_compress_lock",
+    "_compress_locks",
+]

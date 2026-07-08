@@ -328,7 +328,44 @@ class MCPConnectionManager:
                 conn.status = "error"
                 conn.error = f"{type(exc).__name__}: {exc}"
         finally:
+            # M-49：连接 task 退出时必须把它的 adapter 从 ToolRegistry 摘掉，否则
+            # transport 异常断开 / task 被取消后，stale adapter 仍注册在 registry，
+            # agent 会看到一个调用即失败的"幽灵工具"。
+            #
+            # 三种退出路径在此汇合（详见 _teardown_adapters_on_exit）：
+            #  1) 主动断开（_disconnect 先 set shutdown event）→ graceful=True，跳过
+            #     反注册（_disconnect 已做，幂等重复也无害，跳过避免与它竞争）。
+            #  2) transport 异常（server 端断开/网络错）→ except 已记 status=error →
+            #     graceful=False，由 task 自己反注册 + 清 adapters。
+            #  3) task 被取消（CancelledError 不属 Exception）→ 直接到 finally →
+            #     同 2 走 self 清理分支。unregister 幂等，重复调用安全。
             conn.session = None
+            self._teardown_adapters_on_exit(conn, graceful=conn.shutdown.is_set())
+
+    def _teardown_adapters_on_exit(
+        self, conn: _ServerConnection, *, graceful: bool
+    ) -> None:
+        """连接 task 退出时清理 adapter 注册（M-49）。
+
+        - ``graceful=True``：主动断开（``_disconnect`` 先 set 了 shutdown event 并
+          已自行 ``_unregister_adapters`` + 清 adapters）→ 这里只清 session（已在
+          调用方清掉），跳过反注册，避免与 ``_disconnect`` 竞争。
+        - ``graceful=False``：transport 异常断开 / task 被取消 → ``_disconnect`` 没
+          机会跑 → 由 task 自己反注册 adapter、清空 ``conn.adapters``，并把仍为
+          ``connected`` 的 status 收敛到 ``error``（避免 UI 仍显示已断开的 server
+          为 connected、agent 仍把它列进可用工具）。
+
+        ``registry.unregister`` 幂等（``pop(name, None)``），故即便 ``_disconnect``
+        与本方法先后都跑过也无残留、无异常。
+        """
+        if graceful:
+            return
+        self._unregister_adapters(conn)
+        conn.adapters = []
+        if conn.status == "connected":
+            conn.status = "error"
+            conn.error = "connection task exited unexpectedly"
+
 
     @staticmethod
     async def _open_transport(stack: AsyncExitStack, cfg: MCPServerConfig) -> tuple[Any, Any]:

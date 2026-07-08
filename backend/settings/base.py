@@ -651,8 +651,59 @@ class Settings(BaseSettings):
 
     @property
     def lightrag_lru_capacity_scaled(self) -> int:
-        """LRU 容量按 worker 数缩放（多 worker 下避免超额驻留）。"""
+        """LRU 容量按 worker 数缩放（多 worker 下避免超额驻留）。
+
+        M-23 说明：本公式针对 **web worker 进程**（处理并发检索，需多实例驻留）。
+        ARQ worker（python -m arq，跑后台索引）是独立进程，拥有各自的模块级 _instances
+        池，与本进程隔离；ARQ 一次只跑一个 indexing job，容量需求实际为 1，但本公式
+        同样会给它分一份（轻微多驻留 1 个实例，属可接受的内存开销，不造成数据问题）。
+        若未来 ARQ 并发多任务，需单独引入 arq 容量配置项。
+        """
         return max(2, self.lightrag.lru_capacity // max(1, self.backend_workers))
+
+    def validate_runtime_workers(
+        self, known_workers: int | None = None
+    ) -> bool:
+        """运行时校验 ``backend_workers`` 与真实 worker 进程数是否一致（M-24）。
+
+        ``backend_workers`` 驱动 DB 连接池缩放（database.py）、LLM 熔断阈值缩放
+        （reliability.py）、LightRAG LRU 容量缩放（本类 property）——三者都假设
+        它等于 gunicorn/uvicorn 实际拉起的 ``-w`` 进程数。但 ``-w`` 数写在部署
+        脚本里（Dockerfile/compose），与 ``.env`` 的 ``BACKEND_WORKERS`` 是两套
+        手动维护的值，一旦不同步，缩放公式就会算偏（例如真 8 worker 但 env 写 4，
+        实际连接数会翻倍打爆 Postgres）。本方法在进程启动期（lifespan）跑一次，
+        把不一致暴露为显式告警。
+
+        真实 worker 数来源优先级：
+        1. 调用方显式传入的 ``known_workers``（测试 / 自定义编排注入，最准）；
+        2. 环境变量 ``WEB_CONCURRENCY``（gunicorn/uvicorn/容器平台常用约定）；
+        3. 其余环境（无 ``-w`` 注入线索，如 pytest、dev 单进程 uvicorn）→ 跳过校验，
+           返回 ``True``（无法判定时不制造噪音）。
+
+        不抛异常（缩放偏只是性能/容量问题，不致数据错误），仅 ``warnings.warn``。
+        返回 ``True`` 表示一致或无法判定，``False`` 表示检测到不一致。
+        """
+        if known_workers is None:
+            raw = os.getenv("WEB_CONCURRENCY", "").strip()
+            if not raw:
+                return True  # 无注入线索（如测试/dev），不校验
+            try:
+                known_workers = int(raw)
+            except ValueError:
+                return True  # 非法值，交由调用方日志处理，不阻断启动
+        if known_workers <= 0:
+            return True
+        if known_workers != self.backend_workers:
+            warnings.warn(
+                f"BACKEND_WORKERS ({self.backend_workers}) does not match actual worker "
+                f"count ({known_workers}). DB pool / circuit-breaker / LRU scaling "
+                f"formulas assume these are equal — update .env BACKEND_WORKERS or the "
+                f"gunicorn/uvicorn -w flag to match.",
+                stacklevel=2,
+            )
+            return False
+        return True
+
 
 
 @lru_cache(maxsize=1)

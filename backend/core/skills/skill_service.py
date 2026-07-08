@@ -91,6 +91,12 @@ class SkillReadOnlyError(Exception):
     pass
 
 
+class InvalidSkillAlwaysError(Exception):
+    """尝试给 course 层 skill 开启 always:true 时抛出（M-48）。"""
+
+    pass
+
+
 class SkillService:
     """SKILL.md 包的读取 + 运行时加载（personal + course + builtin 三层）。"""
 
@@ -100,12 +106,17 @@ class SkillService:
         user_root: Path,
         builtin_root: Path | None = BUILTIN_SKILLS_ROOT,
         personal_root: Path | None = None,
+        is_shared_course_layer: bool = False,
     ) -> None:
         self._root = user_root  # course 层
         self._builtin_root = builtin_root
         self._personal_root = personal_root  # personal 层（None → 无个人层，教师场景）
         # 写入层：有 personal → 写 personal；否则写 course（现状）
         self._writable_root = personal_root if personal_root is not None else user_root
+        # M-48：是否为"课程共享层"——只有经 get_skill_service(course_id, user_id="")
+        # 构造的教师共享场景才为 True。直构的 SkillService（学生个人 / 测试通用层）
+        # 默认 False，仍可写 always。always 在共享层会污染所有学生每轮 prompt，故禁止。
+        self._is_shared_course_layer = is_shared_course_layer
 
     @property
     def root(self) -> Path:
@@ -245,13 +256,17 @@ class SkillService:
             meta, _ = self._parse_frontmatter(
                 (skill_dir / "SKILL.md").read_text(encoding="utf-8")
             )
+            # M-48 纵深防御：course 层 skill 的 always 永不生效。
+            # 即便有人绕过 API 直接在 course 目录写 always:true 文件，急切注入也会忽略它，
+            # 杜绝课程作者污染所有学生每轮 prompt 的注入面。always 只认 personal/builtin。
+            effective_always = bool(meta.get("always")) and source != "course"
             entries.append(
                 SkillSummaryEntry(
                     name=info.name,
                     description=info.description,
                     available=True,  # 纯文本 playbook，无 requires gate
                     missing=[],
-                    always=bool(meta.get("always")),
+                    always=effective_always,
                     source=source,
                 )
             )
@@ -290,6 +305,16 @@ class SkillService:
     def _skill_dir(self, name: str) -> Path:
         return self._writable_root / self._validate_name(name)
 
+    @property
+    def _writable_is_course_layer(self) -> bool:
+        """当前写入层是否为"课程共享层"（教师为课程制定、同课共享）。
+
+        只有经 get_skill_service(course_id, user_id="") 构造的教师共享场景为 True
+        （personal_root is None 且 is_shared_course_layer=True）。学生个人层、
+        直构的通用 SkillService 均为 False，仍允许 always（那是用户自己的全局守则）。
+        """
+        return self._is_shared_course_layer and self._personal_root is None
+
     def _skill_file(self, name: str) -> Path:
         return self._skill_dir(name) / "SKILL.md"
 
@@ -312,6 +337,15 @@ class SkillService:
         target_dir = self._skill_dir(slug)
         if target_dir.exists():
             raise SkillExistsError(slug)
+        # M-48：course 层（教师为课程制定的共享 skill）不允许 always:true。
+        # always 会让正文每轮急切注入所有学生的 system prompt；恶意/失误的课程作者可借
+        # 此把任意指令塞进每轮对话。限制 always 只能来自 personal（学生自己的全局守则）
+        # 或 builtin（随包发布、可信）。course 层 skill 仍可按需 read_skill 读取。
+        if always and self._writable_is_course_layer:
+            raise InvalidSkillAlwaysError(
+                "课程共享 skill 不支持 always:true（会污染所有学生每轮对话）；"
+                "请用个人 skill 或保留为按需读取"
+            )
         body = self._normalize_content(slug, description, content, always=always)
         target_dir.mkdir(parents=True, exist_ok=False)
         self._skill_file(slug).write_text(body, encoding="utf-8")
@@ -334,6 +368,11 @@ class SkillService:
         if description is not None:
             text = self._rewrite_frontmatter(text, description=description.strip())
         if always is not None:
+            # M-48：course 层禁止开启 always（同 create 的理由）。
+            if always and self._writable_is_course_layer:
+                raise InvalidSkillAlwaysError(
+                    "课程共享 skill 不支持 always:true（会污染所有学生每轮对话）"
+                )
             text = self._rewrite_frontmatter(text, always=always)
         if rename_to and rename_to != slug:
             new_slug = self._validate_name(rename_to)
@@ -439,15 +478,19 @@ def get_skill_service(course_id: str = "", user_id: str = "") -> SkillService:
     key = f"{cid}|{uid or '_'}"
     if key not in _instances:
         personal_root = _PERSONAL_SKILLS_BASE / uid if uid else None
+        # uid 为空（教师/admin 场景）→ 写入层是课程共享目录，禁 always（M-48）；
+        # uid 非空（学生）→ 写个人层，allow always。
         _instances[key] = SkillService(
             user_root=_USER_SKILLS_BASE / cid,
             personal_root=personal_root,
+            is_shared_course_layer=not uid,
         )
     return _instances[key]
 
 
 __all__ = [
     "BUILTIN_SKILLS_ROOT",
+    "InvalidSkillAlwaysError",
     "InvalidSkillNameError",
     "InvalidSkillPathError",
     "SkillExistsError",

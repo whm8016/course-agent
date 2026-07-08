@@ -44,6 +44,21 @@ _JOB_EVENTS_TTL = 3600  # 进度事件列表在 Redis 中保留 1 小时
 # 工具函数
 # ---------------------------------------------------------------------------
 
+async def _resolve_redis(ctx) -> tuple:
+    """获取 redis 连接：优先用 ARQ 注入的 ctx["redis"]（ARQ 管理其生命周期），
+    否则 fallback 自建一个（M-3：旧实现自建后从不 aclose，每次 cron/flush job 都泄漏
+    一个连接，worker 长跑会耗尽连接池）。返回 (redis, should_close)：
+    should_close=True 表示是本函数自建的、用完必须由调用方 aclose。
+    """
+    r = ctx.get("redis")
+    if r is not None:
+        return r, False
+    import redis.asyncio as aioredis
+    from settings import get_settings
+    REDIS_URL = get_settings().db.redis_url.get_secret_value()
+    return aioredis.from_url(REDIS_URL, decode_responses=True), True
+
+
 async def _push_event(redis, job_id: str, event: dict) -> None:
     """向 Redis list 追加一条进度事件（供 WS 端轮询）。"""
     key = f"job:{job_id}:events"
@@ -190,15 +205,13 @@ async def cron_flush_memory(ctx) -> None:
     try:
         from core.memory.flush_manager import scan_and_flush
 
-        # 使用 ctx["redis"]（ARQ 提供的连接）
-        r = ctx.get("redis")
-        if r is None:
-            import redis.asyncio as aioredis
-            from settings import get_settings
-            REDIS_URL = get_settings().db.redis_url.get_secret_value()
-            r = aioredis.from_url(REDIS_URL, decode_responses=True)
-
-        flushed = await scan_and_flush(r, max_turns, idle_timeout)
+        # 优先用 ARQ 注入的 ctx["redis"]；fallback 自建的连接用完必须 aclose（M-3）。
+        r, should_close = await _resolve_redis(ctx)
+        try:
+            flushed = await scan_and_flush(r, max_turns, idle_timeout)
+        finally:
+            if should_close:
+                await r.aclose()
 
         logger.info("[worker] cron_flush_memory complete flushed=%d elapsed_ms=%d",
                     flushed, int((time.perf_counter() - t0) * 1000))
@@ -216,14 +229,13 @@ async def flush_all_pending_job(ctx) -> None:
     try:
         from core.memory.flush_manager import flush_all_pending
 
-        r = ctx.get("redis")
-        if r is None:
-            import redis.asyncio as aioredis
-            from settings import get_settings
-            REDIS_URL = get_settings().db.redis_url.get_secret_value()
-            r = aioredis.from_url(REDIS_URL, decode_responses=True)
-
-        flushed = await flush_all_pending(r)
+        # 优先用 ARQ 注入的 ctx["redis"]；fallback 自建的连接用完必须 aclose（M-3）。
+        r, should_close = await _resolve_redis(ctx)
+        try:
+            flushed = await flush_all_pending(r)
+        finally:
+            if should_close:
+                await r.aclose()
 
         logger.info("[worker] flush_all_pending_job complete flushed=%d elapsed_ms=%d",
                     flushed, int((time.perf_counter() - t0) * 1000))

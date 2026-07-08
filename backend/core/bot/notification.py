@@ -27,6 +27,7 @@ class NotificationService:
         content: str,
         *,
         platform: str | None = None,
+        prefer_owner: str = "",
     ) -> list[str]:
         """Push a message to a specific student.
 
@@ -41,7 +42,10 @@ class NotificationService:
         sent_to: list[str] = []
         for binding in bindings:
             success = await self._send_via_channel(
-                binding.platform, binding.chat_id or binding.platform_user_id, content
+                binding.platform,
+                binding.chat_id or binding.platform_user_id,
+                content,
+                prefer_owner=prefer_owner,
             )
             if success:
                 sent_to.append(binding.platform)
@@ -53,6 +57,8 @@ class NotificationService:
         db: AsyncSession,
         course_id: str,
         content: str,
+        *,
+        prefer_owner: str = "",
     ) -> int:
         """Broadcast a message to all students enrolled in a course.
 
@@ -76,32 +82,54 @@ class NotificationService:
         notified = 0
         for binding in bindings:
             success = await self._send_via_channel(
-                binding.platform, binding.chat_id or binding.platform_user_id, content
+                binding.platform,
+                binding.chat_id or binding.platform_user_id,
+                content,
+                prefer_owner=prefer_owner,
             )
             if success:
                 notified += 1
 
         return notified
 
-    async def _send_via_channel(self, platform: str, chat_id: str, content: str) -> bool:
-        """Send a message through any running bot that has this channel enabled.
+    async def _send_via_channel(
+        self, platform: str, chat_id: str, content: str, *, prefer_owner: str = ""
+    ) -> bool:
+        """Send a message through a running bot that has this channel enabled.
 
-        bot 已按 owner 隔离，但通知推送是跨 owner 的（教师广播），故遍历所有运行实例
-        找一个启用了目标 platform 的作为发送载体。
+        M-41：优先用 ``prefer_owner``（发起通知的教师/管理员）自己的 bot 作为发送载体，
+        避免误用其他用户的 bot（cross-owner：用别人的 bot 发给某学生，上下文/日志归属
+        错乱）。若该 owner 无可用 bot，退回任意启用了目标 platform 的运行实例（保证
+        广播可用性——教师广播场景下「发出去」优先于「严格归属」）。
         """
-        for instance in self._bot_manager.all_running_instances():
-            if not instance.channel_manager:
-                continue
-            channel = instance.channel_manager.get_channel(platform)
-            if channel:
-                try:
-                    msg = OutboundMessage(
-                        channel=platform, chat_id=chat_id, content=content
-                    )
-                    await channel.send(msg)
-                    return True
-                except Exception:
-                    logger.exception(
-                        "Failed to send notification via %s to %s", platform, chat_id
-                    )
-        return False
+        instances = self._bot_manager.all_running_instances()
+
+        def _pick():
+            # 1. 优先：prefer_owner 自己的、启用了目标 channel 的 bot
+            if prefer_owner:
+                for inst in instances:
+                    if inst.owner_id == prefer_owner and inst.channel_manager:
+                        ch = inst.channel_manager.get_channel(platform)
+                        if ch:
+                            return inst
+            # 2. 退回：任意启用了目标 channel 的运行实例（保持广播可用）
+            for inst in instances:
+                if inst.channel_manager:
+                    ch = inst.channel_manager.get_channel(platform)
+                    if ch:
+                        return inst
+            return None
+
+        instance = _pick()
+        if instance is None:
+            return False
+        channel = instance.channel_manager.get_channel(platform)
+        try:
+            msg = OutboundMessage(channel=platform, chat_id=chat_id, content=content)
+            await channel.send(msg)
+            return True
+        except Exception:
+            logger.exception(
+                "Failed to send notification via %s to %s", platform, chat_id
+            )
+            return False

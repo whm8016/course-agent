@@ -380,3 +380,72 @@ def test_get_settings_cached(monkeypatch):
     b = settings_mod.get_settings()
     assert a is b
     settings_mod.get_settings.cache_clear()
+
+
+# ── M-24：BACKEND_WORKERS 运行时校验（validate_runtime_workers）──────────────
+
+def _no_worker_warning(warnings_list):
+    """辅助：列表里是否含 BACKEND_WORKERS mismatch 告警。"""
+    return any("BACKEND_WORKERS" in str(w.message) for w in warnings_list)
+
+
+def test_validate_runtime_workers_match(monkeypatch):
+    """显式注入 known_workers 与 backend_workers 相等 → 返回 True，无告警。"""
+    import warnings as _warnings
+    s = _fresh(monkeypatch, BACKEND_WORKERS="4")
+    with _warnings.catch_warnings(record=True) as rec:
+        _warnings.simplefilter("always")
+        assert s.validate_runtime_workers(known_workers=4) is True
+    assert not _no_worker_warning(rec)
+
+
+def test_validate_runtime_workers_mismatch_warns(monkeypatch):
+    """known_workers 与 backend_workers 不等 → 返回 False + 告警（不抛异常）。"""
+    s = _fresh(monkeypatch, BACKEND_WORKERS="4")
+    with pytest.warns(UserWarning, match="BACKEND_WORKERS .* does not match actual worker count"):
+        result = s.validate_runtime_workers(known_workers=8)
+    assert result is False
+
+
+def test_validate_runtime_workers_from_web_concurrency(monkeypatch):
+    """无显式注入时读 WEB_CONCURRENCY 约定；与 backend_workers 不等 → 告警。"""
+    _set_env(monkeypatch, BACKEND_WORKERS="4")
+    monkeypatch.setenv("WEB_CONCURRENCY", "2")
+    s = Settings(_env_file=None)
+    with pytest.warns(UserWarning, match="does not match"):
+        assert s.validate_runtime_workers() is False
+
+
+def test_validate_runtime_workers_no_env_skips(monkeypatch):
+    """无 WEB_CONCURRENCY 也无显式注入（dev/pytest 单进程）→ 跳过校验，返回 True。"""
+    import warnings as _warnings
+    s = _fresh(monkeypatch, BACKEND_WORKERS="4")
+    monkeypatch.delenv("WEB_CONCURRENCY", raising=False)
+    with _warnings.catch_warnings(record=True) as rec:
+        _warnings.simplefilter("always")
+        assert s.validate_runtime_workers() is True
+    assert not _no_worker_warning(rec)
+
+
+def test_validate_runtime_workers_invalid_env_skips(monkeypatch):
+    """WEB_CONCURRENCY 非法值（非数字）→ 跳过，不阻断启动。"""
+    import warnings as _warnings
+    _set_env(monkeypatch, BACKEND_WORKERS="4")
+    monkeypatch.setenv("WEB_CONCURRENCY", "not-a-number")
+    s = Settings(_env_file=None)
+    with _warnings.catch_warnings(record=True) as rec:
+        _warnings.simplefilter("always")
+        assert s.validate_runtime_workers() is True
+    assert not _no_worker_warning(rec)
+
+
+def test_validate_runtime_workers_nonpositive_skips(monkeypatch):
+    """known_workers <= 0 → 无法判定，跳过（返回 True），不制造噪音。"""
+    import warnings as _warnings
+    s = _fresh(monkeypatch, BACKEND_WORKERS="4")
+    with _warnings.catch_warnings(record=True) as rec:
+        _warnings.simplefilter("always")
+        assert s.validate_runtime_workers(known_workers=0) is True
+        assert s.validate_runtime_workers(known_workers=-1) is True
+    assert not _no_worker_warning(rec)
+

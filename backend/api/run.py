@@ -112,7 +112,7 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
 
     # ---- 4. 处理 subscribe_turn（重连恢复）----
     if payload.get("type") == "subscribe_turn":
-        await _handle_subscribe_turn(websocket, payload, send)
+        await _handle_subscribe_turn(websocket, payload, send, user=user)
         return
 
     # ---- 5. 解析 start_turn 参数 ----
@@ -217,6 +217,7 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
                     turn_id,
                     text=msg.get("text"),
                     answers=msg.get("answers"),
+                    user_id=str(user["id"]),
                 )
                 log_flow("ws.run.submit_reply", turn_id=turn_id, accepted=accepted)
                 if not accepted:
@@ -247,14 +248,22 @@ async def _handle_subscribe_turn(
     websocket: WebSocket,
     payload: dict,
     send,
+    *,
+    user: dict,
 ) -> None:
-    """处理断线重连：按 turn_id + after_seq 回放并继续接收。"""
+    """处理断线重连：按 turn_id + after_seq 回放并继续接收。
+
+    传 user_id 做 turn 归属校验：重连的 turn 不属于当前用户则视为不存在（KeyError），
+    防止 B 用户拿 A 的 turn_id 订阅 A 的事件流偷看答案（Turn IDOR，与 answer_now 同源）。
+    """
     turn_id = str(payload.get("turn_id", ""))
     after_seq = int(payload.get("after_seq", 0))
 
     trm = get_turn_runtime_manager()
     try:
-        async for event in trm.subscribe_turn(turn_id, after_seq=after_seq):
+        async for event in trm.subscribe_turn(
+            turn_id, after_seq=after_seq, user_id=str(user["id"])
+        ):
             await websocket.send_text(json.dumps(event.to_dict(), ensure_ascii=False))
     except KeyError:
         await send({"type": "error", "message": f"turn_id 不存在或已过期：{turn_id}"})

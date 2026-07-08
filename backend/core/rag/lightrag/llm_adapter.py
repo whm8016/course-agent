@@ -100,6 +100,13 @@ def is_lightrag_available() -> tuple[bool, str]:
         return False, "缺少 LIGHTRAG__LLM_MODEL（LightRAG 索引 LLM 专属模型，无回退）"
     if not INDEX_LLM_API_KEY:
         return False, "缺少 LIGHTRAG__API_KEY（LightRAG 索引 LLM 专属凭证，无回退）"
+    # M-26：LightRAG 同时需要 Embedding 做向量化（检索 + 索引都依赖）。原检查只校验
+    # LLM，缺 EMBEDDING__* 时要等到 ainsert 跑到 embedding 阶段才 404，浪费已消耗的
+    # LLM 实体抽取 token。配置期直接 fail-fast，错误信息更早更清晰。
+    if not INDEX_EMBEDDING_MODEL:
+        return False, "缺少 EMBEDDING__MODEL（LightRAG 向量化依赖，无回退）"
+    if not INDEX_EMBEDDING_API_KEY:
+        return False, "缺少 EMBEDDING__API_KEY（LightRAG 向量化依赖，无回退）"
     return True, ""
 
 

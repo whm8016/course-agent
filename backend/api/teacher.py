@@ -8,19 +8,20 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import Integer, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_teacher
-from api.admin import _kb_to_dict, _ALLOWED_EXT, _MAX_BYTES
+from api.admin import _kb_to_dict, _ALLOWED_EXT, _MAX_BYTES, _safe_upload_name
 from api.courses import invalidate_courses_cache
 from api.kb_indexing import trigger_kb_indexing, trigger_llamaindex_build
 from settings import get_settings
 KB_STORE_DIR = get_settings().paths.kb_store_dir
 MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
-from core.db.cache import faq_top
+from core.db.cache import course_access_invalidate, faq_top
+from core.db.limiter import limiter
 from core.codes import ensure_unique_join_code
 from core.db.database import (
     Enrollment, KBFile, KnowledgeBase, Message,
@@ -166,15 +167,17 @@ async def upload_files(
                 status_code=413,
                 detail=f"文件 '{file.filename}' 超过 {MAX_KB_UPLOAD_MB} MB",
             )
-        safe_name = f"{uuid.uuid4().hex[:8]}_{file.filename}"
+        # M-51：清洗客户端文件名（防 ../ 穿越 / 控制字符），再拼 uuid 前缀落盘
+        clean_name = _safe_upload_name(file.filename)
+        safe_name = f"{uuid.uuid4().hex[:8]}_{clean_name}"
         (raw_dir / safe_name).write_bytes(content)
         db.add(KBFile(
             kb_id=kb.id,
-            original_name=file.filename or safe_name,
+            original_name=clean_name,
             file_path=str(raw_dir / safe_name),
             file_size=len(content),
         ))
-        saved.append(file.filename or safe_name)
+        saved.append(clean_name)
 
     await db.flush()
     count_result = await db.execute(
@@ -190,8 +193,10 @@ async def upload_files(
 # ── 触发索引 ──────────────────────────────────────────────────────────────────
 
 @router.post("/courses/{course_id}/index")
+@limiter.limit("6/minute")
 async def index_course(
     course_id: str,
+    request: Request,
     force: bool = False,
     resume: bool = False,
     teacher: dict = Depends(get_current_teacher),
@@ -260,6 +265,10 @@ async def enroll_student(
     db.add(Enrollment(student_id=student.id, course_id=course_id))
     await db.flush()
     logger.info("教师添加学生 student=%s course=%s", student.id, course_id)
+    # M-43：学生此前可能因未选课被缓存为"拒绝"（access:{sid}:{cid}=0，TTL 5min）。
+    # 教师此刻把学生加进来后必须立即失效该 deny 缓存，否则学生在 5 分钟窗口内仍被拒，
+    # 表现为"老师刚加我我却进不去"。
+    await course_access_invalidate(student.id, course_id)
     return {"message": f"已添加 {body.username}", "student_id": student.id}
 
 
@@ -281,6 +290,9 @@ async def remove_student(
     if not enrollment:
         raise HTTPException(status_code=404, detail="选课记录不存在")
     await db.delete(enrollment)
+    # H-6：删除 enrollment 后必须失效该学生的课程访问缓存（access:{sid}:{cid}）。
+    # 否则权限缓存（TTL 5 分钟）仍记着"允许"，被踢的学生在窗口期内仍能继续访问课程。
+    await course_access_invalidate(student_id, course_id)
     return {"message": "已移除"}
 
 

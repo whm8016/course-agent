@@ -22,7 +22,7 @@ async def get_course_entities(course_id: str) -> list[dict]:
         实体列表，每个实体包含 {"id": str, "label": str, "type": str}
     """
     from core.rag.lightrag.llm_adapter import is_lightrag_available
-    from core.rag.lightrag.instance_pool import _get_instance
+    from core.rag.lightrag.instance_pool import lease_instance
 
     ok, reason = is_lightrag_available()
     if not ok:
@@ -30,11 +30,15 @@ async def get_course_entities(course_id: str) -> list[dict]:
         return []
 
     try:
-        rag = await _get_instance(course_id)
+        async with lease_instance(course_id) as rag:
+            return await _collect_entities(rag, course_id)
     except RuntimeError as e:
         logger.warning("get_course_entities failed to get instance: %s", e)
         return []
 
+
+async def _collect_entities(rag, course_id: str) -> list[dict]:
+    """从 LightRAG 图谱收集实体节点（lease_instance 已保证引用计数配对）。"""
     # LightRAG 内部存储结构：chunk_entity_relation_graph 是 NetworkX 图
     entities: list[dict] = []
     if hasattr(rag, "chunk_entity_relation_graph"):
@@ -98,7 +102,7 @@ async def get_course_relations(course_id: str) -> list[dict]:
         关系列表，每个关系包含 {"source": str, "target": str, "relation": str}
     """
     from core.rag.lightrag.llm_adapter import is_lightrag_available
-    from core.rag.lightrag.instance_pool import _get_instance
+    from core.rag.lightrag.instance_pool import lease_instance
 
     ok, reason = is_lightrag_available()
     if not ok:
@@ -106,11 +110,15 @@ async def get_course_relations(course_id: str) -> list[dict]:
         return []
 
     try:
-        rag = await _get_instance(course_id)
+        async with lease_instance(course_id) as rag:
+            return await _collect_relations(rag, course_id)
     except RuntimeError as e:
         logger.warning("get_course_relations failed to get instance: %s", e)
         return []
 
+
+async def _collect_relations(rag, course_id: str) -> list[dict]:
+    """从 LightRAG 图谱收集关系边（lease_instance 已保证引用计数配对）。"""
     relations: list[dict] = []
     if hasattr(rag, "chunk_entity_relation_graph"):
         graph = rag.chunk_entity_relation_graph

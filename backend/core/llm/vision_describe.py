@@ -20,6 +20,27 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# vision 专属熔断器池（按 vision_model 注册，与对话主链路全局 default 隔离）
+_VISION_BREAKERS: dict[str, Any] = {}
+
+
+def _get_vision_circuit_breaker(vision_model: str) -> Any:
+    """取 vision 专属熔断器（按 vision_model 注册，与对话主链路全局 default 隔离）。
+
+    M-21：视觉描述是辅助链路（失败可降级剥图），用独立熔断器，避免视觉供应商波动把
+    对话主链路的全局 default 熔断器打 OPEN。复用 reliability 的 CircuitBreaker，阈值
+    走默认（5 次失败 OPEN）。
+    """
+    from core.llm.reliability import CircuitBreaker
+
+    key = f"vision:{vision_model}"
+    cb = _VISION_BREAKERS.get(key)
+    if cb is None:
+        cb = CircuitBreaker(name=key)
+        _VISION_BREAKERS[key] = cb
+    return cb
+
+
 # 让 vision 模型把图片转成可被纯文本回答模型利用的结构化描述。
 _VISION_DESC_PROMPT = (
     "请详细、准确地描述这张图片的内容。要求：\n"
@@ -55,6 +76,7 @@ async def describe_image_attachments(
     *,
     prompt: str = _VISION_DESC_PROMPT,
     max_tokens: int = 1024,
+    retry_config: Any = None,
 ) -> list[str]:
     """用 vision 模型逐张描述图片，返回描述列表（与 images 等长，失败/无数据项为空串）。
 
@@ -64,12 +86,29 @@ async def describe_image_attachments(
         images: Attachment 列表（需含 base64 或 file_path）。
         prompt: 描述指令。
         max_tokens: 单张描述上限。
+        retry_config: 可选 RetryConfig（M-21：默认走内置重试，瞬时错误 429/超时不丢图）。
 
     Returns:
         描述文本列表，顺序与 images 一一对应；描述失败返回空串占位。
+
+    M-21：单张描述接入 reliability 层（with_retry_and_circuit）。瞬时错误（429/超时/网关）
+    自动指数退避重试，不再裸 await 一次失败就丢图。熔断器走 vision 专属实例（按 vision_model
+    注册），不污染对话主链路的全局 default 熔断器；熔断 OPEN / 重试耗尽时降级为空串，
+    由调用方回退剥图降级，绝不抛 CircuitOpenError 打断主链路。
     """
     if not vision_client or not vision_model or not images:
         return []
+
+    from core.llm.reliability import (
+        CircuitOpenError,
+        LLMRetryError,
+        RetryConfig,
+        with_retry_and_circuit,
+    )
+
+    cfg = retry_config if retry_config is not None else RetryConfig()
+    # vision 专属熔断器：独立于对话主链路的全局 default 熔断器，避免视觉描述失败连累对话。
+    breaker = _get_vision_circuit_breaker(vision_model)
 
     descriptions: list[str] = []
     for idx, att in enumerate(images):
@@ -79,7 +118,8 @@ async def describe_image_attachments(
             logger.warning("vision_describe: 图片 %d 无可用数据，跳过", idx + 1)
             continue
         try:
-            resp = await vision_client.chat.completions.create(
+            resp = await with_retry_and_circuit(
+                vision_client.chat.completions.create,
                 model=vision_model,
                 messages=[
                     {
@@ -91,12 +131,18 @@ async def describe_image_attachments(
                     }
                 ],
                 max_tokens=max_tokens,
+                retry_config=cfg,
+                circuit_breaker=breaker,
             )
             desc = ((resp.choices[0].message.content or "").strip()) if resp.choices else ""
             descriptions.append(desc)
             if not desc:
                 logger.warning("vision_describe: 图片 %d 返回空描述", idx + 1)
-        except Exception as exc:  # 单张失败不阻断其余
+        except (CircuitOpenError, LLMRetryError) as exc:
+            # 熔断 OPEN / 重试耗尽：降级空串，不抛（主链路由调用方回退剥图）
+            logger.warning("vision_describe: 描述图片 %d 失败（熔断/重试耗尽）: %s", idx + 1, exc)
+            descriptions.append("")
+        except Exception as exc:  # 其它意外错误：单张失败不阻断其余
             logger.warning("vision_describe: 描述图片 %d 失败: %s", idx + 1, exc)
             descriptions.append("")
     return descriptions

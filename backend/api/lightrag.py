@@ -6,8 +6,11 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_teacher
+from api.courses import check_course_access
+from core.db.database import get_db
 from settings import get_settings
 LIGHTRAG_TIMEOUT_SEC = get_settings().lightrag.timeout_sec
 from core.rag import get_indexer, is_lightrag_available
@@ -68,10 +71,19 @@ class LightRagChatRequest(BaseModel):
 
 @router.post("/chat/lightrag/index")
 @limiter.limit("10/minute")
-async def index_lightrag(request: Request, body: IndexBody, user: dict = Depends(get_current_teacher)):
+async def index_lightrag(
+    request: Request,
+    body: IndexBody,
+    user: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
     ok, reason = is_lightrag_available()
     if not ok:
         raise HTTPException(status_code=503, detail=reason)
+
+    # 课程归属校验：教师只能索引自己拥有的课程，防止传他人 course_id 触发索引
+    # （绕过 _get_owned_kb 的课程越权）。非 owner → check_course_access 抛 403。
+    await check_course_access(db, body.course_id, user)
 
     logger.info(
         "POST /api/chat/lightrag/index user=%s course=%s force=%s source_dir=%s",

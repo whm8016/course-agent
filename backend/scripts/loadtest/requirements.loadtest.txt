@@ -1,0 +1,7 @@
+# Locust 压测依赖（宿主 Windows 安装，独立于 backend/venv）：
+#   pip install -r backend/scripts/loadtest/requirements.loadtest.txt
+#
+# locust：压测主体（gevent 协程，自带 Web UI 8089）。
+# websocket-client：同步 WS 客户端，gevent patch socket 后协程友好（勿用 websockets async）。
+locust>=2.31,<3
+websocket-client>=1.8

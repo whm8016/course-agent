@@ -132,8 +132,12 @@ class QuizPipeline:
                  elapsed_ms=int((_time.perf_counter() - _t_stage) * 1000),
                  templates=len(templates))
 
-        # ── Stage 3: quiz — 每题生成 + schema 校验 ───────────────────────
+        # ── Stage 3: quiz — 每题生成 + schema 校验（单题容错）────────────
+        # M-8：单题生成（LLM 调用 / JSON 解析 / 校验）失败不再整批中断——失败题记 error 事件
+        # 并跳过，已成功的题照常返回，剩余题继续生成。M-9：_validate_question 把内容残缺的题
+        # （空题干 / 空答案 / choice 答案不命中 options）判为无效，同样走容错路径。
         questions: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
         _t_stage = _time.perf_counter()
         async with stream.stage("quiz", source="quiz"):
             quiz_system = (cfg.get("quiz") or {}).get("system", "")
@@ -149,18 +153,45 @@ class QuizPipeline:
                     enabled_tools=[],
                     mode="quiz",
                 )
-                quiz_outcome = await run_agent_loop(
-                    context=quiz_ctx,
-                    stream=stream,
-                    system_prompt=_with_common(quiz_system, layers),
-                    tool_schemas=None,
-                    max_iterations=1,
-                    emit_terminal_events=False,
-                    client=rt.client,
-                    model=rt.text_model,
-                    binding=rt.binding,
-                )
+                try:
+                    quiz_outcome = await run_agent_loop(
+                        context=quiz_ctx,
+                        stream=stream,
+                        system_prompt=_with_common(quiz_system, layers),
+                        tool_schemas=None,
+                        max_iterations=1,
+                        emit_terminal_events=False,
+                        client=rt.client,
+                        model=rt.text_model,
+                        binding=rt.binding,
+                    )
+                except Exception:
+                    # M-8：单题 LLM 调用异常（超时 / 网络 / provider 抖动）不中断整批
+                    logger.exception("quiz 第 %d 题生成异常", idx)
+                    err = {
+                        "index": idx - 1,
+                        "question_id": tmpl.get("question_id", ""),
+                        "topic": tmpl.get("topic", ""),
+                        "reason": "generation_error",
+                    }
+                    errors.append(err)
+                    await stream.emit({"type": "quiz_question_error", **err})
+                    continue
+
                 q = _parse_question(quiz_outcome.final_text, tmpl)
+                # M-9：内容级校验——空题干/空答案/choice 答案不命中 options 视为无效
+                if not _validate_question(q):
+                    logger.warning("quiz 第 %d 题内容校验失败，跳过", idx)
+                    err = {
+                        "index": idx - 1,
+                        "question_id": q.get("question_id", ""),
+                        "topic": q.get("topic", ""),
+                        "reason": "schema_invalid",
+                    }
+                    errors.append(err)
+                    await stream.emit({"type": "quiz_question_error", **err})
+                    continue
+
                 questions.append(q)
                 await stream.emit({
                     "type": "quiz_question",
@@ -170,7 +201,7 @@ class QuizPipeline:
 
         log_flow("question.stage.quiz",
                  elapsed_ms=int((_time.perf_counter() - _t_stage) * 1000),
-                 generated=len(questions))
+                 generated=len(questions), errors=len(errors))
         log_flow("question.pipeline.complete",
                  elapsed_ms=int((_time.perf_counter() - _t_total) * 1000),
                  questions=len(questions))
@@ -180,6 +211,8 @@ class QuizPipeline:
                 "tools_used": explore_outcome.tools_used,
                 "count_requested": count,
                 "count_generated": len(questions),
+                "count_failed": len(errors),
+                "errors": errors,
                 "stages": ["explore", "plan", "quiz"],
             },
         }
@@ -261,6 +294,30 @@ def _parse_question(text: str, template: dict[str, Any]) -> dict[str, Any]:
         q["options"] = clean if clean else None
 
     return q
+
+
+def _validate_question(q: dict[str, Any]) -> bool:
+    """M-9：对 _parse_question 的产物做内容级 schema 校验，判定该题是否有效可用。
+
+    _parse_question 只做题型/options 字段的格式归一化（保已有行为与签名不变，不破坏旧测试）；
+    真正的「内容是否可用」在这里判：
+      - question（题干）、correct_answer（答案）必须非空——空题干/空答案无法作答。
+      - choice 题：options 至少 2 项（单项无意义）、correct_answer 必须命中 options 的某个 key
+        （否则答案指向不存在的选项，前端无法高亮正确项）。
+
+    返回 False 的题由 pipeline 按 M-8 单题容错路径处理（标记 error，继续其它题）。
+    """
+    if not str(q.get("question", "")).strip():
+        return False
+    if not str(q.get("correct_answer", "")).strip():
+        return False
+    if q.get("question_type") == "choice":
+        opts = q.get("options")
+        if not isinstance(opts, dict) or len(opts) < 2:
+            return False
+        if str(q.get("correct_answer", "")).strip().upper() not in opts:
+            return False
+    return True
 
 
 __all__ = ["QuizPipeline"]

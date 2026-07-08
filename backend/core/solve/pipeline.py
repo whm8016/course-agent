@@ -79,6 +79,10 @@ class DeepSolvePipeline:
         sid = _resolve_session_id(context)
         context.metadata["solve_session_id"] = sid
         session = get_session(sid)
+        # M-7：每 turn 入口重置——session 存在进程内 OrderedDict，sid 由 turn_id/message_id
+        # 解析，撞车（重试 / message_id 复用 / LRU 后再入）时会复用上一轮的 stale plan。
+        # reset 清掉旧 plan/进度/replan 计数，回到「未解题」初态（max_replans 紧接着重设）。
+        session.reset()
         session.max_replans = DEFAULT_MAX_REPLANS
 
         # solve playbook + 通用上下文层叠加（course_prompt / memory / now…，原先缺失）
@@ -95,6 +99,10 @@ class DeepSolvePipeline:
             user_message=await describe_images(context, question, rt),
             mode="deep_solve",
             enabled_tools=enabled,
+            # M-6：隔离 chat 历史对话——solve 是独立解题回合，不该把闲聊历史泄入解题 LLM
+            # 调用（_build_messages 会遍历 conversation_history 拼进 messages）。research/quiz
+            # 的每段 replace 都显式置空，solve 此前漏了。
+            conversation_history=[],
         )
 
         log_flow("solve.pipeline.start", session_id=sid, rag_enabled=rag_enabled,

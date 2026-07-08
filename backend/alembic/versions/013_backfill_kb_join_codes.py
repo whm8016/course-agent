@@ -24,7 +24,21 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _table_exists(table: str) -> bool:
+    """检查表是否存在（对齐 001-014 的 _table_exists 守卫风格，幂等迁移）。"""
+    bind = op.get_bind()
+    return table in sa.inspect(bind).get_table_names()
+
+
 def upgrade() -> None:
+    # C-2 greenfield 守卫：本迁移 SELECT FROM knowledge_bases，但 greenfield 新库该表
+    # 由 014 创建（014 尚未执行到此）→ 旧逻辑抛 'no such table'，整个 upgrade head 中断。
+    # 表不存在时安全跳过：greenfield 链中 014 紧随其后建表并留 join_code NULL（建库时已
+    # 生成码，存量 NULL 行本就只存在于老库）。与 014 的 _table_exists 守卫同构。
+    if not _table_exists("knowledge_bases"):
+        print("[013] knowledge_bases absent (greenfield) — skip backfill")
+        return
+
     bind = op.get_bind()
     from core.codes import generate_code
 

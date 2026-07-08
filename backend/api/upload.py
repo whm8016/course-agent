@@ -36,8 +36,10 @@ ALLOWED_MIME_TYPES = {
     "application/msword",
 }
 
+# M-27：不含 .doc——legacy Word 二进制格式无解析 handler（见 file_routing.py），
+# 上传后索引会被静默丢弃，故上传层直接拒绝（.docx 仍支持）。
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp",
-                      ".pdf", ".txt", ".md", ".docx", ".doc"}
+                      ".pdf", ".txt", ".md", ".docx"}
 
 
 def _safe_ext(filename: str | None) -> str:

@@ -1,6 +1,7 @@
 import sys
 import os
 import logging
+import asyncio
 
 sys.path.insert(0, os.path.dirname(__file__))
 from pythonjsonlogger import jsonlogger
@@ -58,7 +59,9 @@ TUTORBOT_ENABLED = get_settings().tutorbot.enabled
 from core.db.database import init_db, close_db
 from core.db.limiter import limiter
 from core.arq_pool import get_arq_pool, close_arq_pool
-from core.rag.cache import init_rag_cache, get_cache_stats as get_rag_cache_stats, set_rag_cache
+# C-1/C-3：关停标志统一来自 leader 模块（lifespan shutdown 第一行 mark_shutting_down，
+# 是「即将死亡」最早信号）。start_singleton_services 在每个 await 后读 is_shutting_down。
+from core.leader import mark_shutting_down, is_shutting_down
 from core.llm.llm import (
     get_all_llm_circuit_states,
     reset_all_llm_circuit_breakers,
@@ -114,33 +117,79 @@ async def _maybe_compress_summary(session_id: str) -> None:
 _singletons_started = False
 
 
+async def _safe_call(coro_fn, label: str) -> None:
+    """调一个单例停止方法，吞异常（回滚/停止路径不能因单个失败阻断后续清理）。"""
+    try:
+        await coro_fn()
+    except Exception:
+        logger.warning("singleton stop failed (non-fatal): %s", label, exc_info=True)
+
+
 async def start_singleton_services() -> None:
     """拉起 leader 专属单例服务（TutorBot / Cron / MCP）。幂等：已启则跳过。
 
     被 leader 回调调用：首次当选 + 运行中竞选接管。各服务自身亦幂等（双重保险）。
+
+    C-1/C-3 竞态防护：关停标志统一来自 ``leader.is_shutting_down()``（lifespan shutdown
+    第一行经 ``mark_shutting_down()`` 置位，最早）。典型竞态——worker 刚当选、本函数
+    正在 await 某个 manager.start 时 Gunicorn SIGTERM 到达 → shutdown 跑 stop，但此时
+    start 尚未置位 ``_singletons_started``，旧实现的 stop 早退什么都不停；start 恢复后
+    又无条件 ``_singletons_started = True`` → Cron/Bot/MCP 在即将死亡的 worker 上重启、
+    无人停止。修法：入口 + 每个 await 后都检查 ``is_shutting_down()``，发现已关停则
+    **回滚已启动的服务**（逆序），且**绝不置位** ``_singletons_started``。
     """
     global _singletons_started
     if _singletons_started:
         return
+    # 入口即查：关停流程已开始，一个服务都不启动，不置位。
+    if is_shutting_down():
+        logger.info("Singleton startup skipped: application is shutting down")
+        return
+
+    # 已启动的服务（逆序回滚用）。每项是 (stop_coro_factory, label)。
+    started: list = []
 
     if TUTORBOT_ENABLED:
         try:
             from core.bot.manager import get_bot_manager
-            await get_bot_manager().auto_start_bots()
+            bot = get_bot_manager()
+            await bot.auto_start_bots()
+            # C-1/C-3 检查点：await 恢复后立即查关停标志。
+            if is_shutting_down():
+                logger.info("Shutdown signaled during TutorBot start; rolling back")
+                await _safe_call(bot.stop_all, "bot.stop_all")
+                return
+            started.append((bot.stop_all, "bot.stop_all"))
             logger.info("TutorBot manager initialized (auto-started configured bots)")
         except Exception as e:
             logger.warning(f"TutorBot startup failed (non-fatal): {e}")
 
     try:
         from services.cron.service import get_cron_service
-        await get_cron_service().start()
+        cron = get_cron_service()
+        await cron.start()
+        if is_shutting_down():
+            logger.info("Shutdown signaled during Cron start; rolling back bot+cron")
+            await _safe_call(cron.stop, "cron.stop")
+            for fn, label in reversed(started):
+                await _safe_call(fn, label)
+            return
+        started.append((cron.stop, "cron.stop"))
         logger.info("Cron service started")
     except Exception as e:
         logger.warning(f"Cron service startup failed (non-fatal): {e}")
 
     try:
         from core.mcp.manager import get_mcp_manager
-        await get_mcp_manager().ensure_started()
+        mcp = get_mcp_manager()
+        await mcp.ensure_started()
+        if is_shutting_down():
+            logger.info("Shutdown signaled during MCP start; rolling back mcp+cron+bot")
+            await _safe_call(mcp.shutdown, "mcp.shutdown")
+            for fn, label in reversed(started):
+                await _safe_call(fn, label)
+            return
+        started.append((mcp.shutdown, "mcp.shutdown"))
         logger.info("MCP manager initialized")
     except Exception as e:
         logger.warning(f"MCP manager startup failed (non-fatal): {e}")
@@ -157,6 +206,7 @@ async def stop_singleton_services() -> None:
     if not _singletons_started:
         return
 
+    # 与 start 逆序停止：MCP → Cron → Bot
     try:
         from core.mcp.manager import get_mcp_manager
         await get_mcp_manager().shutdown()
@@ -179,6 +229,43 @@ async def stop_singleton_services() -> None:
     _singletons_started = False
 
 
+# ---- 资源水位采样：DB 连接池 + LightRAG 实例池 → Prometheus Gauge（压测/运维观测）----
+_resource_sampler_task: asyncio.Task | None = None
+
+
+async def _sample_resource_gauges() -> None:
+    """每 5s 采样 DB 连接池 checkedout 数 + LightRAG 实例池水位，写入 Prometheus Gauge。
+
+    仅观测用，任何采样失败都静默（SQLite StaticPool/NullPool 无 checkedout、实例池未
+    初始化等），绝不影响主链路。worker label 用 pid 区分（多容器/多 worker 各自独立
+    pool + 实例池）。
+    """
+    from core.observability.metrics import (
+        DB_POOL_CHECKEDOUT,
+        LIGHTRAG_INSTANCES,
+        LIGHTRAG_IN_USE,
+    )
+    from core.db.database import engine
+    from core.rag.lightrag.instance_pool import _instances, _in_use
+
+    worker_id = os.getenv("BACKEND_WORKER_ID") or str(os.getpid())
+    while True:
+        try:
+            # AsyncEngine.sync_engine.pool 是底层 Pool；QueuePool 有 checkedout()，
+            # SQLite 的 StaticPool/NullPool 没有该方法 → except 静默跳过。
+            DB_POOL_CHECKEDOUT.labels(worker=worker_id).set(
+                engine.sync_engine.pool.checkedout()
+            )
+        except Exception:
+            pass
+        try:
+            LIGHTRAG_INSTANCES.set(len(_instances))
+            LIGHTRAG_IN_USE.set(len(_in_use))
+        except Exception:
+            pass
+        await asyncio.sleep(5)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Application startup – initializing database tables")
@@ -191,13 +278,11 @@ async def lifespan(app: FastAPI):
 
     # 尝试初始化 ARQ 任务队列连接池
     await get_arq_pool()
-    # 初始化 RAG 缓存并注入到 rag.py 检索路径
-    try:
-        rag_cache = await init_rag_cache(REDIS_URL, ttl_seconds=3600)
-        set_rag_cache(rag_cache)
-        logger.info("RAG cache initialized and wired to retrieve path")
-    except Exception as e:
-        logger.warning(f"RAG cache initialization failed: {e}")
+
+    # M-24：校验 BACKEND_WORKERS 与真实 worker 进程数是否一致（不一致会令 DB 池 /
+    # 熔断器 / LRU 缩放公式算偏）。读 WEB_CONCURRENCY 约定；无注入线索（dev/单进程）时跳过。
+    from settings import get_settings as _get_settings
+    _get_settings().validate_runtime_workers()
 
     # Leader election: 注册状态翻转回调；leader（含运行中竞选接管）启单例服务。
     from core.leader import try_become_leader, shutdown_leader, register_leader_callbacks
@@ -208,7 +293,16 @@ async def lifespan(app: FastAPI):
     # 当选则内部走 on_gain 拉单例；未当选则起竞选 loop，锁可被接管时再走 on_gain
     await try_become_leader()
 
+    # 资源水位采样 task（DB pool / LightRAG 实例池 → Prometheus，压测/运维观测）
+    global _resource_sampler_task
+    _resource_sampler_task = asyncio.create_task(_sample_resource_gauges())
+
     yield
+
+    # C-1/C-3：shutdown 第一行置位关停标志（最早信号）。此后即便 leader 回调触发
+    # start_singleton_services 也会因 is_shutting_down() 早退/回滚，单例不会在死亡
+    # worker 上重启。
+    mark_shutting_down()
 
     # Shutdown: 通知 ARQ worker 做 final memory flush（Producer-Consumer 模式）
     try:
@@ -221,6 +315,17 @@ async def lifespan(app: FastAPI):
 
     # 停止单例服务（leader 经 on_lose 回调）+ 清理 leader 选举资源（cancel loop、释放锁）
     await shutdown_leader()
+
+    # 取消资源水位采样 task（须在 close_db 前，否则采样读到已释放的 engine 报错）。
+    # _resource_sampler_task 在函数顶部 startup 段已 global 声明（line 297），整个
+    # lifespan 作用域生效，此处无需重复声明（重复 global 且前面已赋值 → SyntaxError）。
+    if _resource_sampler_task is not None:
+        _resource_sampler_task.cancel()
+        try:
+            await _resource_sampler_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _resource_sampler_task = None
 
     logger.info("Application shutdown – closing database pool")
     await close_db()
@@ -395,9 +500,6 @@ async def health_detailed():
             checks["llm"] = "error: DASHSCOPE_API_KEY not set"
     except Exception as exc:
         checks["llm"] = f"error: {exc}"
-
-    # RAG 缓存状态
-    details["rag_cache"] = get_rag_cache_stats().to_dict()
 
     all_ok = all(v.startswith("ok") for v in checks.values())
     return JSONResponse(

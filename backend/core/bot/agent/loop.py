@@ -182,7 +182,7 @@ class AgentLoop:
 
         if not channel or not sender_id:
             return "绑定失败：无法识别你的 IM 账号。"
-        user_id = consume_bind_code(code)
+        user_id = await consume_bind_code(code)
         if not user_id:
             return "绑定失败：绑定码无效或已过期，请在网页端重新生成。"
         try:
@@ -302,15 +302,30 @@ class AgentLoop:
         turn_id = await trm.start_turn(ctx)
 
         final_text = ""
+        turn_error: str | None = None  # H-15：捕获 TRM ERROR 事件，避免 IM 用户沉默
         try:
             async for event in trm.subscribe_turn(turn_id):
                 if event.type == StreamEventType.ANSWER:
                     final_text += str(event.payload.get("content") or "")
+                elif event.type == StreamEventType.ERROR:
+                    # LLM/orchestrator 异常时 TRM 发 ERROR 事件（payload.message 是描述）。
+                    # 旧实现忽略它 → final_text 为空 → _process_message 返回 None → IM 用户沉默。
+                    # 现记下错误，循环结束后若无有效答案则用兜底文案回复，保证用户总能收到反馈。
+                    turn_error = str(event.payload.get("message") or "")
         except asyncio.CancelledError:
             await trm.cancel_turn(turn_id)
             raise
         # 正常结束：bus 由 TRM._run_turn 的 finally 关闭，subscribe_turn 自然退出；
         # turn 状态由 TRM TTL 自动清理，无需手动 cancel。
+
+        # H-15：ERROR 且无有效答案 → 友好兜底（不暴露内部错误细节给 IM 用户）。
+        # 有 ANSWER 文本时优先用答案（ERROR 可能是尾声告警，答案仍可用）。
+        if not final_text and turn_error:
+            final_text = "抱歉，我暂时无法处理这条消息，请稍后重试。"
+            logger.warning(
+                "Turn ended with ERROR and no answer: session=%s error=%s",
+                session_key, turn_error,
+            )
 
         if final_text:
             session.add_message("assistant", final_text)
@@ -348,5 +363,18 @@ class AgentLoop:
         )
 
     async def stop(self) -> None:
+        # M-40：取消所有 in-flight dispatch task，避免 bot stop 后仍有后台 turn 在跑
+        # （持有 session 锁 / 占用 LLM 连接 / 写会话历史），造成资源泄漏与「停了还在回消息」。
         self._running = False
-        logger.info("Agent loop stopped")
+        cancelled = 0
+        for sk, tasks in list(self._active_tasks.items()):
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+                    cancelled += 1
+            self._active_tasks.pop(sk, None)
+        self._session_locks.clear()
+        if cancelled:
+            logger.info("Agent loop stopped (cancelled %d in-flight task(s))", cancelled)
+        else:
+            logger.info("Agent loop stopped")

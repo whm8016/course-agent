@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import random
 from pathlib import Path
 
 from settings import get_settings
@@ -24,6 +25,7 @@ from core.llm.reliability import (
     get_llm_circuit_breaker,
     with_retry_and_circuit,
 )
+from core.llm.loadtest_mock import maybe_loadtest_mock_stream
 
 logger = logging.getLogger(__name__)
 
@@ -177,6 +179,12 @@ async def _create_with_image_fallback(
     原子（成功算 1 次 success，failure_count 不增），避免"模型不支持图片"这类确定性业务
     错误污染服务可用性熔断计数，HALF_OPEN 探测期也能正常剥图。模型不支持 vision（异常命中
     image/vision/multimodal 等关键词）时，剥掉图片用同一模型重试纯文本。
+
+    LLM fallback（M-17 + M-18）：主路径重试耗尽 / 熔断 OPEN 后，若配置了 fallback client
+    且当前是全局默认路径（circuit_breaker 非 None），切到 fallback 端点再用 reliability
+    跑一次（不再裸 create）。此前 fallback 只挂在 chat_complete，生产对话走 run_agent_loop
+    时主模型抖动直接抛错给用户；现在 loop 主路径也能兜底。自配路径（circuit_breaker=None）
+    不兜底，符合「自配是用户私有资源」语义（H-16）。
     """
     from core.llm.multimodal import (
         is_image_input_unsupported,
@@ -184,27 +192,62 @@ async def _create_with_image_fallback(
         strip_image_parts_inplace,
     )
 
-    async def _call_with_image_fallback():
-        try:
-            return await llm_client.chat.completions.create(**create_kwargs)
-        except Exception as exc:
-            msgs = create_kwargs.get("messages") or []
-            if is_image_input_unsupported(exc) and should_degrade_to_text(binding, model, msgs):
-                strip_image_parts_inplace(create_kwargs["messages"])
-                logger.warning("Stage-2 降级：模型 %s 不支持图片输入，剥图后用同模型重试纯文本", model)
-                return await llm_client.chat.completions.create(**create_kwargs)
-            raise
+    def _make_call(client: object, kwargs: dict, bnd: str, mdl: str):
+        async def _call_with_image_fallback():
+            # 压测概率分流（LOAD_TEST_MOCK_LLM=1）：stream 请求按 LOAD_TEST_REAL_RATIO 概率
+            # 真打、其余走假流式 mock。env 不设时整段跳过，行为与生产逐字节一致。mock 不抛
+            # 异常 → reliability 计 success；FORCE_FAIL 走 mock 内部分支触发熔断复验（H-11）。
+            if os.getenv("LOAD_TEST_MOCK_LLM") == "1" and kwargs.get("stream"):
+                _real_ratio = float(os.getenv("LOAD_TEST_REAL_RATIO", "0.15") or "0.15")
+                if random.random() >= _real_ratio:
+                    _ttft = float(os.getenv("LOAD_TEST_MOCK_TTFT_MS", "600")) / 1000
+                    _total = int(os.getenv("LOAD_TEST_MOCK_TOTAL_CHARS", "240"))
+                    return await maybe_loadtest_mock_stream(_ttft, _total)
+            try:
+                return await client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                msgs = kwargs.get("messages") or []
+                if is_image_input_unsupported(exc) and should_degrade_to_text(bnd, mdl, msgs):
+                    strip_image_parts_inplace(kwargs["messages"])
+                    logger.warning(
+                        "Stage-2 降级：模型 %s 不支持图片输入，剥图后用同模型重试纯文本", mdl
+                    )
+                    return await client.chat.completions.create(**kwargs)
+                raise
+        return _call_with_image_fallback
 
     # 熔断器策略：circuit_breaker=None 时不熔断（with_retry_and_circuit 仍重试，只是不计
     # failure）。默认 _llm_circuit_breaker（全局 "default"）保护平台共享的 DashScope——它
     # 是所有未自配用户共用的下游，挂了要快速失败防雪崩；自配 client 路径由调用方传 None
     # 关闭：自配供应商是用户私有资源，平台不替它兜底，让真实错误冒给用户，也避免自配失败
     # 把全局熔断器打 OPEN 误伤他人（含同 binding 不同 key 的自配用户）。
-    return await with_retry_and_circuit(
-        _call_with_image_fallback,
-        retry_config=_retry_config,
-        circuit_breaker=circuit_breaker,
-    )
+    try:
+        return await with_retry_and_circuit(
+            _make_call(llm_client, create_kwargs, binding, model),
+            retry_config=_retry_config,
+            circuit_breaker=circuit_breaker,
+        )
+    except (CircuitOpenError, LLMRetryError) as exc:
+        # M-17/M-18：主路径彻底失败 → fallback 端点兜底（仅全局默认路径）。
+        # fallback 经 with_retry_and_circuit 重跑，瞬时抖动能自愈，不再裸 create。
+        if _fallback_client is None or circuit_breaker is None:
+            raise  # 无 fallback / 自配路径：原样抛给上层
+        logger.warning(
+            "Primary LLM path failed (%s: %s); falling back to %s",
+            type(exc).__name__, exc, FALLBACK_MODEL,
+        )
+        fb_kwargs = dict(create_kwargs)
+        fb_kwargs["model"] = FALLBACK_MODEL
+        try:
+            return await with_retry_and_circuit(
+                _make_call(_fallback_client, fb_kwargs, _fallback_binding, FALLBACK_MODEL),
+                retry_config=_retry_config,
+                # fallback 是独立端点，不接入主链路熔断器（避免 fallback 故障连累主路径判定）
+                circuit_breaker=None,
+            )
+        except (CircuitOpenError, LLMRetryError) as fb_exc:
+            logger.error("Fallback LLM also failed: %s", fb_exc)
+            raise
 
 
 async def _make_chat_completion(
@@ -257,6 +300,9 @@ async def chat_complete(
     messages = _build_messages(system_prompt, history, user_message)
 
     try:
+        # _make_chat_completion → _create_with_image_fallback 内部已含主路径 retry+熔断
+        # 与 fallback 兜底（M-17/M-18：fallback 下沉到该层，chat_complete 不再重复兜底，
+        # 否则双重 fallback 且绕过 reliability）。此处仅在主+fallback 均失败时转友好提示。
         response = await _make_chat_completion(
             model=model,
             messages=messages,
@@ -267,19 +313,7 @@ async def chat_complete(
         return response.choices[0].message.content or ""
 
     except (CircuitOpenError, LLMRetryError) as e:
-        logger.warning(f"Primary LLM failed: {e}, trying fallback...")
-        if _fallback_client:
-            try:
-                fb_resp = await _fallback_client.chat.completions.create(
-                    model=FALLBACK_MODEL,
-                    messages=messages,
-                    stream=False,
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-                return fb_resp.choices[0].message.content or ""
-            except Exception as fb_e:
-                logger.error(f"Fallback LLM also failed: {fb_e}")
+        logger.warning("chat_complete: primary+fallback 均失败: %s", e)
         raise RuntimeError("AI 服务暂时不可用，请稍后重试。") from e
 
 

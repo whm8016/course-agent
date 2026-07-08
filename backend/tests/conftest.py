@@ -52,16 +52,32 @@ async def auth_headers(client: AsyncClient):
 
 @pytest.fixture
 async def admin_headers(client: AsyncClient):
-    """Register or login as the built-in admin user."""
+    """注册一名测试管理员并升级为 admin 角色。
+
+    H-18：注册接口不再因用户名自动提权（消除「撞名 admin 即 admin」攻击面），
+    故测试不能靠注册 ``username="admin"`` 拿到管理员——那样得到的只是 student。
+    这里注册一个普通用户后，直接在 DB 把 role 升为 admin（模拟 DBA / 初始 bootstrap
+    通道，对齐生产「admin 仅由安全通道授予」的语义），再走登录拿 token。
+    """
+    from sqlalchemy import update
+
+    from core.db.database import AsyncSessionLocal, User
+
+    username = f"admin_{os.urandom(3).hex()}"
     r = await client.post(
         "/api/auth/register",
-        json={"username": "admin", "password": "adminpass123", "display_name": "Admin"},
+        json={"username": username, "password": "adminpass123", "display_name": "Admin"},
     )
-    if r.status_code == 409:
-        r = await client.post(
-            "/api/auth/login",
-            json={"username": "admin", "password": "adminpass123"},
+    assert r.status_code == 200, r.text
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            update(User).where(User.username == username).values(role="admin", is_admin=True)
         )
+        await db.commit()
+    r = await client.post(
+        "/api/auth/login",
+        json={"username": username, "password": "adminpass123"},
+    )
     assert r.status_code == 200, r.text
     token = r.json()["token"]
     return {"Authorization": f"Bearer {token}"}

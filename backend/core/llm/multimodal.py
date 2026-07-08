@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64 as _b64
 import logging
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,50 @@ from .capabilities import supports_vision
 logger = logging.getLogger(__name__)
 
 MIME_FALLBACK = "image/png"
+
+
+def _allowed_image_roots() -> list[Path]:
+    """图片读取允许的根目录白名单：上传目录 + 系统临时目录。
+
+    只有落在这些根下的 file_path 才会被读盘注入；其它任意路径（如 ``/etc/passwd``、
+    ``C:\\Windows\\...``）一律拒绝，杜绝 H-4 的任意文件读取。
+    """
+    roots: list[Path] = [Path(tempfile.gettempdir())]
+    try:
+        from settings import get_settings
+
+        upload_dir = (get_settings().paths.upload_dir or "").strip()
+        if upload_dir:
+            roots.append(Path(upload_dir))
+    except Exception:
+        # settings 不可用时退化为仅临时目录（纯函数测试不依赖 settings）
+        pass
+    return roots
+
+
+def _resolve_image_within_allowed_roots(file_path: str) -> Path | None:
+    """把 file_path 解析到允许的图片根内，越界返回 None。
+
+    绝对路径越界、相对 ``..`` 穿越、符号链接逃逸都会在 ``resolve()`` 后落到白名单根之外
+    而被拒绝。合法（落在任一允许根下）返回解析后的绝对 Path。
+
+    这是 H-4 任意文件读取的核心闸门：调用方拿到 None 即应丢弃该图片，绝不读盘。
+    """
+    raw = (file_path or "").strip()
+    if not raw:
+        return None
+    try:
+        resolved = Path(raw).resolve()
+    except (OSError, ValueError):
+        return None
+    for root in _allowed_image_roots():
+        try:
+            root_resolved = root.resolve()
+        except (OSError, ValueError):
+            continue
+        if resolved.is_relative_to(root_resolved):
+            return resolved
+    return None
 
 
 def _guess_mime_type(filename: str | None, fallback: str = MIME_FALLBACK) -> str:
@@ -163,12 +208,21 @@ def _inject_images(
 
         # 已有 base64 优先；否则从 file_path 读盘兜底，
         # 让 from_image_path 路径无需调用方预填 base64。
+        # H-4：file_path 必须先经 _resolve_image_within_allowed_roots 校验，落在允许根
+        # （上传目录/临时目录）内才读盘；越界（如 /etc/passwd、C:\Windows\...）直接跳过，
+        # 不读盘、不注入、不抛异常——攻击者的越界图片被静默丢弃。
         if not b64 and file_path:
-            try:
-                raw = Path(file_path).read_bytes()
-                b64 = _b64.b64encode(raw).decode("ascii")
-            except OSError as exc:
-                logger.warning("failed to read image file %s: %s", file_path, exc)
+            safe_path = _resolve_image_within_allowed_roots(file_path)
+            if safe_path is None:
+                logger.warning(
+                    "image file_path %r rejected: outside allowed roots (H-4)", file_path
+                )
+            else:
+                try:
+                    raw = safe_path.read_bytes()
+                    b64 = _b64.b64encode(raw).decode("ascii")
+                except OSError as exc:
+                    logger.warning("failed to read image file %s: %s", safe_path, exc)
 
         if not b64 and not url:
             continue

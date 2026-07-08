@@ -45,6 +45,31 @@ def _safe_pdf_name(name: str) -> str:
     return base
 
 
+def _validate_paper_path(paper_path: str) -> Path | None:
+    """校验仿卷解析目录路径，防路径遍历。
+
+    只允许落在出题根目录（``get_question_dir()``）内的路径——绝对路径越界、
+    相对 ``..`` 穿越、符号链接逃逸都被拒绝。合法返回解析后的绝对 Path，否则 None。
+
+    设计：``resolve()`` 会展开 ``..``/符号链接，再用 ``is_relative_to`` 判定边界，
+    因此 ``../../etc/passwd`` 这类形变都会被解析到根目录外而拒绝。
+    """
+    raw = (paper_path or "").strip()
+    if not raw:
+        return None
+    try:
+        resolved = Path(raw).resolve()
+    except (OSError, ValueError):
+        return None
+    try:
+        root = get_question_dir().resolve()
+    except (OSError, ValueError):
+        return None
+    if not resolved.is_relative_to(root):
+        return None
+    return resolved
+
+
 @router.websocket("/followup")
 async def websocket_question_followup(websocket: WebSocket):
     user = await ws_authenticate(websocket)
@@ -234,9 +259,17 @@ async def websocket_mimic_generate(websocket: WebSocket):
                         {"type": "error", "content": "paper_path is required for parsed mode"}
                     )
                     return
-                paper_dir = str(paper_path)
+                # 路径遍历防护：paper_path 必须落在出题根目录内，否则拒绝（不拼接、不建目录）。
+                # 防止 ../../etc/passwd 这类穿越把仿卷输出写到任意目录或读取任意目录。
+                safe_paper = _validate_paper_path(str(paper_path))
+                if safe_paper is None:
+                    await websocket.send_json(
+                        {"type": "error", "content": "paper_path 非法：越出出题目录"}
+                    )
+                    return
+                paper_dir = str(safe_paper)
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                batch_dir = _mimic_output_dir() / f"mimic_{timestamp}_{Path(paper_path).name}"
+                batch_dir = _mimic_output_dir() / f"mimic_{timestamp}_{safe_paper.name}"
                 batch_dir.mkdir(parents=True, exist_ok=True)
                 output_dir = str(batch_dir)
             else:

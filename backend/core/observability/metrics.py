@@ -92,6 +92,27 @@ LEADER_STATUS = Gauge(
 
 
 # --------------------------------------------------------------------------
+# 资源水位（压测/运维观测：DB 连接池 + LightRAG 实例池饱和度）
+# 由 main.py 的 _sample_resource_gauges 后台 task 每 5s 写入。worker label 用 pid
+# 区分（每进程独立 pool + 实例池；多容器/多 worker 天然隔离）。
+# --------------------------------------------------------------------------
+
+DB_POOL_CHECKEDOUT = Gauge(
+    "ca_db_pool_checkedout",
+    "SQLAlchemy engine pool: checked-out (in-use) connections",
+    labelnames=["worker"],
+)
+LIGHTRAG_INSTANCES = Gauge(
+    "ca_lightrag_instances",
+    "LightRAG instance pool: cached instances count",
+)
+LIGHTRAG_IN_USE = Gauge(
+    "ca_lightrag_in_use",
+    "LightRAG instance pool: in-use (referenced) instances count",
+)
+
+
+# --------------------------------------------------------------------------
 # Convenience helpers
 # --------------------------------------------------------------------------
 
