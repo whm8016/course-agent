@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from pathlib import Path
@@ -21,6 +22,7 @@ from core.observability import log_flow
 
 from core.rag.types import RetrievalResult, ChunkMeta
 from core.rag.retriever.base import Retriever
+from core.rag.source_utils import strip_chunk_suffix
 from core.rag.lightrag import (
     _get_instance,
     _release_instance,
@@ -76,8 +78,7 @@ def _build_query_param(
     """构建 LightRAG QueryParam。
 
     top_k: 调用方显式指定的检索数量。None → 用配置默认（settings.lightrag
-        .safe_top_k_value / chunk_top_k_value）；传值时仍受安全上限约束（防 API
-        拒绝），但允许小于
+        .top_k / chunk_top_k_value）；传值时仍受配置上限约束，但允许小于
         配置默认，使 retrieve_context / rag tool 的 top_k 真正控制 LightRAG
         检索与 rerank 的候选数量，而非仅做事后切片。
     """
@@ -89,16 +90,16 @@ def _build_query_param(
     lr = get_settings().lightrag
     if top_k is not None:
         req = max(1, int(top_k))
-        safe_top_k = min(req, lr.safe_top_k_value())
+        entity_top_k = min(req, lr.top_k)
         chunk_top_k = min(req, lr.chunk_top_k_value())
     else:
-        safe_top_k = lr.safe_top_k_value()
+        entity_top_k = lr.top_k
         chunk_top_k = lr.chunk_top_k_value()
     max_tokens = lr.max_tokens_config()
 
     param = QueryParam(
         mode=mode,
-        top_k=safe_top_k,
+        top_k=entity_top_k,
         chunk_top_k=chunk_top_k,
         max_total_tokens=max_tokens["total"],
         max_entity_tokens=max_tokens["entity"],
@@ -116,13 +117,34 @@ def _build_query_param(
     return param
 
 
+# LightRAG 无命中哨兵：naive_query 无 chunk 时返回 None（lightrag/operate.py:5786），
+# aquery_llm 随后用 PROMPTS["fail_response"] 兜底，产出形如
+# "Sorry, I'm not able to provide an answer to that question.[no-context]" 的非空字符串。
+# 它不是课程证据——若放行会被 _format_contexts_for_prompt 包成 [证据1] 喂给 Agent，
+# 且 _execute_rag 会带 sources 让前端弹出来源卡片。匹配 [no-context] 标记而非整句：
+# LightRAG 升级 / 多语言措辞会变，但这个标记稳定，是可靠的无命中信号。
+_NO_CONTEXT_MARKER = "[no-context]"
+
+
+def _is_no_context(text: str) -> bool:
+    """判断是否为 LightRAG 无命中兜底字符串（fail_response 哨兵）。"""
+    return _NO_CONTEXT_MARKER in text
+
+
 def _extract_contexts(result: Any) -> list[Any]:
-    """从 LightRAG 查询结果中提取上下文列表。"""
+    """从 LightRAG 查询结果中提取上下文列表。
+
+    集中拦截无命中哨兵：retrieve / retrieve_context / _retrieve_hybrid /
+    dense_search / graph_augmented_retrieve / query 六条检索路径都经此函数，
+    在此一处过滤即可覆盖全部，无需在各调用点重复判空。
+    """
     if isinstance(result, list):
         return result
     if isinstance(result, str):
         text = result.strip()
-        return [text] if text else []
+        if not text or _is_no_context(text):
+            return []
+        return [text]
     if isinstance(result, dict):
         for key in ("contexts", "context", "chunks", "references", "data"):
             value = result.get(key)
@@ -130,8 +152,10 @@ def _extract_contexts(result: Any) -> list[Any]:
                 return value
             if isinstance(value, dict):
                 return [value]
-            if isinstance(value, str) and value.strip():
-                return [value.strip()]
+            if isinstance(value, str):
+                text = value.strip()
+                if text and not _is_no_context(text):
+                    return [text]
     return []
 
 
@@ -147,22 +171,6 @@ def _extract_context_text(ctx: Any) -> str:
     return str(ctx).strip()
 
 
-def _strip_source_suffix(source: str) -> str:
-    """剥离摄入时为绕过 filename 去重加的 `::chunk-<idx>` 后缀，还原真实文件名。
-
-    见 ingestion.parse_files：每个 chunk 的 file_path 被加了 `::chunk-<node 索引>` 让其
-    在 LightRAG 内部唯一。检索结果回带的 file_path 仍带此后缀，展示溯源（如「来源:
-    xxx.pdf」）和 ChunkMeta.source_path 前必须剥掉，否则用户会看到 `xxx.pdf::chunk-5`。
-    用 rfind 定位最后一个 `::chunk-`。不做 unknown_source 特判——剥成 unknown_source
-    后由 _extract_file_path 统一过滤，避免 `unknown_source::chunk-N` 变体漏网。
-    """
-    marker = "::chunk-"
-    idx = source.rfind(marker)
-    if idx > 0:
-        return source[:idx]
-    return source
-
-
 def _extract_file_path(ctx: Any) -> str:
     """从 LightRAG 检索结果中提取来源 file_path，过滤 unknown_source。
 
@@ -174,7 +182,7 @@ def _extract_file_path(ctx: Any) -> str:
         for key in ("file_path", "source_path", "source", "file_name"):
             value = ctx.get(key)
             if isinstance(value, str) and value.strip():
-                cleaned = _strip_source_suffix(value.strip())
+                cleaned = strip_chunk_suffix(value.strip())
                 if cleaned and cleaned != "unknown_source":
                     return cleaned
     return ""
@@ -223,8 +231,7 @@ class LightRAGRetriever(Retriever):
             logger.warning("LightRAGRetriever skipped: %s", reason)
             return []
 
-        safe_top_k = get_settings().lightrag.safe_top_k_value()
-        actual_top_k = min(top_k, safe_top_k)
+        actual_top_k = min(top_k, get_settings().lightrag.top_k)
 
         try:
             rag = await _get_instance(course_id)
@@ -272,7 +279,7 @@ class LightRAGRetriever(Retriever):
         course_id: str,
         query: str,
         top_k: int = 3,
-        max_chars: int = 2000,
+        max_chars: int = 4000,
         **kwargs,
     ) -> str:
         """检索并拼接为上下文字符串。"""
@@ -281,12 +288,26 @@ class LightRAGRetriever(Retriever):
             logger.warning("LightRAGRetriever skipped: %s", reason)
             return ""
 
+        query_mode = kwargs.get("mode") or "naive"
+
+        # Phase 3: ES 启用且 naive 模式时走 hybrid（BM25+Dense+RRF）；失败或空结果降级原 naive。
+        # ES 默认关闭，关闭时 get_es_store()=None → 跳过，行为与改造前完全一致。
+        if query_mode == "naive":
+            try:
+                from core.rag.es_client import get_es_store
+                if get_es_store() is not None:
+                    context_text = await self._retrieve_hybrid(course_id, query, top_k, max_chars)
+                    if context_text:
+                        return context_text
+                    logger.info("hybrid 返回空，降级 naive course=%s", course_id)
+            except Exception as exc:
+                logger.warning("hybrid retrieve 失败，降级 naive course=%s: %s", course_id, exc)
+
         try:
             rag = await _get_instance(course_id)
             # retrieve_context 是 agent tool call 的快速检索路径，使用 naive 模式：
             # naive = 纯向量搜索，only_need_context=True 时 0 次内部 LLM 调用。
             # 调用方可通过 kwargs["mode"] 覆盖（如需图谱推理传 "mix"）。
-            query_mode = kwargs.get("mode") or "naive"
             param = _build_query_param(query_mode, None, only_need_context=True, top_k=top_k)
 
             t0 = time.perf_counter()
@@ -306,6 +327,128 @@ class LightRAGRetriever(Retriever):
 
         except Exception as exc:
             logger.error("LightRAGRetriever.retrieve_context failed: %s", exc, exc_info=True)
+            return ""
+        finally:
+            await _release_instance(course_id)
+
+    async def _retrieve_hybrid(
+        self,
+        course_id: str,
+        query: str,
+        top_k: int,
+        max_chars: int,
+    ) -> str:
+        """Phase 3 hybrid 检索：BM25(ES) + Dense(LightRAG naive) 并行 → RRF 融合。
+
+        dense 路复用 LightRAG naive（内部已 rerank），故不再外挂 rerank_fn（避免双重精排）；
+        BM25 路走 ES。chunk_id=content hash 作两系统 join key（见 ingestion 双写）。
+        ES 实际不可用时 hybrid_retrieve 内部跳过 BM25 路，退化为纯 dense。
+        """
+        from core.rag.hybrid_retriever import retrieve as hybrid_retrieve
+        from core.rag.retrieval_config import DEFAULT_CONFIG
+        from core.rag.es_client import get_es_store
+
+        rag = await _get_instance(course_id)
+        try:
+            async def _dense(query_text: str, k: int) -> list[dict]:
+                param = _build_query_param("naive", None, only_need_context=True, top_k=k)
+                result = await rag.aquery(query_text, param=param)
+                docs: list[dict] = []
+                for i, ctx in enumerate(_extract_contexts(result)[:k]):
+                    content = _extract_context_text(ctx)
+                    if content:
+                        docs.append({
+                            "chunk_id": hashlib.md5(content.encode("utf-8")).hexdigest(),
+                            "content": content,
+                            "score": float(k - i),
+                            "file_path": _extract_file_path(ctx),
+                        })
+                return docs
+
+            results = await hybrid_retrieve(
+                query, course_id, DEFAULT_CONFIG,
+                es_store=get_es_store(), dense_search_fn=_dense, rerank_fn=None,
+            )
+            if not results:
+                return ""
+            contexts = [
+                {"content": r.get("content", ""), "file_path": r.get("file_path", "")}
+                for r in results[:top_k]
+            ]
+            return _format_contexts_for_prompt(contexts, limit=top_k, max_chars=max_chars)
+        finally:
+            await _release_instance(course_id)
+
+    async def dense_search(self, course_id: str, query: str, k: int) -> list[dict]:
+        """naive 向量检索 → list[dict]（content/chunk_id/score/file_path），供消融实验注入。
+
+        与 _retrieve_hybrid 内 _dense 逻辑相同，但独立管理 instance 生命周期（每次调用
+        get/release）；在线 _retrieve_hybrid 复用外层已持 instance 避免重复获取，性能优先。
+        两处刻意重复 ~10 行而非互相调用，是为了让在线热路径不承担额外的 instance get/release。
+        """
+        rag = await _get_instance(course_id)
+        try:
+            param = _build_query_param("naive", None, only_need_context=True, top_k=k)
+            result = await rag.aquery(query, param=param)
+            docs: list[dict] = []
+            for i, ctx in enumerate(_extract_contexts(result)[:k]):
+                content = _extract_context_text(ctx)
+                if content:
+                    docs.append({
+                        "chunk_id": hashlib.md5(content.encode("utf-8")).hexdigest(),
+                        "content": content,
+                        "score": float(k - i),
+                        "file_path": _extract_file_path(ctx),
+                    })
+            return docs
+        finally:
+            await _release_instance(course_id)
+
+    async def graph_augmented_retrieve(
+        self,
+        course_id: str,
+        query: str,
+        top_k: int = 3,
+        max_chars: int | None = None,
+    ) -> str:
+        """Phase 4 图增强检索：向量召回 → 知识图谱邻域扩展 → 去重拼接。
+
+        relationship 查询专用路径。两步：
+          1. local 模式拿实体/关系图邻域（LightRAG local = 以实体为中心的 1-hop 扩展，
+             解释「A 和 B 什么关系 / 谁影响谁」这类多跳关联）
+          2. naive 向量召回拿精确事实 chunk（和 fact 路同源，补事实证据）
+        图邻域在前（关系结构优先），naive 事实在后，content 前 200 字去重。
+        比 mix 更聚焦：relationship 不需要 global 全局摘要，砍掉避免噪声。
+        KG 未建（local 返回空）时自动退化为纯 naive 向量证据。
+        """
+        # max_chars=None → 读 settings.lightrag.graph_augmented_max_chars（默认 4000=现状）；
+        # 调用方显式传值时优先用调用方值，评测/生产不传 → 自动走 settings。
+        if max_chars is None:
+            max_chars = get_settings().lightrag.graph_augmented_max_chars
+        rag = await _get_instance(course_id)
+        try:
+            # 1. 图谱邻域（关系结构）
+            local_param = _build_query_param("local", None, only_need_context=True, top_k=top_k)
+            local_result = await rag.aquery(query, param=local_param)
+            local_contexts = _extract_contexts(local_result)
+
+            # 2. 向量召回（精确事实证据）
+            naive_param = _build_query_param("naive", None, only_need_context=True, top_k=top_k)
+            naive_result = await rag.aquery(query, param=naive_param)
+            naive_contexts = _extract_contexts(naive_result)
+
+            # 3. 去重拼接：图邻域在前（关系结构），naive 事实在后
+            seen: set[str] = set()
+            merged: list[Any] = []
+            for ctx in list(local_contexts) + list(naive_contexts):
+                text = _extract_context_text(ctx)
+                key = text[:200] if text else ""
+                if key and key not in seen:
+                    seen.add(key)
+                    merged.append(ctx)
+            return _format_contexts_for_prompt(merged, limit=top_k * 2, max_chars=max_chars)
+        except Exception as exc:
+            logger.error("LightRAGRetriever.graph_augmented_retrieve failed: %s", exc, exc_info=True)
             return ""
         finally:
             await _release_instance(course_id)

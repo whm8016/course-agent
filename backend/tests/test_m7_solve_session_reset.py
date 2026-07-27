@@ -71,7 +71,7 @@ async def test_pipeline_entry_resets_stale_plan_on_sid_collision():
             new=AsyncMock(return_value=CommonContextLayers()),
         ),
         patch("core.solve.pipeline.describe_images", new=AsyncMock(side_effect=lambda c, t, r: t)),
-        patch("core.solve.pipeline._get_tool_schemas", return_value=[]),
+        patch("core.solve.pipeline.get_tool_schemas", return_value=[]),
         patch("core.solve.pipeline.run_agent_loop", new=AsyncMock(side_effect=_fake_loop_round2)),
     ):
         await DeepSolvePipeline().run("解 y+2=5", ctx2, bus)
@@ -115,7 +115,7 @@ async def test_pipeline_reset_does_not_break_in_turn_writes():
             new=AsyncMock(return_value=CommonContextLayers()),
         ),
         patch("core.solve.pipeline.describe_images", new=AsyncMock(side_effect=lambda c, t, r: t)),
-        patch("core.solve.pipeline._get_tool_schemas", return_value=[]),
+        patch("core.solve.pipeline.get_tool_schemas", return_value=[]),
         patch("core.solve.pipeline.run_agent_loop", new=AsyncMock(side_effect=_fake_loop)),
     ):
         await DeepSolvePipeline().run("解 x+1=3", ctx, bus)

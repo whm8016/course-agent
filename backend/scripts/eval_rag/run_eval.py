@@ -48,6 +48,21 @@ logger = logging.getLogger(__name__)
 
 
 async def main():
+    # 落盘日志：把 root logger 的全部输出（含 ragas.executor 的 Job[N] 异常）写到文件，
+    # 终端关闭后仍可回溯判分异常的真实类型。RAGAS Executor 把判分异常静默转 np.nan，
+    # 不落盘就抓不到"真凶"（NaN→0 假性0分的根因）。
+    from datetime import datetime as _dt
+    _log_ts = _dt.now().strftime("%Y%m%d_%H%M%S")
+    config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+    _log_path = config.RESULTS_DIR / f"eval_run_{_log_ts}.log"
+    _file_handler = logging.FileHandler(_log_path, encoding="utf-8")
+    _file_handler.setLevel(logging.INFO)
+    _file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s | %(message)s")
+    )
+    logging.getLogger().addHandler(_file_handler)
+    logger.info("本次评测日志落盘: %s", _log_path)
+
     parser = argparse.ArgumentParser(description="RAG 评测系统")
     parser.add_argument(
         "--course",
@@ -67,9 +82,18 @@ async def main():
         help="合成评测集时直接扫描该目录文档（不连库；与 --course 二选一，--course 优先）",
     )
     parser.add_argument(
+        "--dataset",
+        choices=["qa", "synthetic"],
+        default="qa",
+        help="评测集来源：qa=人工手写 qa_dataset.json（默认）；"
+             "synthetic=加载 synthetic_dataset.json（直接用现成题目，不重新合成，省 LLM）",
+    )
+    parser.add_argument(
         "--modes",
-        default="naive,local,global,mix",
-        help="评测模式列表（逗号分隔）",
+        default="fact,relationship",
+        help="评测策略列表（逗号分隔）；实际是生产自适应路由的 strategy："
+             "fact=纯向量检索（默认）、relationship=图谱邻域+naive 事实。两条都走生产检索方法，"
+             "answer 统一用主对话 LLM 生成（对齐 tool_registry._execute_rag）",
     )
     parser.add_argument(
         "--metrics",
@@ -85,14 +109,20 @@ async def main():
     parser.add_argument(
         "--production-parity",
         action="store_true",
-        help="contexts 走生产路径 retrieve_context(naive, top_k=5)，精确对齐 _execute_rag；"
-             "默认走 retrieve()（按 mode 图谱检索），衡量 LightRAG 自身生成质量",
+        help="（deprecated）contexts 现已恒走生产路径，此开关不再有实际效果，保留仅为向后兼容",
     )
     parser.add_argument(
         "--top-k",
         type=int,
         default=None,
         help="检索 top_k（默认读 config.EVAL_TOP_K=5，对齐生产）",
+    )
+    parser.add_argument(
+        "--ablation",
+        action="store_true",
+        help="消融模式：遍历 retrieval_config.ABLATION_CONFIGS 全组合（dense/bm25/rerank/融合方式），"
+             "每个 RetrievalConfig 跑 hybrid retrieve 对比检索召回质量（context_precision/recall，answer 留空省 LLM）。"
+             "需 settings.elasticsearch.enabled=true 才有 BM25 路；未启用则 bm25 配置退化为纯 dense。",
     )
     args = parser.parse_args()
 
@@ -108,12 +138,20 @@ async def main():
             docs_dir=args.docs_dir,
             n=args.generate,
         )
+    elif args.dataset == "synthetic":
+        # 直接加载现成合成题（synthetic_dataset.json），不重新合成，省 LLM
+        dataset_path = config.EVAL_DIR / "synthetic_dataset.json"
+        logger.info("加载合成评测集: %s", dataset_path)
+        if not dataset_path.exists():
+            logger.error("评测集文件不存在: %s", dataset_path)
+            sys.exit(1)
+        qa_items = json.loads(dataset_path.read_text("utf-8"))
     else:
         # 人工评测集（qa_dataset.json）
         logger.info("加载人工评测集: %s", config.DATASET_PATH)
         if not config.DATASET_PATH.exists():
             logger.error("评测集文件不存在: %s", config.DATASET_PATH)
-            logger.error("提示：用 --generate N 自动合成评测集")
+            logger.error("提示：用 --generate N 自动合成评测集，或 --dataset synthetic 用合成集")
             sys.exit(1)
         qa_items = json.loads(config.DATASET_PATH.read_text("utf-8"))
     logger.info("评测集大小: %d 条", len(qa_items))
@@ -124,23 +162,37 @@ async def main():
         cat_counts[item["category"]] = cat_counts.get(item["category"], 0) + 1
     logger.info("分类分布: %s", cat_counts)
 
-    # ---- Step 2: 逐模式查询 ----
-    modes = [m.strip() for m in args.modes.split(",")]
-    metric_names = [m.strip() for m in args.metrics.split(",")]
+    # ---- Step 2: 查询 ----
+    if args.ablation:
+        # 消融模式：遍历 ABLATION_CONFIGS，每个 RetrievalConfig 跑 hybrid retrieve
+        from core.rag.retrieval_config import ABLATION_CONFIGS
+        from scripts.eval_rag.ablation_runner import run_ablation
 
-    logger.info("评测模式: %s", modes)
-    logger.info("评测指标: %s", metric_names)
+        modes = [cfg.label() for cfg in ABLATION_CONFIGS.values()]
+        # ablation answer 留空（只对比检索召回），强制 context 指标，跳过需 answer 的 faithfulness/answer_relevancy
+        metric_names = ["context_precision", "context_recall"]
+        logger.info("消融模式：配置=%s", modes)
+        logger.info("消融指标（强制）: %s", metric_names)
 
-    from scripts.eval_rag.rag_runner import run_all_modes
+        all_results = await run_ablation(
+            args.course, qa_items, ABLATION_CONFIGS, top_k=args.top_k,
+        )
+    else:
+        # 原模式路径：逐 LightRAG mode（naive/local/global/mix）查询
+        modes = [m.strip() for m in args.modes.split(",")]
+        metric_names = [m.strip() for m in args.metrics.split(",")]
+        logger.info("评测模式: %s", modes)
+        logger.info("评测指标: %s", metric_names)
 
-    all_results = await run_all_modes(
-        args.course,
-        qa_items,
-        modes,
-        no_cache=args.no_cache,
-        top_k=args.top_k,
-        production_parity=args.production_parity,
-    )
+        from scripts.eval_rag.rag_runner import run_all_modes
+        all_results = await run_all_modes(
+            args.course,
+            qa_items,
+            modes,
+            no_cache=args.no_cache,
+            top_k=args.top_k,
+            production_parity=args.production_parity,
+        )
 
     # ---- Step 3-4: RAGAS 指标计算 ----
     # evaluate_mode 单次跑完直接返回 {avg, per_question}：逐条分数来自同一次 evaluate
@@ -150,13 +202,23 @@ async def main():
     avg_scores: dict[str, dict[str, float]] = {}
     per_question_scores: dict[str, list[dict[str, float]]] = {}
     total_tokens_by_mode: dict[str, int] = {}
+    invalid_by_mode: dict[str, dict[str, list[int]]] = {}
     for mode in modes:
         logger.info("计算 %s 模式的指标...", mode)
         res = evaluate_mode(qa_items, all_results[mode], metric_names)
         avg_scores[mode] = res["avg"]
         per_question_scores[mode] = res["per_question"]
         total_tokens_by_mode[mode] = res.get("total_tokens", 0)
+        invalid_by_mode[mode] = res.get("invalid", {})
         logger.info("%s 模式结果: %s", mode, res["avg"])
+        # 判崩排除清单：RAGAS Executor 异常→NaN→记0 的假性0分，已剔出均值，列出供人工复核
+        for m, idxs in (invalid_by_mode[mode] or {}).items():
+            if idxs:
+                qids = [qa_items[i]["id"] for i in idxs if i < len(qa_items)]
+                logger.warning(
+                    "  [%s] %s 有 %d 题判分异常(NaN)已剔出均值: %s",
+                    mode, m, len(idxs), qids,
+                )
 
     # 成本估算（Phase 3.6：按 total_tokens 粗估，input/output 混合平均单价）
     total_tokens = sum(total_tokens_by_mode.values())
@@ -205,6 +267,7 @@ async def main():
         "total_tokens_by_mode": total_tokens_by_mode,
         "total_tokens": total_tokens,
         "est_cost": est_cost,
+        "invalid_by_mode": invalid_by_mode,
     }
     config.RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     summary_path = config.RESULTS_DIR / f"eval_summary_{ts}.json"
@@ -253,6 +316,10 @@ async def main():
     # 全部达标 exit 0（CI 通过），任一不达标 exit 1（阻断 CI）。日志用 ASCII 避免 GBK 控制台编码问题
     # sys 用顶层第 29 行的 import；这里不再局部 import，否则会让 sys 变成 main() 的局部名，
     # 导致第 117 行（数据集缺失 fallback）的 sys.exit 报 UnboundLocalError
+    if args.ablation:
+        logger.info("消融模式：跳过质量门禁（配置对比分析，非达标门禁），直接通过")
+        sys.exit(0)
+
     from scripts.eval_rag.quality_gate import check_quality_gate
     passed, failures = check_quality_gate(summary)
     if passed:

@@ -11,21 +11,24 @@ plan/quiz 用 run_agent_loop 单轮 + prompt 要求 JSON + 解析校验（provid
 """
 from __future__ import annotations
 
+import asyncio
+import copy
 import json
 import logging
-import re
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from core.agentic.loop import _get_tool_schemas, run_agent_loop
+from core.agent.registry import get_tool_schemas
+from core.agentic.loop import run_agent_loop
 from core.context import UnifiedContext
+from core.llm.json_extract import extract_json_from_llm
 from core.observability import log_flow
 from core.pipeline_common import (
-    assemble_common_context,
     build_common_context_layers,
     describe_images,
     resolve_profile_runtime,
+    with_common_prompt,
 )
 from core.prompt_loader import load_prompt_dict
 from core.stream_bus import StreamBus
@@ -37,14 +40,9 @@ _QUIZ_PROMPT_PATH = Path(__file__).parent / "prompts" / "zh" / "pipeline.yaml"
 _VALID_TYPES = ("choice", "concept", "fill_in_blank", "short_answer", "written", "coding")
 _VALID_DIFFICULTY = ("easy", "medium", "hard")
 
-
-def _with_common(task_system, layers) -> str:
-    """叠加通用上下文层到 task system（solve/research/quiz 共享语义）。
-
-    通用层为空时原样返回，避免多余空行。
-    """
-    common = assemble_common_context(layers)
-    return f"{task_system}\n\n{common}" if common else task_system
+# Stage 3 并行生成上限：N 道题相互独立，用 Semaphore 限并发 LLM 调用，避免打满供应商速率限制
+# （对标 research.DEFAULT_MAX_PARALLEL_TOPICS）
+_MAX_PARALLEL_QUESTIONS = 3
 
 
 class QuizPipeline:
@@ -85,8 +83,8 @@ class QuizPipeline:
             explore_outcome = await run_agent_loop(
                 context=explore_ctx,
                 stream=stream,
-                system_prompt=_with_common((cfg.get("explore") or {}).get("system", ""), layers),
-                tool_schemas=_get_tool_schemas(explore_ctx),
+                system_prompt=with_common_prompt((cfg.get("explore") or {}).get("system", ""), layers),
+                tool_schemas=get_tool_schemas(explore_ctx),
                 max_iterations=5,
                 emit_terminal_events=False,
                 client=rt.client,
@@ -119,7 +117,7 @@ class QuizPipeline:
             plan_outcome = await run_agent_loop(
                 context=plan_ctx,
                 stream=stream,
-                system_prompt=_with_common(plan_system, layers),
+                system_prompt=with_common_prompt(plan_system, layers),
                 tool_schemas=None,
                 max_iterations=1,
                 emit_terminal_events=False,
@@ -132,72 +130,98 @@ class QuizPipeline:
                  elapsed_ms=int((_time.perf_counter() - _t_stage) * 1000),
                  templates=len(templates))
 
-        # ── Stage 3: quiz — 每题生成 + schema 校验（单题容错）────────────
-        # M-8：单题生成（LLM 调用 / JSON 解析 / 校验）失败不再整批中断——失败题记 error 事件
-        # 并跳过，已成功的题照常返回，剩余题继续生成。M-9：_validate_question 把内容残缺的题
-        # （空题干 / 空答案 / choice 答案不命中 options）判为无效，同样走容错路径。
+        # ── Stage 3: quiz — 每题并行生成 + schema 校验（单题容错）────────
+        # 各题相互独立（第 N 题不需要第 N-1 题的结果），是 N 个完全独立的 run_agent_loop
+        # （max_iterations=1）。用 asyncio.gather + Semaphore 并行跑，把 N 次串行 LLM 调用压成
+        # ≈ 最慢一题的耗时（对标 research._drive_queue 的并行模式，扁平 DAG 的全量并行）。
+        # 容错（M-8/M-9）语义不变：单题无论是 LLM 异常还是内容校验失败，都只记 error 事件、
+        # 跳过该题，其余题照常生成。
         questions: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
         _t_stage = _time.perf_counter()
         async with stream.stage("quiz", source="quiz"):
             quiz_system = (cfg.get("quiz") or {}).get("system", "")
-            for idx, tmpl in enumerate(templates, 1):
-                quiz_ctx = replace(
-                    context,
-                    user_message=(
-                        f"题目蓝图：{json.dumps(tmpl, ensure_ascii=False)}\n\n"
-                        f"探索摘要：\n{exploration_trace}\n\n"
-                        f"请生成第 {idx} 道题（JSON）。"
-                    ),
-                    conversation_history=[],
-                    enabled_tools=[],
-                    mode="quiz",
-                )
-                try:
-                    quiz_outcome = await run_agent_loop(
-                        context=quiz_ctx,
-                        stream=stream,
-                        system_prompt=_with_common(quiz_system, layers),
-                        tool_schemas=None,
-                        max_iterations=1,
-                        emit_terminal_events=False,
-                        client=rt.client,
-                        model=rt.text_model,
-                        binding=rt.binding,
+            sem = asyncio.Semaphore(_MAX_PARALLEL_QUESTIONS)
+
+            async def _gen(
+                idx: int, tmpl: dict[str, Any]
+            ) -> tuple[int, dict[str, Any] | None, dict[str, Any] | None]:
+                """生成单题（并发安全）：fork 隔离 context → run_agent_loop → 解析 + 校验。
+
+                返回 (idx, question, error)：成功则 question 非 None，失败则 error 非 None。
+                事件（quiz_question / quiz_question_error）按完成顺序直接发到主 stream——前端按
+                到达顺序追加、不依赖 index 排序，故完成顺序乱序无害；questions / errors 列表在
+                gather 后由主协程按 idx 排序汇总，保证结果载荷顺序确定（与串行时一致）。
+                """
+                async with sem:
+                    # 并发隔离：replace 是浅拷贝，attachments / metadata 仍指向原 context 同一对象；
+                    # _build_messages 会原地清空 doc 附件 base64（loop.py:96-97）并可能写 metadata，
+                    # 多题共享同一份会让先跑的题清空后跑题的附件。深拷贝隔离（同 research._fork_for_block）。
+                    quiz_ctx = _fork_for_quiz(
+                        context,
+                        user_message=(
+                            f"题目蓝图：{json.dumps(tmpl, ensure_ascii=False)}\n\n"
+                            f"探索摘要：\n{exploration_trace}\n\n"
+                            f"请生成第 {idx} 道题（JSON）。"
+                        ),
+                        conversation_history=[],
+                        enabled_tools=[],
+                        mode="quiz",
                     )
-                except Exception:
-                    # M-8：单题 LLM 调用异常（超时 / 网络 / provider 抖动）不中断整批
-                    logger.exception("quiz 第 %d 题生成异常", idx)
-                    err = {
-                        "index": idx - 1,
-                        "question_id": tmpl.get("question_id", ""),
-                        "topic": tmpl.get("topic", ""),
-                        "reason": "generation_error",
-                    }
-                    errors.append(err)
-                    await stream.emit({"type": "quiz_question_error", **err})
-                    continue
+                    try:
+                        quiz_outcome = await run_agent_loop(
+                            context=quiz_ctx,
+                            stream=stream,
+                            system_prompt=with_common_prompt(quiz_system, layers),
+                            tool_schemas=None,
+                            max_iterations=1,
+                            emit_terminal_events=False,
+                            client=rt.client,
+                            model=rt.text_model,
+                            binding=rt.binding,
+                        )
+                    except Exception:
+                        # M-8：单题 LLM 调用异常（超时 / 网络 / provider 抖动）不中断整批
+                        logger.exception("quiz 第 %d 题生成异常", idx)
+                        err = {
+                            "index": idx - 1,
+                            "question_id": tmpl.get("question_id", ""),
+                            "topic": tmpl.get("topic", ""),
+                            "reason": "generation_error",
+                        }
+                        await stream.emit({"type": "quiz_question_error", **err})
+                        return (idx, None, err)
 
-                q = _parse_question(quiz_outcome.final_text, tmpl)
-                # M-9：内容级校验——空题干/空答案/choice 答案不命中 options 视为无效
-                if not _validate_question(q):
-                    logger.warning("quiz 第 %d 题内容校验失败，跳过", idx)
-                    err = {
-                        "index": idx - 1,
-                        "question_id": q.get("question_id", ""),
-                        "topic": q.get("topic", ""),
-                        "reason": "schema_invalid",
-                    }
-                    errors.append(err)
-                    await stream.emit({"type": "quiz_question_error", **err})
-                    continue
+                    q = _parse_question(quiz_outcome.final_text, tmpl)
+                    # M-9：内容级校验——空题干/空答案/choice 答案不命中 options 视为无效
+                    if not _validate_question(q):
+                        logger.warning("quiz 第 %d 题内容校验失败，跳过", idx)
+                        err = {
+                            "index": idx - 1,
+                            "question_id": q.get("question_id", ""),
+                            "topic": q.get("topic", ""),
+                            "reason": "schema_invalid",
+                        }
+                        await stream.emit({"type": "quiz_question_error", **err})
+                        return (idx, None, err)
 
-                questions.append(q)
-                await stream.emit({
-                    "type": "quiz_question",
-                    "index": idx - 1,
-                    "question": q,
-                })
+                    await stream.emit({
+                        "type": "quiz_question",
+                        "index": idx - 1,
+                        "question": q,
+                    })
+                    return (idx, q, None)
+
+            # 并行跑全部题（_gen 内已全捕获异常，正常不会抛到 gather）
+            raw = await asyncio.gather(
+                *[_gen(idx, tmpl) for idx, tmpl in enumerate(templates, 1)]
+            )
+            # 按 idx 排序汇总 → questions / errors 顺序确定（与串行一致），与各题完成顺序无关
+            for _idx, q, err in sorted(raw, key=lambda r: r[0]):
+                if q is not None:
+                    questions.append(q)
+                elif err is not None:
+                    errors.append(err)
 
         log_flow("question.stage.quiz",
                  elapsed_ms=int((_time.perf_counter() - _t_stage) * 1000),
@@ -220,26 +244,8 @@ class QuizPipeline:
 
 # ── JSON 解析 + schema 校验（tool_calls 版基础校验，强 repair 留后续）─────────
 
-def _extract_json(text: str) -> dict[str, Any]:
-    """从 LLM 输出提取 JSON 对象，容忍 markdown fence / 前后噪声。"""
-    cleaned = re.sub(r"```(?:json)?", "", text or "").strip().rstrip("`").strip()
-    try:
-        data = json.loads(cleaned)
-        return data if isinstance(data, dict) else {}
-    except json.JSONDecodeError:
-        pass
-    start = cleaned.find("{")
-    if start == -1:
-        return {}
-    try:
-        data, _end = json.JSONDecoder().raw_decode(cleaned, start)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
-
-
 def _parse_templates(text: str, count: int) -> list[dict[str, Any]]:
-    data = _extract_json(text)
+    data = extract_json_from_llm(text)
     raw = data.get("templates", []) if isinstance(data, dict) else []
     if not isinstance(raw, list):
         return []
@@ -266,7 +272,7 @@ def _parse_templates(text: str, count: int) -> list[dict[str, Any]]:
 
 
 def _parse_question(text: str, template: dict[str, Any]) -> dict[str, Any]:
-    data = _extract_json(text)
+    data = extract_json_from_llm(text)
     expected_type = str(template.get("question_type", "written")).strip().lower()
     expected_type = expected_type if expected_type in _VALID_TYPES else "written"
     qt = str(data.get("question_type", expected_type)).strip().lower()
@@ -318,6 +324,25 @@ def _validate_question(q: dict[str, Any]) -> bool:
         if str(q.get("correct_answer", "")).strip().upper() not in opts:
             return False
     return True
+
+
+def _fork_for_quiz(context: UnifiedContext, **overrides: Any) -> UnifiedContext:
+    """为并行 quiz 题目派生隔离 context（并发安全）。
+
+    dataclasses.replace 是浅拷贝：attachments / metadata 仍指向原 context 的同一对象。
+    run_agent_loop → _build_messages 会原地改 Attachment（doc 文件清空 base64，见 loop.py
+    :96-97）并可能写 metadata；并行多题共享同一份时，先跑的题清空 base64 会让后跑的题丢掉
+    附件内容。这里对 attachments + metadata 深拷贝，每题拿到独立副本互不影响（同 research
+    的 _fork_for_block）。其余字段由 replace 正常处理；仅 Stage 3 并行入口用。
+    """
+    forked = replace(
+        context,
+        attachments=copy.deepcopy(context.attachments),
+        metadata=copy.deepcopy(context.metadata),
+    )
+    if overrides:
+        forked = replace(forked, **overrides)
+    return forked
 
 
 __all__ = ["QuizPipeline"]

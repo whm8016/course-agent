@@ -32,6 +32,32 @@ services:
       timeout: 3s
       retries: 5
 
+  # ── Elasticsearch（Phase 3 hybrid search 的 BM25 路）──────────────────────
+  # 可选服务：settings.elasticsearch.enabled=false（默认）时不启用，backend/worker
+  # 自动降级为纯 dense（LightRAG naive）。启用步骤：
+  #   1) .env 设 ELASTICSEARCH__ENABLED=true、ELASTICSEARCH__URL=http://elasticsearch:9200
+  #      （docker 网络内用服务名；本机开发用 http://localhost:9200）
+  #   2) 装中文分词 ik 插件（官方镜像不带，否则 BM25 中文按字切效果差）：进入容器执行
+  #      bin/elasticsearch-plugin install https://get.infini.cloud/elasticsearch/analysis-ik/8.14.0
+  #      后重启 ES；或 build 一个预装 ik 的自定义镜像。ik 版本必须与 ES 版本精确匹配。
+  elasticsearch:
+    image: elasticsearch:8.14.0
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+    ports:
+      - "127.0.0.1:9200:9200"
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
   backend:
     build:
       context: ./backend
@@ -111,3 +137,4 @@ volumes:
   backend_uploads:
   backend_venv:
   redisdata:
+  esdata:

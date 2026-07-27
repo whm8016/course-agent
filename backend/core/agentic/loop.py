@@ -27,12 +27,20 @@ from typing import Any
 from settings import get_settings
 LLM_BINDING = get_settings().llm.binding
 TEXT_MODEL = get_settings().llm.text_model
+from core.agentic import context_policy
 from core.agentic.tool_dispatch import dispatch_tool_calls
 from core.agentic.types import DispatchOutcome, LoopOutcome, RoundResult, ToolCall
 from core.context import UnifiedContext
 from core.llm.llm import _create_with_image_fallback, _llm_circuit_breaker, client as _default_client
 from core.llm.multimodal import prepare_multimodal_messages
 from core.observability import log_flow
+from core.observability.cost import (
+    TokenUsage,
+    estimate_cost,
+    observe_cost,
+    observe_usage,
+    usage_from_response_chunk,
+)
 from core.observability.metrics import observe_llm_round
 from core.stream_bus import StreamBus
 
@@ -110,15 +118,6 @@ def _build_messages(system_prompt: str, context: UnifiedContext, *, binding: str
     return messages
 
 
-def _get_tool_schemas(context: UnifiedContext) -> list[dict[str, Any]] | None:
-    """根据 context.enabled_tools 过滤并返回对应的 OpenAI tool schemas（registry 单一数据源）。"""
-    if not context.enabled_tools:
-        return None
-    from core.agent.registry import get_tool_registry
-    schemas = get_tool_registry().schemas_for(context.enabled_tools)
-    return schemas or None
-
-
 async def _one_round(
     messages: list[dict[str, Any]],
     tool_schemas: list[dict[str, Any]] | None,
@@ -158,6 +157,9 @@ async def _one_round(
         "stream": True,
         "temperature": 0.7,
         "max_tokens": 8192,
+        # 成本可观测性：末块携带 usage（OpenAI 原生 / Anthropic 适配器合成等价块）。
+        # 不支持的端点会在 _create_with_image_fallback 内被剥除并重试（见 llm.py）。
+        "stream_options": {"include_usage": True},
     }
     if tool_schemas:
         kwargs["tools"] = tool_schemas
@@ -173,6 +175,7 @@ async def _one_round(
     _reasoning_started = False           # 是否已发出本轮 reasoning 的 start 事件
     _tool_call_seen = False              # 本轮 delta 是否出现过 tool_calls（出现后停发答案 token）
     _tag_leak_seen = False               # 本轮 content 是否嗅探到 DSML 标签泄漏（见 _strip_dsml_tags）
+    round_usage: TokenUsage | None = None  # 本轮 usage（从末块捕获），provider 不支持时保持 None
 
     # H-16：自配/profile client（llm_client 非 None）不接入全局熔断器。
     # 判定信号 = _one_round 的 llm_client 参数：None → 全局默认 client（平台所有未自配
@@ -182,6 +185,11 @@ async def _one_round(
     _circuit = None if llm_client is not None else _llm_circuit_breaker
     stream = await _create_with_image_fallback(_client, kwargs, binding, model, circuit_breaker=_circuit)
     async for chunk in stream:
+        # 成本采集：末尾 usage chunk（choices 为空）——OpenAI 末块 / Anthropic 适配器合成的等价块。
+        # 必须在下方 `if not choices: continue` 之前取，否则空-choices 的 usage 块会被跳掉。
+        _u = usage_from_response_chunk(chunk)
+        if _u is not None:
+            round_usage = _u
         choices = getattr(chunk, "choices", None) or []
         if not choices:
             continue
@@ -244,6 +252,9 @@ async def _one_round(
                 if arguments:
                     entry["arguments"] += str(arguments)
 
+    # 成本采集：本轮 usage 计入 Prometheus（token 维度，逐轮埋；usage 为 None 时跳过）
+    observe_usage(model, round_usage)
+
     # 本轮推理收尾：仅在确实产生过 reasoning_content 时发 complete，让前端折叠思考块
     if _reasoning_started and reasoning_sink is not None:
         try:
@@ -295,6 +306,7 @@ async def _one_round(
         elapsed_ms=_elapsed_ms,
         ttft_ms=_ttft_ms,
         reasoning=reasoning,
+        usage=round_usage,
     )
 
 
@@ -361,7 +373,7 @@ async def run_agent_loop(
         stream:         StreamBus 实例，用于向前端发送事件。
         system_prompt:  已组装好的本轮系统提示词。
         tool_schemas:   传给 LLM 的 OpenAI tool schemas；传 None 表示禁用工具。
-                        可用 _get_tool_schemas(context) 从 context.enabled_tools 派生。
+                        可用 core.agent.registry.get_tool_schemas(context) 从 context.enabled_tools 派生。
         model:          模型名称覆盖；默认使用 config.TEXT_MODEL。
         client:         LLM client（AsyncOpenAI / AnthropicAdapter / AsyncAzureOpenAI）。
                         传 None 时使用全局 _default_client（向后兼容）。
@@ -393,6 +405,7 @@ async def run_agent_loop(
     eff_binding = binding or LLM_BINDING
     messages = _build_messages(system_prompt, context, binding=eff_binding)
     tools_used: list[str] = []
+    turn_usage = TokenUsage()  # 本 loop 累积 usage（成本采集汇总），done 时埋 cost Counter
     final_text = ""
     # M-4：兜底用——最后一轮若没产出最终文字（见下方「空回复兜底」），回退到本轮模型已生成的
     # 旁白/推理，避免用户得到空 answer。优先取最后一段非空 content（工具轮的旁白）。
@@ -436,6 +449,7 @@ async def run_agent_loop(
                                               reasoning_stage="answer_now", binding=eff_binding,
                                               tool_choice_override="none")
                     final_text = result.content
+                    turn_usage = turn_usage.add(result.usage)
                 except Exception:
                     logger.exception("AgentLoop: answer_now 直接回答失败")
                     final_text = "（立即回答失败，请稍后重试。）"
@@ -446,8 +460,20 @@ async def run_agent_loop(
         # 最后一轮：禁用工具，强制模型输出文字答案
         is_final_round = iteration == max_iterations - 1
         schemas = None if is_final_round else tool_schemas
-        # 防止多轮工具调用后 messages 总量超模型 context window
-        _snip_tool_results(messages)
+        # 防止多轮工具调用后 messages 总量超模型 context window。
+        # contextvar 覆盖优先（评测 harness per-task 指定 raw/masking/summary_only/hybrid）；
+        # 未覆盖时回落 settings.context_policy.enabled（默认 False→旧 _snip_tool_results，零变化）。
+        arm = context_policy.current_arm()
+        if arm is not None:
+            _extra = await context_policy.apply_arm(messages, model, arm)
+            if _extra:
+                context.metadata["_cp_extra_llm_calls"] = (
+                    context.metadata.get("_cp_extra_llm_calls", 0) + _extra
+                )
+        elif get_settings().context_policy.enabled:
+            await context_policy.apply(messages, model)
+        else:
+            _snip_tool_results(messages)
         # 本轮 reasoning 的 stage：首轮=分析问题(thinking)，工具后=整理证据(observing)。
         # 用 stage 区分，避免前端按 stage 分组时同 stage 多轮互相覆盖。
         reasoning_stage = "observing" if seen_tool_result else "thinking"
@@ -470,6 +496,8 @@ async def run_agent_loop(
                 elapsed_ms=result.elapsed_ms,
                 ttft_ms=result.ttft_ms,
             )
+            # 成本采集：累积本轮 usage（provider 不支持采集时 result.usage 为 None，add 等价不变）
+            turn_usage = turn_usage.add(result.usage)
         except Exception:
             # 兜底：本轮若已发出 reasoning start（running），补发 complete 避免前端思考块卡转圈
             try:
@@ -565,11 +593,33 @@ async def run_agent_loop(
                     await stream.emit(event)
             break
 
+    # 成本采集汇总：按本 loop 累积 usage 估算成本，埋 cost Counter + 写 turn 共享 metadata。
+    loop_cost = estimate_cost(model, turn_usage)
     log_flow("agent_loop.done",
              iterations=iteration + 1,
              tools_used=list(dict.fromkeys(tools_used)),
              answer_chars=len(final_text),
-             elapsed_ms=int((time.perf_counter() - _loop_t0) * 1000))
+             elapsed_ms=int((time.perf_counter() - _loop_t0) * 1000),
+             input_tokens=turn_usage.input_tokens,
+             output_tokens=turn_usage.output_tokens,
+             cache_read_tokens=turn_usage.cache_read_tokens,
+             cost_usd=loop_cost)
+    # cost 维度 Counter（label 含 course_id/mode，需 context，故在 loop 层而非 _one_round 层埋）
+    observe_cost(model, context.course_id, context.mode, loop_cost)
+    # 成本配额累加（第四批）：把本轮估算成本记入 per-user/course/日 Redis 计数。
+    # 总开关关时短路，避免无谓 Redis 往返；best-effort，Redis 不可用静默跳过（见 accrue_cost）。
+    if get_settings().cost_quota.enabled:
+        from core.quota.cost_quota import accrue_cost
+        await accrue_cost(context.user_id, context.course_id, loop_cost)
+    # 写 turn 共享 context.metadata，供 turn_runtime 汇总进 turn.complete 日志。chat/quiz/
+    # deep_solve 单 loop 即全 turn；research 多 fork 子 loop 各写各的 fork 副本（不回传父
+    # context），全 turn 成本以 Counter 聚合值为准（Counter 跨 loop 单调累加）。
+    context.metadata["llm_usage"] = {
+        "input_tokens": turn_usage.input_tokens,
+        "output_tokens": turn_usage.output_tokens,
+        "cache_read_tokens": turn_usage.cache_read_tokens,
+    }
+    context.metadata["llm_cost_usd"] = loop_cost
 
     # M-4 空回复兜底：循环走完仍无最终文字（轮次预算耗尽且最后一轮模型既没吐文字也没正常 break，
     # 或最后一轮 content 为空），回退到本轮模型已生成的旁白；旁白也空则用明确提示语。
@@ -596,4 +646,5 @@ async def run_agent_loop(
         rounds=iteration + 1,
         tools_used=list(dict.fromkeys(tools_used)),
         completed=True,
+        total_usage=turn_usage,
     )

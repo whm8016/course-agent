@@ -24,7 +24,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from prometheus_fastapi_instrumentator import Instrumentator
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
@@ -387,9 +387,48 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# gunicorn 多 worker：worker 退出时清理本进程的 multiproc 文件，防 'all' 模式的 pid-labeled
+# Gauge（leader/pool）留下幽灵样本。仅 multiprocess 模式生效；Counter/Histogram 是累积值，
+# prometheus_client 本就保留已退出进程的文件（代表已完成的真实工作量），无需清理。
+def _mark_prometheus_process_dead() -> None:
+    if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+        try:
+            from prometheus_client import multiprocess
+
+            multiprocess.mark_process_dead(os.getpid())
+        except Exception:  # noqa: BLE001 — best-effort 清理，失败不影响进程退出
+            pass
+
+
+import atexit
+
+atexit.register(_mark_prometheus_process_dead)
+
+# Instrumentator 仅 instrument（埋 HTTP 指标到 registry），不再用内置 expose：gunicorn -w 4 下
+# 内置 /metrics 只反映接到请求的那个 worker（~1/4 流量）。改为自定义 /metrics：multiprocess
+# 模式用 MultiProcessCollector 聚合所有 worker 写入 multiproc 目录的文件，单进程用默认 REGISTRY
+# （与旧 expose 行为等价）。excluded_handlers 不含 /metrics（本端点自己处理，避免自指计数）。
 Instrumentator(
     excluded_handlers=["/api/health", "/metrics"],
-).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False)
+).instrument(app)
+
+
+@app.get("/metrics", include_in_schema=False)
+async def _prometheus_metrics() -> Response:
+    from prometheus_client import (
+        CONTENT_TYPE_LATEST,
+        REGISTRY,
+        CollectorRegistry,
+        generate_latest,
+        multiprocess,
+    )
+
+    if os.environ.get("PROMETHEUS_MULTIPROC_DIR"):
+        registry: object = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+    else:
+        registry = REGISTRY  # 单进程：默认 registry（行为等价旧 Instrumentator.expose）
+    return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 app.include_router(question_router, prefix="/api")
 app.include_router(question_notebook_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")

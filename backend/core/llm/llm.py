@@ -159,6 +159,17 @@ def _build_messages(
     return messages
 
 
+def _is_stream_options_unsupported(exc: Exception) -> bool:
+    """识别「端点不支持 stream_options」类错误（用于成本采集降级判断）。
+
+    部分 OpenAI 兼容端点（老版本 DashScope/某些私有部署）会因 stream_options 报 400
+    而非静默忽略。此时降级：剥掉 stream_options 用同模型重试一次（丢 usage 但保 turn），
+    与 Stage-2 剥图降级同套路。匹配信息关键字，兼容各家错误文案差异。
+    """
+    msg = str(exc).lower()
+    return "stream_options" in msg or "include_usage" in msg
+
+
 # ============================================================
 # 带重试和熔断的 LLM 调用
 # ============================================================
@@ -211,6 +222,15 @@ async def _create_with_image_fallback(
                     strip_image_parts_inplace(kwargs["messages"])
                     logger.warning(
                         "Stage-2 降级：模型 %s 不支持图片输入，剥图后用同模型重试纯文本", mdl
+                    )
+                    return await client.chat.completions.create(**kwargs)
+                # 成本采集降级：端点不支持 stream_options（报 400 而非静默忽略）→ 剥掉重试一次。
+                # 丢本轮 usage（cost 可观测性降级），但保 turn 不挂——比盲传 stream_options 打断
+                # 整轮对话安全。发生在 create 层、reliability 之前，成功算 1 次 success 不污染熔断。
+                if _is_stream_options_unsupported(exc) and "stream_options" in kwargs:
+                    kwargs.pop("stream_options", None)
+                    logger.info(
+                        "成本采集降级：%s 端点不支持 stream_options，已剥离重试（本轮无 usage）", mdl
                     )
                     return await client.chat.completions.create(**kwargs)
                 raise

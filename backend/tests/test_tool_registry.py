@@ -147,3 +147,81 @@ def test_execute_business_param_named_name_no_clash(fresh_registry):
         assert r.content == "skill:aihot"
 
     asyncio.run(run())
+
+
+def _stub_skill_service(tmp_path, monkeypatch):
+    """建一个仅含 demo skill 的 SkillService，并 patch get_skill_service 返回它。"""
+    import core.skills.skill_service as ss_mod
+    from core.skills.skill_service import SkillService
+
+    builtin = tmp_path / "builtin"
+    (builtin / "demo").mkdir(parents=True)
+    (builtin / "demo" / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: d\n---\n这是完整正文", encoding="utf-8"
+    )
+    svc = SkillService(user_root=tmp_path / "user", builtin_root=builtin)
+    monkeypatch.setattr(ss_mod, "get_skill_service", lambda *a, **k: svc)
+    return svc
+
+
+def test_read_skill_dedup_within_turn(tmp_path, monkeypatch):
+    """同 turn 内重复 read_skill(demo)：首次返回全文，第二次返回「已加载过」不塞全文。"""
+    from core.agent.tool_registry import _execute_read_skill
+    from core.agentic.dynamic_tools import reset_read_skill_log, set_read_skill_log
+
+    _stub_skill_service(tmp_path, monkeypatch)
+
+    token = set_read_skill_log()
+    try:
+        async def run():
+            r1 = await _execute_read_skill(course_id="c", name="demo")
+            r2 = await _execute_read_skill(course_id="c", name="demo")
+            return r1, r2
+        r1, r2 = asyncio.run(run())
+    finally:
+        reset_read_skill_log(token)
+
+    assert r1.success and "这是完整正文" in r1.content
+    assert r2.success and "已读取过" in r2.content
+    assert "这是完整正文" not in r2.content   # 第二次不重复塞全文
+
+
+def test_read_skill_dedup_different_file_not_collapsed(tmp_path, monkeypatch):
+    """同一 skill 不同文件 → key 不同，互不去重（读 SKILL.md 不影响读 references/x.md）。"""
+    from core.agent.tool_registry import _execute_read_skill
+    from core.agentic.dynamic_tools import reset_read_skill_log, set_read_skill_log
+
+    _stub_skill_service(tmp_path, monkeypatch)
+    # 参考文件写在 builtin 层（_stub 里 builtin_root=tmp_path/builtin）
+    (tmp_path / "builtin" / "demo" / "references").mkdir()
+    (tmp_path / "builtin" / "demo" / "references" / "extra.md").write_text(
+        "参考细节", encoding="utf-8"
+    )
+
+    token = set_read_skill_log()
+    try:
+        async def run():
+            r1 = await _execute_read_skill(course_id="c", name="demo")                    # SKILL.md
+            r2 = await _execute_read_skill(course_id="c", name="demo", file="references/extra.md")
+            return r1, r2
+        r1, r2 = asyncio.run(run())
+    finally:
+        reset_read_skill_log(token)
+
+    assert "这是完整正文" in r1.content
+    assert "参考细节" in r2.content   # 不同文件，各自返回全文
+
+
+def test_read_skill_no_dedup_without_log(tmp_path, monkeypatch):
+    """未注入去重 log（直调/单测场景）：不去重，两次都返回全文（向后兼容）。"""
+    from core.agent.tool_registry import _execute_read_skill
+
+    _stub_skill_service(tmp_path, monkeypatch)
+
+    async def run():
+        r1 = await _execute_read_skill(course_id="c", name="demo")
+        r2 = await _execute_read_skill(course_id="c", name="demo")
+        return r1, r2
+    r1, r2 = asyncio.run(run())
+    assert "这是完整正文" in r1.content
+    assert "这是完整正文" in r2.content   # 都返回全文，未去重

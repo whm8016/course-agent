@@ -15,6 +15,7 @@ import json
 import logging
 import sys
 import os
+import time
 
 # 让 import 能找到同目录下所有模块（与 main.py 一致）
 sys.path.insert(0, os.path.dirname(__file__))
@@ -38,6 +39,13 @@ logging.basicConfig(level=_LOG_LEVEL, handlers=[_handler])
 logger = logging.getLogger(__name__)
 
 _JOB_EVENTS_TTL = 3600  # 进度事件列表在 Redis 中保留 1 小时
+
+# ARQ 任务重试与死信（plan 第三批-2）
+_ARQ_MAX_TRIES = 3  # 单任务最大尝试次数（含首次）。两索引任务重跑幂等（LightRAG purge /
+                    # LlamaIndex persist 覆盖写），自动重试不产生重复数据；flush 任务内部
+                    # 全 catch 不 re-raise，max_tries 对它们无实际作用。
+_DEADLETTER_KEY = "arq:deadletter"  # 全局死信 list（复用 job:{job_id}:events 的 list 风格）
+_DEADLETTER_TTL = 7 * 24 * 3600     # 死信保留 7 天供运维排查/重放
 
 
 # ---------------------------------------------------------------------------
@@ -67,6 +75,42 @@ async def _push_event(redis, job_id: str, event: dict) -> None:
         await redis.expire(key, _JOB_EVENTS_TTL)
     except Exception:
         logger.debug("_push_event failed job_id=%s", job_id, exc_info=True)
+
+
+async def _push_deadletter_if_terminal(
+    ctx, *, function: str, error: BaseException
+) -> None:
+    """ARQ 任务终态失败（max_tries 用尽）写入 Redis 死信 list，供运维排查/重放。
+
+    复用 _push_event 的 list 风格（rpush + expire）。仅在最后一次尝试失败时写
+    （``job_try >= _ARQ_MAX_TRIES``）；中间失败由 ARQ 自动重试，不进死信。死信本身 best-effort，
+    写失败只打 debug 日志不抛（观测不应影响主流程，更不能让死信把任务重新标记失败）。
+    """
+    job_try = ctx.get("job_try", 1)
+    if job_try < _ARQ_MAX_TRIES:
+        return  # 还有重试机会，交由 ARQ 自动重试
+    job_id = str(ctx.get("job_id", ""))
+    r, should_close = await _resolve_redis(ctx)
+    try:
+        payload = json.dumps(
+            {
+                "job_id": job_id,
+                "function": function,
+                "job_try": job_try,
+                "error": repr(error)[:1000],
+                "ts": time.time(),
+            },
+            ensure_ascii=False,
+        )
+        await r.rpush(_DEADLETTER_KEY, payload)
+        await r.expire(_DEADLETTER_KEY, _DEADLETTER_TTL)
+    except Exception:
+        logger.debug(
+            "deadletter write failed job_id=%s func=%s", job_id, function, exc_info=True
+        )
+    finally:
+        if should_close:
+            await r.aclose()
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +158,7 @@ async def run_indexing(
                      job_id=job_id, error=str(exc), elapsed_ms=_el)
             from core.observability.metrics import observe_worker_job
             observe_worker_job("indexing", "error", _el)
+            await _push_deadletter_if_terminal(ctx, function="run_indexing", error=exc)
             raise
     finally:
         await release_index_dlock(lock, renew)
@@ -153,6 +198,7 @@ async def run_llamaindex_build(
             log_flow("worker.llamaindex.error", logger=logger, level=logging.ERROR,
                      job_id=job_id, error=str(exc),
                      elapsed_ms=int((time.perf_counter() - t0) * 1000))
+            await _push_deadletter_if_terminal(ctx, function="run_llamaindex_build", error=exc)
             raise
         finally:
             # 终态兜底：_run_llamaindex_build 内部静默吞所有异常（_mark_final 自带 try/except），
@@ -270,6 +316,8 @@ class WorkerSettings:
     max_jobs = 10
     job_timeout = 36000   # 单个任务最长 10 小时
     keep_result = 300    # 任务结果保留 5 分钟
+    max_tries = _ARQ_MAX_TRIES  # 失败自动重试：网络抖动/OOM/瞬时 DB 锁的容错（含首次）
+    retry_jobs = True           # 显式开启重试（默认即 True，声明便于阅读；幂等性见 _ARQ_MAX_TRIES 注释）
 
     # Mem0 批量刷新 cron：每 30s 扫描一次 Redis
     from arq import cron

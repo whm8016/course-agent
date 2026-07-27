@@ -57,6 +57,23 @@ def _openai_chunk(
     )
 
 
+def _openai_usage_chunk(*, input_tokens: int, output_tokens: int, cache_read: int) -> Any:
+    """构造与 OpenAI 末块同形态的 usage chunk（choices=[] + usage 字段）。
+
+    成本可观测性用：把 Anthropic 的 message_start(message.usage) + message_delta(usage)
+    归一成 OpenAI 形态，使 loop._one_round 的 usage_from_response_chunk 一套代码读两类 provider。
+    """
+    return SimpleNamespace(
+        choices=[],
+        usage=SimpleNamespace(
+            prompt_tokens=input_tokens,
+            completion_tokens=output_tokens,
+            total_tokens=input_tokens + output_tokens,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=cache_read),
+        ),
+    )
+
+
 def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
     """将 OpenAI function calling schema 转换为 Anthropic tool schema。"""
     if not tools:
@@ -311,6 +328,11 @@ class _AnthropicStream:
                 tool_index = 0
                 current_tool: dict[str, Any] | None = None
                 current_tool_args = ""
+                # 成本采集：Anthropic usage 分散在两事件——message_start 带 input/cache_read，
+                # message_delta 带 output。累积后在 message_stop 合成 OpenAI 形态 usage 块。
+                usage_in = 0
+                usage_cache = 0
+                usage_out = 0
 
                 async for event in stream:
                     etype = getattr(event, "type", "")
@@ -363,6 +385,24 @@ class _AnthropicStream:
                         ) or "stop"
                         finish = "tool_calls" if tool_index > 0 else stop_reason
                         await self._queue.put(_openai_chunk(finish_reason=finish))
+                        # 合成 OpenAI 形态 usage 块（成本采集）——消息正常结束时才攒齐完整 usage
+                        await self._queue.put(_openai_usage_chunk(
+                            input_tokens=usage_in, output_tokens=usage_out, cache_read=usage_cache,
+                        ))
+
+                    elif etype == "message_start":
+                        # input_tokens + cache_read 在消息开始时给出
+                        _msg = getattr(event, "message", None)
+                        _u = getattr(_msg, "usage", None) if _msg else None
+                        if _u is not None:
+                            usage_in = int(getattr(_u, "input_tokens", 0) or 0)
+                            usage_cache = int(getattr(_u, "cache_read_input_tokens", 0) or 0)
+
+                    elif etype == "message_delta":
+                        # output_tokens 在消息增量结束时给出（累计值）
+                        _u = getattr(event, "usage", None)
+                        if _u is not None:
+                            usage_out = int(getattr(_u, "output_tokens", 0) or 0)
 
         except Exception as exc:
             logger.exception("AnthropicStream error")

@@ -170,9 +170,6 @@ class LLMConfig(BaseModel):
     api_version: str = ""
     text_model: str = "qwen-plus"
     fast_model: str = "qwen-turbo"
-    # LightRAG 分角色 LLM（1.5.4+）：低成本模型
-    extract_model: str = "qwen-turbo"  # EXTRACT 角色：实体提取
-    keyword_model: str = "qwen-turbo"  # KEYWORD 角色：关键词提取
     # 生成参数 / 超时（收编原硬编码）
     temperature: float = 0.7
     max_tokens: int = 8192
@@ -263,8 +260,60 @@ class ChunkingConfig(BaseModel):
     size: int = 500
     overlap: int = 80
     top_k: int = 4
-    ingest_size: int = 900
-    ingest_overlap: int = 60
+    # 摄入切块大小（摄入流水线真正生效的切块参数，.env: CHUNKING__INGEST_SIZE/OVERLAP）。
+    # 默认 1200/120 与原硬编码 LLAMA_INDEX_CHUNK_SIZE 对齐（行为零变化），可调小做评测。
+    ingest_size: int = 1200
+    ingest_overlap: int = 120
+    # 切块策略（可插拔扩展点）。默认 sentence_splitter = 现有 LlamaIndex SentenceSplitter。
+    # ragflow_manual_docx = DOCX 走移植自 RAGFlow Manual 的结构化切块（标题层级栈 +
+    #   表格原子化），非 DOCX 仍走 SentenceSplitter。.env: CHUNKING__STRATEGY=ragflow_manual_docx
+    strategy: str = "sentence_splitter"
+    # Phase 2: Contextual Retrieval（Anthropic）。默认关，需 .env 显式开启：
+    #   CHUNKING__CONTEXTUAL_ENRICHMENT=true。开启后摄入时给每个 chunk 注入文档
+    #   背景前缀（fast_model 生成），提升检索命中率，代价是每 chunk 一次 LLM 调用。
+    contextual_enrichment: TruthyBool = False
+    contextual_model: str = ""  # 空=用 llm.fast_model
+    # Phase 4: 图片描述回填。开启时把 VLM 图片描述作为独立文本 chunk 追加进索引，
+    # 让纯向量检索(fact mode)也能召回图片内容。复用 image_extractor 的 desc_cache，
+    # 不重花 VLM。默认关，行为零变化。.env: CHUNKING__INLINE_IMAGE_DESCRIPTIONS=true
+    inline_image_descriptions: TruthyBool = False
+
+
+class ContextPolicyConfig(BaseModel):
+    """轮内上下文预算策略（第二批）。默认全部关闭=行为与旧 _snip_tool_results 等价，便于消融对照。
+
+    调研依据 arXiv:2508.21433（The Complexity Trap, JetBrains）：Observation Masking 相对
+    Raw 成本减半、解题率持平；纯摘要引发 trajectory elongation。最优是 hybrid（掩码为主、
+    摘要为最后手段）。M 取小值（max_iterations=10，远小于 SWE-agent 的 250 轮）。
+    .env 前缀 CONTEXT_POLICY__*。
+    """
+
+    # 总开关。关=loop 仍走旧 _snip_tool_results（按全局字符>80000 从最早 tool 替换，行为零变化）；
+    # 开=走 context_policy.apply 三段式（cap 单条 + 掩码窗口化 + 可选 hybrid 摘要）。
+    enabled: TruthyBool = False
+    keep_recent_turns: int = 3      # 保留最近 M 轮 role=tool 原文，更早掩码（mask_old_observations）
+    budget_chars: int = 80_000      # 总字符触发点，与旧 _snip_tool_results 一致
+    tool_result_max_chars: int = 6000  # 单条 tool 结果头尾保留上限（cap_tool_result）；0=不限
+    summary_enabled: TruthyBool = False  # hybrid 兜底摘要（调 fast LLM，默认关）
+    summary_threshold: int = 4      # 被掩码轮数 >= 此值才触发摘要
+
+
+class CostQuotaConfig(BaseModel):
+    """每用户/课程/自然日 的 LLM 成本配额（第四批）。默认全关=行为零变化，便于灰度。
+
+    设计要点：
+    - **只降级不拒绝**：超预算时把本轮对话模型从 text_model 降到便宜档 fast_model
+      （profile 配置），而非返回 4xx 阻断用户——避免「上一轮刚好超预算，下一轮被锁死」。
+    - **软预算**：成本在 loop 结束后按 estimate_cost 累加（loop.py），故「推过预算的那一轮」
+      本身不降级，下一轮才降级——这是 quota 的固有滞后，符合业界软限流惯例。
+    - **best-effort**：Redis 不可用时 check_quota 直接放行、accrue_cost 静默跳过，绝不阻塞业务。
+    - 计数键 ca:costquota:{user_id}:{course_id}:{YYYYMMDD}，按日滚动（TTL 2 天自清理）。
+    .env 前缀 COST_QUOTA__*。
+    """
+
+    enabled: TruthyBool = False        # 总开关。关=check/accrue 均短路，零行为变化
+    daily_budget_usd: float = 1.0      # 每用户/课程/自然日 的 USD 预算上限
+    degrade_model: TruthyBool = True   # 超预算→降级到 fast_model（False=仅记录不降级）
 
 
 class LightRAGConfig(BaseModel):
@@ -281,16 +330,31 @@ class LightRAGConfig(BaseModel):
     llm_model: str = ""
     api_key: StrippedSecret = SecretStr("")
     base_url: str = ""
+    # 分角色模型（LightRAG 1.5.4+ role_llm_configs）：空=回退 llm_model（行为不变）；
+    # 非空=该角色索引时改用此模型，凭证复用上面的 api_key/base_url（须同 provider 可见）。
+    extract_model: str = ""   # EXTRACT 角色：实体/关系提取（索引 token 大头，建议便宜档）
+    keyword_model: str = ""   # KEYWORD 角色：关键词提取
     enabled: TruthyBool = False
     query_mode: str = "mix"
-    top_k: int = 20
+    top_k: int = 6
     timeout_sec: int = 120
     embedding_dim: int = 1024
     auto_index_ttl_sec: int = 120
     stream_context_limit: int = 4
     stream_context_max_chars: int = 800
     agentic_rag_max_chars: int = 10000
+    # relationship 路每块上下文字符上限（graph_augmented_retrieve 用，max_chars=None 时读它）。
+    # 默认 4000=现状（行为不变）；改 .env LIGHTRAG__GRAPH_AUGMENTED_MAX_CHARS 放宽，
+    # 减少 LightRAG local 实体图被硬切。fact 路不受影响（retrieve_context 仍 4000）。
+    graph_augmented_max_chars: int = 4000
     enable_rerank: TruthyBool = True
+    # 相关性阈值过滤（LightRAG 1.5.4 原生 min_rerank_score，见 lightrag/utils.py 过滤逻辑：
+    # 低于阈值的 chunk 在 rerank 后被丢弃，全滤掉则返回 []→触发无命中路径）。
+    # 默认 0.0 = 不过滤 = 行为完全不变；阈值口径是 DashScope gte-rerank-v2 的 relevance_score
+    #（已接 rerank_adapter.py），与裸余弦相似度分布不同，不能照搬 0.5。生效前置条件：
+    # enable_rerank=True（默认）且 rerank_model_func 已挂载（需 EMBEDDING__API_KEY），
+    # 缺 key 时阈值静默失效，但无命中哨兵修复不受影响。
+    min_rerank_score: float = 0.0
     # ingestion
     save_ingest_chunks: TruthyBool = True
     ingest_chunks_subdir: str = "ingest_chunks"
@@ -298,8 +362,6 @@ class LightRAGConfig(BaseModel):
     ingest_batch_size: int = 16
     max_async: int = 8
     lru_capacity: int = 10  # 同时驻留内存的最大课程数（按 worker 缩放，见 Settings.lightrag_lru_capacity_scaled）
-    # 安全阈值（防 API 拒绝）
-    safe_top_k: int = 6
     chunk_top_k: int = 5
     max_total_tokens: int = 14000
     max_entity_tokens: int = 3000
@@ -308,14 +370,10 @@ class LightRAGConfig(BaseModel):
     max_history_chars: int = 8000
     llm_system_max_chars: int = 24000
 
-    # ── 计算方法（原 core/rag/rag_config.py 的 get_safe_top_k 等，内聚至此）──
-    def safe_top_k_value(self) -> int:
-        """min(top_k, safe_top_k) —— aquery 的 top_k 安全上限。"""
-        return min(self.top_k, self.safe_top_k)
-
+    # ── 计算方法 ──
     def chunk_top_k_value(self) -> int:
-        """min(chunk_top_k, safe_top_k_value())。"""
-        return min(self.chunk_top_k, self.safe_top_k_value())
+        """min(chunk_top_k, top_k) —— 最终塞进 prompt 的 chunk 数不超过种子实体数。"""
+        return min(self.chunk_top_k, self.top_k)
 
     def max_tokens_config(self) -> dict[str, int]:
         """对应 LightRAG QueryParam 的 max tokens 字典。"""
@@ -344,6 +402,23 @@ class LlamaParseConfig(BaseModel):
     cloud_api_key: SecretStr = SecretStr("")  # 兼容 LLAMA_CLOUD_API_KEY 语义
     parse_api_key: SecretStr = SecretStr("")  # 作 cloud_api_key 的 fallback
     question_use_llamaindex: TruthyBool = True
+
+
+class PdfConfig(BaseModel):
+    """PDF 摄入解析配置（backend 二选一，无降级）。
+
+    PDF 解析与 DOCX 同构（extract_pdf_sections → section 列表 → sentence_splitter），
+    backend 决定走哪个解析器；切块统一 sentence_splitter，不再有 pdf_structured 策略。
+    .env: PDF__BACKEND / PDF__DO_OCR / PDF__OCR_PROVIDER。
+
+    - docling（默认）：Docling 单引擎全包——版面/表格/标题/页码 + OCR（RapidOCR 后端）。
+      需 pip install docling rapidocr-onnxruntime（首次运行模型下到 ~/.cache/docling）。
+    - mupdf：PyMuPDF 轻量纯文本 + 章节(get_toc) + 页码，不装 torch；无 OCR/表格原子化。
+    """
+
+    backend: str = "docling"  # docling(默认) | mupdf；二选一，选定失败则跳过该文件，不降级
+    do_ocr: TruthyBool = True  # 仅 docling：扫描件 OCR
+    ocr_provider: str = "rapid"  # 仅 docling：rapid | easyocr
 
 
 class TutorBotConfig(BaseModel):
@@ -400,6 +475,11 @@ class Mem0Config(BaseModel):
 
     time_decay_enabled: TruthyBool = False
     time_decay_lambda: float = 0.005  # 衰减系数（半衰期约 139 天）
+    # 检索相关性过滤阈值（P0-C）：mem0 V3 search 原生支持 threshold，>0 时过滤低相关噪声。
+    # 默认 0.0=不过滤=行为完全不变。当前部署 mem0 版本对 threshold 关键字的兼容性未实测
+    # （Docker 起不来），build_memory_context 已加 TypeError 自适应降级兜底。
+    # recency_decay_lambda 是否真实生效同理待 Docker 验证。
+    search_threshold: float = 0.0
     conflict_detect_enabled: TruthyBool = True
     conflict_similarity_threshold: float = 0.85
     conflict_min_days_gap: int = 7
@@ -433,6 +513,19 @@ class QuestionConfig(BaseModel):
             "rag": self.tool_rag,
             "code_execution": self.tool_code_execution,
         }
+
+
+class ElasticsearchConfig(BaseModel):
+    """Elasticsearch BM25（Phase 3 hybrid search）。
+
+    enabled=False（默认）时 get_es_store() 返回 None，检索降级为纯 dense（LightRAG
+    naive），ingestion 也跳过 ES 双写。需先 ``pip install elasticsearch[async]`` 并
+    启动 ES（见 docker-compose.yml 的 elasticsearch 服务 + ik 分词插件）。
+    """
+
+    enabled: TruthyBool = False
+    url: str = "http://localhost:9200"
+    index_name: str = "rag_chunks"
 
 
 class LangSmithView(BaseModel):
@@ -486,6 +579,7 @@ class Settings(BaseSettings):
     lightrag: LightRAGConfig = Field(default_factory=LightRAGConfig)
     rag: RagConfig = Field(default_factory=RagConfig)
     llamaparse: LlamaParseConfig = Field(default_factory=LlamaParseConfig)
+    pdf: PdfConfig = Field(default_factory=PdfConfig)
     tutorbot: TutorBotConfig = Field(default_factory=TutorBotConfig)
     qq_bot: QQBotConfig = Field(default_factory=QQBotConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
@@ -494,6 +588,9 @@ class Settings(BaseSettings):
     mem0: Mem0Config = Field(default_factory=Mem0Config)
     summary: SummaryConfig = Field(default_factory=SummaryConfig)
     question: QuestionConfig = Field(default_factory=QuestionConfig)
+    elasticsearch: ElasticsearchConfig = Field(default_factory=ElasticsearchConfig)
+    context_policy: ContextPolicyConfig = Field(default_factory=ContextPolicyConfig)
+    cost_quota: CostQuotaConfig = Field(default_factory=CostQuotaConfig)
 
     # ------------------------------------------------------------------
     # validators

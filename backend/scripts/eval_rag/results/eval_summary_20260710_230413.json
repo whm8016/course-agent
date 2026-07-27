@@ -1,0 +1,164 @@
+{
+  "timestamp": "2026-07-10 23:04:13",
+  "course": "circuit_analysis",
+  "modes": [
+    "fact",
+    "relationship"
+  ],
+  "metrics": [
+    "faithfulness",
+    "context_precision",
+    "context_recall"
+  ],
+  "avg_scores": {
+    "fact": {
+      "faithfulness": 0.0,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    },
+    "relationship": {
+      "faithfulness": 0.0,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    }
+  },
+  "distributions": {
+    "fact": {
+      "faithfulness": {
+        "mean": 0.0,
+        "std": 0.0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "context_precision": {
+        "mean": 0.0,
+        "std": 0.0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "context_recall": {
+        "mean": 0.0,
+        "std": 0.0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      }
+    },
+    "relationship": {
+      "faithfulness": {
+        "mean": 0.0,
+        "std": 0.0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "context_precision": {
+        "mean": 0.0,
+        "std": 0.0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      },
+      "context_recall": {
+        "mean": 0.0,
+        "std": 0.0,
+        "p50": 0.0,
+        "p90": 0.0,
+        "p95": 0.0,
+        "min": 0.0,
+        "max": 0.0
+      }
+    }
+  },
+  "latency": {
+    "fact": {
+      "retrieve_ms": {
+        "mean": 707.0952380952381,
+        "std": 965.732236613476,
+        "p50": 425.0,
+        "p90": 888.0,
+        "p95": 1069.0,
+        "min": 291.0,
+        "max": 4921.0
+      },
+      "query_ms": {
+        "mean": 9649.857142857143,
+        "std": 4339.739275531634,
+        "p50": 8043.0,
+        "p90": 16483.0,
+        "p95": 16521.0,
+        "min": 2352.0,
+        "max": 17052.0
+      },
+      "total_ms": {
+        "mean": 10356.952380952382,
+        "std": 4405.473775680502,
+        "p50": 8586.0,
+        "p90": 16912.0,
+        "p95": 17213.0,
+        "min": 2725.0,
+        "max": 17526.0
+      }
+    },
+    "relationship": {
+      "retrieve_ms": {
+        "mean": 5354.428571428572,
+        "std": 2228.2794039439523,
+        "p50": 4760.0,
+        "p90": 8322.0,
+        "p95": 9488.0,
+        "min": 2507.0,
+        "max": 11190.0
+      },
+      "query_ms": {
+        "mean": 9031.666666666666,
+        "std": 3452.3492668496706,
+        "p50": 8320.0,
+        "p90": 13751.0,
+        "p95": 14227.0,
+        "min": 4764.0,
+        "max": 15720.0
+      },
+      "total_ms": {
+        "mean": 14386.095238095239,
+        "std": 4461.188448371363,
+        "p50": 14317.0,
+        "p90": 19782.0,
+        "p95": 19938.0,
+        "min": 7628.0,
+        "max": 23715.0
+      }
+    }
+  },
+  "delta": {
+    "fact": {
+      "faithfulness": 0.0,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    },
+    "relationship": {
+      "faithfulness": 0.0,
+      "context_precision": 0.0,
+      "context_recall": 0.0
+    }
+  },
+  "has_baseline": true,
+  "total_tokens_by_mode": {
+    "fact": 0,
+    "relationship": 0
+  },
+  "total_tokens": 0,
+  "est_cost": 0.0
+}

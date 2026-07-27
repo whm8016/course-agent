@@ -221,6 +221,47 @@ def _patch_ragas_persona_dedup() -> None:
         PersonaList.__getitem__ = _tolerant_get  # type: ignore[assignment]
 
 
+def _chinese_persona_list() -> list[Any]:
+    """固定的中文 persona 列表，替代 ragas 默认的 LLM 生成 persona。
+
+    根因：generate_personas_from_kg 用的 PersonaGenerationPrompt 只有一条英文 few-shot
+    示例（"Digital Marketing Specialist"），LLM 即便读到中文教材摘要也常常照着示例的
+    英文风格编 persona（如 "electronics student focusing on..."）；后续出题 prompt 又是
+    照抄 persona 的语言组织问题，于是整份合成题一半中文一半英文。
+    直接给固定的中文 persona，从源头掐掉这条英文污染链路，顺带省一次 LLM 调用。
+    """
+    from ragas.testset.persona import Persona
+
+    return [
+        Persona(
+            name="认真预习复习的学生",
+            role_description="课前预习、课后复习课程内容，关心概念原理和实验步骤是否吃透。",
+        ),
+        Persona(
+            name="缺乏基础的自学者",
+            role_description="自学该课程，基础较弱，希望用通俗易懂的中文重新理解重点概念。",
+        ),
+        Persona(
+            name="核对细节的助教",
+            role_description="批改作业和实验报告，需要核对讲义中的技术细节和标准答案是否准确。",
+        ),
+    ]
+
+
+async def _adapt_query_distribution_to_chinese(query_distribution: Any, llm: Any) -> None:
+    """把出题/主题匹配等 prompt 的 few-shot 示例整体翻译成中文（就地替换 synthesizer 的 prompt）。
+
+    根因同上：single_hop/multi_hop 的 QueryAnswerGenerationPrompt 示例也是英文
+    （"Software Engineer" / "Historian" persona + 英文 query/answer），LLM 会照着示例的
+    语言续写。用 ragas 官方的 PromptMixin.adapt_prompts（内部调用 PydanticPrompt.adapt）
+    把该 synthesizer 名下所有 prompt 的示例和 instruction 整体翻译成中文，
+    而不是猜哪个字段该改——比手写中文示例更不容易漏改某个 prompt。
+    """
+    for synthesizer, _weight in query_distribution:
+        adapted = await synthesizer.adapt_prompts("chinese", llm=llm, adapt_instruction=True)
+        synthesizer.set_prompts(**adapted)
+
+
 def _testset_to_items(testset: Any, source_label: str) -> list[dict]:
     """把 ragas Testset 转成 qa_dataset.json 结构的 list[dict]。"""
     df = testset.to_pandas()
@@ -277,7 +318,11 @@ async def generate_dataset(
     logger.info("切成 %d 个 chunk（对齐生产切割，上限 %d）", len(docs), _MAX_DOCS)
 
     # 3. RAGAS 合成
+    from ragas.run_config import RunConfig
     from ragas.testset import TestsetGenerator
+    from ragas.testset.graph import KnowledgeGraph, Node, NodeType
+    from ragas.testset.synthesizers import default_query_distribution
+    from ragas.testset.transforms import apply_transforms, default_transforms_for_prechunked
 
     # 修 ragas 0.4.3 重名 persona 导致 multi_hop 出题 KeyError（见 _patch_ragas_persona_dedup）
     _patch_ragas_persona_dedup()
@@ -288,10 +333,38 @@ async def generate_dataset(
         llm=_build_ragas_llm(config.GEN_LLM_MODEL, max_tokens=config.GEN_LLM_MAX_TOKENS),
         embedding_model=_build_ragas_embeddings(async_client=True),
     )
+    generator.persona_list = _chinese_persona_list()
+
+    # 手动展开 generate_with_chunks 内部的两步（建知识图谱 → 出题），是为了能在建完图谱、
+    # 知道真实可用的出题方式后再做中文适配，避免像之前那样跳过用真实图谱过滤
+    # single_hop/multi_hop 是否可用——某些出题方式在图谱里找不到可用节点/关系时会直接报错，
+    # 白白浪费已经花掉的 LLM tokens。这里改成：找不到就跳过并打日志提醒，不报错、不崩。
+    nodes = [
+        Node(type=NodeType.CHUNK, properties={"page_content": chunk, "document_metadata": {}})
+        for chunk in docs
+    ]
+    kg = KnowledgeGraph(nodes=nodes)
+    transforms = default_transforms_for_prechunked(
+        llm=generator.llm, embedding_model=generator.embedding_model
+    )
+    logger.info("构建知识图谱（NER/摘要等抽取，会调用 LLM，请耐心等待）...")
+    apply_transforms(kg, transforms, run_config=RunConfig())
+    generator.knowledge_graph = kg
+
+    all_synthesizer_names = {s.name for s, _ in default_query_distribution(generator.llm)}
+    query_distribution = default_query_distribution(generator.llm, kg)
+    skipped = all_synthesizer_names - {s.name for s, _ in query_distribution}
+    if skipped:
+        logger.warning("知识图谱中没有可用的节点/关系，已跳过这些出题方式: %s", skipped)
+
+    # 把出题 prompt 的英文 few-shot 示例翻译成中文，否则合成题会一半中文一半英文
+    # （见 _adapt_query_distribution_to_chinese）
+    await _adapt_query_distribution_to_chinese(query_distribution, generator.llm)
+
     logger.info("开始合成 %d 道 QA（会调用 LLM，请耐心等待）...", n)
-    testset = generator.generate_with_chunks(
-        chunks=docs,
+    testset = generator.generate(
         testset_size=n,
+        query_distribution=query_distribution,
         raise_exceptions=True,
     )
 

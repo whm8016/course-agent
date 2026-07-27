@@ -18,7 +18,7 @@ from core.memory.memory import (
     update_session_mode,
     update_session_title,
 )
-from core.agent.orchestrator import normalize_mode
+from core.agent.mode_normalize import normalize_mode
 
 router = APIRouter()
 

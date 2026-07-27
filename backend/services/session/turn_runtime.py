@@ -329,7 +329,9 @@ class TurnRuntimeManager:
                 status = "ok" if agent_output else "empty"
                 log_flow("turn.complete", turn_id=execution.turn_id,
                          elapsed_ms=elapsed_total, events=seq,
-                         answer_chars=len(agent_output))
+                         answer_chars=len(agent_output),
+                         llm_usage=execution.context.metadata.get("llm_usage"),
+                         llm_cost_usd=execution.context.metadata.get("llm_cost_usd"))
                 observe_turn(
                     mode=execution.context.mode or "chat",
                     status=status,

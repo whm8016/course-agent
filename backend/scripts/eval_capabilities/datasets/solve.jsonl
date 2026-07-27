@@ -1,0 +1,3 @@
+{"id": "solve-01", "input": "求解：一个 10V 直流电压源串联 2Ω 和 3Ω 两个电阻，求流过电路的电流以及 3Ω 电阻两端的电压。请分步求解。", "target": "应分步：I = 10/(2+3) = 2A；U_3Ω = 3×2 = 6V。过程完整、单位正确、答案正确。", "metadata": {"mode": "deep_solve", "course_id": "mycourse"}}
+{"id": "solve-02", "input": "求解：一个 12V 电压源内阻 1Ω，给 5Ω 负载供电，求负载获得的功率。请分步求解。", "target": "应分步：I = 12/(1+5) = 2A；P = I²×5 = 20W。分步清晰、答案正确。", "metadata": {"mode": "deep_solve", "course_id": "mycourse"}}
+{"id": "solve-03", "input": "求解：RLC 串联电路中 L = 1mH、C = 1μF，求串联谐振频率 f0。请分步求解。", "target": "应：f0 = 1/(2π√(LC)) = 1/(2π√(1e-3 × 1e-6)) ≈ 159155 Hz ≈ 159kHz。公式正确、计算正确。", "metadata": {"mode": "deep_solve", "course_id": "mycourse"}}

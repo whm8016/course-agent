@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 
@@ -75,6 +76,130 @@ _COMPRESS_PROMPT = """你是对话摘要助手。将下面的对话内容渐进�
 ---
 
 请输出整合后的完整摘要："""
+
+
+# ── 结构化 JSON 摘要（P0-B）───────────────────────────────────────────────────
+# session.summary 存 JSON 字符串（结构化）；get_summary 负责把它格式化成可读文本注入
+# 对话（注入点 chat.py 零改动）。LLM 只抽【新增】内容，已有摘要由代码 merge（去重追加），
+# 不交给 LLM 融合——避免 LLM 重写时吞掉旧的关键信息。JSON 解析失败重试 temp=0，再失败
+# 降级旧文本逻辑（_COMPRESS_PROMPT）。
+# 调研依据：RAPTOR（arXiv:2401.18059）结构化分层摘要、MemGPT（arXiv:2310.08560）结构化
+# 记忆块写入而非自由文本；RECOMP（arXiv:2310.04408）selective augmentation（空数组=不相关）。
+_STRUCTURED_COMPRESS_PROMPT = """你是对话摘要助手。从【新增对话】中提取结构化信息，输出 JSON。
+
+已有摘要（仅供参考、避免重复抽取，不要原样复制）：
+{existing_summary}
+
+新增对话：
+{new_messages}
+
+输出以下 JSON 结构（直接输出 JSON，不要 markdown 围栏）：
+{{
+  "topics": ["本次新增讨论的主题"],
+  "decisions": ["本次新增达成的结论或决定"],
+  "facts": ["本次确认的具体事实（学生偏好、知识水平、数据等，须可验证）"],
+  "open_questions": ["本次仍未解决的问题"],
+  "action_items": ["本次约定的后续行动"]
+}}
+
+规则：
+- 每个数组最多 5 项，每项不超过 50 字
+- 只抽取【新增对话】里的新信息，已有摘要仅供参考（代码会去重，重复无害）
+- 某类无内容则写空数组 []
+- facts 只保留可验证的具体信息，不要笼统描述
+"""
+
+_MAX_MSG_CHARS = 2000  # 单条消息喂 LLM 的上限（旧 500 → 2000，避免硬截丢信息）
+_MAX_ITEMS_PER_LIST = 5  # 每个 JSON 数组上限（合并后超限丢弃最旧，保时间序）
+_SUMMARY_KEYS = ("topics", "decisions", "facts", "open_questions", "action_items")
+
+
+def _parse_structured(summary_str: str) -> dict | None:
+    """解析 session.summary 为 dict。非合法 JSON（旧文本/损坏/空）返回 None。"""
+    if not summary_str:
+        return None
+    try:
+        d = json.loads(summary_str)
+    except (ValueError, TypeError):
+        return None
+    return d if isinstance(d, dict) else None
+
+
+def _parse_json_loose(raw: str) -> dict | None:
+    """宽松解析 LLM 输出的 JSON：剥 markdown 围栏、提取首个 {...}，失败返回 None。"""
+    if not raw:
+        return None
+    text = raw.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text[:4].lower() == "json":
+            text = text[4:]
+        text = text.strip()
+    try:
+        d = json.loads(text)
+        return d if isinstance(d, dict) else None
+    except ValueError:
+        pass
+    start, end = text.find("{"), text.rfind("}")
+    if 0 <= start < end:
+        try:
+            d = json.loads(text[start:end + 1])
+            return d if isinstance(d, dict) else None
+        except ValueError:
+            return None
+    return None
+
+
+def _normalize_item(s: str) -> str:
+    """去重归一化：strip + lower + 去末尾常见标点。"""
+    return (s or "").strip().lower().rstrip("。.；;，,、:：")
+
+
+def _merge_structured(existing: dict | None, new: dict) -> dict:
+    """代码合并：existing + new 各数组去重追加，每类保留最新 N 项（超限丢最旧）。
+
+    LLM 只抽新内容，已有摘要靠代码 merge——不依赖 LLM 融合，避免吞旧内容。去重按归一化
+    文本精确匹配；new 项追加在 existing 之后（保时间序）。
+    """
+    existing = existing or {}
+    merged: dict[str, list[str]] = {}
+    for key in _SUMMARY_KEYS:
+        old = existing.get(key) if isinstance(existing.get(key), list) else []
+        newv = new.get(key) if isinstance(new.get(key), list) else []
+        seen: set[str] = set()
+        combined: list[str] = []
+        for item in [*old, *newv]:
+            if not isinstance(item, str):
+                continue
+            item = item.strip()
+            if not item:
+                continue
+            norm = _normalize_item(item)
+            if norm in seen:
+                continue
+            seen.add(norm)
+            combined.append(item)
+        merged[key] = combined[-_MAX_ITEMS_PER_LIST:]
+    return merged
+
+
+def _format_structured(d: dict) -> str:
+    """dict → 可读 markdown 文本（注入对话用，与旧自由文本格式相近）。空摘要返回空串。"""
+    def _section(title: str, key: str) -> str:
+        items = d.get(key) if isinstance(d.get(key), list) else []
+        if not items:
+            return ""
+        body = "\n".join(f"- {it}" for it in items)
+        return f"## {title}\n{body}\n\n"
+
+    parts = [
+        _section("会话主题", "topics"),
+        _section("关键结论与决定", "decisions"),
+        _section("确认的事实", "facts"),
+        _section("未解决的问题", "open_questions"),
+        _section("约定与后续", "action_items"),
+    ]
+    return "".join(parts).rstrip()
 
 
 class SessionSummaryManager:
@@ -224,18 +349,65 @@ class SessionSummaryManager:
         existing_summary: str,
         messages: list[Message],
     ) -> str | None:
-        """调用 LLM 执行压缩。"""
-        # 格式化消息
+        """结构化 JSON 抽取 + 代码增量合并；失败降级旧文本逻辑。
+
+        返回值写入 session.summary：成功=JSON 字符串，降级=自由文本。get_summary 负责
+        把 JSON 格式化成可读文本注入对话（注入点零改动）。LLM 只抽【新增】内容，已有摘要
+        由 ``_merge_structured`` 代码合并去重——不交给 LLM 融合，避免吞旧内容。
+        """
         msg_text = "\n".join(
-            f"{m.role}: {m.content[:500]}"
+            f"{m.role}: {m.content[:_MAX_MSG_CHARS]}"
             for m in messages
         )
+        existing = _parse_structured(existing_summary)
+        existing_ref = _format_structured(existing) if existing else "(无)"
 
+        # 结构化抽取：temp=0.3 首试，解析失败 temp=0 重试一次
+        for temperature in (0.3, 0.0):
+            prompt = _STRUCTURED_COMPRESS_PROMPT.format(
+                existing_summary=existing_ref,
+                new_messages=msg_text,
+            )
+            raw = ""
+            try:
+                resp = await async_openai_client.chat.completions.create(
+                    model=TEXT_MODEL,
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=temperature,
+                    max_tokens=800,
+                )
+                raw = (resp.choices[0].message.content or "").strip()
+            except Exception as e:
+                logger.warning("[L2] structured compress temp=%s failed: %s", temperature, e)
+            new = _parse_json_loose(raw)
+            if new is not None:
+                merged = _merge_structured(existing, new)
+                if any(merged.get(k) for k in _SUMMARY_KEYS):
+                    logger.info(
+                        "[L2] structured compress done keys=%s",
+                        [k for k in _SUMMARY_KEYS if merged.get(k)],
+                    )
+                    return json.dumps(merged, ensure_ascii=False)
+                logger.warning("[L2] structured compress returned empty json, retry/fallback")
+
+        # 降级：旧自由文本融合逻辑（结构化连续失败时兜底，保证不阻塞）
+        logger.warning("[L2] structured compress exhausted, fallback to text summary")
+        return await self._do_compress_text(existing_summary, messages)
+
+    async def _do_compress_text(
+        self,
+        existing_summary: str,
+        messages: list[Message],
+    ) -> str | None:
+        """降级路径：旧自由文本融合（结构化 JSON 抽取连续失败时兜底，保证不阻塞）。"""
+        msg_text = "\n".join(
+            f"{m.role}: {m.content[:_MAX_MSG_CHARS]}"
+            for m in messages
+        )
         prompt = _COMPRESS_PROMPT.format(
             existing_summary=existing_summary or "(无)",
             new_messages=msg_text,
         )
-
         try:
             resp = await async_openai_client.chat.completions.create(
                 model=TEXT_MODEL,
@@ -244,18 +416,26 @@ class SessionSummaryManager:
                 max_tokens=800,
             )
             summary = (resp.choices[0].message.content or "").strip()
-            logger.info("[L2] LLM compress done summary_len=%d", len(summary))
-            return summary
+            logger.info("[L2] text fallback compress done summary_len=%d", len(summary))
+            return summary or None
         except Exception as e:
-            logger.warning("[L2] compress failed: %s", e)
+            logger.warning("[L2] text fallback compress failed: %s", e)
             return None
 
     async def get_summary(self, db: AsyncSession, session_id: str) -> str:
-        """获取 session 的 L2 摘要。"""
+        """获取 session 的 L2 摘要（注入对话用）。
+
+        session.summary 存 JSON 字符串（结构化）或旧文本（降级）。JSON 自动格式化成可读
+        markdown 文本返回；非 JSON 原样返回。注入点（chat.py）拿到的始终是可读文本，零改动。
+        """
         session = await db.get(Session, session_id)
         if not session:
             return ""
-        return session.summary or ""
+        raw = session.summary or ""
+        structured = _parse_structured(raw)
+        if structured is not None:
+            return _format_structured(structured)
+        return raw
 
 
 # 全局单例

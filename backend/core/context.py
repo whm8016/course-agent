@@ -32,7 +32,7 @@ class UnifiedContext:
             由 API 层调用 normalize_mode() 后写入（旧 vision/summarize 已废弃，归入 chat）。
         enabled_tools: 用户本轮启用的工具名列表（如 ["rag", "web_search"]）。
             空列表表示未启用任何可选工具。
-        rag_mode: LightRAG 检索模式（"mix" | "naive" | "local" | "global"），默认 "mix"。
+        rag_mode: LightRAG 检索模式（"mix" | "naive" | "local" | "global"），默认 "naive"。
             用户在对话界面选择，注入到 chat 流式的 rag 工具调用（覆盖 retrieve_context
             默认的 naive）。仅 chat 工具消费；出题/研究等其它路径各自写死 mode，不受影响。
         memory_context: 记忆快照文本，由 build_memory_context(user) 生成，
@@ -55,7 +55,7 @@ class UnifiedContext:
     attachments: list[Attachment] = field(default_factory=list)
     mode: str = "chat"
     enabled_tools: list[str] = field(default_factory=list)
-    rag_mode: str = "mix"  # LightRAG 检索模式：mix/naive/local/global（chat 工具注入）
+    rag_mode: str = "naive"  # LightRAG 检索模式：mix/naive/local/global（chat 工具注入）
     memory_context: str = ""  # L3: mem0 事实记忆
     session_summary: str = ""  # L2: 早期对话摘要
     language: str = "zh"

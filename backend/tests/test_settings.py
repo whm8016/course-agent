@@ -96,7 +96,7 @@ def test_defaults_instantiate(monkeypatch):
     assert s.llm.fast_model == "qwen-turbo"
     assert s.vision.model == "qwen-vl-plus"
     assert s.embedding.model == "text-embedding-v3"
-    assert s.lightrag.top_k == 20
+    assert s.lightrag.top_k == 6
     assert s.chunking.size == 500
     assert s.mem0.time_decay_enabled is False
     assert s.summary.window_size == 5
@@ -313,9 +313,8 @@ def test_agentic_rag_backend_default(monkeypatch):
 
 def test_lightrag_compute_methods(monkeypatch):
     s = _fresh(monkeypatch, LIGHTRAG__TOP_K="20")
-    # safe_top_k_value = min(top_k, safe_top_k=6) = 6
-    assert s.lightrag.safe_top_k_value() == 6
-    # chunk_top_k_value = min(chunk_top_k=5, safe_top_k_value=6) = 5
+    assert s.lightrag.top_k == 20
+    # chunk_top_k_value = min(chunk_top_k=5, top_k=20) = 5
     assert s.lightrag.chunk_top_k_value() == 5
     mt = s.lightrag.max_tokens_config()
     assert set(mt.keys()) == {"total", "entity", "relation"}

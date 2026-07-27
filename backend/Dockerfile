@@ -34,17 +34,20 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY pyproject.toml uv.lock ./
 
 # 同步依赖（--frozen 确保不修改 uv.lock，--no-dev 排除开发依赖）
+# UV_INDEX_URL：国内 build 经 --build-arg 指向镜像源（如清华）加速 docling/torch 全家桶下载；
+# 不传则用 PyPI 默认源，行为与原先一致。
+ARG UV_INDEX_URL
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    UV_INDEX_URL="${UV_INDEX_URL:-}" uv sync --frozen --no-dev --no-install-project
 
 # 复制项目代码
 COPY . .
 
 EXPOSE 8002
 
-CMD ["uv", "run", "--no-dev", "gunicorn", "main:app", \
-     "-k", "uvicorn.workers.UvicornWorker", \
-     "-w", "4", \
-     "--bind", "0.0.0.0:8002", \
-     "--timeout", "300", \
-     "--graceful-timeout", "30"]
+# Prometheus 多进程模式：gunicorn -w 4 下，默认 in-process registry 让 /metrics 只反映接到请求的
+# 那个 worker（≈1/4 流量）。设 PROMETHEUS_MULTIPROC_DIR 后，prometheus_client 把各 worker 的
+# Counter/Histogram/Gauge 写入共享目录，/metrics 用 MultiProcessCollector 聚合全部 worker。
+# /dev/shm 是 Docker 默认 tmpfs（内存盘），读写快且随容器销毁，适合存放这些临时聚合文件。
+ENV PROMETHEUS_MULTIPROC_DIR=/dev/shm/prometheus_multiproc
+CMD ["sh", "-c", "mkdir -p $PROMETHEUS_MULTIPROC_DIR && rm -rf $PROMETHEUS_MULTIPROC_DIR/* && exec uv run --no-dev gunicorn main:app -k uvicorn.workers.UvicornWorker -w 4 --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]

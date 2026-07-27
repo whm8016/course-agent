@@ -185,12 +185,27 @@ async def build_memory_context(user_id: str, query_text: str, *, top_k: int = 5,
             "[mem0] build_memory_context SEARCH user_id=%s query=%s top_k=%d decay_lambda=%.4f",
             user_id, query_text[:100], top_k, decay_lambda
         )
-        results = await m.search(
-            query_text,
-            filters={"user_id": user_id},
-            top_k=top_k,
-            recency_decay_lambda=decay_lambda,
-        )
+        # P0-C：search_threshold 过滤低相关记忆（默认 0=不过滤=行为不变）。mem0 V3 原生
+        # 支持 threshold 关键字，但当前部署版本兼容性未实测（Docker 起不来）——故 >0 时
+        # 才尝试传 threshold，mem0 不接受则 TypeError 自适应降级（不阻塞检索）。
+        # recency_decay_lambda 真实生效验证同样待 Docker。
+        threshold = settings.mem0.search_threshold
+        base_kwargs: dict = {
+            "filters": {"user_id": user_id},
+            "top_k": top_k,
+            "recency_decay_lambda": decay_lambda,
+        }
+        try:
+            if threshold > 0:
+                results = await m.search(query_text, **base_kwargs, threshold=threshold)
+            else:
+                results = await m.search(query_text, **base_kwargs)
+        except TypeError:
+            # mem0 版本不接受 threshold/recency_decay_lambda 等关键字 → 降级最小参数重试
+            logger.warning(
+                "[mem0] search 不接受 threshold 等关键字，降级为最小参数重试", exc_info=True
+            )
+            results = await m.search(query_text, filters={"user_id": user_id}, top_k=top_k)
         results = results.get("results", []) if isinstance(results, dict) else (results or [])
     except Exception as exc:
         logger.warning("[mem0] build_memory_context SEARCH_FAILED user_id=%s error=%s", user_id, exc)
@@ -315,28 +330,8 @@ async def _detect_and_clean_conflicts(user_id: str, results: list[dict], setting
     return results
 
 
-async def get_all_text(user_id: str) -> str:
-    """read_memory 工具：返回该用户全部记忆文本。"""
-    if not user_id:
-        logger.warning("[mem0] get_all_text skipped: empty user_id")
-        return "(未登录)"
-    m = get_memory()
-    logger.info("[mem0] get_all_text FETCH user_id=%s", user_id)
-    results = await m.get_all(filters={"user_id": user_id}, top_k=200)
-    rows = [r for r in (results.get("results", []) if isinstance(results, dict) else (results or [])) if r.get("memory")]
-    if not rows:
-        logger.info("[mem0] get_all_text NO_RESULTS user_id=%s", user_id)
-        return "(暂无记忆)"
-    logger.info(
-        "[mem0] get_all_text FOUND user_id=%s count=%d memories=%s",
-        user_id, len(rows), [r.get("memory", "")[:50] for r in rows[:5]]
-    )
-    # 带 id，供 write_memory 的 edit 拿到 target_id
-    return "\n".join(f"- [id={r.get('id')}] {r.get('memory', '')}" for r in rows)
-
-
 async def has_any(user_id: str) -> bool:
-    """用户是否已有任何记忆（决定是否挂 read_memory 工具）。"""
+    """用户是否已有任何记忆（chat 入口的可观测性日志用）。"""
     if not user_id:
         return False
     try:

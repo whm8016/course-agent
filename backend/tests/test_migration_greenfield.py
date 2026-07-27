@@ -87,6 +87,46 @@ def test_014_idempotent():
     assert EXPECTED_TABLES.issubset(tables)
 
 
+def test_015_creates_academic_tables():
+    """015 在仅含 users 的空库上建出 course_schedules + grades（含索引/唯一约束）。"""
+    mod = _load_migration("015_create_academic_tables.py")
+    engine = _engine_with_users()
+    with engine.begin() as conn:
+        ctx = MigrationContext.configure(conn)
+        with Operations.context(ctx):
+            mod.upgrade()
+        insp = sa.inspect(conn)
+
+        tables = set(insp.get_table_names())
+        assert {"course_schedules", "grades"}.issubset(tables)
+
+        # course_schedules：单列索引 + 复合索引
+        cs_indexes = {i["name"] for i in insp.get_indexes("course_schedules")}
+        assert "ix_course_schedules_course_id" in cs_indexes
+        assert "idx_course_schedule_course_weekday" in cs_indexes
+
+        # grades：复合唯一约束 + 单列/复合索引
+        g_uniques = {u["name"] for u in insp.get_unique_constraints("grades")}
+        assert "uq_grade_student_course_item" in g_uniques
+        g_indexes = {i["name"] for i in insp.get_indexes("grades")}
+        assert "ix_grades_student_id" in g_indexes
+        assert "idx_grade_student_course" in g_indexes
+
+
+def test_015_idempotent():
+    """重复跑 015 不报错（已存在的表被 _table_exists 跳过）。"""
+    mod = _load_migration("015_create_academic_tables.py")
+    engine = _engine_with_users()
+    with engine.begin() as conn:
+        ctx = MigrationContext.configure(conn)
+        with Operations.context(ctx):
+            mod.upgrade()
+            mod.upgrade()  # 第二次：幂等
+        tables = set(sa.inspect(conn).get_table_names())
+    assert {"course_schedules", "grades"}.issubset(tables)
+
+
+
 def test_013_greenfield_skips_when_kb_table_absent():
     """013 在 knowledge_bases 不存在时安全跳过（C-2：堵 greenfield 顺序陷阱）。
 
@@ -119,8 +159,8 @@ def test_013_runs_when_kb_table_present():
             mod.upgrade()  # 表存在 → 守卫不命中 → 正常执行 backfill（0 行）
 
 
-def test_migration_chain_head_is_014():
-    """014 被识别为唯一 head，且 down_revision 链回 013（链不断、无分叉）。
+def test_migration_chain_head_is_015():
+    """015 被识别为唯一 head，且 down_revision 链回 014（链不断、无分叉）。
 
     防止 revision/down_revision 写错导致 alembic 不识别或多 head。ScriptDirectory
     只解析 versions 目录，不连 DB、不 exec env.py，故无需 settings/env 配置。
@@ -130,8 +170,8 @@ def test_migration_chain_head_is_014():
 
     cfg = Config(str(VERSIONS.parent.parent / "alembic.ini"))
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["014"]
+    assert script.get_heads() == ["015"]
 
     revisions = [r.revision for r in script.walk_revisions()]
     # head 能倒走回 base，证明链完整
-    assert "014" in revisions and "013" in revisions and "001" in revisions
+    assert "015" in revisions and "014" in revisions and "001" in revisions

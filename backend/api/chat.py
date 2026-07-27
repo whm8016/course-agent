@@ -20,7 +20,7 @@ from core.attachment import Attachment
 from core.context import UnifiedContext
 from core.db.database import get_db
 from core.db.limiter import limiter
-from core.agent.orchestrator import normalize_mode
+from core.agent.mode_normalize import normalize_mode
 from core.observability import log_flow
 from services.session.turn_runtime import get_turn_runtime_manager
 
@@ -42,7 +42,7 @@ class ChatRequest(BaseModel):
     attachments: list[Attachment] = Field(default_factory=list, description="附件列表（图片，支持多图）")
     tools: list[str] = Field(default_factory=list, description="启用的工具，如 ['rag', 'web_search']")
     model_profile_id: str | None = Field(default=None, description="本次对话使用的 LLM 供应商 profile id（对标 ：用户下拉选中；不传走默认/active）")
-    rag_mode: str = Field(default="mix", description="LightRAG 检索模式：mix/naive/local/global，默认 mix")
+    rag_mode: str = Field(default="naive", description="LightRAG 检索模式：mix/naive/local/global，默认 naive（纯向量+rerank，0 次内部 LLM 调用）")
 
 
 @router.post("/chat")
@@ -59,10 +59,10 @@ async def chat(
     session_id: str | None = body.session_id
     mode: str = normalize_mode(body.chat_mode)
 
-    # rag_mode 白名单校验：只允许合法的 LightRAG 查询模式，非法/空值回退 mix
+    # rag_mode 白名单校验：只允许合法的 LightRAG 查询模式，非法/空值回退 naive
     rag_mode = (body.rag_mode or "").strip().lower()
     if rag_mode not in {"mix", "naive", "local", "global"}:
-        rag_mode = "mix"
+        rag_mode = "naive"
 
     # 附件解析 + 图片限流 + 物化（归属校验 + 读 base64），统一在 api.upload
     attachments = resolve_attachments(body.attachments, body.image_path)
@@ -118,7 +118,6 @@ async def chat(
         session_summary=_session_summary,  # L2
         llm_profile_id=body.model_profile_id or "",
         rag_mode=rag_mode,
-        metadata={"has_memory": _has_memory},
     )
     
 

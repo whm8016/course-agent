@@ -1,3 +1,10 @@
+"""内置工具的执行器实现（rag / web_search / ask_user / solve_* 等 _execute_* 函数）。
+
+命名提示：本模块叫 tool_registry，但**注册中心**是 ``core/agent/registry.py``
+（``ToolRegistry`` + ``register_builtins``）；本模块只提供各工具的 executor 与静态
+schema（``TOOLS_OPENAI_SCHEMA`` 等），由 ``register_builtins`` 装配进 ToolRegistry。
+按 context.enabled_tools 派生本轮 schema 见 ``core.agent.registry.get_tool_schemas``。
+"""
 from __future__ import annotations
 import asyncio, json, logging
 from core.agent.tool_protocol import ToolResult
@@ -17,14 +24,30 @@ async def _execute_rag(course_id: str, query: str, **kwargs) -> ToolResult:
     from core.rag import get_retriever
     try:
         retriever = get_retriever("lightrag")
-        content = await retriever.retrieve_context(
-            course_id=course_id,
-            query=query,
-            top_k=kwargs.get("top_k", 5),
-            **kwargs,
-        )
-        if len(content) > 4000:
-            content = content[:4000] + "\n...(truncated)"
+        # Phase 4 自适应路由：
+        #   fact         → 向量检索（naive；ES 启用时 retrieve_context 内部走 hybrid BM25+Dense）
+        #   relationship → 图增强检索（向量召回 + 知识图谱邻域扩展，擅长多跳关系）
+        strategy = str(kwargs.get("strategy") or "fact").strip().lower()
+        if strategy == "relationship":
+            content = await retriever.graph_augmented_retrieve(
+                course_id=course_id,
+                query=query,
+                top_k=kwargs.get("top_k", 5),
+            )
+        else:
+            content = await retriever.retrieve_context(
+                course_id=course_id,
+                query=query,
+                top_k=kwargs.get("top_k", 5),
+                mode="naive",
+            )
+        # 二次截断上限读 settings.lightrag.agentic_rag_max_chars（默认 10000）：
+        # 与 retrieve_context/graph_augmented 的单块上限协调，避免拼接好的多证据被二次砍断。
+        # 原硬编码 8000 改读这个曾无人使用的孤儿字段，默认更宽松（10000），方向安全。
+        from settings import get_settings
+        _rag_truncate_limit = get_settings().lightrag.agentic_rag_max_chars
+        if len(content) > _rag_truncate_limit:
+            content = content[:_rag_truncate_limit] + "\n...(truncated)"
         _preview = (content[:800] + "…") if len(content) > 800 else content
         logger.info(
             "tool_registry [rag] course=%s query_chars=%d retrieved_chars=%d empty=%s\n"
@@ -37,6 +60,13 @@ async def _execute_rag(course_id: str, query: str, **kwargs) -> ToolResult:
         )
         if content:
             logger.debug("tool_registry [rag] full retrieved_context:\n%s", content)
+        else:
+            # 无命中（含被哨兵修复拦截的 LightRAG 英文道歉句）：给明确信号而非空串。
+            # 不带 sources——避免前端弹出无效来源卡片；success=False 让 Agent 知道
+            # 此路不通，应转而说明"课程资料未覆盖"而非用通用知识硬答。
+            return ToolResult(
+                content="（知识库中未检索到与该问题相关的内容。）", success=False
+            )
         return ToolResult(content=content, sources=[{"type": "rag", "query": query}])
     except Exception as e:
         logger.exception("rag tool failed")
@@ -139,6 +169,9 @@ async def _execute_read_skill(course_id: str, name: str, file: str = "SKILL.md",
     """read_skill 工具：读取 SKILL.md 知识包内容（模型按需拉取，避免 prompt 膨胀）。
 
     user_id 非空时跨 personal 层解析（学生私人 skill 覆盖课程 skill）。
+    同轮去重：本 turn 已读过的 (skill, file) 不再重复返回全文（其内容已在上方 role=tool
+    消息里），改返回「已加载过」提示，防止模型反复 read 同一 skill 撑大 messages。去重集合
+    经 contextvar 注入（chat_pipeline 每 turn set/reset）；未注入（如直调单测）则跳过。
     """
     from core.skills.skill_service import (
         InvalidSkillPathError,
@@ -149,19 +182,33 @@ async def _execute_read_skill(course_id: str, name: str, file: str = "SKILL.md",
     if not skill_name:
         return ToolResult(content="read_skill 需要 name 参数（技能名）。", success=False)
     rel = str(file or "SKILL.md").strip() or "SKILL.md"
+
+    # 同轮去重：未注入（直调场景）→ log=None 跳过；命中则不重复塞全文进 messages
+    from core.agentic.dynamic_tools import current_read_skill_log
+    log = current_read_skill_log()
+    dedup_key = (skill_name, rel)
+    if log is not None and dedup_key in log:
+        return ToolResult(
+            content=f"（本轮已读取过 {skill_name}/{rel}，完整内容见上方工具结果，无需重复读取。）",
+            success=True,
+        )
+
     try:
         svc = get_skill_service(course_id, user_id)
         content = svc.read_skill_file(skill_name, rel)
-        return ToolResult(
-            content=content,
-            sources=[{"type": "skill", "name": skill_name, "file": rel}],
-        )
     except SkillNotFoundError:
         return ToolResult(content=f"（未找到技能：{skill_name}）", success=False)
     except InvalidSkillPathError:
         return ToolResult(content=f"（非法技能文件路径：{rel}）", success=False)
     except Exception as e:
         return ToolResult(content=f"（读取技能失败：{e}）", success=False)
+    # 仅成功读取才记入去重 log（失败允许同轮重试）
+    if log is not None:
+        log.add(dedup_key)
+    return ToolResult(
+        content=content,
+        sources=[{"type": "skill", "name": skill_name, "file": rel}],
+    )
 
 
 async def _execute_load_tools(names, **kwargs) -> ToolResult:
@@ -191,6 +238,25 @@ async def _execute_load_tools(names, **kwargs) -> ToolResult:
 # ── Solve Tools（确定性脊柱：plan / finish_step / replan）──────────────────
 # capabilities/solve/tools.py。仅在 solve turn 激活（contextvar 有 session_id）。
 # 智能在 loop 出口（模型规划+求解），这三个工具提供 commit plan、不跳步、bounded replan 的确定性。
+
+# force replan 强制信号阈值（消融开关默认关）：finish_step 连续失败达此值且开关开时，
+# 返回里追加"请调用 solve_replan"强制提示，推动模型修正不适用计划。仅追加文本，不替模型决策。
+_SOLVE_FORCE_REPLAN_THRESHOLD = 2
+
+
+def _force_replan_hint(session) -> str:
+    """force replan 门：开关开且连续失败达阈值→返回强制 replan 提示，否则空串。
+
+    session 是 core.solve.session.SolveSession（此处不注解类型，避免顶部强依赖 +
+    ruff F821），访问 .force_replan_gate / .consecutive_finish_failures。开关默认 False
+    （行为零变化），DeepSolvePipeline.run 按 context.metadata["solve_force_replan"] 设置。
+    """
+    if (session.force_replan_gate
+            and session.consecutive_finish_failures >= _SOLVE_FORCE_REPLAN_THRESHOLD):
+        return (f" 已连续 {session.consecutive_finish_failures} 次 finish_step 未命中有效步骤，"
+                f"当前计划可能不适用，请调用 solve_replan 修正计划。")
+    return ""
+
 
 def _no_solve_session() -> ToolResult:
     return ToolResult(content="当前无解题会话，solve 工具不可用。", success=False)
@@ -232,8 +298,9 @@ async def _execute_solve_finish_step(step_id: str, summary: str, **kwargs) -> To
         return ToolResult(content="还没有计划。请先调 solve_plan 再调 solve_finish_step。", success=False)
     step = session.mark_done(step_id, summary)
     if step is None:
+        hint = _force_replan_hint(session)
         return ToolResult(
-            content=f"未知步骤 {step_id!r}；有效 id：{[s.id for s in session.steps]}。",
+            content=f"未知步骤 {step_id!r}；有效 id：{[s.id for s in session.steps]}。{hint}",
             success=False,
         )
     nxt = session.next_step()
@@ -286,11 +353,16 @@ TOOLS_OPENAI_SCHEMA = [
         "type": "function",
         "function": {
             "name": "rag",
-            "description": "从课程知识库中检索与问题最相关的内容片段，适合回答课程知识点问题。",
+            "description": "从课程知识库中检索与问题最相关的内容片段，适合回答课程知识点问题。支持事实检索(fact)与关系推理(relationship)两种策略。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "检索查询词，提炼自用户问题的核心关键词"},
+                    "strategy": {
+                        "type": "string",
+                        "enum": ["fact", "relationship"],
+                        "description": "检索策略：fact=查具体知识点/定义/公式/事实（向量精确匹配，默认）；relationship=查实体间关系/对比/因果/多概念关联（知识图谱推理，擅长多跳关联）",
+                    },
                 },
                 "required": ["query"],
             },

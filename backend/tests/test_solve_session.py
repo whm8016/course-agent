@@ -86,3 +86,65 @@ def test_solve_tools_via_contextvar():
         assert not r.success
 
     asyncio.run(_run())
+
+
+# ── force replan 强制信号（消融开关默认关）──────────────────────────────────────
+
+
+def test_mark_done_counts_consecutive_failures():
+    """mark_done 成功→计数归零；未知 step_id→连续失败计数+1。"""
+    s = SolveSession(session_id="t-fail")
+    s.set_plan("a", [("S1", "g1"), ("S2", "g2")])
+    assert s.mark_done("S1", "ok") is not None
+    assert s.consecutive_finish_failures == 0
+    assert s.mark_done("S9", "bad") is None
+    assert s.consecutive_finish_failures == 1
+    assert s.mark_done("S8", "bad2") is None
+    assert s.consecutive_finish_failures == 2
+    # 成功一次归零
+    assert s.mark_done("S2", "ok2") is not None
+    assert s.consecutive_finish_failures == 0
+
+
+def test_force_replan_hint_gate_and_threshold():
+    """开关关→不注入；开关开但未达阈值→不注入；开关开+达阈值→注入 solve_replan。"""
+    from core.agent.tool_registry import _SOLVE_FORCE_REPLAN_THRESHOLD, _force_replan_hint
+
+    s = SolveSession(session_id="t-hint")
+    s.set_plan("a", [("S1", "g1")])
+    # 开关关，即使达阈值也不注入
+    s.consecutive_finish_failures = _SOLVE_FORCE_REPLAN_THRESHOLD
+    assert _force_replan_hint(s) == ""
+    # 开关开但未达阈值
+    s.force_replan_gate = True
+    s.consecutive_finish_failures = 1
+    assert _force_replan_hint(s) == ""
+    # 开关开 + 达阈值 → 注入
+    s.consecutive_finish_failures = _SOLVE_FORCE_REPLAN_THRESHOLD
+    hint = _force_replan_hint(s)
+    assert "solve_replan" in hint
+    assert str(_SOLVE_FORCE_REPLAN_THRESHOLD) in hint
+
+
+def test_finish_step_injects_hint_only_with_gate_on():
+    """端到端：连续失败达阈值时，开关开→返回含 replan 提示；关→不含。"""
+
+    async def _run(gate_on: bool) -> str:
+        from core.solve.session import get_session
+
+        sid = "turn-force-" + ("on" if gate_on else "off")
+        token = set_current_solve_session(sid)
+        try:
+            await execute_tool("solve_plan", course_id="", analysis="a", steps=[{"goal": "g1"}])
+            # 模拟 pipeline.run 的开关设置（reset 后按 context.metadata set）
+            get_session(sid).force_replan_gate = gate_on
+            await execute_tool("solve_finish_step", course_id="", step_id="BAD1", summary="x")
+            r = await execute_tool("solve_finish_step", course_id="", step_id="BAD2", summary="y")
+            return r.content
+        finally:
+            reset_current_solve_session(token)
+
+    off = asyncio.run(_run(False))
+    on = asyncio.run(_run(True))
+    assert "solve_replan" not in off
+    assert "solve_replan" in on

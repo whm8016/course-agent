@@ -189,7 +189,7 @@ export async function chatStream(
         tools: enabledTools,
         model_profile_id: modelProfileId || null,
         attachments: attachments ?? [],
-        rag_mode: ragMode || 'mix',
+        rag_mode: ragMode || 'naive',
       }),
     })
   } catch (err) {

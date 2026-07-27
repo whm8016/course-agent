@@ -47,7 +47,7 @@ METRICS_ALL: list[str] = [m for tier in METRICS_TIERS.values() for m in tier]
 
 # ---------------------------------------------------------------------------
 # LLM / Embedding（RAGAS 评测内部使用）
-# 阅卷(RAGAS 指标)用 DeepSeek 强推理模型，合成出题用快/省模型，embedding 用千问。
+# 阅卷与合成出题均用 DeepSeek 强推理模型（deepseek-v4-pro），embedding 用千问。
 # .env 实际变量名是双下划线 LLM__* / EMBEDDING__*（pydantic settings 嵌套字段），
 # 旧的单下划线名（DASHSCOPE_API_KEY 等）保留作 fallback 兼容。
 # ---------------------------------------------------------------------------
@@ -60,11 +60,10 @@ LLM_BASE_URL: str = (
     os.getenv("LLM__BASE_URL") or os.getenv("LLM_BASE_URL")
     or "https://api.deepseek.com/v1"
 )
-# 阅卷(RAGAS 指标)用强推理模型，合成出题用快/省模型
+# 阅卷(RAGAS 指标)、合成出题(TestsetGenerator) 均用强推理模型，各自独立的 env 开关，
+# 不跟随生产聊天模型的 LLM__TEXT_MODEL（避免切生产模型时连带改变出题/阅卷质量）。
 JUDGE_LLM_MODEL: str = os.getenv("EVAL_JUDGE_MODEL", "deepseek-v4-pro")
-GEN_LLM_MODEL: str = (
-    os.getenv("LLM__TEXT_MODEL") or os.getenv("LLM_TEXT_MODEL") or "deepseek-v4-flash"
-)
+GEN_LLM_MODEL: str = os.getenv("EVAL_GEN_MODEL", "deepseek-v4-pro")
 # RAGAS LLM 输出 token 上限：ragas 默认 max_tokens=1024，NER 抽实体 / faithfulness 分解 claims 等
 # 结构化输出远超 1024 → 输出被截断 → instructor IncompleteOutputException + tenacity 疯狂重试
 # （这正是 NERExtractor 龟速 422s/it 的根因，不是真推理慢）。合成与阅卷均给 8192：合成 NER 抽实体

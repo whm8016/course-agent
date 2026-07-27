@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import json
 import logging
 import re
 from dataclasses import replace
@@ -30,14 +29,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.agentic.loop import _get_tool_schemas, run_agent_loop
+from core.agent.registry import get_tool_schemas
+from core.agentic.loop import run_agent_loop
 from core.context import UnifiedContext
+from core.llm.json_extract import extract_json_from_llm
 from core.observability import log_flow
 from core.pipeline_common import (
-    assemble_common_context,
     build_common_context_layers,
     describe_images,
     resolve_profile_runtime,
+    with_common_prompt,
 )
 from core.prompt_loader import load_prompt_dict
 from core.research.citation_manager import CitationManager
@@ -61,26 +62,19 @@ DEFAULT_REPHRASE_MAX_ITERATIONS = 2
 DEFAULT_DECOMPOSE_NUM_SUBTOPICS = 5
 DEFAULT_BLOCK_MAX_ITERATIONS = 5
 DEFAULT_MAX_PARALLEL_TOPICS = 3
+# 单块研究自检重试上限（含首次）：与 solve/session.py DEFAULT_MAX_REPLANS 同语义的「有界重试」。
+# plan 第三批：失败重跑一次、仍失败才 mark_failed，故总尝试 = 2。
+DEFAULT_BLOCK_MAX_TRIES = 2
+# 块自检：有效研究摘要至少这么长（明显截断 / 空判失败）。research FINISH 摘要通常是一段话，
+# 50 字（中文约 25 字）是非常宽松的下限，只挡真正的退化输出。
+_BLOCK_MIN_KNOWLEDGE_CHARS = 50
 
-
-# ── JSON 解析（参照 question/pipeline.py 的 _extract_json）─────────────────────
-
-def _extract_json(text: str) -> dict[str, Any]:
-    """从 LLM 输出提取 JSON 对象，容忍 markdown fence / 前后噪声。"""
-    cleaned = re.sub(r"```(?:json)?", "", text or "").strip().rstrip("`").strip()
-    try:
-        data = json.loads(cleaned)
-        return data if isinstance(data, dict) else {}
-    except json.JSONDecodeError:
-        pass
-    start = cleaned.find("{")
-    if start == -1:
-        return {}
-    try:
-        data, _end = json.JSONDecoder().raw_decode(cleaned, start)
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+# ── Observer 汇总质量门（PEOS，消融开关默认关）──────────────────────────────
+# _drive_queue 后、_write_report 前，对「有内容但来源不足」的块补检索一轮。
+# 与块级 _block_self_check 互补：块级只保证「非空且至少 1 个来源」，Observer 看来源是否够多。
+_OBSERVER_MIN_SOURCES = 2          # 块来源少于此数视为证据不足，补检索
+_OBSERVER_MAX_REFILL_BLOCKS = 8    # safety：一次最多补这么多块，防队列异常膨胀
+_OBSERVER_DEFAULT = False          # 默认关，行为零变化；经 context.metadata["research_observer"] 开
 
 
 def _parse_sub_topics(text: str, topic: str, num_subtopics: int) -> list[dict[str, str]]:
@@ -88,7 +82,7 @@ def _parse_sub_topics(text: str, topic: str, num_subtopics: int) -> list[dict[st
 
     解析失败或为空时回退为单个以原主题命名的子主题，保证后续阶段可继续。
     """
-    data = _extract_json(text)
+    data = extract_json_from_llm(text)
     raw = data.get("sub_topics") or data.get("subtopics") or []
     if not isinstance(raw, list):
         raw = []
@@ -159,6 +153,24 @@ def _strip_source_markers(text: str) -> str:
     return _SOURCE_MARKER_RE.sub("", text or "").strip()
 
 
+def _block_self_check(knowledge: str, has_retrieval: bool) -> bool:
+    """research 块轻量自检（plan 第三批-1）。返回 True=可用，False=判失败需重试。
+
+    三类失败信号（plan：块内容为空 / 无引用 / 长度异常）：
+    - 空 / 过短（< _BLOCK_MIN_KNOWLEDGE_CHARS）→ 明显没产出有效研究，判失败；
+    - 有检索工具（rag/web_search）却无任何 ``[来源: ...]`` 标记 → 应检索却未引证，判失败
+      （CitationManager 靠这些标记建参考文献，无引证的块产出的章节没有来源，违背研究
+      pipeline 的引证设计）。
+    纯推理块（has_retrieval=False，如禁用了知识库与联网）只校验长度。
+    """
+    k = (knowledge or "").strip()
+    if len(k) < _BLOCK_MIN_KNOWLEDGE_CHARS:
+        return False
+    if has_retrieval and not _SOURCE_MARKER_RE.search(k):
+        return False
+    return True
+
+
 def _fork_for_block(context: UnifiedContext, **overrides: Any) -> UnifiedContext:
     """为并行 research block 派生隔离 context（M-5）。
 
@@ -203,15 +215,6 @@ class ResearchPipeline:
         self.block_max_iterations = max(2, int(block_max_iterations))
         self.queue_max_length = max(1, int(queue_max_length))
 
-    def _with_common(self, task_system: str, layers=None) -> str:
-        """叠加通用上下文层到 task system（solve/research/quiz 共享语义）。
-
-        layers 默认取 self._layers（run() 开头算一次，多阶段 + asyncio.gather 并行块
-        只读复用同一份不可变 dataclass，无竞态）。通用层为空时原样返回。
-        """
-        common = assemble_common_context(layers if layers is not None else self._layers)
-        return f"{task_system}\n\n{common}" if common else task_system
-
     # ------------------------------------------------------------------
     # Public entry
     # ------------------------------------------------------------------
@@ -229,6 +232,9 @@ class ResearchPipeline:
         # 不可变 dataclass：5 个阶段方法 + asyncio.gather 并行块只读共享，无竞态
         self._rt = await resolve_profile_runtime(context.llm_profile_id, context.user_id)
         self._layers = await build_common_context_layers(context)
+        # Observer 汇总质量门开关（默认关）：开则 _drive_queue 后对来源不足的块补检索一轮。
+        # 经 context.metadata["research_observer"] 控制（消融实验 on/off 对比用）。
+        self._observer_gate = bool(context.metadata.get("research_observer", _OBSERVER_DEFAULT))
         log_flow("research.pipeline.start", research_id=research_id, topic=topic[:120])
 
         # ── Phase 1: rephrase ────────────────────────────────────────────
@@ -269,6 +275,17 @@ class ResearchPipeline:
         log_flow("research.stage.researching",
                  elapsed_ms=int((datetime.now() - _t_phase).total_seconds() * 1000),
                  blocks=queue.statistics().get("total", 0))
+
+        # ── Observer 汇总质量门（可选，默认关）：来源不足的块补检索一轮 ──
+        if self._observer_gate:
+            _t_observer = datetime.now()
+            async with stream.stage("observing", source=_SOURCE):
+                await self._observe_and_refill(
+                    queue=queue, topic=refined_topic, context=context, stream=stream, cfg=cfg
+                )
+            log_flow("research.stage.observing",
+                     elapsed_ms=int((datetime.now() - _t_observer).total_seconds() * 1000),
+                     blocks=queue.statistics().get("total", 0))
 
         # ── Phase 4: reporting ───────────────────────────────────────────
         _t_phase = datetime.now()
@@ -322,7 +339,7 @@ class ResearchPipeline:
         cfg: dict[str, Any],
     ) -> str:
         rephrase_cfg = cfg.get("rephrase") or {}
-        system_prompt = self._with_common(rephrase_cfg.get("system", ""))
+        system_prompt = with_common_prompt(rephrase_cfg.get("system", ""), self._layers)
         tools = [t for t in context.enabled_tools if t in _RESEARCH_TOOLS]
         ctx = replace(
             context,
@@ -337,7 +354,7 @@ class ResearchPipeline:
             context=ctx,
             stream=stream,
             system_prompt=system_prompt,
-            tool_schemas=_get_tool_schemas(ctx) if tools else None,
+            tool_schemas=get_tool_schemas(ctx) if tools else None,
             max_iterations=DEFAULT_REPHRASE_MAX_ITERATIONS,
             client=self._rt.client,
             model=self._rt.text_model,
@@ -359,8 +376,9 @@ class ResearchPipeline:
         cfg: dict[str, Any],
     ) -> list[dict[str, str]]:
         decompose_cfg = cfg.get("decompose") or {}
-        system_prompt = self._with_common(
-            (decompose_cfg.get("system", "")).format(num_subtopics=self.num_subtopics)
+        system_prompt = with_common_prompt(
+            (decompose_cfg.get("system", "")).format(num_subtopics=self.num_subtopics),
+            self._layers,
         )
         ctx = replace(
             context,
@@ -427,6 +445,44 @@ class ResearchPipeline:
                 logger.warning("research 调度超过安全上限 %d 轮，中止", safety_cap)
                 break
 
+    async def _observe_and_refill(
+        self,
+        *,
+        queue: DynamicTopicQueue,
+        topic: str,
+        context: UnifiedContext,
+        stream: StreamBus,
+        cfg: dict[str, Any],
+    ) -> None:
+        """队列级汇总质量门（PEOS Observer）：_drive_queue 后补检索来源不足的块。
+
+        块级 _block_self_check 只保证「非空且有至少 1 个 [来源] 标记」；Observer 看的是来源
+        是否够多支撑可信结论——对 knowledge 非空但 sources < _OBSERVER_MIN_SOURCES 的块补检索
+        一次（串行，复用 _research_block 的 self_check+重试+抽来源）。补检索后 CitationManager
+        去重兜底，故 _research_block 的 add_source 累加语义（旧来源+新来源）不会造成重复引用。
+
+        Safety：只补一轮（每候选至多补一次）、候选数有 _OBSERVER_MAX_REFILL_BLOCKS 上限；
+        开关 self._observer_gate 默认关，默认行为零变化。串行而非 gather：补检索是已有块的增强，
+        候选通常少，串行简单可测、无并发 fork 顾虑。
+        """
+        candidates = [
+            b for b in queue.blocks
+            if b.knowledge and len(b.sources) < _OBSERVER_MIN_SOURCES
+        ][:_OBSERVER_MAX_REFILL_BLOCKS]
+        if not candidates:
+            return
+        log_flow("research.observer.refill",
+                 block_ids=[b.block_id for b in candidates],
+                 min_sources=_OBSERVER_MIN_SOURCES)
+        for b in candidates:
+            try:
+                await self._research_block(
+                    block=b, queue=queue, topic=topic,
+                    context=context, stream=stream, cfg=cfg,
+                )
+            except Exception:
+                logger.exception("research observer 补检索块 %s 异常", b.block_id)
+
     async def _flush_child_stream(
         self, stream: StreamBus, child: StreamBus, block: TopicBlock
     ) -> None:
@@ -460,35 +516,39 @@ class ResearchPipeline:
         stream: StreamBus,
         cfg: dict[str, Any],
     ) -> None:
-        """研究单个子主题：run_agent_loop 检索 → FINISH 摘要 → 抽来源入 sources。"""
+        """研究单个子主题：run_agent_loop 检索 → FINISH 摘要 → 自检 → 抽来源入 sources。
+
+        自检重试（plan 第三批-1）：单块 loop 后做一次轻量校验（空 / 无引用 / 过短即判失败），
+        失败重跑，最多 DEFAULT_BLOCK_MAX_TRIES 次（含首次），仍失败才 mark_failed。重试预算与
+        solve/session.py 的 bounded replan 同语义。不引入独立 Reviewer agent——按 Anthropic
+        隔离原则，子块本身即隔离边界，再加一层 agent 只增成本。
+
+        重试在单协程内串行（attempt 1 → 2），不与其它并行 block 共享可变态（block/ctx 各自独立）。
+        每次尝试用独立子 StreamBus；最终只 flush「被采纳的那次」（成功 or 最后一次）的事件，
+        避免把中间失败的检索过程暴露给前端造成一段块内多次起止的噪音。
+        """
         queue.mark_researching(block.block_id)
         step_cfg = cfg.get("research_step") or {}
         tools = [t for t in context.enabled_tools if t in _RESEARCH_TOOLS]
+        has_retrieval = bool(tools)  # 自检：有检索工具却无 [来源: ...] 标记 → 判失败需重试
         # 只有用户选了知识库（enabled_tools 含 rag）且课程存在时，才提示已挂载知识库；
         # 否则本轮工具里没有 rag，却提示"调用 rag 检索"会让 LLM 困惑（有提示无工具可调）
         kb_note = ""
         if "rag" in tools and context.course_id:
             kb_note = f"\n    已挂载知识库：{context.course_id}，调用 rag 时优先检索该库。"
-        system_prompt = self._with_common(
+        system_prompt = with_common_prompt(
             (step_cfg.get("system", "")).format(
                 topic=topic,
                 block_title=block.sub_topic,
                 block_overview=block.overview or "(无额外说明)",
                 kb_note=kb_note,
-            )
+            ),
+            self._layers,
         )
         siblings = "\n".join(
             f"  - {b.sub_topic}" for b in queue.blocks if b.block_id != block.block_id
         ) or "  (无)"
         user_prompt = (step_cfg.get("user_template", "")).format(sibling_topics=siblings)
-
-        ctx = _fork_for_block(
-            context,
-            user_message=user_prompt,
-            conversation_history=[],
-            enabled_tools=tools,
-            mode="research",
-        )
 
         # M-10：并行 block 事件隔离——给本块一个独立子 StreamBus，run_agent_loop 的所有事件
         # （thinking/tool_call/tool_result/token）先缓冲在子 bus，块跑完后整体（按原顺序、
@@ -496,31 +556,63 @@ class ResearchPipeline:
         # await 调度交错塞进主 bus._history，前端拿到的 token 序列会跨子主题混在一起，无法
         # 归属。牺牲块内逐字真流式（research 块本就是后台检索子任务，emit_terminal_events
         # =False，非交互），换取块级事件不交错。
-        child_stream = StreamBus()
-        try:
-            outcome = await run_agent_loop(
-                context=ctx,
-                stream=child_stream,
-                system_prompt=system_prompt,
-                tool_schemas=_get_tool_schemas(ctx) if tools else None,
-                max_iterations=self.block_max_iterations,
-                client=self._rt.client,
-                model=self._rt.text_model,
-                binding=self._rt.binding,
-                emit_terminal_events=False,
+        final_outcome = None       # 被采纳那次（成功 or 最后一次）的 outcome
+        final_stream: StreamBus | None = None  # 与之配对的子 bus（供末尾 flush）
+        success = False
+        for attempt in range(1, DEFAULT_BLOCK_MAX_TRIES + 1):
+            # 每次尝试重新 fork：run_agent_loop→_build_messages 会原地清掉 fork 的 doc base64，
+            # 复用同一 fork 会让重试丢失附件内容（_fork_for_block deepcopy 的意义所在）。
+            # 重试是失败路径（罕见），多一次 deepcopy 可接受。
+            ctx = _fork_for_block(
+                context,
+                user_message=user_prompt,
+                conversation_history=[],
+                enabled_tools=tools,
+                mode="research",
             )
-        except Exception:
-            logger.exception("research 块 %s 失败", block.block_id)
-            queue.mark_failed(block.block_id)
-            return
-        finally:
-            # 块结束（含异常）：把子 bus 缓冲的事件整体 flush 到主 stream（顺序保持，不交错）
-            await self._flush_child_stream(stream, child_stream, block)
+            child_stream = StreamBus()
+            try:
+                outcome = await run_agent_loop(
+                    context=ctx,
+                    stream=child_stream,
+                    system_prompt=system_prompt,
+                    tool_schemas=get_tool_schemas(ctx) if tools else None,
+                    max_iterations=self.block_max_iterations,
+                    client=self._rt.client,
+                    model=self._rt.text_model,
+                    binding=self._rt.binding,
+                    emit_terminal_events=False,
+                )
+            except Exception:
+                logger.exception("research 块 %s 第 %d/%d 次执行异常",
+                                 block.block_id, attempt, DEFAULT_BLOCK_MAX_TRIES)
+                final_stream = child_stream  # 留作兜底 flush（让前端能看到最后一次的轨迹）
+                continue
+            final_outcome = outcome
+            final_stream = child_stream
+            if outcome.completed and _block_self_check(outcome.final_text or "", has_retrieval):
+                success = True
+                break
+            log_flow("research.block.self_check_failed",
+                     block_id=block.block_id, attempt=attempt,
+                     max_tries=DEFAULT_BLOCK_MAX_TRIES,
+                     knowledge_chars=len((outcome.final_text or "").strip()),
+                     completed=bool(outcome.completed))
+            logger.warning("research 块 %s 第 %d/%d 次自检不过（空/无引用/过短），重试",
+                           block.block_id, attempt, DEFAULT_BLOCK_MAX_TRIES)
 
-        block.knowledge = (outcome.final_text or "").strip()
-        for trace in _extract_traces_from_knowledge(block.knowledge, block):
-            block.add_source(trace)
-        if outcome.completed and block.knowledge:
+        # 采纳最终 outcome 的内容（无论成败：reporting 阶段只取 knowledge 非空的块；
+        # mark_failed 的块若有内容仍可作为降级证据）。sources 仅从采纳的这一份抽，重试不累加。
+        if final_outcome is not None:
+            block.knowledge = (final_outcome.final_text or "").strip()
+            for trace in _extract_traces_from_knowledge(block.knowledge, block):
+                block.add_source(trace)
+
+        # flush 被采纳那次的子 bus（成功 or 最后一次失败/异常），保持块级事件不交错
+        if final_stream is not None:
+            await self._flush_child_stream(stream, final_stream, block)
+
+        if success:
             queue.mark_completed(block.block_id)
         else:
             queue.mark_failed(block.block_id)
@@ -633,7 +725,7 @@ class ResearchPipeline:
         for b in blocks:
             preview = _strip_source_markers(b.knowledge).split("\n\n")[0][:400]
             summaries.append(f"- [{b.block_id}] {b.sub_topic}\n  {preview}")
-        system_prompt = self._with_common(report_cfg.get("system", ""))
+        system_prompt = with_common_prompt(report_cfg.get("system", ""), self._layers)
         user_prompt = (report_cfg.get("user_template", "")).format(
             topic=topic,
             block_summaries="\n".join(summaries) or "(无研究块)",
@@ -656,7 +748,7 @@ class ResearchPipeline:
             binding=self._rt.binding,
             emit_terminal_events=False,
         )
-        data = _extract_json(outcome.final_text)
+        data = extract_json_from_llm(outcome.final_text)
         if isinstance(data, dict) and (data.get("title") or data.get("sections")):
             return data
         return {"title": topic, "sections": []}
@@ -800,7 +892,7 @@ class ResearchPipeline:
         outcome = await run_agent_loop(
             context=ctx,
             stream=stream,
-            system_prompt=self._with_common(system_prompt),
+            system_prompt=with_common_prompt(system_prompt, self._layers),
             tool_schemas=None,
             max_iterations=1,
             client=self._rt.client,

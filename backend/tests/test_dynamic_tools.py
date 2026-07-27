@@ -94,3 +94,20 @@ def test_resolve_load_tools_schema_shape():
     params = LOAD_TOOLS_SCHEMA["function"]["parameters"]
     assert params["properties"]["names"]["type"] == "array"
     assert "names" in params["required"]
+
+
+def test_read_skill_log_contextvar_lifecycle():
+    """read_skill 去重集合的 set/current/reset 生命周期；默认 None（直调场景向后兼容）。"""
+    from core.agentic.dynamic_tools import (
+        current_read_skill_log,
+        reset_read_skill_log,
+        set_read_skill_log,
+    )
+    assert current_read_skill_log() is None                 # 默认 None
+    token = set_read_skill_log()
+    log = current_read_skill_log()
+    assert isinstance(log, set) and log == set()            # 初始空 set
+    log.add(("demo", "SKILL.md"))
+    assert ("demo", "SKILL.md") in current_read_skill_log()  # 同一对象可见
+    reset_read_skill_log(token)
+    assert current_read_skill_log() is None                 # reset 回 None

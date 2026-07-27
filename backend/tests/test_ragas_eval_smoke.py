@@ -25,33 +25,34 @@ def test_split_context_string():
 
 @pytest.mark.asyncio
 async def test_run_lightrag_query_two_step_no_answer_leak(monkeypatch):
-    """contexts 来自 retrieve()，answer 来自 query()，两者独立；answer 不回填 contexts（Bug 1）。"""
+    """contexts 来自 retrieve_context（拼接字符串拆分），answer 来自主 LLM（chat_complete），
+    两者独立；answer 不回填 contexts（Bug 1）。对齐 rag_runner 复刻生产路径的重构。"""
     import sys
     import types
 
-    # 构造假 core.rag 模块（避免触发真 core.rag 的重依赖初始化）
+    # 假 core.rag：retrieve_context 返回拼接字符串（生产路径格式）
     fake_mod = types.ModuleType("core.rag")
-
-    class FakeRetrievalResult:
-        content = "ctx-A"
-
     fake_retriever = types.SimpleNamespace()
 
-    async def fake_retrieve(*a, **k):
-        return [FakeRetrievalResult()]
+    async def fake_retrieve_context(*a, **k):
+        return "[证据1]ctx-A"
 
-    async def fake_query(*a, **k):
-        return {"answer": "answer-A"}
-
-    fake_retriever.retrieve = fake_retrieve
-    fake_retriever.query = fake_query
+    fake_retriever.retrieve_context = fake_retrieve_context
     fake_mod.get_retriever = lambda name: fake_retriever
-
     monkeypatch.setitem(sys.modules, "core.rag", fake_mod)
 
+    # 假主 LLM：chat_complete 返回固定 answer（与 contexts 来源完全独立）
+    fake_llm = types.ModuleType("core.llm.llm")
+
+    async def fake_chat_complete(*a, **k):
+        return "answer-A"
+
+    fake_llm.chat_complete = fake_chat_complete
+    monkeypatch.setitem(sys.modules, "core.llm.llm", fake_llm)
+
     from scripts.eval_rag.rag_runner import _run_lightrag_query
-    res = await _run_lightrag_query("c1", "问题", "mix")
-    assert res["contexts"] == ["ctx-A"]
+    res = await _run_lightrag_query("c1", "问题", "fact")
+    assert res["contexts"] == ["[证据1]ctx-A"]
     assert res["answer"] == "answer-A"
     # Bug 1 核心断言：answer 不应混入 contexts
     assert "answer-A" not in res["contexts"]
@@ -105,10 +106,12 @@ def test_extract_scores_from_scores_attr():
             {"faithfulness": 1.0, "context_precision": 0.6},
         ]
 
-    avg, per_q = _extract_scores(FakeResult(), ["faithfulness", "context_precision"])
+    avg, per_q, invalid = _extract_scores(FakeResult(), ["faithfulness", "context_precision"])
     assert avg["faithfulness"] == pytest.approx(0.95)
     assert avg["context_precision"] == pytest.approx(0.7)
     assert len(per_q) == 2 and per_q[0]["faithfulness"] == 0.9
+    # 全有效分数 → 无判崩样本
+    assert invalid == {"faithfulness": [], "context_precision": []}
 
 
 def test_extract_scores_from_to_pandas():
@@ -125,9 +128,28 @@ def test_extract_scores_from_to_pandas():
                 "faithfulness": [0.9, 0.7],
             })
 
-    avg, per_q = _extract_scores(FakeResult(), ["faithfulness"])
+    avg, per_q, invalid = _extract_scores(FakeResult(), ["faithfulness"])
     assert avg["faithfulness"] == pytest.approx(0.8)
     assert per_q[1]["faithfulness"] == 0.7
+    assert invalid == {"faithfulness": []}
+
+
+def test_extract_scores_nan_excluded_from_avg():
+    """判崩（NaN）样本记入 invalid 清单，且不计入均值（RAGAS误判修复 Step2 核心）。"""
+    from scripts.eval_rag.ragas_evaluator import _extract_scores
+
+    class FakeResult:
+        scores = [
+            {"faithfulness": 0.9},
+            {"faithfulness": float("nan")},  # 第2条判崩
+            {"faithfulness": 0.7},
+        ]
+
+    avg, per_q, invalid = _extract_scores(FakeResult(), ["faithfulness"])
+    # NaN 样本已剔出均值：(0.9+0.7)/2 = 0.8，而非 (0.9+0+0.7)/3≈0.533
+    assert avg["faithfulness"] == pytest.approx(0.8)
+    assert invalid == {"faithfulness": [1]}
+    assert per_q[1]["faithfulness"] == 0.0  # 判崩样本填 0.0 保持 CSV 可用
 
 
 # ---------------------------------------------------------------------------

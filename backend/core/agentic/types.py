@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from core.observability.cost import TokenUsage
+
 
 @dataclass
 class ToolCall:
@@ -25,6 +27,7 @@ class RoundResult:
     elapsed_ms: int = 0                     # 本轮 LLM 调用总耗时（ms）
     ttft_ms: int | None = None              # 首 token 延迟（ms）
     reasoning: str = ""                     # 本轮推理（思考）全文，无则空串（非推理模型恒空，优雅降级）
+    usage: TokenUsage | None = None         # 本轮 token 用量（input/output/cache_read），provider 不支持采集时为 None
 
     @property
     def has_tool_calls(self) -> bool:
@@ -51,3 +54,7 @@ class LoopOutcome:
     rounds: int                             # 实际执行的 LLM 调用轮次
     tools_used: list[str] = field(default_factory=list)  # 本轮用到的工具名称（去重）
     completed: bool = True                  # 是否正常结束（False 表示被中断）
+    # 全 loop 累计 token 用量（input/output/cache_read）。loop 内每轮 round_usage 早就在
+    # 累加进 turn_usage 并写 context.metadata["llm_usage"]；此处一并挂到返回值，让直接调
+    # run_agent_loop 的场景（评测 harness / 单测）无需读 metadata 即可拿到成本。
+    total_usage: TokenUsage = field(default_factory=TokenUsage)

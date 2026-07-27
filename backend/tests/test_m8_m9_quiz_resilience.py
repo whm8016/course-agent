@@ -40,17 +40,29 @@ _FAKE_CFG = {
 }
 
 
-def _mock_loop_seq(outputs):
-    """按调用顺序返回 LoopOutcome；outputs[i] 可为字符串（final_text）或 'RAISE'。"""
-    idx = {"i": 0}
+def _mock_loop_dispatch(explore_text, plan_payload, qid_outputs):
+    """按 user_message 内容分发 run_agent_loop 返回值（并发安全）。
 
+    explore/plan 按 stage 关键词识别；quiz 阶段从「题目蓝图」里抽 question_id，按题分发对应输出。
+    分发依据是各题自己的输入而非全局调用顺序——Stage 3 改并行后调用顺序不确定，必须这样分发
+    才不会假阳性（旧的 _mock_loop_seq 按调用计数返回，并行下会把 RAISE 随机落到任意题）。
+    qid_outputs: {question_id: "<json 文本>" 或 "RAISE"}。
+    """
     async def _fake(**kwargs):
-        i = idx["i"]
-        idx["i"] = i + 1
-        out = outputs[i] if i < len(outputs) else ""
-        if out == "RAISE":
-            raise RuntimeError("模拟第 2 题 LLM 超时")
-        return MagicMock(rounds=1, tools_used=[], final_text=out)
+        um = (kwargs.get("context").user_message or "")
+        if "请生成第" in um:  # quiz：从 blueprint 抽 question_id
+            try:
+                bp_raw = um.split("题目蓝图：", 1)[1].split("\n\n", 1)[0]
+                qid = json.loads(bp_raw).get("question_id", "")
+            except Exception:
+                qid = ""
+            out = qid_outputs.get(qid, "")
+            if out == "RAISE":
+                raise RuntimeError(f"模拟 {qid} LLM 超时")
+            return MagicMock(rounds=1, tools_used=[], final_text=out)
+        if "请规划" in um:  # plan
+            return MagicMock(rounds=1, tools_used=[], final_text=plan_payload)
+        return MagicMock(rounds=1, tools_used=[], final_text=explore_text)  # explore
 
     return _fake
 
@@ -103,19 +115,18 @@ async def test_quiz_one_question_failure_does_not_abort_batch():
     """3 题：第 1、3 正常，第 2 题 LLM 调用抛异常 → 整批不中断，返回 2 题 + 1 error。"""
     ctx = _ctx()
     bus = StreamBus()
-    # explore(0) plan(1) quiz_q1(2) quiz_q2(3 RAISE) quiz_q3(4)
-    outputs = [
-        "探索摘要",  # explore
-        json.dumps({"templates": [
-            {"question_id": "q1", "topic": "T1", "question_type": "written", "difficulty": "easy"},
-            {"question_id": "q2", "topic": "T2", "question_type": "written", "difficulty": "easy"},
-            {"question_id": "q3", "topic": "T3", "question_type": "written", "difficulty": "easy"},
-        ]}),  # plan → 3 templates
-        json.dumps({"question_type": "written", "question": "题1", "correct_answer": "答1", "explanation": "e1"}),  # q1 ok
-        "RAISE",  # q2 异常
-        json.dumps({"question_type": "written", "question": "题3", "correct_answer": "答3", "explanation": "e3"}),  # q3 ok
-    ]
-    fake = _mock_loop_seq(outputs)
+    # Stage 3 改并行后调用顺序不确定，故按 question_id 分发（不依赖调用次序）。
+    plan_payload = json.dumps({"templates": [
+        {"question_id": "q1", "topic": "T1", "question_type": "written", "difficulty": "easy"},
+        {"question_id": "q2", "topic": "T2", "question_type": "written", "difficulty": "easy"},
+        {"question_id": "q3", "topic": "T3", "question_type": "written", "difficulty": "easy"},
+    ]})
+    qid_outputs = {
+        "q1": json.dumps({"question_type": "written", "question": "题1", "correct_answer": "答1", "explanation": "e1"}),  # ok
+        "q2": "RAISE",  # 异常
+        "q3": json.dumps({"question_type": "written", "question": "题3", "correct_answer": "答3", "explanation": "e3"}),  # ok
+    }
+    fake = _mock_loop_dispatch("探索摘要", plan_payload, qid_outputs)
 
     with (
         patch("core.question.pipeline.resolve_profile_runtime", new=AsyncMock(return_value=ProfileRuntime())),
@@ -149,20 +160,19 @@ async def test_quiz_schema_invalid_question_skipped():
     """第 1 题 choice 答案不命中 options（M-9 校验失败）→ 跳过不发 quiz_question，第 2 题照常。"""
     ctx = _ctx()
     bus = StreamBus()
-    outputs = [
-        "探索摘要",  # explore
-        json.dumps({"templates": [
-            {"question_id": "q1", "topic": "T1", "question_type": "choice", "difficulty": "easy"},
-            {"question_id": "q2", "topic": "T2", "question_type": "written", "difficulty": "easy"},
-        ]}),  # plan → 2 templates
+    plan_payload = json.dumps({"templates": [
+        {"question_id": "q1", "topic": "T1", "question_type": "choice", "difficulty": "easy"},
+        {"question_id": "q2", "topic": "T2", "question_type": "written", "difficulty": "easy"},
+    ]})
+    qid_outputs = {
         # q1：choice 题，但 correct_answer=D 不命中 options（A/B/C）→ 无效
-        json.dumps({"question_type": "choice", "question": "1+1?",
-                    "options": {"A": "1", "B": "2", "C": "3"}, "correct_answer": "D",
-                    "explanation": "e"}),
+        "q1": json.dumps({"question_type": "choice", "question": "1+1?",
+                          "options": {"A": "1", "B": "2", "C": "3"}, "correct_answer": "D",
+                          "explanation": "e"}),
         # q2：正常 written
-        json.dumps({"question_type": "written", "question": "题2", "correct_answer": "答2", "explanation": "e2"}),
-    ]
-    fake = _mock_loop_seq(outputs)
+        "q2": json.dumps({"question_type": "written", "question": "题2", "correct_answer": "答2", "explanation": "e2"}),
+    }
+    fake = _mock_loop_dispatch("探索摘要", plan_payload, qid_outputs)
 
     with (
         patch("core.question.pipeline.resolve_profile_runtime", new=AsyncMock(return_value=ProfileRuntime())),

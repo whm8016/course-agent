@@ -31,6 +31,20 @@ _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n?", re.DOTALL)
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _MAX_READ_CHARS = 100_000
 
+# manifest 预算（对齐 Anthropic Agent Skills「name+description 约 100 词/skill、总量控制」原则）。
+# skill 数量增长时避免清单线性膨胀撑爆 system prompt；超限时按 personal>course>builtin 的既有
+# 优先级从尾部裁剪。不在此做语义相关性排序——那需要 query+embedding，属检索层职责（plan 第三条
+# 明确：skill 规模未到二三十个前不引入检索层，当前靠优先级截断即可）。
+_MANIFEST_MAX_ENTRIES = 40      # 最多列出多少个 skill 行
+_MANIFEST_MAX_CHARS = 6_000     # 整块 manifest（含标题）字符预算
+_MANIFEST_DESC_MAX_CHARS = 200  # 单条 description 截断长度（超长描述收省略号）
+
+# always skill 全文注入预算（load_for_context，每轮 system prompt 携带）。比 manifest 略宽
+# （always 是核心守则），但仍需上限——原先每个 always:true skill 裸 read_text 拼接无限制，
+# 多个大 skill 会线性撑爆每轮 prompt。超限按 personal>course>builtin 从尾部裁 + 省略行
+# （与 render_skills_manifest 既有裁剪语义一致，不发明新规则）。
+_ALWAYS_MAX_CHARS = 8_000
+
 # builtin skill 随包发布（core/skills/builtin/），只读
 BUILTIN_SKILLS_ROOT = Path(__file__).resolve().parent / "builtin"
 
@@ -273,27 +287,43 @@ class SkillService:
         return entries
 
     def load_for_context(self, names: list[str]) -> str:
-        """把给定 skill 的正文渲染成 system-prompt 块（仅 always:true 用）。"""
+        """把给定 skill 的正文渲染成 system-prompt 块（仅 always:true 用）。
+
+        预算控制（_ALWAYS_MAX_CHARS）：每个 always skill 原先裸 read_text 拼接无上限，多个大
+        skill 会线性撑爆每轮 prompt。现按 personal>course>builtin 排序后累计，超预算从尾部
+        （低优先级）pop + 追加省略行——与 render_skills_manifest 既有裁剪语义一致。
+        """
         if not names:
             return ""
-        parts: list[str] = []
+        # source 优先级：personal > course > builtin（靠前的更可能命中任务，保留更多）
+        _src_rank = {"personal": 0, "course": 1, "builtin": 2}
+        blocks: list[str] = []
         for name in names:
             resolved = self._resolve_skill_dir(name)
             if resolved is None:
                 continue
-            skill_dir, _source = resolved
+            skill_dir, source = resolved
             text = (skill_dir / "SKILL.md").read_text(encoding="utf-8")
             _, body = self._parse_frontmatter(text)
             body = body.strip()
             if not body:
                 continue
-            parts.append(f"### Skill: {name}\n\n{body}")
-        if not parts:
+            blocks.append((_src_rank.get(source, 9), f"### Skill: {name}\n\n{body}"))
+        if not blocks:
             return ""
-        return (
-            "## 常驻技能\n以下守则每轮都适用，优先于通用默认。\n\n"
-            + "\n\n---\n\n".join(parts)
-        )
+        blocks.sort(key=lambda x: x[0])  # 高优先级在前
+        parts = [b for _, b in blocks]
+        header = "## 常驻技能\n以下守则每轮都适用，优先于通用默认。\n\n"
+        sep = "\n\n---\n\n"
+        dropped = 0
+        # 超预算从尾部（低优先级）pop；至少保留 1 个（最高优先级），即使它本身超预算
+        while len(header + sep.join(parts)) > _ALWAYS_MAX_CHARS and len(parts) > 1:
+            parts.pop()
+            dropped += 1
+        out = header + sep.join(parts)
+        if dropped:
+            out += f"\n\n（已省略 {dropped} 个低优先级常驻技能以控制 prompt 长度）"
+        return out
 
     def load_always_for_context(self) -> str:
         """急切渲染 always:true 的 skill。"""
@@ -442,6 +472,8 @@ def render_skills_manifest(entries: list[SkillSummaryEntry]) -> str:
     """把 manifest 行渲染成 system-prompt 的 Skills 块。
 
     always 条目排除（其正文已急切注入，再列浪费 token）。重名保留首次出现。
+    预算控制：单条 description 超长截断；总条数/总字符超限时按既有优先级从尾部裁剪
+    （条目顺序已是 personal>course>builtin，靠前的更可能命中任务），并追加一行省略提示。
     """
     seen: set[str] = set()
     lines: list[str] = []
@@ -453,15 +485,34 @@ def render_skills_manifest(entries: list[SkillSummaryEntry]) -> str:
         if not entry.available:
             suffix = f" (unavailable: {', '.join(entry.missing)})"
         description = entry.description or entry.name
+        if len(description) > _MANIFEST_DESC_MAX_CHARS:
+            description = description[: _MANIFEST_DESC_MAX_CHARS - 1].rstrip() + "…"
         lines.append(f"- **{entry.name}** — {description}{suffix}")
+
     if not lines:
         return ""
-    return (
+
+    header = (
         "## Skills\n"
         "按需可用的专项手册。当任务匹配某技能的描述时，先调用 `read_skill` "
         "读取其完整内容，再按指引执行。标注 unavailable 的技能在依赖满足前不可用。\n\n"
-        + "\n".join(lines)
     )
+
+    dropped = 0
+    # 条数上限：超出按优先级从尾部裁剪
+    if len(lines) > _MANIFEST_MAX_ENTRIES:
+        dropped += len(lines) - _MANIFEST_MAX_ENTRIES
+        lines = lines[:_MANIFEST_MAX_ENTRIES]
+    # 字符预算：标题占固定空间，正文超限时继续从尾部移除（靠前的优先级更高，保留）
+    budget = _MANIFEST_MAX_CHARS - len(header)
+    while len("\n".join(lines)) > budget and len(lines) > 1:
+        lines.pop()
+        dropped += 1
+
+    body = "\n".join(lines)
+    if dropped:
+        body += f"\n- …（另有 {dropped} 个技能因清单篇幅未列出）"
+    return header + body
 
 
 _instances: dict[str, SkillService] = {}

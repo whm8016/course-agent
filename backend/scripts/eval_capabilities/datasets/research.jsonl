@@ -1,0 +1,3 @@
+{"id": "research-01", "input": "请调研并总结：谐振现象在通信电路中的主要应用，写一份简短研究报告。", "target": "报告应紧扣主题，覆盖调谐/选频/滤波等应用，有分析与洞见，结构清晰，论断有据可查。", "metadata": {"mode": "deep_research", "course_id": "mycourse"}}
+{"id": "research-02", "input": "总结：戴维南等效与诺顿等效的区别与联系，并说明各自适用场景。", "target": "报告应对比两者（电压源串阻 vs 电流源并阻），说明等效互换关系，分析适用场景，结构清晰。", "metadata": {"mode": "deep_research", "course_id": "mycourse"}}
+{"id": "research-03", "input": "调研：滤波电路的主要类型（低通/高通/带通/带阻）及其工作原理。", "target": "报告应覆盖四类滤波器，说明原理（电容电感的频率特性），有应用举例，结构清晰，论断有据。", "metadata": {"mode": "deep_research", "course_id": "mycourse"}}

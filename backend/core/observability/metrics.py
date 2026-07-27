@@ -15,7 +15,7 @@
 """
 from __future__ import annotations
 
-from prometheus_client import Gauge, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 # --------------------------------------------------------------------------
 # Turn（整体回合）
@@ -44,6 +44,23 @@ LLM_FIRST_TOKEN = Histogram(
     "Time-to-first-token (TTFT) for LLM streaming",
     labelnames=["mode"],
     buckets=(0.1, 0.2, 0.5, 1, 2, 5),
+)
+
+# LLM token 用量（成本可观测性）。token_type ∈ input/output/cache_read。
+# 逐轮在 _one_round 埋（core/observability/cost.observe_usage）。命名对齐 OTel GenAI 语义约定。
+LLM_TOKENS_TOTAL = Counter(
+    "ca_llm_tokens_total",
+    "LLM token consumption by type (input/output/cache_read)",
+    labelnames=["model", "token_type"],
+)
+
+# LLM 成本（按 run_agent_loop 调用汇总，单位美元）。cost = estimate_cost(model, 累积usage)。
+# course_id/mode label 在 loop 层才有 context，故在 run_agent_loop 的 done 处汇总埋
+# （core/observability/cost.observe_cost），不在逐轮的 _one_round 埋。
+LLM_COST_USD_TOTAL = Counter(
+    "ca_llm_cost_usd_total",
+    "Estimated LLM cost in USD (aggregated per agent loop)",
+    labelnames=["model", "course_id", "mode"],
 )
 
 # --------------------------------------------------------------------------
@@ -102,13 +119,18 @@ DB_POOL_CHECKEDOUT = Gauge(
     "SQLAlchemy engine pool: checked-out (in-use) connections",
     labelnames=["worker"],
 )
+# 这两个 Gauge 无 label：多 worker（gunicorn）下所有进程写同一 labelset，默认 'all' 会碰撞。
+# multiprocess_mode='livesum' 让 MultiProcessCollector 跨存活 worker 求和（总量），且自动排除
+# 已退出 worker（'live' 前缀）。pid-labeled 的 LEADER_STATUS / DB_POOL 因 labelset 各异，用默认 'all'。
 LIGHTRAG_INSTANCES = Gauge(
     "ca_lightrag_instances",
     "LightRAG instance pool: cached instances count",
+    multiprocess_mode="livesum",
 )
 LIGHTRAG_IN_USE = Gauge(
     "ca_lightrag_in_use",
     "LightRAG instance pool: in-use (referenced) instances count",
+    multiprocess_mode="livesum",
 )
 
 

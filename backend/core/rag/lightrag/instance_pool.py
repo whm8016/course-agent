@@ -179,6 +179,7 @@ async def _get_instance(course_id: str) -> Any:
         is_lightrag_available,
         _llm_model_func,
         _embedding_func,
+        build_role_llm_configs,
     )
 
     # 导入 LightRAG（延迟导入避免循环依赖）
@@ -220,6 +221,21 @@ async def _get_instance(course_id: str) -> Any:
             _rerank_func = build_rerank_func()
             if _rerank_func is not None:
                 _extra_kwargs["rerank_model_func"] = _rerank_func
+                # 相关性阈值过滤（LightRAG 1.5.4 原生 min_rerank_score）：仅在 rerank 已挂载时
+                # 才有意义——低于阈值的 chunk 在 rerank 后被丢弃。默认 0.0 不传（行为不变）；
+                # 口径是 gte-rerank-v2 的 relevance_score，不可照搬裸余弦 0.5。
+                if "min_rerank_score" in _sig.parameters:
+                    _min_score = get_settings().lightrag.min_rerank_score
+                    if _min_score > 0:
+                        _extra_kwargs["min_rerank_score"] = _min_score
+
+        # 分角色模型（role_llm_configs，LightRAG 1.5.4+）：extract/keyword 走便宜模型省成本。
+        # build_role_llm_configs 在两者皆空时返回 None → 不传 → 全角色回退 base（行为不变）。
+        _role_cfgs = None
+        if "role_llm_configs" in _sig.parameters:
+            _role_cfgs = build_role_llm_configs()
+            if _role_cfgs is not None:
+                _extra_kwargs["role_llm_configs"] = _role_cfgs
 
         rag = LightRAG(
             working_dir=LIGHTRAG_WORKDIR,
@@ -229,6 +245,11 @@ async def _get_instance(course_id: str) -> Any:
             **_extra_kwargs,
         )
         await rag.initialize_storages()
+        if _role_cfgs:
+            logger.info(
+                "LightRAG role_llm_configs 启用 course=%s roles=%s（其余角色回退 base）",
+                course_id, list(_role_cfgs.keys()),
+            )
         _instances[course_id] = rag
         _in_use[course_id] = 1  # H-10：新建实例即被本次获取引用
 

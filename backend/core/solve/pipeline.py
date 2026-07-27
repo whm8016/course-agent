@@ -19,14 +19,15 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from core.agentic.loop import _get_tool_schemas, run_agent_loop
+from core.agent.registry import get_tool_schemas
+from core.agentic.loop import run_agent_loop
 from core.context import UnifiedContext
 from core.observability import log_flow
 from core.pipeline_common import (
-    assemble_common_context,
     build_common_context_layers,
     describe_images,
     resolve_profile_runtime,
+    with_common_prompt,
 )
 from core.prompt_loader import load_prompt_dict
 from core.solve.session import (
@@ -84,12 +85,14 @@ class DeepSolvePipeline:
         # reset 清掉旧 plan/进度/replan 计数，回到「未解题」初态（max_replans 紧接着重设）。
         session.reset()
         session.max_replans = DEFAULT_MAX_REPLANS
+        # force replan 门开关（默认关）：开则 finish_step 连续失败时返回里强制提示 replan。
+        # 经 context.metadata["solve_force_replan"] 控制（消融实验 on/off 对比用）。
+        session.force_replan_gate = bool(context.metadata.get("solve_force_replan", False))
 
         # solve playbook + 通用上下文层叠加（course_prompt / memory / now…，原先缺失）
         solve_cfg = load_prompt_dict(_SOLVE_PROMPT_PATH)
         task_system = solve_cfg.get("system") or ""
-        common = assemble_common_context(layers)
-        system_prompt = f"{task_system}\n\n{common}" if common else task_system
+        system_prompt = with_common_prompt(task_system, layers)
 
         # 可用工具：solve 三件套 + rag（可选）
         enabled = list(_SOLVE_TOOLS) + (["rag"] if rag_enabled else [])
@@ -115,7 +118,7 @@ class DeepSolvePipeline:
                 context=solve_ctx,
                 stream=stream,
                 system_prompt=system_prompt,
-                tool_schemas=_get_tool_schemas(solve_ctx),
+                tool_schemas=get_tool_schemas(solve_ctx),
                 max_iterations=12,
                 client=rt.client,
                 model=rt.text_model,

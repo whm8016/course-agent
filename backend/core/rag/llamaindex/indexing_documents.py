@@ -11,6 +11,7 @@ from typing import Optional
 from llama_index.core.schema import Document
 
 from core.rag.llamaindex.file_routing import FileClassification, FileTypeRouter
+from settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -31,23 +32,29 @@ def file_paths_to_llama_documents(
     classification = FileTypeRouter.classify_files(file_paths)
     documents: list[Document] = []
 
+    pdf_backend = get_settings().pdf.backend
     for file_path_str in classification.parser_files:
         file_path = Path(file_path_str).resolve()
-        lg.info("Parsing PDF: %s", file_path.name)
-        text = FileTypeRouter.extract_pdf_text(str(file_path))
-        if text.strip():
-            documents.append(
-                Document(
-                    text=text,
-                    metadata={
-                        "file_name": file_path.name,
-                        "file_path": str(file_path),
-                    },
+        lg.info("Parsing PDF (backend=%s): %s", pdf_backend, file_path.name)
+        sections = FileTypeRouter.extract_pdf_sections(
+            str(file_path), backend=pdf_backend
+        )
+        if sections:
+            for sec in sections:
+                documents.append(
+                    Document(
+                        text=sec["content"],
+                        metadata={
+                            "file_name": file_path.name,
+                            "file_path": str(file_path),
+                            "section": sec["title"],
+                            "page": sec["page"],
+                        },
+                    )
                 )
-            )
-            lg.info("Loaded: %s (%d chars)", file_path.name, len(text))
+            lg.info("Loaded: %s → %d sections", file_path.name, len(sections))
         else:
-            lg.warning("Skipped empty document: %s", file_path.name)
+            lg.warning("Skipped empty PDF: %s", file_path.name)
 
     for file_path_str in classification.text_files:
         file_path = Path(file_path_str).resolve()

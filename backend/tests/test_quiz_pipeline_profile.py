@@ -77,7 +77,7 @@ async def test_quiz_threads_profile_and_injects_layers():
             "core.question.pipeline.describe_images",
             new=AsyncMock(side_effect=_fake_describe),
         ),
-        patch("core.question.pipeline._get_tool_schemas", return_value=[{"name": "rag"}]),
+        patch("core.question.pipeline.get_tool_schemas", return_value=[{"name": "rag"}]),
         patch(
             "core.question.pipeline.run_agent_loop", new=AsyncMock(side_effect=_fake_loop)
         ),

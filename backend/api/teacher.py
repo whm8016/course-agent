@@ -24,7 +24,7 @@ from core.db.cache import course_access_invalidate, faq_top
 from core.db.limiter import limiter
 from core.codes import ensure_unique_join_code
 from core.db.database import (
-    Enrollment, KBFile, KnowledgeBase, Message,
+    CourseSchedule, Enrollment, Grade, KBFile, KnowledgeBase, Message,
     NotebookEntry, Session, User, get_db,
 )
 from core.rag.ingestion import IndexingControl
@@ -966,3 +966,175 @@ async def analytics_student_detail(
         "error_graph": eg,
         "recent_questions": recent_questions,
     }
+
+
+# ── 课表 / 成绩录入（教师写入口，读写分离：只读工具 query_* 不写）─────────────────
+#
+# 这些是「学业结构化数据」的教师录入侧，与 3 个只读学业查询工具（query_timetable /
+# query_grades / query_mistakes，见 core/academic/tools.py）配套。写入只走本 REST API +
+# JWT 教师角色校验（get_current_teacher）+ 课程 owner 校验（_get_owned_kb），OWASP LLM06：
+# 绝不让 agent 工具具备写权限。
+
+
+class ScheduleItem(BaseModel):
+    weekday: int = Field(..., ge=1, le=7, description="1=周一 … 7=周日")
+    start_time: str = Field("", max_length=16)
+    end_time: str = Field("", max_length=16)
+    location: str = Field("", max_length=128)
+    teacher_name: str = Field("", max_length=64)
+    weeks: str = Field("", max_length=64)
+    note: str = ""
+
+
+class ScheduleBody(BaseModel):
+    items: list[ScheduleItem] = Field(default_factory=list)
+
+
+class GradeItem(BaseModel):
+    student_id: str = Field(..., min_length=1, max_length=32)
+    item_name: str = Field(..., min_length=1, max_length=128)
+    score: float = 0.0
+    full_score: float = 100.0
+    graded_at: float | None = None
+    comment: str = ""
+
+
+class GradesBatchBody(BaseModel):
+    grades: list[GradeItem] = Field(default_factory=list)
+
+
+def _schedule_to_dict(s: CourseSchedule) -> dict:
+    return {
+        "id": s.id,
+        "course_id": s.course_id,
+        "weekday": s.weekday,
+        "start_time": s.start_time,
+        "end_time": s.end_time,
+        "location": s.location,
+        "teacher_name": s.teacher_name,
+        "weeks": s.weeks,
+        "note": s.note,
+        "created_at": s.created_at,
+    }
+
+
+def _grade_to_dict(g: Grade) -> dict:
+    return {
+        "id": g.id,
+        "student_id": g.student_id,
+        "course_id": g.course_id,
+        "item_name": g.item_name,
+        "score": g.score,
+        "full_score": g.full_score,
+        "graded_at": g.graded_at,
+        "comment": g.comment,
+        "created_at": g.created_at,
+    }
+
+
+@router.get("/courses/{course_id}/schedule")
+async def get_course_schedule(
+    course_id: str,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """读取该课程全部课表行（owner 校验）。"""
+    await _get_owned_kb(db, course_id, teacher)
+    res = await db.execute(
+        select(CourseSchedule)
+        .where(CourseSchedule.course_id == course_id)
+        .order_by(CourseSchedule.weekday.asc(), CourseSchedule.start_time.asc())
+    )
+    return [_schedule_to_dict(s) for s in res.scalars().all()]
+
+
+@router.put("/courses/{course_id}/schedule")
+async def replace_course_schedule(
+    course_id: str,
+    body: ScheduleBody,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """整表替换课表（幂等）：删旧插新。重复 PUT 到同一状态结果一致。"""
+    await _get_owned_kb(db, course_id, teacher)
+    existing = await db.execute(
+        select(CourseSchedule).where(CourseSchedule.course_id == course_id)
+    )
+    for row in existing.scalars().all():
+        await db.delete(row)
+    for item in body.items:
+        db.add(CourseSchedule(course_id=course_id, **item.model_dump()))
+    await db.commit()
+    logger.info("teacher %s replaced schedule course=%s rows=%d", teacher.get("id"), course_id, len(body.items))
+    return {"course_id": course_id, "count": len(body.items)}
+
+
+@router.get("/courses/{course_id}/grades")
+async def list_course_grades(
+    course_id: str,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """读取该课程全部成绩（owner 校验）。"""
+    await _get_owned_kb(db, course_id, teacher)
+    res = await db.execute(
+        select(Grade)
+        .where(Grade.course_id == course_id)
+        .order_by(Grade.student_id.asc(), Grade.item_name.asc())
+        .limit(limit)
+    )
+    return [_grade_to_dict(g) for g in res.scalars().all()]
+
+
+@router.post("/courses/{course_id}/grades")
+async def upsert_course_grades(
+    course_id: str,
+    body: GradesBatchBody,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """批量 upsert 成绩，按 (student_id, course_id, item_name) 复合键命中则更新。"""
+    await _get_owned_kb(db, course_id, teacher)
+    upserted = 0
+    for g in body.grades:
+        res = await db.execute(
+            select(Grade).where(
+                Grade.student_id == g.student_id,
+                Grade.course_id == course_id,
+                Grade.item_name == g.item_name,
+            )
+        )
+        row = res.scalar_one_or_none()
+        if row is None:
+            row = Grade(student_id=g.student_id, course_id=course_id, item_name=g.item_name)
+            db.add(row)
+        row.score = g.score
+        row.full_score = g.full_score
+        row.comment = g.comment
+        if g.graded_at is not None:
+            row.graded_at = g.graded_at
+        upserted += 1
+    await db.commit()
+    logger.info("teacher %s upserted grades course=%s count=%d", teacher.get("id"), course_id, upserted)
+    return {"course_id": course_id, "upserted": upserted}
+
+
+@router.delete("/courses/{course_id}/grades/{grade_id}")
+async def delete_course_grade(
+    course_id: str,
+    grade_id: str,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """删除单条成绩（owner 校验 + 校验该成绩属于本课程）。"""
+    await _get_owned_kb(db, course_id, teacher)
+    res = await db.execute(
+        select(Grade).where(Grade.id == grade_id, Grade.course_id == course_id)
+    )
+    row = res.scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="成绩记录不存在")
+    await db.delete(row)
+    await db.commit()
+    return {"deleted": grade_id}

@@ -52,7 +52,7 @@ async def test_solve_threads_profile_model_and_binding():
         patch(
             "core.solve.pipeline.describe_images", new=AsyncMock(side_effect=_fake_describe)
         ),
-        patch("core.solve.pipeline._get_tool_schemas", return_value=[]),
+        patch("core.solve.pipeline.get_tool_schemas", return_value=[]),
         patch(
             "core.solve.pipeline.run_agent_loop", new=AsyncMock(return_value=fake_outcome)
         ) as m_loop,
@@ -93,7 +93,7 @@ async def test_solve_injects_common_context_layers():
             "core.solve.pipeline.describe_images",
             new=AsyncMock(side_effect=lambda c, t, r: t),
         ),
-        patch("core.solve.pipeline._get_tool_schemas", return_value=[]),
+        patch("core.solve.pipeline.get_tool_schemas", return_value=[]),
         patch(
             "core.solve.pipeline.run_agent_loop",
             new=AsyncMock(return_value=MagicMock(rounds=1, tools_used=[], final_text="ok")),

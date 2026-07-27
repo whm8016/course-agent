@@ -24,6 +24,10 @@ from settings import get_settings
 INDEX_LLM_MODEL = get_settings().lightrag.llm_model
 INDEX_LLM_API_KEY = get_settings().lightrag.api_key.get_secret_value()
 INDEX_LLM_BASE_URL = get_settings().lightrag.base_url
+# 分角色模型（role_llm_configs）：空=回退 INDEX_LLM_MODEL（行为不变）；非空=该角色用此模型。
+# 凭证复用 INDEX_LLM_API_KEY/BASE_URL，故模型须与 INDEX_LLM_MODEL 同 provider 可见。
+INDEX_LLM_EXTRACT_MODEL = get_settings().lightrag.extract_model
+INDEX_LLM_KEYWORD_MODEL = get_settings().lightrag.keyword_model
 
 # LightRAG 索引阶段 Embedding（来源 EMBEDDING__*）
 INDEX_EMBEDDING_MODEL = get_settings().embedding.model
@@ -41,12 +45,14 @@ logger = logging.getLogger(__name__)
 
 try:
     from lightrag.llm.openai import openai_complete_if_cache, openai_embed
+    from lightrag.llm_roles import RoleLLMConfig
     from lightrag.utils import wrap_embedding_func_with_attrs
 
     LIGHTRAG_IMPORT_ERROR: Exception | None = None
 except Exception as exc:  # pragma: no cover
     openai_complete_if_cache = None  # type: ignore[assignment]
     openai_embed = None  # type: ignore[assignment]
+    RoleLLMConfig = None  # type: ignore[assignment]
     wrap_embedding_func_with_attrs = None  # type: ignore[assignment]
     LIGHTRAG_IMPORT_ERROR = exc
 
@@ -113,17 +119,17 @@ def is_lightrag_available() -> tuple[bool, str]:
 # ── LLM 调用函数 ───────────────────────────────────────────────────────────────
 
 
-@safe_traceable(name="lightrag.llm", run_type="llm")
-async def _llm_model_func(
+async def _call_index_llm(
+    model: str,
     prompt: str,
     system_prompt: str | None = None,
     history_messages: list[dict] | None = None,
-    keyword_extraction: bool = False,
     **kwargs: Any,
 ) -> str:
-    """LightRAG LLM 调用适配函数。
+    """索引阶段 LLM 调用的共享实现（base 与各 role 复用）。
 
-    使用 OpenAI 兼容 API（INDEX_LLM_*）完成索引阶段 LLM 调用。
+    用 OpenAI 兼容 API（INDEX_LLM_* 凭证）调用指定 model，统一做系统 prompt 截断 +
+    错误收集。凭证固定为 LightRAG 专属 provider，各角色只换 model 名（须同 provider）。
     """
     assert openai_complete_if_cache is not None, "LightRAG LLM 不可用"
 
@@ -134,7 +140,7 @@ async def _llm_model_func(
 
     try:
         return await openai_complete_if_cache(
-            INDEX_LLM_MODEL,
+            model,
             prompt,
             system_prompt=safe_system_prompt,
             history_messages=history_messages or [],
@@ -150,6 +156,56 @@ async def _llm_model_func(
         _llm_error_log.append(exc)
         logger.error("LLM 调用失败（已记录）: %s", exc)
         raise
+
+
+@safe_traceable(name="lightrag.llm", run_type="llm")
+async def _llm_model_func(
+    prompt: str,
+    system_prompt: str | None = None,
+    history_messages: list[dict] | None = None,
+    keyword_extraction: bool = False,
+    **kwargs: Any,
+) -> str:
+    """LightRAG base LLM 适配（= INDEX_LLM_MODEL）。query/vlm 等未配角色回退到此。"""
+    return await _call_index_llm(
+        INDEX_LLM_MODEL, prompt, system_prompt, history_messages, **kwargs
+    )
+
+
+def _make_role_llm_func(model_name: str):
+    """构造一个角色 LLM func（对外签名同 base），内部用 model_name 走 INDEX_LLM_* 凭证。"""
+
+    @safe_traceable(name=f"lightrag.llm.{model_name}", run_type="llm")
+    async def _role_func(
+        prompt: str,
+        system_prompt: str | None = None,
+        history_messages: list[dict] | None = None,
+        keyword_extraction: bool = False,
+        **kwargs: Any,
+    ) -> str:
+        return await _call_index_llm(
+            model_name, prompt, system_prompt, history_messages, **kwargs
+        )
+
+    return _role_func
+
+
+def build_role_llm_configs() -> "dict[str, Any] | None":
+    """按 settings 构造 LightRAG role_llm_configs（extract/keyword 分角色模型）。
+
+    - extract/keyword 皆空 → None（不传 role_llm_configs，LightRAG 全角色回退 base，行为不变）。
+    - 非空角色 → RoleLLMConfig(func=_make_role_llm_func(model))；max_async/timeout 不传，
+      由 LightRAG 回退 base 的 llm_model_max_async / default_llm_timeout。
+    - 返回 dict 只含非空角色；未出现的角色（含 query/vlm）由 LightRAG 自动回退 base。
+    """
+    if RoleLLMConfig is None:
+        return None  # lightrag 不可用（is_lightrag_available 已拦截，此为兜底）
+    configs: dict[str, Any] = {}
+    if INDEX_LLM_EXTRACT_MODEL:
+        configs["extract"] = RoleLLMConfig(func=_make_role_llm_func(INDEX_LLM_EXTRACT_MODEL))
+    if INDEX_LLM_KEYWORD_MODEL:
+        configs["keyword"] = RoleLLMConfig(func=_make_role_llm_func(INDEX_LLM_KEYWORD_MODEL))
+    return configs or None
 
 
 # ── Embedding 函数 ─────────────────────────────────────────────────────────────
@@ -182,6 +238,7 @@ __all__ = [
     "is_lightrag_available",
     "_llm_model_func",
     "_embedding_func",
+    "build_role_llm_configs",
     "take_llm_errors",
     "clear_llm_errors",
     "_is_fatal_llm_error",
@@ -189,6 +246,8 @@ __all__ = [
     "INDEX_LLM_MODEL",
     "INDEX_LLM_API_KEY",
     "INDEX_LLM_BASE_URL",
+    "INDEX_LLM_EXTRACT_MODEL",
+    "INDEX_LLM_KEYWORD_MODEL",
     "INDEX_EMBEDDING_MODEL",
     "INDEX_EMBEDDING_API_KEY",
     "INDEX_EMBEDDING_BASE_URL",

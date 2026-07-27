@@ -1,0 +1,5 @@
+{"id": "chat-01", "input": "请解释什么是基尔霍夫电压定律（KVL），并举一个简单例子。", "target": "答案应覆盖：KVL 定义（沿闭合回路各元件电压代数和为零）、符号约定、至少一个具体电路例子；不得编造公式。", "metadata": {"mode": "chat", "course_id": "mycourse", "rag_mode": "naive"}}
+{"id": "chat-02", "input": "电容和电感在直流稳态下分别等效为什么元件？为什么？", "target": "答案应指出：电容直流稳态等效开路、电感等效短路，并说明原因（充放电完成/磁通不变化）；不得与交流瞬态行为混淆。", "metadata": {"mode": "chat", "course_id": "mycourse", "rag_mode": "naive"}}
+{"id": "chat-03", "input": "什么是戴维南定理？怎样求一个二端网络的戴维南等效电路？", "target": "答案应覆盖：任意线性含源二端网络可等效为电压源串电阻；求开路电压 Uoc 与等效电阻 Req（独立源置零法）；不得漏掉独立源置零步骤。", "metadata": {"mode": "chat", "course_id": "mycourse", "rag_mode": "naive"}}
+{"id": "chat-04", "input": "RLC 串联电路发生串联谐振的条件和谐振频率公式是什么？", "target": "答案应给出谐振条件 XL=XC、谐振频率 f0=1/(2π√(LC))；并说明谐振时阻抗最小呈纯阻性；不得写错公式。", "metadata": {"mode": "chat", "course_id": "mycourse", "rag_mode": "naive"}}
+{"id": "chat-05", "input": "正弦交流电的有效值和最大值是什么关系？有效值的物理意义是什么？", "target": "答案应指出有效值=最大值/√2，并解释有效值定义（与直流在相同电阻上产生相同热效应）；不得把有效值当成平均值。", "metadata": {"mode": "chat", "course_id": "mycourse", "rag_mode": "naive"}}

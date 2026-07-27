@@ -1,0 +1,94 @@
+{
+  "timestamp": "2026-07-17 14:42:28",
+  "course": "mycourse_rf600_img",
+  "modes": [
+    "fact"
+  ],
+  "metrics": [
+    "context_precision",
+    "context_recall",
+    "faithfulness"
+  ],
+  "avg_scores": {
+    "fact": {
+      "context_precision": 0.7142857142142857,
+      "context_recall": 0.6206349206349207,
+      "faithfulness": 0.5218107845927394
+    }
+  },
+  "distributions": {
+    "fact": {
+      "context_precision": {
+        "mean": 0.7142857142142857,
+        "std": 0.4517539514074502,
+        "p50": 0.9999999999,
+        "p90": 0.9999999999,
+        "p95": 0.9999999999,
+        "min": 0.0,
+        "max": 0.9999999999
+      },
+      "context_recall": {
+        "mean": 0.6206349206349205,
+        "std": 0.3558247280437766,
+        "p50": 0.6666666666666666,
+        "p90": 1.0,
+        "p95": 1.0,
+        "min": 0.0,
+        "max": 1.0
+      },
+      "faithfulness": {
+        "mean": 0.5218107845927396,
+        "std": 0.4118146079913265,
+        "p50": 0.5333333333333333,
+        "p90": 1.0,
+        "p95": 1.0,
+        "min": 0.0,
+        "max": 1.0
+      }
+    }
+  },
+  "latency": {
+    "fact": {
+      "retrieve_ms": {
+        "mean": 1694.952380952381,
+        "std": 1944.9400645971803,
+        "p50": 994.0,
+        "p90": 3101.0,
+        "p95": 7229.0,
+        "min": 536.0,
+        "max": 7660.0
+      },
+      "query_ms": {
+        "mean": 10406.952380952382,
+        "std": 4398.182454434369,
+        "p50": 10224.0,
+        "p90": 15716.0,
+        "p95": 18318.0,
+        "min": 2796.0,
+        "max": 19051.0
+      },
+      "total_ms": {
+        "mean": 12101.904761904761,
+        "std": 5348.607125355713,
+        "p50": 12146.0,
+        "p90": 17498.0,
+        "p95": 20088.0,
+        "min": 3709.0,
+        "max": 25978.0
+      }
+    }
+  },
+  "delta": {
+    "fact": {
+      "context_precision": -0.2381,
+      "context_recall": -0.1222,
+      "faithfulness": -0.182
+    }
+  },
+  "has_baseline": true,
+  "total_tokens_by_mode": {
+    "fact": 0
+  },
+  "total_tokens": 0,
+  "est_cost": 0.0
+}

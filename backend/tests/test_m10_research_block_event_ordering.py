@@ -60,12 +60,12 @@ def test_parallel_blocks_events_not_interleaved():
         if "导数" in system_prompt:
             await stream.emit({"type": "token", "content": "A1"})
             await stream.emit({"type": "token", "content": "A2"})
-            return LoopOutcome(final_text="导数是变化率 [来源: https://a.com]", rounds=1, completed=True)
+            return LoopOutcome(final_text="导数刻画函数在某一点的瞬时变化率，是微积分的核心概念，几何上表示切线的斜率 [来源: https://a.com]", rounds=1, completed=True)
         if "积分" in system_prompt:
             await stream.emit({"type": "token", "content": "B1"})
             await stream.emit({"type": "token", "content": "B2"})
-            return LoopOutcome(final_text="积分用于求面积 [来源: https://b.com]", rounds=1, completed=True)
-        return LoopOutcome(final_text="段落", rounds=1, completed=True)
+            return LoopOutcome(final_text="积分用于求面积与累积量，是微积分的基本运算，与导数互为逆运算（微积分基本定理） [来源: https://b.com]", rounds=1, completed=True)
+        return LoopOutcome(final_text="这是一个足够长的段落占位以通过块自检 [来源: https://default.com]", rounds=1, completed=True)
 
     async def _go():
         stream = StreamBus()
@@ -115,7 +115,7 @@ def test_block_boundary_wraps_its_tokens():
     async def _fake_loop(*, context, stream, system_prompt, **kw):
         await stream.emit({"type": "token", "content": "X1"})
         await stream.emit({"type": "token", "content": "X2"})
-        return LoopOutcome(final_text="结论 [来源: https://x.com]", rounds=1, completed=True)
+        return LoopOutcome(final_text="结论部分给出完整的推导与说明，包含主要定理及其几何意义，可供后续报告引用 [来源: https://x.com]", rounds=1, completed=True)
 
     async def _go():
         stream = StreamBus()
@@ -164,7 +164,7 @@ def test_child_stream_is_not_the_main_stream():
         captured_streams.append(stream)
         # 在子 bus 上 emit，验证它不会直接出现在主 stream（直到 flush）
         await stream.emit({"type": "token", "content": "Z"})
-        return LoopOutcome(final_text="ok [来源: https://z.com]", rounds=1, completed=True)
+        return LoopOutcome(final_text="这是一个足够长的有效研究摘要，包含关键结论与来源标注，供断言子 bus 隔离 [来源: https://z.com]", rounds=1, completed=True)
 
     main_stream = StreamBus()
 

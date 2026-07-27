@@ -6,12 +6,13 @@ Centralized file type classification and routing for the RAG pipeline.
 Determines the appropriate processing method for each document type.
 """
 
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import List
 
-import logging 
+import logging
 logger = logging.getLogger("FileTypeRouter")
 
 
@@ -39,6 +40,101 @@ class FileClassification:
     pptx_files: List[str]
     image_files: List[str]
     unsupported: List[str]
+
+
+def serialize_table(tbl) -> str:
+    """序列化 python-docx / python-pptx 表格为 Markdown 表格纯文本。
+
+    对向量检索与 LLM 理解均友好。正确处理合并单元格：python-docx 的 row.cells
+    对横向/纵向合并格返回同一底层 <w:tc> 的重复引用，按 id(cell._tc) 去重——
+    横向合并的值只在首列出现一次，纵向合并的延续行该列留空，从而保持网格列对齐
+    （治旧实现把合并表序列化成「标称值 / 实测值 | 750 | 580…」错乱的病）。pptx
+    无底层 _tc，退用 id(cell) 尽力去重。docx/pptx 共用此实现。
+    """
+    rows = tbl.rows
+    if not rows:
+        return ""
+    is_docx = all(hasattr(c, "_tc") for c in rows[0].cells)
+    total_cols = max((len(r.cells) for r in rows), default=0)
+    if total_cols == 0:
+        return ""
+
+    grid_rows: list[dict[int, str]] = []
+    for row in rows:
+        seen: set[int] = set()
+        row_cells: dict[int, str] = {}
+        for col_idx, cell in enumerate(row.cells):
+            tc = cell._tc if is_docx else None
+            key = id(tc) if is_docx else id(cell)
+            if key in seen:
+                continue
+            seen.add(key)
+            # 纵向合并延续格（vMerge=continue）：值在 restart 格，此处留空保对齐
+            if is_docx and tc.vMerge == "continue":
+                row_cells[col_idx] = ""
+            else:
+                # 单元格内换行/多空白会破坏 Markdown 表格行结构，规范为单空格
+                row_cells[col_idx] = " ".join(cell.text.split())
+        if any(row_cells.values()):
+            grid_rows.append(row_cells)
+    if not grid_rows:
+        return ""
+
+    lines: list[str] = []
+    for r_idx, row_cells in enumerate(grid_rows):
+        cells_out = [row_cells.get(c, "") for c in range(total_cols)]
+        lines.append("| " + " | ".join(cells_out) + " |")
+        if r_idx == 0:
+            lines.append("| " + " | ".join(["---"] * total_cols) + " |")
+    return "\n".join(lines)
+
+
+# ── Docling 单例（PDF 解析 backend，arq worker 并发下只加载一次）──────────────
+_DOCLING_CONVERTER = None
+_DOCLING_CONVERTER_LOCK = threading.Lock()
+
+
+def _get_docling_converter():
+    """模块级 DocumentConverter 单例（首次加载用 Lock 守护）。
+
+    读 settings.pdf（do_ocr / ocr_provider）配置 PdfPipelineOptions。docling 未装时
+    抛 ImportError，由调用方 _extract_pdf_sections_docling 捕获 → 返回 []（不降级）。
+    配置变更需重启进程（单例只建一次）。
+    """
+    global _DOCLING_CONVERTER
+    if _DOCLING_CONVERTER is None:
+        with _DOCLING_CONVERTER_LOCK:
+            if _DOCLING_CONVERTER is None:
+                from settings import get_settings
+
+                cfg = get_settings().pdf
+                from docling.document_converter import (
+                    DocumentConverter,
+                    PdfFormatOption,
+                )
+                from docling.datamodel.pipeline_options import (
+                    PdfPipelineOptions,
+                    RapidOcrOptions,
+                )
+
+                pipeline = PdfPipelineOptions()
+                pipeline.do_ocr = bool(cfg.do_ocr)
+                if cfg.ocr_provider == "rapid":
+                    pipeline.ocr_options = RapidOcrOptions()
+                _DOCLING_CONVERTER = DocumentConverter(
+                    format_options={"pdf": PdfFormatOption(pipeline_options=pipeline)}
+                )
+    return _DOCLING_CONVERTER
+
+
+def _docling_item_page(item) -> int:
+    """从 Docling item.prov 取首个页码（1-based）；无 provenance 返回 0。"""
+    prov = getattr(item, "prov", None) or []
+    for p in prov:
+        page_no = getattr(p, "page_no", None)
+        if page_no:
+            return int(page_no)
+    return 0
 
 
 class FileTypeRouter:
@@ -260,34 +356,7 @@ class FileTypeRouter:
             logger.warning("Failed to open .docx %s: %s", p.name, exc)
             return []
 
-        # Build a lookup: docx table objects → their serialized text
-        def _serialize_table(tbl) -> str:
-            rows = tbl.rows
-            if not rows:
-                return ""
-            # Treat first row as header if it contains non-empty cells
-            first_cells = [c.text.strip() for c in rows[0].cells]
-            has_header = any(first_cells)
-            headers = first_cells if has_header else []
-            lines: list[str] = []
-            start = 1 if has_header else 0
-            if has_header:
-                lines.append(" | ".join(h for h in headers if h))
-            for row in rows[start:]:
-                cells = [c.text.strip() for c in row.cells]
-                if not any(cells):
-                    continue
-                if headers:
-                    pairs = []
-                    for h, v in zip(headers, cells):
-                        if h and v:
-                            pairs.append(f"{h}: {v}")
-                        elif v:
-                            pairs.append(v)
-                    lines.append(" | ".join(pairs))
-                else:
-                    lines.append(" | ".join(c for c in cells if c))
-            return "\n".join(lines)
+        # 表格序列化用模块级 serialize_table（docx/pptx 共用，见文件顶部）
 
         # Walk body XML children to preserve paragraph/table order per section
         body = d.element.body
@@ -343,7 +412,7 @@ class FileTypeRouter:
             elif tag == "tbl":
                 tbl_obj = tbl_map.get(id(child))
                 if tbl_obj is not None:
-                    serialized = _serialize_table(tbl_obj)
+                    serialized = serialize_table(tbl_obj)
                     if serialized:
                         current_parts.append(serialized)
 
@@ -366,32 +435,8 @@ class FileTypeRouter:
 
     @classmethod
     def _serialize_pptx_table(cls, table) -> str:
-        """Serialize a python-pptx table (same header-row logic as DOCX)."""
-        rows = table.rows
-        if not rows:
-            return ""
-        first_cells = [c.text.strip() for c in rows[0].cells]
-        has_header = any(first_cells)
-        headers = first_cells if has_header else []
-        lines: list[str] = []
-        start = 1 if has_header else 0
-        if has_header:
-            lines.append(" | ".join(h for h in headers if h))
-        for row in rows[start:]:
-            cells = [c.text.strip() for c in row.cells]
-            if not any(cells):
-                continue
-            if headers:
-                pairs = []
-                for h, v in zip(headers, cells):
-                    if h and v:
-                        pairs.append(f"{h}: {v}")
-                    elif v:
-                        pairs.append(v)
-                lines.append(" | ".join(pairs))
-            else:
-                lines.append(" | ".join(c for c in cells if c))
-        return "\n".join(lines)
+        """Serialize a python-pptx table（委托模块级 serialize_table，与 DOCX 同逻辑）。"""
+        return serialize_table(table)
 
     @classmethod
     def extract_pptx_sections(cls, file_path: str) -> list[dict]:
@@ -490,6 +535,127 @@ class FileTypeRouter:
         except Exception as exc:
             logger.warning("Failed to extract PDF text %s: %s", file_path, exc)
             return ""
+
+    @classmethod
+    def extract_pdf_sections(cls, file_path: str, backend: str = "docling") -> list[dict]:
+        """Parse a .pdf → sections（与 extract_docx_sections 同构：[{title, content, page}]）。
+
+        backend="docling"（默认）：Docling 单引擎全包（版面/表格/标题/页码 + 扫描件 OCR），
+            表格原子化为独立 section（不锯断）；标题(label=section_header)开新 section。
+        backend="mupdf"：PyMuPDF get_toc() 切章节 + page.get_text() + 页码注入，
+            轻量纯 CPU（无 torch）；无 OCR、无表格原子化。
+        选定 backend 失败 → logger.warning + 返回 []（该文件跳过，**不切到另一个 backend**）。
+        要换 backend 改 settings.pdf.backend 重启，无运行时降级。
+        """
+        if backend == "mupdf":
+            return cls._extract_pdf_sections_mupdf(file_path)
+        return cls._extract_pdf_sections_docling(file_path)
+
+    @classmethod
+    def _extract_pdf_sections_mupdf(cls, file_path: str) -> list[dict]:
+        """mupdf backend：fitz.get_toc() 切章节 + page.get_text() + 页码 → sections。"""
+        try:
+            import fitz  # PyMuPDF
+        except ImportError:
+            logger.warning("PyMuPDF 未安装，PDF(mupdf backend) 跳过: %s", file_path)
+            return []
+        try:
+            doc = fitz.open(file_path)
+        except Exception as exc:
+            logger.warning("mupdf 打开 PDF 失败 %s: %s", file_path, exc)
+            return []
+        try:
+            toc = doc.get_toc()  # [[level, title, page_1based], ...]；无书签 → []
+            if not toc:
+                text = "\n\n".join(p.get_text() for p in doc)
+                return [{"title": "", "content": text, "page": 1}] if text.strip() else []
+            sections: list[dict] = []
+            n = doc.page_count
+            for i, (_lvl, title, start_page) in enumerate(toc):
+                end_page = toc[i + 1][2] - 1 if i + 1 < len(toc) else n
+                end_page = min(end_page, n)
+                content = "\n\n".join(
+                    doc[p].get_text() for p in range(start_page - 1, end_page)
+                )
+                if content.strip():
+                    sections.append({"title": title, "content": content, "page": start_page})
+            return sections
+        except Exception as exc:
+            logger.warning("mupdf 解析 PDF 失败 %s: %s", file_path, exc)
+            return []
+        finally:
+            doc.close()
+
+    @classmethod
+    def _extract_pdf_sections_docling(cls, file_path: str) -> list[dict]:
+        """docling backend：DocumentConverter → DoclingDocument → sections（表格原子化）。"""
+        try:
+            converter = _get_docling_converter()
+        except ImportError as exc:
+            logger.error(
+                "backend=docling 但 docling 依赖未装，该 PDF 跳过（不降级 mupdf）%s: %s",
+                file_path, exc,
+            )
+            return []
+        try:
+            result = converter.convert(file_path)
+            ddoc = result.document
+        except Exception as exc:
+            logger.warning("docling 解析 PDF 失败 %s: %s", file_path, exc)
+            return []
+
+        sections: list[dict] = []
+        current_title: str | None = None
+        current_parts: list[str] = []
+        current_page: int = 0
+
+        def _flush() -> None:
+            nonlocal current_parts, current_page
+            if current_parts:
+                content = "\n\n".join(current_parts)
+                current_parts = []
+                if content.strip():
+                    sections.append({
+                        "title": current_title or "",
+                        "content": content,
+                        "page": current_page,
+                    })
+            current_page = 0
+
+        for item, _level in ddoc.iterate_items():
+            label = getattr(item, "label", "")
+            page = _docling_item_page(item) or current_page
+            if label == "section_header":
+                text = (getattr(item, "text", "") or "").strip()
+                if text:
+                    _flush()
+                    current_title = text
+                    current_page = page or current_page
+            elif label == "table":
+                _flush()
+                try:
+                    tbl_md = item.export_to_markdown(doc=ddoc)
+                except Exception:
+                    tbl_md = getattr(item, "text", "") or ""
+                if tbl_md and tbl_md.strip():
+                    sections.append({
+                        "title": f"{current_title or ''}（表格）",
+                        "content": tbl_md,
+                        "page": page,
+                    })
+            else:  # paragraph / list_item / caption / ...
+                text = (getattr(item, "text", "") or "").strip()
+                if text:
+                    current_parts.append(text)
+                    if not current_page:
+                        current_page = page
+        _flush()
+
+        if not sections:  # 无标题无表格 → 整文档单 section
+            md = ddoc.export_to_markdown()
+            if md and md.strip():
+                sections.append({"title": "", "content": md, "page": 0})
+        return sections
 
     @classmethod
     async def read_text_file(cls, file_path: str) -> str:

@@ -137,3 +137,36 @@ def test_always_injection(tmp_path):
     manifest = render_skills_manifest(svc.summary_entries())
     assert "- **house**" not in manifest   # always 不进 manifest
     assert "- **ondemand**" in manifest
+
+
+def test_render_manifest_truncates_long_description():
+    """单条 description 超长 → 截断到 _MANIFEST_DESC_MAX_CHARS 并收省略号（对齐官方 ~100 词/skill）。"""
+    entries = [SkillSummaryEntry(name="big", description="字" * 500)]
+    out = render_skills_manifest(entries)
+    assert "字" * 500 not in out      # 未整段塞入
+    assert "…" in out                 # 带省略号
+    assert "- **big**" in out         # 条目仍在
+
+
+def test_render_manifest_entry_cap_drops_tail(monkeypatch):
+    """条数超上限：按 personal>course>builtin 优先级从尾部裁剪并计数。"""
+    import core.skills.skill_service as ss
+    monkeypatch.setattr(ss, "_MANIFEST_MAX_ENTRIES", 3)
+    monkeypatch.setattr(ss, "_MANIFEST_MAX_CHARS", 100_000)  # 让条数成为唯一约束
+    entries = [SkillSummaryEntry(name=f"s{i}", description=f"desc{i}") for i in range(5)]
+    out = render_skills_manifest(entries)
+    assert "- **s0**" in out and "- **s2**" in out          # 前 3 条保留
+    assert "- **s3**" not in out and "- **s4**" not in out  # 尾部 2 条裁掉
+    assert "另有 2 个" in out                                # 省略计数准确
+
+
+def test_render_manifest_char_budget_drops_tail(monkeypatch):
+    """字符预算触发（条数未超）：从尾部移除并计数，首条（最高优先级）必保留。"""
+    import core.skills.skill_service as ss
+    monkeypatch.setattr(ss, "_MANIFEST_MAX_ENTRIES", 100)
+    monkeypatch.setattr(ss, "_MANIFEST_MAX_CHARS", 200)     # 极小预算，触发字符裁剪
+    entries = [SkillSummaryEntry(name=f"x{i}", description="abcdefghij") for i in range(10)]
+    out = render_skills_manifest(entries)
+    assert "- **x0**" in out        # 首条必保留
+    assert "- **x9**" not in out    # 尾条必被裁
+    assert "另有" in out            # 必然有省略计数

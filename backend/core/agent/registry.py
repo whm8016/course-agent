@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
+
+if TYPE_CHECKING:
+    from core.context import UnifiedContext
 
 from core.agent.tool_protocol import ToolResult
 
@@ -122,6 +125,14 @@ def register_builtins(registry: ToolRegistry) -> None:
     )
     from core.agentic.dynamic_tools import LOAD_TOOLS_SCHEMA
     from core.bot.cron_tool import CRON_SCHEMA, execute_cron
+    from core.academic.tools import (
+        QUERY_GRADES_SCHEMA,
+        QUERY_MISTAKES_SCHEMA,
+        QUERY_TIMETABLE_SCHEMA,
+        execute_query_grades,
+        execute_query_mistakes,
+        execute_query_timetable,
+    )
 
     executor_by_name: dict[str, ToolExecutor] = {
         "rag": _execute_rag,
@@ -133,6 +144,9 @@ def register_builtins(registry: ToolRegistry) -> None:
         "solve_finish_step": _execute_solve_finish_step,
         "solve_replan": _execute_solve_replan,
         "cron": execute_cron,
+        "query_timetable": execute_query_timetable,
+        "query_grades": execute_query_grades,
+        "query_mistakes": execute_query_mistakes,
     }
     schema_by_name: dict[str, dict[str, Any]] = {
         s["function"]["name"]: s for s in TOOLS_OPENAI_SCHEMA
@@ -140,6 +154,9 @@ def register_builtins(registry: ToolRegistry) -> None:
     schema_by_name["read_skill"] = READ_SKILL_SCHEMA
     schema_by_name["load_tools"] = LOAD_TOOLS_SCHEMA
     schema_by_name["cron"] = CRON_SCHEMA
+    schema_by_name["query_timetable"] = QUERY_TIMETABLE_SCHEMA
+    schema_by_name["query_grades"] = QUERY_GRADES_SCHEMA
+    schema_by_name["query_mistakes"] = QUERY_MISTAKES_SCHEMA
 
     for name, executor in executor_by_name.items():
         schema = schema_by_name.get(name)
@@ -161,10 +178,25 @@ def get_tool_registry() -> ToolRegistry:
     return _registry
 
 
+def get_tool_schemas(context: UnifiedContext) -> list[dict[str, Any]] | None:
+    """根据 context.enabled_tools 过滤并返回对应的 OpenAI tool schemas。
+
+    registry 是 schema 的单一数据源；context.enabled_tools 为空时返回 None（禁用工具）。
+    供 run_agent_loop 及各 pipeline（solve/research/quiz）派生本轮可用工具——原先此派生
+    逻辑藏在 core.agentic.loop 的私有 _get_tool_schemas 里被跨模块 import（封装泄漏），
+    现作为 registry 的公开 API。
+    """
+    if not context.enabled_tools:
+        return None
+    schemas = get_tool_registry().schemas_for(context.enabled_tools)
+    return schemas or None
+
+
 __all__ = [
     "ToolEntry",
     "ToolExecutor",
     "ToolRegistry",
     "register_builtins",
     "get_tool_registry",
+    "get_tool_schemas",
 ]

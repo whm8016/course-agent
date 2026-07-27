@@ -1,4 +1,4 @@
-"""DynamicToolResolver — 取代 ``_get_tool_schemas`` 调用的动态 schema 组装层。
+"""DynamicToolResolver — 取代 ``core.agent.registry.get_tool_schemas`` 调用的动态 schema 组装层。
 
 组装本轮完整 tool schema list：``base``（静态 schema 按 enabled_tools 过滤）
 + ``read_skill``（skills_manifest 非空时）+ ``load_tools``（有 deferred pool 时）
@@ -45,6 +45,15 @@ _CURRENT_LOADER: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "deferred_loader", default=None
 )
 
+# 当前 turn 已读 skill 的 (name, file) 集合（execute_tool("read_skill") 经此去重，
+# 避免模型同 turn 重复读同一 skill 把全文反复塞进 messages）。chat_pipeline 每 turn
+# set 空 set / finally reset；未 set 时返回 None（_execute_read_skill 此时跳过去重，
+# 保持直调场景如单测的向后兼容）。best-effort：同 task 内 _execute_read_skill 无 await，
+# 协程不会在「查 log → add」之间切换，故天然无竞态；最坏（未来 read 改异步）仅多读一次，无需加锁。
+_CURRENT_READ_SKILL_LOG: contextvars.ContextVar[set | None] = contextvars.ContextVar(
+    "read_skill_log", default=None
+)
+
 
 def current_deferred_loader() -> Any:
     return _CURRENT_LOADER.get()
@@ -54,6 +63,21 @@ def reset_deferred_loader(token: Any) -> None:
     """turn 结束时清理 loader（token 来自 resolve 返回值）。"""
     if token is not None:
         _CURRENT_LOADER.reset(token)
+
+
+def set_read_skill_log() -> contextvars.Token:
+    """turn 开始时初始化空去重集合，返回 reset 用 token。"""
+    return _CURRENT_READ_SKILL_LOG.set(set())
+
+
+def current_read_skill_log() -> set | None:
+    return _CURRENT_READ_SKILL_LOG.get()
+
+
+def reset_read_skill_log(token: contextvars.Token) -> None:
+    """turn 结束时清理 read_skill 去重集合。"""
+    if token is not None:
+        _CURRENT_READ_SKILL_LOG.reset(token)
 
 
 def resolve(
@@ -76,17 +100,10 @@ def resolve(
     # read_skill（skills_manifest 非空时）
     if context.skills_manifest:
         base.append(_registry.get("read_skill").schema)
-    # write_memory 始终挂载（用户明确说偏好时用）
-    if context.user_id:
-        wm = _registry.get("write_memory")
-        if wm:
-            base.append(wm.schema)
-
-    # read_memory 按需挂载（有记忆内容时才挂）
-    if context.user_id and context.metadata.get("has_memory"):
-        rm = _registry.get("read_memory")
-        if rm:
-            base.append(rm.schema)
+    # write_memory / read_memory 工具已移除（plan 第三批-4 清死代码）：原分支挂载的 schema 在
+    # registry 从未注册（_registry.get 恒 None → if 守卫恒不进入），是未接线的半成品死代码；
+    # 配套的 read executor mem0_client.get_all_text 与 has_memory 元数据已同步删除。如需恢复
+    # agent 记忆读写能力，须先在 register_builtins 补 schema + executor 再在此挂载。
 
     # deferred MCP 工具（渐进式揭示）
     token = None
@@ -130,5 +147,8 @@ __all__ = [
     "LOAD_TOOLS_SCHEMA",
     "current_deferred_loader",
     "reset_deferred_loader",
+    "current_read_skill_log",
+    "reset_read_skill_log",
+    "set_read_skill_log",
     "resolve",
 ]

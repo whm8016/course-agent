@@ -11,10 +11,12 @@ import logging
 import time
 from typing import Any
 
+from core.agentic.context_policy import cap_tool_result
 from core.agentic.types import DispatchOutcome, ToolCall
 from core.observability import log_flow
 from core.observability.metrics import observe_tool_call
 from core.stream_bus import StreamBus
+from settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +72,20 @@ async def dispatch_tool_calls(
                          tool_name=tc.name, elapsed_ms=_elapsed)
 
             await stream.emit({"type": "tool_result", "tool": tc.name, "content": content[:2000]})
+            # 写入 messages 的 tool content：默认全量（行为等价）；开启 context_policy 时单条
+            # 上限裁（cap_tool_result 头尾保留），消除「前端事件截 2000 / messages 收全量」的不对称。
+            # 前端事件（上一行 content[:2000]）保持现状，两者解耦。
+            _cp = get_settings().context_policy
+            _msg_content = (
+                cap_tool_result(content, _cp.tool_result_max_chars)
+                if _cp.enabled and _cp.tool_result_max_chars > 0
+                else content
+            )
             msg: dict[str, Any] = {
                 "role": "tool",
                 "tool_call_id": tc.id,
                 "name": tc.name,
-                "content": content,
+                "content": _msg_content,
             }
             if pause_payload is not None:
                 msg["_pause_payload"] = pause_payload

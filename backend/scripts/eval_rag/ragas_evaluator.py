@@ -252,47 +252,88 @@ def _safe_float(v: Any) -> float:
     return f
 
 
+def _is_invalid_score(v: Any) -> bool:
+    """ragas 分数是否是评测器异常（NaN/None/非数值）。
+
+    ragas Executor 把判分异常静默转成 np.nan，与"真判 0"在最终分数上无法区分——
+    这里用原始值是否 NaN/None/非数值 来识别"判崩了"，供均值剔除与排除清单使用。
+    """
+    import math
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return True
+    return math.isnan(f) or math.isinf(f)
+
+
 def _avg_from_per_question(
-    per_q: list[dict[str, float]], metric_names: list[str]
+    per_q: list[dict[str, float]], metric_names: list[str],
+    invalid: dict[str, list[int]] | None = None,
 ) -> dict[str, float]:
-    """从逐条分数算各指标均值（逐条已 _safe_float 填充，无 NaN，直接平均）。"""
+    """从逐条分数算各指标均值。
+
+    invalid 给出每个指标"判崩了（NaN）"的样本索引，这些不计入均值（分母减一），
+    避免 RAGAS 评测器异常把假性 0 分灌进均值、系统性拉低 faithfulness/recall。
+    """
     if not per_q:
         return {m: 0.0 for m in metric_names}
-    return {m: sum(row.get(m, 0.0) for row in per_q) / len(per_q) for m in metric_names}
+    invalid = invalid or {m: [] for m in metric_names}
+    out = {}
+    for m in metric_names:
+        bad = set(invalid.get(m, []))
+        valid = [row.get(m, 0.0) for i, row in enumerate(per_q) if i not in bad]
+        out[m] = sum(valid) / len(valid) if valid else 0.0
+    return out
 
 
 def _extract_scores(
     result: Any, metric_names: list[str]
-) -> tuple[dict[str, float], list[dict[str, float]]]:
-    """从 ragas evaluate() 返回值提取 (整体均值, 逐条分数列表)。
+) -> tuple[dict[str, float], list[dict[str, float]], dict[str, list[int]]]:
+    """从 ragas evaluate() 返回值提取 (整体均值, 逐条分数列表, 各指标判崩样本索引)。
 
     逐条分数直接来自单次 evaluate 的结果（每条样本一行/一项），无需逐条重跑——
     这是 Bug 3 的修复核心：旧实现要么把整体均值复制 N 遍充作逐条，要么逐条重跑 N 次 API。
     metric 列名与 metric_names 一致（collections 指标的 name 属性决定列名）。
+
+    per_q 结构不变（{metric: float}），判崩（NaN）样本填 0.0 保持 CSV 可用，不波及下游；
+    判崩题号单独放进 invalid（{metric: [idx...]}），供均值剔除与排除清单。
     """
+
+    def _build(scores_iter):
+        per_q = []
+        invalid = {m: [] for m in metric_names}
+        for i, s in enumerate(scores_iter):
+            # 兼容 dict 与 pandas Series（二者都有 .get）
+            if not hasattr(s, "get"):
+                continue
+            row = {}
+            for m in metric_names:
+                raw = s.get(m)
+                if _is_invalid_score(raw):
+                    invalid[m].append(i)
+                    row[m] = 0.0
+                else:
+                    row[m] = float(raw)
+            per_q.append(row)
+        return per_q, invalid
+
+    empty_invalid = {m: [] for m in metric_names}
     # ragas 0.4: EvaluationResult.scores 是 list[dict]，每条样本一项
     scores_list = getattr(result, "scores", None)
     if isinstance(scores_list, list) and scores_list:
-        per_q = [
-            {m: _safe_float(s.get(m)) for m in metric_names}
-            for s in scores_list
-            if isinstance(s, dict)
-        ]
-        return _avg_from_per_question(per_q, metric_names), per_q
+        per_q, invalid = _build(scores_list)
+        return _avg_from_per_question(per_q, metric_names, invalid), per_q, invalid
 
     # to_pandas fallback（ragas 0.2/0.4 通用）
     if hasattr(result, "to_pandas"):
         df = result.to_pandas()
-        per_q = [
-            {m: _safe_float(row.get(m)) for m in metric_names}
-            for _, row in df.iterrows()
-        ]
-        return _avg_from_per_question(per_q, metric_names), per_q
+        per_q, invalid = _build(row for _, row in df.iterrows())
+        return _avg_from_per_question(per_q, metric_names, invalid), per_q, invalid
 
     # fallback: dict 形式（无逐条信息）
     if isinstance(result, dict):
-        return ({k: _safe_float(v) for k, v in result.items()}, [])
-    return {}, []
+        return ({k: _safe_float(v) for k, v in result.items()}, [], empty_invalid)
+    return {}, [], empty_invalid
 
 
 # ---------------------------------------------------------------------------
@@ -327,7 +368,7 @@ def evaluate_mode(
             embeddings=embeddings,
             show_progress=False,
         )
-        avg, per_q = _extract_scores(result, metric_names)
+        avg, per_q, invalid = _extract_scores(result, metric_names)
         # Cost 估算依据：ragas EvaluationResult.total_tokens（本轮该模式总消耗）
         # ragas 0.4.3 的 total_tokens 是方法（非属性），需兼容调用
         _tt = getattr(result, "total_tokens", 0)
@@ -336,7 +377,7 @@ def evaluate_mode(
         except Exception:
             _tt = 0
         total_tokens = int(_tt or 0)
-        return {"avg": avg, "per_question": per_q, "total_tokens": total_tokens}
+        return {"avg": avg, "per_question": per_q, "total_tokens": total_tokens, "invalid": invalid}
     except Exception as e:
         logger.error("ragas evaluate 失败: %s", e)
-        return {"avg": {}, "per_question": []}
+        return {"avg": {}, "per_question": [], "invalid": {}}

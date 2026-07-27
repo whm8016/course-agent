@@ -45,7 +45,7 @@ async def test_solve_isolates_conversation_history():
             new=AsyncMock(return_value=CommonContextLayers()),
         ),
         patch("core.solve.pipeline.describe_images", new=AsyncMock(side_effect=lambda c, t, r: t)),
-        patch("core.solve.pipeline._get_tool_schemas", return_value=[]),
+        patch("core.solve.pipeline.get_tool_schemas", return_value=[]),
         patch("core.solve.pipeline.run_agent_loop", new=AsyncMock(side_effect=_capture_run)),
     ):
         await DeepSolvePipeline().run("解 x+1=3", ctx, bus)

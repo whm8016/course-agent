@@ -45,6 +45,11 @@ class SolveSession:
     steps: list[SolveStep] = field(default_factory=list)
     replans: int = 0
     max_replans: int = DEFAULT_MAX_REPLANS
+    # force replan 信号（消融开关默认关）：finish_step 连续未命中有效步骤时计数累加；
+    # session.force_replan_gate 开 + 计数达阈值 → tool_registry 返回里追加"请 replan"强制提示。
+    # pipeline.run 按 context.metadata["solve_force_replan"] 设置开关；默认 False 行为零变化。
+    consecutive_finish_failures: int = 0
+    force_replan_gate: bool = False
 
     def set_plan(self, analysis: str, steps: list[tuple[str, str]]) -> None:
         self.analysis = analysis
@@ -63,7 +68,11 @@ class SolveSession:
             if step.id == step_id:
                 step.done = True
                 step.summary = summary.strip()
+                # 成功推进→连续失败归零（与 force replan 门的失败计数配对）
+                self.consecutive_finish_failures = 0
                 return step
+        # 未知 step_id（模型传错 / 计划不适用）→连续失败+1，达阈值时 finish_step 强制提示 replan
+        self.consecutive_finish_failures += 1
         return None
 
     def next_step(self) -> SolveStep | None:
@@ -87,6 +96,8 @@ class SolveSession:
         self.analysis = ""
         self.steps = []
         self.replans = 0
+        self.consecutive_finish_failures = 0
+        self.force_replan_gate = False  # 回初态（pipeline.run 会按开关重设）
 
 
 _SESSIONS: "OrderedDict[str, SolveSession]" = OrderedDict()

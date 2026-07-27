@@ -2,8 +2,8 @@
 
 路由完全由上层 Orchestrator + CapabilityRegistry 按 context.mode 完成：
   chat          → ChatCapability         → ChatPipeline (本文件) → run_agent_loop
-  deep_solve    → DeepSolveCapability    → DeepSolvePipeline（独立三阶段）
-  deep_research → DeepResearchCapability → ResearchPipeline（独立三阶段）
+  deep_solve    → DeepSolveCapability    → DeepSolvePipeline（单 agent loop + solve 工具状态机）
+  deep_research → DeepResearchCapability → ResearchPipeline（四阶段：rephrase → decompose → research → reporting）
   quiz          → QuizCapability
 
 本文件只负责 chat 模式：组装 system prompt → 驱动 agent loop。
@@ -25,11 +25,16 @@ from core.pipeline_common import (
     resolve_profile_runtime,
 )
 from core.stream_bus import StreamBus
+from settings import get_settings
 
 logger = logging.getLogger(__name__)
 
 # chat agent loop 行为规范（外部化 YAML，agentic_chat.yaml）
 _CHAT_PROMPT_PATH = Path(__file__).parent / "prompts" / "zh" / "chat.yaml"
+
+# system prompt 总预算护栏阈值（字符）。超阈值打 WARNING + 各段字符分解，定位是哪一层膨胀。
+# 只告警不截断——system prompt 静默截断会破坏 prefix cache 且难排查。
+_SYSTEM_PROMPT_WARN_CHARS = 8_000
 
 
 def assemble_system_prompt(
@@ -99,6 +104,31 @@ class ChatPipeline:
                  user_provider=bool(context.user_id),
                  model_override=str(rt.text_model) if rt.text_model else "none")
 
+        # ── 成本配额（第四批）：超 daily_budget → 降级到便宜档 fast_model（只降级不拒绝）──
+        # 软限流：硬拒绝会造成「上一轮刚好超限→下一轮被锁死」；降级 cheaper model 控本又保可用。
+        # 仅平台 profile 有 fast_model 时实际切换；用户自配 provider 或无便宜档→仅记录不降级。
+        _cq = get_settings().cost_quota
+        if _cq.enabled and _cq.degrade_model and context.user_id:
+            from core.quota.cost_quota import check_quota
+            over, used, budget = await check_quota(context.user_id, context.course_id)
+            if over:
+                from dataclasses import replace
+                from core.llm.catalog import active_profile_id, get_profile, profile_fast_model
+                _pid = (context.llm_profile_id or "").strip() or active_profile_id()
+                _prof = get_profile(_pid)
+                _fast = profile_fast_model(_prof) if _prof else None
+                if _fast and _fast != rt.text_model:
+                    rt = replace(rt, text_model=_fast)
+                    log_flow("chat.cost_quota_degraded",
+                             user_id=context.user_id, course_id=context.course_id,
+                             used_usd=used, budget_usd=budget,
+                             from_model=context.llm_profile_id or "default",
+                             to_model=_fast)
+                else:
+                    log_flow("chat.cost_quota_over_no_fast_model",
+                             user_id=context.user_id, course_id=context.course_id,
+                             used_usd=used, budget_usd=budget)
+
         # ── 通用上下文层（course_prompt / bot_persona / always_skills / memory / session / now）──
         # include_skills=True：chat 挂 read_skill 工具，急切注入 always-on skill 全文。
         layers = await build_common_context_layers(context, include_skills=True)
@@ -165,6 +195,16 @@ class ChatPipeline:
                  tools_count=len(tool_schemas) if tool_schemas else 0,
                  skills_manifest=bool(context.skills_manifest),
                  elapsed_ms=int((time.perf_counter() - _t0) * 1000))
+        # system prompt 总预算护栏：超阈值打 WARNING 并记录各段字符数分解（降序），定位膨胀层。
+        if len(system_prompt) > _SYSTEM_PROMPT_WARN_CHARS:
+            seg = sorted(
+                ((k, len(v or "")) for k, v in prompt_kwargs.items() if v),
+                key=lambda x: -x[1],
+            )
+            logger.warning(
+                "system_prompt 超预算阈值 %d > %d chars；各段字符数(降序): %s",
+                len(system_prompt), _SYSTEM_PROMPT_WARN_CHARS, seg,
+            )
 
         # ── 两阶段图片处理（rt.text_model/binding 判断主模型能否看图）──────────
         # 主模型不支持 vision → 视觉模型描述成文字；支持 → 跳过，走 loop 内直注。
@@ -172,7 +212,14 @@ class ChatPipeline:
 
         # cron owner 注入（bot 对话：loop._run_turn 写入 metadata；web 无则不 set，cron 工具不挂载）
         from core.bot.cron_tool import reset_cron_owner, set_cron_owner
+        # read_skill 同轮去重集合（turn 级：每 turn set 空 / finally reset）
+        from core.agentic.dynamic_tools import (
+            reset_deferred_loader,
+            reset_read_skill_log,
+            set_read_skill_log,
+        )
         cron_token = set_cron_owner(context.metadata.get("cron_owner"))
+        rs_token = set_read_skill_log()
         try:
             await run_agent_loop(
                 context=context,
@@ -185,8 +232,8 @@ class ChatPipeline:
             )
         finally:
             reset_cron_owner(cron_token)
-            from core.agentic.dynamic_tools import reset_deferred_loader
             reset_deferred_loader(loader_token)
+            reset_read_skill_log(rs_token)
 
 
 __all__ = ["ChatPipeline"]

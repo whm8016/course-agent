@@ -6,6 +6,7 @@ LightRAG 仅负责 ainsert。
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -17,17 +18,15 @@ from typing import Literal, Optional
 from settings import get_settings
 INGEST_CHUNK_OVERLAP = get_settings().chunking.ingest_overlap
 INGEST_CHUNK_SIZE = get_settings().chunking.ingest_size
-LLAMA_CLOUD_API_KEY = get_settings().llamaparse.cloud_api_key.get_secret_value()
 LIGHTRAG_INGEST_BATCH_SIZE = get_settings().lightrag.ingest_batch_size
 LIGHTRAG_INGEST_CHUNKS_SNAPSHOT = get_settings().lightrag.ingest_chunks_snapshot
 LIGHTRAG_INGEST_CHUNKS_SUBDIR = get_settings().lightrag.ingest_chunks_subdir
 LIGHTRAG_SAVE_INGEST_CHUNKS = get_settings().lightrag.save_ingest_chunks
 LIGHTRAG_WORKDIR = get_settings().paths.lightrag_workdir
-from core.rag.llamaindex.indexing_documents import (
-    LLAMA_INDEX_CHUNK_OVERLAP,
-    LLAMA_INDEX_CHUNK_SIZE,
-    file_paths_to_llama_documents,
-)
+from core.rag.chunking.registry import get_chunk_strategy, register_chunk_strategy
+from core.rag.llamaindex.indexing_documents import file_paths_to_llama_documents
+from core.rag.llamaindex.file_routing import FileClassification
+from core.rag.source_utils import strip_chunk_suffix
 
 logger = logging.getLogger(__name__)
 
@@ -121,25 +120,11 @@ _TOKEN_OVERHEAD_PER_CHUNK = 2000
 # ── LlamaIndex（可选）────────────────────────────────────────────────────────
 try:
     from llama_index.core.node_parser import SentenceSplitter
-    from llama_index.core.schema import Document as LlamaDocument
     logger.info("LlamaIndex 可用，将使用智能文档解析")
 except ImportError as e:
     raise ImportError(
         "llama-index-core 未安装，请执行: pip install llama-index-core"
     ) from e
-
-# ── LlamaParse（可选，图像 PDF 专用）─────────────────────────────────────────
-try:
-    from llama_cloud_services import LlamaParse
-    _llamaparse_available = True
-except ImportError:
-    try:
-        from llama_parse import LlamaParse  # type: ignore[no-redef]
-        _llamaparse_available = True
-    except ImportError:
-        _llamaparse_available = False
-        logger.warning("llama-cloud-services 未安装，图像 PDF 将无法解析；请执行: pip install llama-cloud-services")
-    
 
 
 # ── 降级文本读取 ────────────────────────────────────────────────────────────
@@ -168,43 +153,133 @@ def _split_text(
     return chunks
 
 
-def _build_source_prefix(section: str = "", file_name: str = "") -> str:
+def _build_source_prefix(section: str = "", file_name: str = "", page: int = 0) -> str:
     """构建来源前缀，注入到 chunk 文本开头，供 LightRAG 实体抽取 LLM 可见章节/文件来源。
 
     DOCX/PPTX 有 section → 注入章节名；PDF/TXT/MD 无 section → 退化用文件名。
-    无任何来源信息时返回空串（不注入）。
+    page>0（PDF 独有页码）时追加 | 第N页。page 默认 0 → 现有 docx/sentence_splitter
+    调用不传 page，输出零变化（向后兼容）。
     """
+    parts: list[str] = []
     if section:
-        return f"【章节: {section}】\n"
-    if file_name:
-        return f"【来源: {file_name}】\n"
-    return ""
+        parts.append(f"章节: {section}")
+    elif file_name:
+        parts.append(f"来源: {file_name}")
+    if page > 0:
+        parts.append(f"第{page}页")
+    if not parts:
+        return ""
+    return f"【{' | '.join(parts)}】\n"
+
+
+# ── 切块策略分发（可插拔）─────────────────────────────────────────────────────
+
+
+def _chunk_by_sentence_splitter(documents: list) -> tuple[list[str], list[str]]:
+    """默认切块策略：LlamaIndex SentenceSplitter → chunks + sources。
+
+    从 parse_files 原逻辑原样提取（纯重构，行为不变）。每个 chunk 注入【章节/来源】
+    前缀，source 加 ::chunk-<idx> 全局唯一后缀。
+    """
+    nodes = SentenceSplitter(
+        chunk_size=INGEST_CHUNK_SIZE,
+        chunk_overlap=INGEST_CHUNK_OVERLAP,
+    ).get_nodes_from_documents(documents)
+
+    chunks: list[str] = []
+    chunk_sources: list[str] = []
+    for idx, n in enumerate(nodes):
+        content = n.get_content().strip()
+        if not content:
+            continue
+        meta = getattr(n, "metadata", None) or {}
+        file_path = str(meta.get("file_path", "") or "")
+        section = str(meta.get("section", "") or "")
+        file_name = str(meta.get("file_name", "") or "")
+        page = int(meta.get("page", 0) or 0)
+
+        prefix = _build_source_prefix(section=section, file_name=file_name, page=page)
+        chunks.append(f"{prefix}{content}" if prefix else content)
+        # 给每个 chunk 的来源加全局唯一后缀（::chunk-<node 索引>），规避 LightRAG 的
+        # filename 去重：同文件多 chunk 贴同一 file_path 会被标 DUPLICATE:filename 丢弃。
+        # Windows 文件名禁用 ':'、Linux 路径不含 '::'，故不与真实文件名冲突；
+        # 检索端 strip_chunk_suffix 会剥掉它还原真实文件名。
+        base_src = file_path if file_path else "unknown_source"
+        chunk_sources.append(f"{base_src}::chunk-{idx}")
+    return chunks, chunk_sources
+
+
+def _chunk_documents(
+    documents: list,
+    classification: FileClassification,
+    strategy: str,
+) -> tuple[list[str], list[str]]:
+    """切块策略分发（settings.chunking.strategy 扩展点）。
+
+    查 chunking registry 注册表分发（与 core/rag/registry.py 的检索器后端注册表同构）：
+    get_chunk_strategy(strategy) 取策略函数，以统一签名
+    (documents, classification, INGEST_CHUNK_SIZE) 调用。新增策略只需
+    register_chunk_strategy 一行，无需改本函数的分发代码（消除原先硬编码的 if/else）。
+
+    产出的 chunks/chunk_sources 格式与默认策略完全一致（前缀 + ::chunk-<idx>），
+    下游 _ingest_body 的 rag.ainsert(file_paths=...) 零改动。
+    """
+    return get_chunk_strategy(strategy)(documents, classification, INGEST_CHUNK_SIZE)
+
+
+def _chunk_sentence_splitter_strategy(
+    documents: list, classification: FileClassification, ingest_size: int
+) -> tuple[list[str], list[str]]:
+    """默认策略：全部 documents 走 _chunk_by_sentence_splitter（忽略 classification/ingest_size）。"""
+    return _chunk_by_sentence_splitter(documents)
+
+
+def _chunk_ragflow_manual_strategy(
+    documents: list, classification: FileClassification, ingest_size: int
+) -> tuple[list[str], list[str]]:
+    """ragflow_manual_docx 策略：DOCX 走 chunk_docx_structured（移植 RAGFlow Manual：
+    标题层级栈 + 表格原子化），非 DOCX documents 回退 _chunk_by_sentence_splitter。
+    混合策略——只对 DOCX 生效，PDF/TXT/PPTX 行为不变。"""
+    from core.rag.chunking.ragflow_manual_docx import chunk_docx_structured
+
+    # documents 里哪些来自 DOCX：用 resolved 绝对路径匹配（indexing_documents 存的
+    # file_path 是 resolved 绝对路径，classification.docx_files 是原始字符串）
+    docx_resolved = {str(Path(fp).resolve()) for fp in classification.docx_files}
+    docx_doc_indices = {
+        i for i, d in enumerate(documents)
+        if str(d.metadata.get("file_path", "")) in docx_resolved
+    }
+
+    chunks: list[str] = []
+    chunk_sources: list[str] = []
+
+    # DOCX：结构化切块（表格原子化 + 标题层级栈）
+    for fp in classification.docx_files:
+        ck_list, sec_list = chunk_docx_structured(fp, max_section_chars=ingest_size)
+        file_name = Path(fp).name
+        resolved_fp = str(Path(fp).resolve())
+        for i, (ck, sec) in enumerate(zip(ck_list, sec_list)):
+            prefix = _build_source_prefix(section=sec, file_name=file_name)
+            chunks.append(f"{prefix}{ck}" if prefix else ck)
+            # 同文件内 i 唯一 + resolved file_path 前缀 → 全局唯一，与默认策略等价
+            chunk_sources.append(f"{resolved_fp}::chunk-{i}")
+
+    # 非 DOCX：原 SentenceSplitter（排除 DOCX documents，避免 DOCX 被切两次）
+    non_docx_docs = [d for i, d in enumerate(documents) if i not in docx_doc_indices]
+    if non_docx_docs:
+        nd_chunks, nd_sources = _chunk_by_sentence_splitter(non_docx_docs)
+        chunks.extend(nd_chunks)
+        chunk_sources.extend(nd_sources)
+
+    return chunks, chunk_sources
+
+
+# 注册切块策略（模块加载时执行；新增策略在此加一行即可，_chunk_documents 分发结构不变）
+register_chunk_strategy("sentence_splitter", _chunk_sentence_splitter_strategy)
+register_chunk_strategy("ragflow_manual_docx", _chunk_ragflow_manual_strategy)
 
 
 # ── 核心解析函数 ─────────────────────────────────────────────────────────────
-
-_IMAGE_PDF_THRESHOLD = 0.3  # 空文档占比超过此值时认定为图像 PDF（扫描件）
-
-def _llamaparse_pdfs(pdf_paths: list[str]) -> list[LlamaDocument]:
-    """用 LlamaParse 解析图像 PDF，返回 LlamaIndex Document 列表。"""
-    if not _llamaparse_available or not LLAMA_CLOUD_API_KEY:
-        logger.warning(
-            "LlamaParse 不可用（llama-parse 未安装或 LLAMA_CLOUD_API_KEY 未配置），"
-            "图像 PDF 将跳过：%s",
-            pdf_paths,
-        )
-        return []
-
-    parser = LlamaParse(
-        api_key=LLAMA_CLOUD_API_KEY,
-        result_type="text",
-        language="ch_sim",
-    )
-    logger.info("LlamaParse 开始解析 %d 个 PDF...", len(pdf_paths))
-    docs = parser.load_data(pdf_paths)
-    logger.info("LlamaParse 解析完成: %d 个文档", len(docs))
-    return docs
-
 
 def parse_files(file_paths: list[str]) -> tuple[list[str], list[str], dict[str, list[str]]]:
     """
@@ -224,23 +299,6 @@ def parse_files(file_paths: list[str]) -> tuple[list[str], list[str], dict[str, 
         file_paths, log=logger
     )
 
-    empty_count = sum(1 for d in documents if not d.get_content().strip())
-    if (
-        documents
-        and empty_count / len(documents) > _IMAGE_PDF_THRESHOLD
-        and classification.parser_files
-    ):
-        logger.info(
-            "检测到图像 PDF（%d/%d 个文档内容为空），尝试 LlamaParse 重新解析...",
-            empty_count,
-            len(documents),
-        )
-        pdf_paths = list(classification.parser_files)
-        non_pdf_docs = [d for d in documents if d.get_content().strip()]
-        if pdf_paths:
-            parsed_docs = _llamaparse_pdfs(pdf_paths)
-            documents = non_pdf_docs + parsed_docs
-
     if not documents:
         logger.warning("摄入解析结果为空（无有效文档）")
         return [], [], {}
@@ -255,43 +313,117 @@ def parse_files(file_paths: list[str]) -> tuple[list[str], list[str], dict[str, 
         if content:
             doc_texts.setdefault(fp, []).append(content)
 
-    nodes = SentenceSplitter(
-        chunk_size=LLAMA_INDEX_CHUNK_SIZE,
-        chunk_overlap=LLAMA_INDEX_CHUNK_OVERLAP,
-    ).get_nodes_from_documents(documents)
-
-    # TextNode 继承 source Document 的 metadata（file_name/file_path/section）。
-    # 这里保留来源信息：chunk_sources 与 chunks 等长，供 rag.ainsert(file_paths=...)；
-    # 同时把章节/来源前缀注入 chunk 文本，让实体抽取 LLM 可见来源。
-    chunks: list[str] = []
-    chunk_sources: list[str] = []
-    for idx, n in enumerate(nodes):
-        content = n.get_content().strip()
-        if not content:
-            continue
-        meta = getattr(n, "metadata", None) or {}
-        file_path = str(meta.get("file_path", "") or "")
-        section = str(meta.get("section", "") or "")
-        file_name = str(meta.get("file_name", "") or "")
-
-        prefix = _build_source_prefix(section=section, file_name=file_name)
-        chunks.append(f"{prefix}{content}" if prefix else content)
-        # 给每个 chunk 的来源加全局唯一后缀（::chunk-<node 索引>），规避 LightRAG 的
-        # filename 去重：旧版 LightRAG 会按 file_path 判重，同一个 PDF 切出的多 chunk
-        # 贴同一个文件名 → 一个 batch 里只有第 1 个进库，其余被标 DUPLICATE:filename 丢弃
-        # （实测 16 个 chunk 的 batch 15 个被扔）。用 enumerate(nodes) 的全局序保证唯一，
-        # 跳过空 node 不影响。Windows 文件名禁用 ':'、Linux 路径也不含 '::'，故 '::chunk-'
-        # 不会与真实文件名冲突。检索端 _strip_source_suffix 会剥掉它还原真实文件名。
-        base_src = file_path if file_path else "unknown_source"
-        chunk_sources.append(f"{base_src}::chunk-{idx}")
+    # 切块策略分发（默认 sentence_splitter；ragflow_manual_docx 时 DOCX 走结构化切块，
+    # 非 DOCX 仍走 sentence_splitter）。详见 _chunk_documents。
+    strategy = get_settings().chunking.strategy
+    chunks, chunk_sources = _chunk_documents(documents, classification, strategy)
 
     logger.info(
-        "摄入解析完成: %d 个输入文件 → %d 个文档 → %d 个 chunk",
+        "摄入解析完成: %d 个输入文件 → %d 个文档 → %d 个 chunk（strategy=%s）",
         len(file_paths),
         len(documents),
         len(chunks),
+        strategy,
     )
     return chunks, chunk_sources, doc_texts
+
+
+# ── Phase 2: Contextual Chunking 接入辅助 ────────────────────────────────────
+
+def _load_contextual_cache(path: Path) -> dict[str, str]:
+    """加载磁盘缓存 {chunk_hash: enriched}；损坏/缺失返回空 dict。"""
+    try:
+        if path.exists():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                return data
+    except (OSError, json.JSONDecodeError):
+        logger.debug("contextual cache 读取失败，重新开始: %s", path)
+    return {}
+
+
+def _save_contextual_cache(path: Path, cache: dict[str, str]) -> None:
+    """持久化缓存，供重复索引复用（避免对同一 chunk 重复调 LLM）。"""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        logger.warning("contextual cache 保存失败: %s", e)
+
+
+async def _apply_contextual_enrichment(
+    course_id: str,
+    chunks: list[str],
+    sources: list[str],
+    doc_texts: dict[str, list[str]],
+    *,
+    model: str = "",
+) -> list[str]:
+    """对 chunks 做文档背景前缀注入，返回等长 enriched 列表。
+
+    按来源文件分组：同一文件的 chunks 共享该文件全文作 document_text（provider 侧
+    prompt caching 友好）。磁盘 cache 跨索引复用，单 chunk LLM 失败降级原文。
+    """
+    from core.rag.contextual_chunking import contextualize_chunks
+    from core.llm.llm import chat_complete
+
+    fast_model = model or get_settings().llm.fast_model or get_settings().llm.text_model
+
+    async def _llm_func(prompt: str) -> str:
+        return await chat_complete(
+            system_prompt="",
+            history=[],
+            user_message=prompt,
+            model=fast_model,
+            temperature=0.3,
+            max_tokens=200,
+        )
+
+    cache_path = _lightrag_ingest_chunks_dir(course_id) / "contextual_cache.json"
+    cache = _load_contextual_cache(cache_path)
+
+    # 按来源文件分组 chunk 索引，每组共享对应文件全文
+    groups: dict[str, list[int]] = {}
+    for i, src in enumerate(sources):
+        groups.setdefault(strip_chunk_suffix(src), []).append(i)
+
+    enriched = list(chunks)
+    for fp, idxs in groups.items():
+        doc_parts = doc_texts.get(fp) or []
+        document_text = "\n\n".join(doc_parts) if isinstance(doc_parts, list) else str(doc_parts)
+        group_chunks = [chunks[i] for i in idxs]
+        enc = await contextualize_chunks(
+            group_chunks, document_text, _llm_func, cache=cache,
+        )
+        for i, text in zip(idxs, enc):
+            enriched[i] = text
+
+    _save_contextual_cache(cache_path, cache)
+    logger.info(
+        "Contextual enrichment 完成 course=%s files=%d chunks=%d",
+        course_id, len(groups), len(chunks),
+    )
+    return enriched
+
+
+async def _index_batch_to_es(es_store, course_id: str, chunks: list[str], sources: list[str]) -> None:
+    """Phase 3: 把一批 chunk 写入 ES BM25 索引（chunk_id=content hash，作两系统 join key）。
+
+    失败仅告警不阻断 LightRAG 索引（ES 是增强路径，不可用则检索降级纯 dense）。
+    """
+    docs = [
+        {
+            "chunk_id": hashlib.md5(text.encode("utf-8")).hexdigest(),
+            "content": text,
+            "file_path": strip_chunk_suffix(src),
+        }
+        for text, src in zip(chunks, sources)
+        if text and text.strip()
+    ]
+    if docs:
+        ok = await es_store.index_chunks(docs, course_id=course_id)
+        if not ok:
+            logger.warning("ES 双写失败（不影响 LightRAG 索引）course=%s batch=%d", course_id, len(docs))
 
 
 # ── 完整摄入流水线 ───────────────────────────────────────────────────────────
@@ -405,6 +537,37 @@ async def ingest_to_lightrag(
         )
 
 
+def _append_image_desc_chunks(
+    all_chunks: list[str],
+    all_sources: list[str],
+    img_cache: Path,
+) -> int:
+    """Phase 4：把 VLM 图片描述作为独立文本 chunk 追加进 all_chunks/all_sources。
+
+    复用 image_extractor 写好的 desc_cache（dict[sha256(图), 描述]），不重花 VLM。
+    每条描述包成 `【图片描述】\n{desc}` 追加，source 用 `image_desc::img-{i}`
+    （与现有 file_path::chunk-idx 同构，ainsert 的 file_paths 不校验格式）。
+    chunks/sources 严格配对 append。返回追加条数。
+    desc_cache 不存在/空/读失败 → 降级返回 0，不抛异常（绝不阻断索引）。
+    """
+    try:
+        from core.rag.llamaindex.image_extractor import _load_desc_cache
+
+        img_descs = _load_desc_cache(img_cache)
+    except Exception as exc:
+        logger.warning("图片描述回填失败（降级跳过）: %s", exc)
+        return 0
+    added = 0
+    for desc in img_descs.values():
+        desc = (desc or "").strip()
+        if not desc:
+            continue
+        all_chunks.append(f"【图片描述】\n{desc}")
+        all_sources.append(f"image_desc::img-{added}")
+        added += 1
+    return added
+
+
 async def _ingest_body(
     course_id: str,
     file_paths: list[str],
@@ -454,6 +617,22 @@ async def _ingest_body(
     await _emit(5, parse_label, resume_from_chunk, 0, 0)
     logger.info("开始解析 %d 个文件 course=%s resume_from=%d", len(file_paths), course_id, resume_from_chunk)
     all_chunks, all_sources, doc_texts = await asyncio.to_thread(parse_files, file_paths)
+
+    # Phase 2: Contextual Chunking（可选）——给每个 chunk 注入文档背景前缀，提升
+    # embedding/BM25 命中率。仅当 chunking.contextual_enrichment 开启时执行；单 chunk
+    # LLM 失败降级原文，整体异常也不阻断索引。默认关闭，需 .env 显式开启。
+    _chunk_cfg = get_settings().chunking
+    if _chunk_cfg.contextual_enrichment and all_chunks:
+        try:
+            all_chunks = await _apply_contextual_enrichment(
+                course_id, all_chunks, all_sources, doc_texts,
+                model=_chunk_cfg.contextual_model,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Contextual enrichment 整体失败，降级原文 chunks course=%s: %s",
+                course_id, exc,
+            )
 
     # Step 1b: 图片摄入（复用 doc_texts，不再重复提取文本）
     # rag 由调用方通过 lease_instance 注入，Step 1b 与 Step 2 共用同一实例（H-10）。
@@ -524,6 +703,14 @@ async def _ingest_body(
         logger.warning("解析结果为空 course=%s", course_id)
         await _emit(100, "解析结果为空，无可索引内容", 0, 0, 0)
         return {"status": "empty", "chunks": 0, "files": len(file_paths), "images": 0}
+
+    # Phase 4: 图片描述回填（可选）——把 VLM 图片描述作为独立文本 chunk 追加，
+    # 让纯向量检索(fact)也能召回图片内容。复用 image_extractor 写好的 desc_cache，不重花 VLM。
+    # 默认关，需 CHUNKING__INLINE_IMAGE_DESCRIPTIONS=true。
+    if _chunk_cfg.inline_image_descriptions and not skip_images_on_resume:
+        added = _append_image_desc_chunks(all_chunks, all_sources, img_cache)
+        if added:
+            logger.info("图片描述回填 course=%s 追加 %d 条", course_id, added)
 
     await asyncio.to_thread(
         _persist_lightrag_ingest_chunks,
@@ -686,6 +873,12 @@ async def _ingest_body(
                     raise RuntimeError(f"LLM API 致命错误，索引中止: {err_msg[:300]}")
                 else:
                     logger.warning("非致命 LLM 错误（继续）: %s", errors[0])
+
+            # Phase 3: ES 双写（仅 settings.elasticsearch.enabled；失败仅告警不阻断）
+            from core.rag.es_client import get_es_store
+            es_store = get_es_store()
+            if es_store is not None:
+                await _index_batch_to_es(es_store, course_id, batch_chunks, batch_sources)
 
             done = already_done + consumed
             progress = 10 + int(done / total * 85)

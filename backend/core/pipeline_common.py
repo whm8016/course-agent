@@ -173,6 +173,17 @@ def assemble_common_context(layers: CommonContextLayers) -> str:
     )
 
 
+def with_common_prompt(task_system: str, layers: CommonContextLayers) -> str:
+    """任务提示词 + 通用上下文层拼接；通用层为空时只保留任务提示词。
+
+    solve/research/quiz 的通用入口：先 assemble_common_context 拼通用层，非空则与
+    task_system 用空行连接，否则原样返回 task_system（避免多余空行）。与 chat 的
+    assemble_system_prompt 同语义的薄包装，统一三处原先各自复制的 _with_common。
+    """
+    common = assemble_common_context(layers)
+    return f"{task_system}\n\n{common}" if common else task_system
+
+
 async def describe_images(
     ctx: "UnifiedContext", base_text: str, rt: ProfileRuntime
 ) -> str:
@@ -198,5 +209,6 @@ __all__ = [
     "resolve_profile_runtime",
     "build_common_context_layers",
     "assemble_common_context",
+    "with_common_prompt",
     "describe_images",
 ]

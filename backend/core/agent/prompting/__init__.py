@@ -100,7 +100,7 @@ def build_tool_hint_text(
 
     ``ToolRegistry.build_prompt_text``：按启用的工具名渲染提示。
 
-    过滤逻辑（与 ``_get_tool_schemas`` / ``DynamicToolResolver.resolve`` 同语义）：
+    过滤逻辑（与 ``core.agent.registry.get_tool_schemas`` / ``DynamicToolResolver.resolve`` 同语义）：
     - ``names`` 来自 ``context.enabled_tools``；空/None → 返回 ``""``（本轮无工具，
       不注入；与 schema 过滤一致）。
     - 按 ``names`` 顺序去重保留；缺 hint 文件（``short_description`` 空）的工具静默跳过。

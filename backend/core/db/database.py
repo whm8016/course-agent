@@ -304,6 +304,58 @@ class Enrollment(Base):
     )
 
 
+class CourseSchedule(Base):
+    """课程课表行（课程级，不带 user_id）。
+
+    由教师通过 REST API 录入；query_timetable 工具 JOIN Enrollment 限定「我选的课」。
+    weekday 用整数 1-7（1=周一 … 7=周日）便于排序与过滤；weeks 用字符串存原始表达
+    （如 "1-16" / "1,3,5,…"），不做结构化解析（业务简单、避免过度设计）。
+    """
+
+    __tablename__ = "course_schedules"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(12))
+    course_id = Column(String(64), nullable=False, index=True)
+    weekday = Column(Integer, nullable=False)            # 1=周一 … 7=周日
+    start_time = Column(String(16), nullable=False, default="")   # "HH:MM"
+    end_time = Column(String(16), nullable=False, default="")     # "HH:MM"
+    location = Column(String(128), nullable=False, default="")
+    teacher_name = Column(String(64), nullable=False, default="")
+    weeks = Column(String(64), nullable=False, default="")
+    note = Column(Text, nullable=False, default="")
+    created_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        Index("idx_course_schedule_course_weekday", "course_id", "weekday"),
+    )
+
+
+class Grade(Base):
+    """学生成绩记录（学生级，student_id 强绑定登录身份）。
+
+    由教师通过 REST API 批量 upsert；query_grades 工具强制 WHERE student_id==注入的
+    user_id（身份只走注入，schema 不暴露身份参数）。UniqueConstraint 保证同学生同课程
+    同条目唯一，upsert 靠 (student_id, course_id, item_name) 复合键。
+    """
+
+    __tablename__ = "grades"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(12))
+    student_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    course_id = Column(String(64), nullable=False)
+    item_name = Column(String(128), nullable=False)     # 期中考试 / 作业1 / …
+    score = Column(Float, nullable=False, default=0.0)
+    full_score = Column(Float, nullable=False, default=100.0)
+    graded_at = Column(Float, nullable=True)             # 判分时间戳；null=未判分
+    comment = Column(Text, nullable=False, default="")
+    created_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        UniqueConstraint("student_id", "course_id", "item_name", name="uq_grade_student_course_item"),
+        Index("idx_grade_student_course", "student_id", "course_id"),
+    )
+
+
 class UserSocialBinding(Base):
     """User ↔ social platform binding (QQ / Feishu)."""
 

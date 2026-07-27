@@ -1,0 +1,10 @@
+{
+  "capability": "chat",
+  "scores": {
+    "accuracy": 0.0
+  },
+  "passed": false,
+  "failures": [
+    "chat.accuracy = 0.000 < 阈值 0.7"
+  ]
+}

@@ -17,6 +17,7 @@ import pytest
 from core.agentic.types import LoopOutcome
 from core.context import UnifiedContext
 from core.pipeline_common import CommonContextLayers, ProfileRuntime
+from core.stream_bus import StreamBus
 from core.research.citation_manager import CitationManager
 from core.research.data_structures import (
     DEFAULT_QUEUE_MAX_LENGTH,
@@ -24,7 +25,10 @@ from core.research.data_structures import (
     TopicStatus,
 )
 from core.research.pipeline import (
+    DEFAULT_BLOCK_MAX_TRIES,
     ResearchPipeline,
+    _BLOCK_MIN_KNOWLEDGE_CHARS,
+    _block_self_check,
     _extract_traces_from_knowledge,
     _parse_sub_topics,
     _strip_source_markers,
@@ -236,10 +240,10 @@ def _mock_loop_factory():
             '{"title":"积分应用","overview":"面积与累积"}'
             "]}"
         ),
-        # 2 block_1 (导数定义)
-        "导数是瞬时变化率 [来源: https://en.wikipedia.org/wiki/Derivative]。",
-        # 3 block_2 (积分应用)
-        "积分用于求面积与累积 [来源: 积分教材.pdf]。",
+        # 2 block_1 (导数定义) —— 够长 + 有来源标记，通过块自检（_BLOCK_MIN_KNOWLEDGE_CHARS=50）
+        "导数刻画函数在某点的瞬时变化率，是微积分的核心概念，几何上表示切线斜率 [来源: https://en.wikipedia.org/wiki/Derivative]。",
+        # 3 block_2 (积分应用) —— 同样够长 + 有来源标记
+        "积分用于求面积与累积量，是微积分的基本运算，与导数互为逆运算（微积分基本定理） [来源: 积分教材.pdf]。",
         # 4 outline
         (
             '{"title":"导数与积分研究报告","sections":['
@@ -310,3 +314,232 @@ def test_pipeline_run_end_to_end():
     assert result["metadata"]["block_count"] == 2
     assert result["metadata"]["sources"] >= 2
     assert result["metadata"]["stages"] == ["rephrase", "decompose", "researching", "reporting"]
+
+
+# ── 块自检 + 重试（plan 第三批-1）────────────────────────────────────────────────
+
+
+def test_block_self_check_rejects_empty_and_short():
+    assert _block_self_check("", has_retrieval=True) is False
+    assert _block_self_check("   ", has_retrieval=True) is False
+    # 过短（< _BLOCK_MIN_KNOWLEDGE_CHARS）判失败
+    assert _block_self_check("X" * (_BLOCK_MIN_KNOWLEDGE_CHARS - 1), has_retrieval=False) is False
+
+
+def test_block_self_check_rejects_no_citation_when_retrieval_available():
+    # 够长但无 [来源: ...] 标记、且有检索工具 → 判失败（应检索却未引证）
+    assert _block_self_check("Y" * 200, has_retrieval=True) is False
+
+
+def test_block_self_check_passes():
+    # 够长 + 有来源标记 + 有检索工具 → 通过
+    ok = "Z" * 60 + " [来源: doc.pdf]"
+    assert _block_self_check(ok, has_retrieval=True) is True
+    # 纯推理块（无检索工具）只校验长度
+    assert _block_self_check("Z" * 60, has_retrieval=False) is True
+
+
+def _new_pipeline_for_block_test() -> ResearchPipeline:
+    """构造一个 ResearchPipeline 并手动设好 _rt/_layers（_research_block 直接测，跳过 run()）。"""
+    pipe = ResearchPipeline()
+    pipe._rt = ProfileRuntime()
+    pipe._layers = CommonContextLayers()
+    return pipe
+
+
+@pytest.mark.asyncio
+async def test_research_block_retries_then_succeeds():
+    """第 1 次过短（自检不过）→ 重跑第 2 次产出合格摘要 → mark_completed，run_agent_loop 被调 2 次。"""
+    pipe = _new_pipeline_for_block_test()
+    q = DynamicTopicQueue()
+    block = q.add_block("导数定义")
+    ctx = _make_context()
+    stream = StreamBus()
+    cfg = {"research_step": {
+        "system": "{topic}{block_title}{block_overview}{kb_note}",
+        "user_template": "{sibling_topics}",
+    }}
+
+    calls = {"n": 0}
+
+    async def _fake_loop(**kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return LoopOutcome(final_text="太短", rounds=1, tools_used=[], completed=True)
+        return LoopOutcome(
+            final_text=(
+                "这是一个足够长的有效研究摘要，详细说明了导数的定义、几何意义与基本计算例子，"
+                "可供后续报告引用 [来源: 高数教材.pdf]。"
+            ),
+            rounds=1, tools_used=[], completed=True,
+        )
+
+    with (
+        patch("core.research.pipeline.run_agent_loop", new=_fake_loop),
+        patch("core.research.pipeline.get_tool_schemas", return_value=[]),
+    ):
+        await pipe._research_block(
+            block=block, queue=q, topic="t", context=ctx, stream=stream, cfg=cfg,
+        )
+
+    assert calls["n"] == 2  # 重试了一次
+    assert block.status == TopicStatus.COMPLETED
+    assert block.knowledge.startswith("这是一个足够长的有效研究摘要")
+    assert any(s.source == "高数教材.pdf" for s in block.sources)
+
+
+@pytest.mark.asyncio
+async def test_research_block_marks_failed_after_self_check_exhausted():
+    """每次都过短 → 用尽重试 → mark_failed，run_agent_loop 被调 DEFAULT_BLOCK_MAX_TRIES 次。"""
+    pipe = _new_pipeline_for_block_test()
+    q = DynamicTopicQueue()
+    block = q.add_block("空主题")
+    ctx = _make_context()
+    stream = StreamBus()
+    cfg = {"research_step": {
+        "system": "{topic}{block_title}{block_overview}{kb_note}",
+        "user_template": "{sibling_topics}",
+    }}
+
+    calls = {"n": 0}
+
+    async def _always_short(**kw):
+        calls["n"] += 1
+        return LoopOutcome(final_text="太短", rounds=1, tools_used=[], completed=True)
+
+    with (
+        patch("core.research.pipeline.run_agent_loop", new=_always_short),
+        patch("core.research.pipeline.get_tool_schemas", return_value=[]),
+    ):
+        await pipe._research_block(
+            block=block, queue=q, topic="t", context=ctx, stream=stream, cfg=cfg,
+        )
+
+    assert calls["n"] == DEFAULT_BLOCK_MAX_TRIES
+    assert block.status == TopicStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_research_block_retries_on_exception_then_marks_failed():
+    """每次都抛异常 → 用尽重试 → mark_failed（不向上抛），run_agent_loop 被调 DEFAULT_BLOCK_MAX_TRIES 次。"""
+    pipe = _new_pipeline_for_block_test()
+    q = DynamicTopicQueue()
+    block = q.add_block("异常主题")
+    ctx = _make_context()
+    stream = StreamBus()
+    cfg = {"research_step": {
+        "system": "{topic}{block_title}{block_overview}{kb_note}",
+        "user_template": "{sibling_topics}",
+    }}
+
+    calls = {"n": 0}
+
+    async def _raises(**kw):
+        calls["n"] += 1
+        raise RuntimeError("boom")
+
+    with (
+        patch("core.research.pipeline.run_agent_loop", new=_raises),
+        patch("core.research.pipeline.get_tool_schemas", return_value=[]),
+    ):
+        # 不应抛出（_research_block 内部消化异常）
+        await pipe._research_block(
+            block=block, queue=q, topic="t", context=ctx, stream=stream, cfg=cfg,
+        )
+
+    assert calls["n"] == DEFAULT_BLOCK_MAX_TRIES
+    assert block.status == TopicStatus.FAILED
+
+
+# ── Observer 汇总质量门（消融开关默认关）──────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_observe_and_refill_only_under_sourced_blocks():
+    """只对「有内容但 sources < _OBSERVER_MIN_SOURCES」的块补检索；来源够 / 无内容跳过。"""
+    from core.research.data_structures import ToolTrace
+    from core.research.pipeline import _OBSERVER_MIN_SOURCES
+
+    pipe = _new_pipeline_for_block_test()
+    q = DynamicTopicQueue()
+    a = q.add_block("导数")          # 有内容 + 0 来源 → 候选
+    a.knowledge = "导数是变化率 [来源: doc.pdf]"
+    a.sources = []
+    b = q.add_block("积分")          # 2 来源 → 跳过
+    b.knowledge = "积分..."
+    b.add_source(ToolTrace(tool_type="rag", query="q", summary="s", source="x"))
+    b.add_source(ToolTrace(tool_type="rag", query="q2", summary="s2", source="y"))
+    c = q.add_block("空")            # 无内容 → 跳过
+    c.knowledge = ""
+
+    calls: list[str] = []
+
+    async def _fake_block(**kw):
+        calls.append(kw["block"].block_id)
+
+    with patch.object(pipe, "_research_block", _fake_block):
+        await pipe._observe_and_refill(
+            queue=q, topic="t", context=_make_context(), stream=StreamBus(), cfg={},
+        )
+    assert calls == ["block_1"]  # 只补 a
+    assert _OBSERVER_MIN_SOURCES == 2
+
+
+@pytest.mark.asyncio
+async def test_observe_and_refill_caps_candidates():
+    """候选数超过 _OBSERVER_MAX_REFILL_BLOCKS 时截断，防队列异常膨胀。"""
+    from core.research.pipeline import _OBSERVER_MAX_REFILL_BLOCKS
+
+    pipe = _new_pipeline_for_block_test()
+    q = DynamicTopicQueue(max_length=_OBSERVER_MAX_REFILL_BLOCKS + 5)
+    for i in range(_OBSERVER_MAX_REFILL_BLOCKS + 5):
+        blk = q.add_block(f"t{i}")
+        blk.knowledge = f"内容{i}"  # 有内容 + 0 来源 → 候选
+
+    calls: list[str] = []
+
+    async def _fake_block(**kw):
+        calls.append(kw["block"].block_id)
+
+    with patch.object(pipe, "_research_block", _fake_block):
+        await pipe._observe_and_refill(
+            queue=q, topic="t", context=_make_context(), stream=StreamBus(), cfg={},
+        )
+    assert len(calls) == _OBSERVER_MAX_REFILL_BLOCKS
+
+
+@pytest.mark.asyncio
+async def test_observer_gate_off_skips_refill():
+    """开关关（metadata 无 research_observer）→ run 不调 _observe_and_refill。"""
+    pipeline = ResearchPipeline(num_subtopics=2, max_parallel=2)
+    ctx = _make_context()  # 默认关
+    stream = StreamBus()
+    invoked: list[dict] = []
+    with (
+        patch("core.research.pipeline.run_agent_loop", new=_mock_loop_factory()),
+        patch("core.research.pipeline.resolve_profile_runtime", new=AsyncMock(return_value=ProfileRuntime())),
+        patch("core.research.pipeline.build_common_context_layers", new=AsyncMock(return_value=CommonContextLayers())),
+        patch("core.research.pipeline.describe_images", new=AsyncMock(side_effect=lambda c, t, r: t)),
+        patch.object(pipeline, "_observe_and_refill", new=AsyncMock(side_effect=lambda **kw: invoked.append(kw))),
+    ):
+        await pipeline.run(topic="研究导数与积分", context=ctx, stream=stream)
+    assert invoked == []
+
+
+@pytest.mark.asyncio
+async def test_observer_gate_on_invokes_refill():
+    """开关开（metadata research_observer=True）→ run 调一次 _observe_and_refill。"""
+    pipeline = ResearchPipeline(num_subtopics=2, max_parallel=2)
+    ctx = _make_context()
+    ctx.metadata["research_observer"] = True
+    stream = StreamBus()
+    invoked: list[dict] = []
+    with (
+        patch("core.research.pipeline.run_agent_loop", new=_mock_loop_factory()),
+        patch("core.research.pipeline.resolve_profile_runtime", new=AsyncMock(return_value=ProfileRuntime())),
+        patch("core.research.pipeline.build_common_context_layers", new=AsyncMock(return_value=CommonContextLayers())),
+        patch("core.research.pipeline.describe_images", new=AsyncMock(side_effect=lambda c, t, r: t)),
+        patch.object(pipeline, "_observe_and_refill", new=AsyncMock(side_effect=lambda **kw: invoked.append(kw))),
+    ):
+        await pipeline.run(topic="研究导数与积分", context=ctx, stream=stream)
+    assert len(invoked) == 1
