@@ -13,11 +13,14 @@
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from settings import get_settings
 
 from core.rag.lightrag.instance_pool import _PG_STORAGE_ATTRS
 
@@ -413,3 +416,172 @@ async def test_purge_cold_cache_loads_temp_and_survives_drop_failure(monkeypatch
     assert "c1" not in instance_pool._instances
     assert "c1" not in instance_pool._in_use
     assert not ws_dir.exists()
+
+
+# ---------------------------------------------------------------------------
+# Idle reaper：容量 + 空闲 TTL 的 TTL 半边（_reap_once 单趟，不起后台 loop）
+# ---------------------------------------------------------------------------
+
+def _seed_idle(course_id: str, *, idle_for: float, in_use: int = 0):
+    """往实例池塞一个 mock 实例，_last_used 倒推 idle_for 秒（模拟空闲时长）。"""
+    from core.rag.lightrag.instance_pool import _instances, _in_use, _last_used
+
+    mock = SimpleNamespace(finalize_storages=AsyncMock())
+    _instances[course_id] = mock
+    _last_used[course_id] = time.monotonic() - idle_for
+    if in_use:
+        _in_use[course_id] = in_use
+    return mock
+
+
+@pytest.mark.asyncio
+async def test_reap_removes_past_ttl():
+    """idle 超 TTL 且无引用 → 被 _reap_once 回收（finalize 被调，实例出池）。"""
+    from core.rag.lightrag.instance_pool import (
+        _reap_once, _instances, _in_use, _last_used,
+    )
+
+    _instances.clear(); _in_use.clear(); _last_used.clear()
+    ttl = get_settings().lightrag.instance_idle_ttl_sec
+    mock_rag = _seed_idle("idle", idle_for=ttl + 10)
+
+    reaped = await _reap_once()
+    assert reaped == 1
+    assert "idle" not in _instances
+    assert "idle" not in _last_used
+    mock_rag.finalize_storages.assert_awaited_once()
+    _instances.clear(); _last_used.clear()
+
+
+@pytest.mark.asyncio
+async def test_reap_skips_in_use():
+    """in_use>0（正被检索/索引引用）→ 绝不回收（防 use-after-finalize）。"""
+    from core.rag.lightrag.instance_pool import (
+        _reap_once, _instances, _in_use, _last_used,
+    )
+
+    _instances.clear(); _in_use.clear(); _last_used.clear()
+    ttl = get_settings().lightrag.instance_idle_ttl_sec
+    mock_rag = _seed_idle("busy", idle_for=ttl + 10, in_use=1)
+
+    reaped = await _reap_once()
+    assert reaped == 0
+    assert "busy" in _instances  # 保留
+    mock_rag.finalize_storages.assert_not_called()
+    _instances.clear(); _in_use.clear(); _last_used.clear()
+
+
+@pytest.mark.asyncio
+async def test_reap_skips_within_ttl():
+    """仍在 TTL 内（刚被引用）→ 不回收。"""
+    from core.rag.lightrag.instance_pool import (
+        _reap_once, _instances, _in_use, _last_used,
+    )
+
+    _instances.clear(); _in_use.clear(); _last_used.clear()
+    mock_rag = _seed_idle("fresh", idle_for=0)  # 刚打点
+
+    reaped = await _reap_once()
+    assert reaped == 0
+    assert "fresh" in _instances
+    mock_rag.finalize_storages.assert_not_called()
+    _instances.clear(); _last_used.clear()
+
+
+@pytest.mark.asyncio
+async def test_reap_finalize_failure_non_blocking():
+    """某个实例 finalize 抛异常 → 只记日志，不阻断同批其余实例回收。"""
+    from core.rag.lightrag.instance_pool import (
+        _reap_once, _instances, _in_use, _last_used,
+    )
+
+    _instances.clear(); _in_use.clear(); _last_used.clear()
+    ttl = get_settings().lightrag.instance_idle_ttl_sec
+    boom = _seed_idle("boom", idle_for=ttl + 10)
+    boom.finalize_storages = AsyncMock(side_effect=RuntimeError("boom"))
+    ok = _seed_idle("ok", idle_for=ttl + 10)
+
+    reaped = await _reap_once()
+    assert reaped == 2  # 两个都出池（finalize 失败不影响回收计数）
+    assert "boom" not in _instances
+    assert "ok" not in _instances
+    boom.finalize_storages.assert_awaited_once()
+    ok.finalize_storages.assert_awaited_once()
+    _instances.clear(); _last_used.clear()
+
+
+@pytest.mark.asyncio
+async def test_ensure_reaper_noop_in_testing():
+    """settings.testing=True 时 _ensure_reaper 不启动后台 loop（防污染单测事件循环）。"""
+    import core.rag.lightrag.instance_pool as pool
+    from core.rag.lightrag.instance_pool import _ensure_reaper
+
+    assert get_settings().testing is True
+    pool._reaper_task = None
+    _ensure_reaper()
+    assert pool._reaper_task is None  # 测试环境不启动
+
+
+@pytest.mark.asyncio
+async def test_stop_idle_reaper_idempotent():
+    """未启动过时 stop_idle_reaper 是 no-op（不抛异常）。"""
+    import core.rag.lightrag.instance_pool as pool
+    from core.rag.lightrag.instance_pool import stop_idle_reaper
+
+    pool._reaper_task = None
+    await stop_idle_reaper()  # 不应抛
+    assert pool._reaper_task is None
+
+
+@pytest.mark.asyncio
+async def test_evict_uses_shared_finalize_and_clears_last_used():
+    """evict_oldest 复用 _finalize_instance，并清 _last_used（reaper 与 evict 同口径）。"""
+    from core.rag.lightrag.instance_pool import (
+        evict_oldest, _instances, _in_use, _last_used,
+    )
+
+    _instances.clear(); _in_use.clear(); _last_used.clear()
+    mock_rag = SimpleNamespace(finalize_storages=AsyncMock())
+    _instances["c1"] = mock_rag
+    _last_used["c1"] = time.monotonic()
+
+    evicted = await evict_oldest()
+    assert evicted == "c1"
+    assert "c1" not in _instances
+    assert "c1" not in _last_used  # evict 也清了 _last_used
+    mock_rag.finalize_storages.assert_awaited_once()
+    _instances.clear(); _last_used.clear()
+
+
+# ---------------------------------------------------------------------------
+# 生产门禁：ENVIRONMENT=production + SQLite → 拒绝构造，绝不退化到文件后端
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_get_instance_production_sqlite_fails_fast(monkeypatch):
+    """生产 + SQLite：_get_instance 直接拒绝构造，绝不退化到耗内存的文件后端
+    （NanoVectorDB 把全部向量塞进进程内存）。门禁在任何 LightRAG 依赖导入之前触发。"""
+    from core.rag.lightrag import instance_pool
+
+    monkeypatch.setattr(instance_pool, "_IS_POSTGRES", False)
+    monkeypatch.setattr(instance_pool, "_IS_PRODUCTION", True)
+
+    with pytest.raises(RuntimeError, match="PostgreSQL"):
+        await instance_pool._get_instance("c1")
+
+
+@pytest.mark.asyncio
+async def test_get_instance_dev_sqlite_skips_guard(monkeypatch):
+    """dev/测试（_IS_PRODUCTION=False）+ SQLite 不受门禁约束——门禁放行后控制权交给
+    后续 is_lightrag_available。防回归：若门禁条件漏写 _IS_PRODUCTION（误成只看
+    _IS_POSTGRES），dev 会被误拦，此用例失败。mock 不可用避免真构造文件后端。"""
+    from core.rag.lightrag import instance_pool, llm_adapter
+
+    monkeypatch.setattr(instance_pool, "_IS_POSTGRES", False)
+    monkeypatch.setattr(instance_pool, "_IS_PRODUCTION", False)
+    monkeypatch.setattr(llm_adapter, "is_lightrag_available", lambda: (False, "mocked-off"))
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await instance_pool._get_instance("c1")
+    assert "PostgreSQL" not in str(exc_info.value)
+    assert "mocked-off" in str(exc_info.value)
