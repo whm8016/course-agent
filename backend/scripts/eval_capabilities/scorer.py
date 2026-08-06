@@ -17,7 +17,7 @@ import json
 import re
 from typing import Any
 
-from inspect_ai.scorer import Score, Target, mean_score, model_graded_qa, scorer
+from inspect_ai.scorer import Score, Target, mean, model_graded_qa, scorer
 from inspect_ai.solver import TaskState
 
 from . import config
@@ -95,7 +95,7 @@ def _valid_quiz_item(item: Any) -> bool:
     return has_q and has_a
 
 
-@scorer(metrics=[mean_score()])
+@scorer(metrics=[mean()])
 def quiz_validity():
     async def score(state: TaskState, target: Target) -> Score:
         items = state.metadata.get("_quiz") or []
@@ -122,7 +122,7 @@ def _quiz_quality_prompt(items: list[dict], question: str) -> str:
     )
 
 
-@scorer(metrics=[mean_score()])
+@scorer(metrics=[mean()])
 def quiz_quality():
     async def score(state: TaskState, target: Target) -> Score:
         items = state.metadata.get("_quiz") or []
@@ -151,7 +151,7 @@ def _trajectory_legal(trace: list[dict]) -> bool:
     return has_plan and has_finish
 
 
-@scorer(metrics=[mean_score()])
+@scorer(metrics=[mean()])
 def solve_trajectory():
     async def score(state: TaskState, target: Target) -> Score:
         trace = state.metadata.get("_trace") or []
@@ -173,7 +173,7 @@ def _solve_answer_prompt(answer: str, question: str, target: Target) -> str:
     )
 
 
-@scorer(metrics=[mean_score()])
+@scorer(metrics=[mean()])
 def solve_answer():
     async def score(state: TaskState, target: Target) -> Score:
         val, expl = await _ensemble_score(
@@ -196,7 +196,7 @@ def _race_prompt(report: str, question: str, target: Target) -> str:
     )
 
 
-@scorer(metrics=[mean_score()])
+@scorer(metrics=[mean()])
 def research_race():
     async def score(state: TaskState, target: Target) -> Score:
         val, expl = await _ensemble_score(
@@ -222,7 +222,7 @@ def _fact_prompt(report: str, trace: list[dict]) -> str:
     )
 
 
-@scorer(metrics=[mean_score()])
+@scorer(metrics=[mean()])
 def research_fact():
     async def score(state: TaskState, target: Target) -> Score:
         trace = state.metadata.get("_trace") or []

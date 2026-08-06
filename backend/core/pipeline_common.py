@@ -57,6 +57,7 @@ class CommonContextLayers:
     bot_persona: str = ""
     always_skills: str = ""
     memory_context: str = ""
+    mastery_context: str = ""
     session_summary: str = ""
     now_text: str = ""
 
@@ -75,7 +76,11 @@ async def resolve_profile_runtime(
 
     client 经 provider_factory.get_llm_client_for_profile 按 profile 指纹缓存，空 key 回退 .env。
     """
-    from core.llm.catalog import active_profile_id, get_profile, profile_text_model
+    from core.llm.catalog import (
+        active_profile_id_cached,
+        get_profile_cached,
+        profile_text_model,
+    )
     from core.llm.provider_factory import get_llm_client_for_profile
 
     try:
@@ -95,9 +100,9 @@ async def resolve_profile_runtime(
                     binding=binding,
                 )
 
-        # 2/3. 平台 profile（profile_id → active）
-        pid = (profile_id or "").strip() or active_profile_id()
-        prof = get_profile(pid)
+        # 2/3. 平台 profile（profile_id → active，走 Redis 缓存避免同步文件 I/O 阻塞）
+        pid = (profile_id or "").strip() or await active_profile_id_cached()
+        prof = await get_profile_cached(pid)
         if prof:
             return ProfileRuntime(
                 client=get_llm_client_for_profile(prof),
@@ -141,12 +146,29 @@ async def build_common_context_layers(
     )
     now_text = f"【当前时间】{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %A')}"
 
+    # L3 掌握度（薄弱点）：所有 pipeline 共享。ctx.mastery_context 预置则用之，否则从 DB 构建。
+    # 顺带修「只有 chat 注入记忆」的缺口——solve/research/quiz 也拿到掌握度，按需诊断反复性错误。
+    mastery_context = ctx.mastery_context or ""
+    if not mastery_context and ctx.user_id and ctx.course_id:
+        try:
+            from core.db.database import AsyncSessionLocal
+            from core.memory.mastery import get_mastery_context
+
+            async with AsyncSessionLocal() as db:
+                mastery_context = await get_mastery_context(db, ctx.user_id, ctx.course_id)
+        except Exception:
+            logger.exception(
+                "build mastery context failed user=%s course=%s", ctx.user_id, ctx.course_id
+            )
+            mastery_context = ""
+
     metadata = ctx.metadata or {}
     return CommonContextLayers(
         course_prompt=course_prompt,
         bot_persona=(metadata.get("bot_persona") or "").strip(),
         always_skills=always_skills,
         memory_context=ctx.memory_context or "",
+        mastery_context=mastery_context,
         session_summary=session_summary,
         now_text=now_text,
     )
@@ -166,6 +188,7 @@ def assemble_common_context(layers: CommonContextLayers) -> str:
             layers.bot_persona,
             layers.always_skills,
             layers.memory_context,
+            layers.mastery_context,
             layers.session_summary,
             layers.now_text,
         )

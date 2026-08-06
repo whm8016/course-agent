@@ -1,18 +1,17 @@
 """M-11：Session summary 并发压缩无锁的回归测试。
 
-根因（AUDIT M-11，``main.py:94-95`` + ``session_summary.py``）：每次
-CAPABILITY_COMPLETE 都 ``asyncio.create_task(_maybe_compress_summary(session_id))``，
-无 per-session 锁。同一 session 连续多轮 turn → 多个压缩 task 并发：都读到同一份旧
-``session.summary``、各自调 LLM、各自 ``db.commit`` 写 ``summary_up_to_msg_id`` →
-后者覆盖前者、增量丢失、游标错乱。
+根因（AUDIT M-11，main.py + session_summary.py）：每次 CAPABILITY_COMPLETE 都
+asyncio.create_task(_maybe_compress_summary(session_id))，无 per-session 锁。同一
+session 连续多轮 turn → 多个压缩 task 并发：都读到同一份旧 session.summary、各自调
+LLM、各自 commit 写 summary_up_to_msg_id → 后者覆盖前者、增量丢失、游标错乱。
 
-修法：``session_summary.py`` 加 per-session ``asyncio.Lock``。``maybe_compress`` 入口
-非阻塞探测（``lock.locked()``），已有压缩在进行则本轮让路（返回 False，下次 turn 再压）；
-否则持锁执行 ``_maybe_compress_locked``。单事件循环下 ``setdefault`` 原子、
-``locked()`` 与 ``async with`` 间无 await，无 TOCTOU。
+修法：session_summary.py 加 per-session asyncio.Lock（L1）。maybe_compress 入口非阻塞
+探测（lock.locked()），已有压缩在进行则本轮让路（返回 False，下次 turn 再压）；否则
+持锁执行。本文件聚焦 L1 进程内锁的语义——SQL keyset / OCC / 跨进程 Redis 锁的正确性
+由 test_l2_summary_hardening.py 用真实 SQLite 覆盖；这里用 mock db 驱动新版
+_maybe_compress_locked（COUNT 短路 + boundary + keyset 增量 + OCC 写回）走到 _do_compress。
 
 interleaving（同 session 两个并发 maybe_compress，单事件循环）：
-  - 正常（串行）：A 拿锁 → 压缩 → commit → 释放；B 探测时未锁 → 也压缩（增量）。
   - 竞态（本测试）：A 拿锁进入 _do_compress（LLM 耗时）→ B 探测 lock.locked()=True →
     B return False（让路，不并发覆盖）；A 完成 commit。最终 _do_compress 仅一次。
 """
@@ -43,7 +42,9 @@ def _make_session_with_messages(msg_count: int, window_size: int = 10):
     session = MagicMock()
     session.summary = ""  # 首次全量
     session.summary_up_to_msg_id = None
+    session.summary_up_to_created_at = None  # 新 keyset 游标（首次为 None → 走全量）
     session.summary_updated_at = None
+    session.summary_version = 0  # OCC 版本号
 
     messages = []
     for i in range(msg_count):
@@ -54,22 +55,38 @@ def _make_session_with_messages(msg_count: int, window_size: int = 10):
         m.created_at = float(i)
         messages.append(m)
 
-    # window_msg_count = window_size * 2；messages_to_compress = messages[:-window_msg_count]
-    # 需 msg_count > window_size*2 且 > window_size + buffer，给 22 条（window=10）满足。
+    # window_msg_count = window_size * 2；需 msg_count > window_size*2 且 > window+buffer，
+    # 给 22 条（window=10）满足。
     return session, messages
+
+
+def _make_db(session, messages, scalar_side_effect=None):
+    """构造 mock db，驱动新版 _maybe_compress_locked 走完整流程到 _do_compress。
+
+    新实现：db.scalar 做 COUNT 短路；db.execute 取 boundary（.scalars().first()）、
+    keyset 增量（.scalars().all()）、OCC 写回（.rowcount）。同一 result_mock 同时装载
+    这三种访问方式，使三次 db.execute 都取到正确值。
+    """
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=session)
+    if scalar_side_effect is not None:
+        db.scalar = AsyncMock(side_effect=scalar_side_effect)
+    else:
+        db.scalar = AsyncMock(return_value=len(messages))
+    result_mock = MagicMock()
+    # boundary 取窗口外最后一条；测试只关心非 None + 有 .id/.created_at，取任一消息即可
+    result_mock.scalars.return_value.first.return_value = messages[1]
+    result_mock.scalars.return_value.all.return_value = messages  # keyset 增量区间
+    result_mock.rowcount = 1  # OCC 写回成功
+    db.execute = AsyncMock(return_value=result_mock)
+    return db
 
 
 async def test_concurrent_compress_same_session_only_one_runs():
     """同 session 并发 maybe_compress：只有持锁者执行 _do_compress + commit，另一让路。"""
     mgr = ss.SessionSummaryManager(window_size=10, buffer_size=2, compress_interval=1)
     session, messages = _make_session_with_messages(22, window_size=10)
-
-    db = AsyncMock()
-    db.get = AsyncMock(return_value=session)
-    # db.execute 返回带 scalars().all() 的对象
-    result_mock = MagicMock()
-    result_mock.scalars.return_value.all.return_value = messages
-    db.execute = AsyncMock(return_value=result_mock)
+    db = _make_db(session, messages)
 
     compress_call_count = 0
     compress_started = asyncio.Event()
@@ -78,12 +95,10 @@ async def test_concurrent_compress_same_session_only_one_runs():
         nonlocal compress_call_count
         compress_call_count += 1
         compress_started.set()
-        # 模拟 LLM 耗时：让第二个 maybe_compress 有窗口探测到锁
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.1)  # 让第二个 maybe_compress 探测到锁
         return "compressed-summary"
 
     with patch.object(mgr, "_do_compress", side_effect=slow_do_compress):
-        # 并发发起两个同 session 压缩
         results = await asyncio.gather(
             mgr.maybe_compress(db, "sess-A"),
             mgr.maybe_compress(db, "sess-A"),
@@ -102,16 +117,7 @@ async def test_different_sessions_compress_concurrently():
     mgr = ss.SessionSummaryManager(window_size=10, buffer_size=2, compress_interval=1)
     session_a, msgs_a = _make_session_with_messages(22)
     session_b, msgs_b = _make_session_with_messages(22)
-
-    async def make_db(session, msgs):
-        db = AsyncMock()
-        db.get = AsyncMock(return_value=session)
-        result_mock = MagicMock()
-        result_mock.scalars.return_value.all.return_value = msgs
-        db.execute = AsyncMock(return_value=result_mock)
-        return db
-
-    db_a, db_b = await make_db(session_a, msgs_a), await make_db(session_b, msgs_b)
+    db_a, db_b = _make_db(session_a, msgs_a), _make_db(session_b, msgs_b)
 
     barrier = asyncio.Event()
 
@@ -131,24 +137,22 @@ async def test_different_sessions_compress_concurrently():
 
 
 async def test_compress_after_release_succeeds():
-    """前一次压缩完成后，下一次同 session 可正常压缩（锁已释放，非永久阻塞）。"""
+    """前一次压缩完成后，下一次同 session 可正常进入（锁已释放，非永久阻塞）。
+
+    第二次走 COUNT 短路返回 False（scalar 低于阈值），证明锁未卡死、流程可重入。
+    新实现写回走 Core UPDATE（不原地改写 mock session 游标），故用 COUNT 短路模拟
+    「无需再压」——游标推进 / 无增量的语义由 test_l2_summary_hardening 真实库覆盖。
+    """
     mgr = ss.SessionSummaryManager(window_size=10, buffer_size=2, compress_interval=1)
     session, messages = _make_session_with_messages(22)
-
-    db = AsyncMock()
-    db.get = AsyncMock(return_value=session)
-    result_mock = MagicMock()
-    result_mock.scalars.return_value.all.return_value = messages
-    db.execute = AsyncMock(return_value=result_mock)
+    # 第一次 scalar=22（进入压缩）；第二次 scalar=5（低于阈值 12 → COUNT 短路）
+    db = _make_db(session, messages, scalar_side_effect=[22, 5])
 
     with patch.object(mgr, "_do_compress", return_value="summary"):
         r1 = await mgr.maybe_compress(db, "sess-C")
-        # 第二次：summary_up_to_msg_id 已设，但 new_messages_to_compress 因无新消息会 return False
-        # （消息数未增）。这里主要验证锁已释放、不抛「锁被占」。
         r2 = await mgr.maybe_compress(db, "sess-C")
 
     assert r1 is True
-    # 第二次因无增量消息返回 False（非锁阻塞）
-    assert r2 is False
+    assert r2 is False  # COUNT 短路，非锁阻塞
     # 锁在两次调用间已释放
     assert not ss._get_compress_lock("sess-C").locked()

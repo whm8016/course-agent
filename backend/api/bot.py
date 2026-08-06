@@ -90,6 +90,19 @@ def _is_admin(user: dict) -> bool:
     return is_admin_user(user)
 
 
+async def require_bot_manager(user: dict = Depends(get_current_user)) -> dict:
+    """Bot 实例创建/管理仅限教师/管理员。
+
+    学生自建 bot 会拉起常驻 AgentLoop + 心跳任务（每 30min 真调 LLM），且 main.py
+    进程重启时全量拉起所有 auto_start=True 的 bot——实例数随学生规模单调增长、不回收，
+    4GB 单 worker 进程撑不住（OOM）。从源头把实例规模锁在教师数量级（远小于学生），
+    规避风险，无需额外开发空闲回收机制。
+    """
+    if user.get("role") not in ("teacher", "admin"):
+        raise HTTPException(status_code=403, detail="仅教师/管理员可管理 Bot")
+    return user
+
+
 def _resolve_owner(manager, owner_id: str, bot_id: str, is_admin: bool) -> str:
     """定位 bot 的实际 owner_id（用于后续操作）。
 
@@ -124,7 +137,7 @@ def _require_leader_or_409() -> None:
 # --- Bot CRUD ---
 
 @router.get("/list")
-async def list_bots(user: dict = Depends(get_current_user)):
+async def list_bots(user: dict = Depends(require_bot_manager)):
     """List bot instances owned by the current user (admin also sees legacy)."""
     manager = get_bot_manager()
     owner = _owner_of(user)
@@ -184,7 +197,7 @@ async def mark_notification_read(
 
 
 @router.post("/create")
-async def create_bot(req: BotCreateRequest, user: dict = Depends(get_current_user)):
+async def create_bot(req: BotCreateRequest, user: dict = Depends(require_bot_manager)):
     """Create and start a new bot (owned by the current user)."""
     if not _BOT_ID_RE.match(req.bot_id):
         raise HTTPException(
@@ -207,7 +220,7 @@ async def create_bot(req: BotCreateRequest, user: dict = Depends(get_current_use
 
 
 @router.post("/{bot_id}/start")
-async def start_bot(bot_id: str, user: dict = Depends(get_current_user)):
+async def start_bot(bot_id: str, user: dict = Depends(require_bot_manager)):
     """Start a stopped bot."""
     manager = get_bot_manager()
     _require_leader_or_409()
@@ -217,7 +230,7 @@ async def start_bot(bot_id: str, user: dict = Depends(get_current_user)):
 
 
 @router.post("/{bot_id}/stop")
-async def stop_bot(bot_id: str, user: dict = Depends(get_current_user)):
+async def stop_bot(bot_id: str, user: dict = Depends(require_bot_manager)):
     """Stop a running bot."""
     manager = get_bot_manager()
     actual_owner = _resolve_owner(manager, _owner_of(user), bot_id, _is_admin(user))
@@ -228,7 +241,7 @@ async def stop_bot(bot_id: str, user: dict = Depends(get_current_user)):
 
 
 @router.delete("/{bot_id}")
-async def delete_bot_route(bot_id: str, user: dict = Depends(get_current_user)):
+async def delete_bot_route(bot_id: str, user: dict = Depends(require_bot_manager)):
     """删除 bot（停止 + 删除持久化配置）。"""
     manager = get_bot_manager()
     actual_owner = _resolve_owner(manager, _owner_of(user), bot_id, _is_admin(user))
@@ -246,7 +259,7 @@ class BotUpdateRequest(BaseModel):
 
 
 @router.put("/{bot_id}")
-async def update_bot_route(bot_id: str, req: BotUpdateRequest, user: dict = Depends(get_current_user)):
+async def update_bot_route(bot_id: str, req: BotUpdateRequest, user: dict = Depends(require_bot_manager)):
     """更新 bot 配置（name/description/persona/course_id）；运行中则重启以应用新配置。"""
     manager = get_bot_manager()
     actual_owner = _resolve_owner(manager, _owner_of(user), bot_id, _is_admin(user))
@@ -265,7 +278,7 @@ async def update_bot_route(bot_id: str, req: BotUpdateRequest, user: dict = Depe
 
 
 @router.get("/{bot_id}/history")
-async def get_bot_history(bot_id: str, limit: int = 100, user: dict = Depends(get_current_user)):
+async def get_bot_history(bot_id: str, limit: int = 100, user: dict = Depends(require_bot_manager)):
     """Get conversation history for a bot."""
     manager = get_bot_manager()
     actual_owner = _resolve_owner(manager, _owner_of(user), bot_id, _is_admin(user))
@@ -274,7 +287,7 @@ async def get_bot_history(bot_id: str, limit: int = 100, user: dict = Depends(ge
 
 
 @router.post("/{bot_id}/message")
-async def send_message(bot_id: str, req: BotMessageRequest, user: dict = Depends(get_current_user)):
+async def send_message(bot_id: str, req: BotMessageRequest, user: dict = Depends(require_bot_manager)):
     """Send a message to a bot and get the response (carries caller identity)."""
     manager = get_bot_manager()
     _require_leader_or_409()
@@ -497,7 +510,7 @@ def _reminder_owner_key(actual_owner: str, bot_id: str) -> str:
 
 
 @router.get("/{bot_id}/reminders")
-async def list_reminders(bot_id: str, user: dict = Depends(get_current_user)):
+async def list_reminders(bot_id: str, user: dict = Depends(require_bot_manager)):
     """List all scheduled reminders for a bot."""
     manager = get_bot_manager()
     actual_owner = _resolve_owner(manager, _owner_of(user), bot_id, _is_admin(user))
@@ -507,7 +520,7 @@ async def list_reminders(bot_id: str, user: dict = Depends(get_current_user)):
 
 
 @router.post("/{bot_id}/reminders")
-async def create_reminder(bot_id: str, req: ReminderCreateRequest, user: dict = Depends(get_current_user)):
+async def create_reminder(bot_id: str, req: ReminderCreateRequest, user: dict = Depends(require_bot_manager)):
     """Create a scheduled reminder for a bot.
 
     When the reminder fires, the bot sends the message via the specified channel (qq/feishu/web).
@@ -546,7 +559,7 @@ async def create_reminder(bot_id: str, req: ReminderCreateRequest, user: dict = 
 
 
 @router.delete("/{bot_id}/reminders/{job_id}")
-async def cancel_reminder(bot_id: str, job_id: str, user: dict = Depends(get_current_user)):
+async def cancel_reminder(bot_id: str, job_id: str, user: dict = Depends(require_bot_manager)):
     """Cancel a scheduled reminder."""
     manager = get_bot_manager()
     actual_owner = _resolve_owner(manager, _owner_of(user), bot_id, _is_admin(user))

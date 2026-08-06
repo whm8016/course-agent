@@ -15,13 +15,31 @@
 """
 from __future__ import annotations
 
-from prometheus_client import Counter, Gauge, Histogram
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram
+
+
+def _metric(factory, name: str, *args, **kwargs):
+    """模块级指标幂等构造：同名已注册则复用，避免单进程内重复执行模块体时抛 Duplicated timeseries。
+
+    根因：本模块在 import 时构造全局指标，全部注册进 prometheus_client 默认 REGISTRY（全进程共享）。
+    生产 gunicorn 每 worker 是 fork 出的独立进程、各自 REGISTRY，不触发；但长跑单进程（ARQ worker、
+    离线评测 inspect 单进程）若因任意原因二次执行本模块体——部分导入中途失败被 sys.modules 驱逐后
+    ARQ 重试（max_tries）/ 第二模块身份 / reload——第二次 register 同名指标即抛
+    ``Duplicated timeseries``，连累索引任务全 ERROR（scripts/eval_capabilities/run.py 曾用 monkeypatch
+    绕过同一根因）。本 helper 把"已注册即复用"下沉到指标定义点，根治该类问题且正路径行为零变化。
+    """
+    existing = REGISTRY._names_to_collectors.get(name)
+    if existing is not None:
+        return existing
+    return factory(name, *args, **kwargs)
+
 
 # --------------------------------------------------------------------------
 # Turn（整体回合）
 # --------------------------------------------------------------------------
 
-TURN_DURATION = Histogram(
+TURN_DURATION = _metric(
+    Histogram,
     "ca_turn_duration_seconds",
     "Total wall-clock time for a single agent turn",
     labelnames=["mode", "status"],
@@ -32,14 +50,16 @@ TURN_DURATION = Histogram(
 # Agent Loop（每轮 LLM 调用）
 # --------------------------------------------------------------------------
 
-LLM_ROUND_DURATION = Histogram(
+LLM_ROUND_DURATION = _metric(
+    Histogram,
     "ca_llm_round_duration_seconds",
     "Duration of a single LLM streaming round in the agent loop",
     labelnames=["mode"],
     buckets=(0.2, 0.5, 1, 2, 5, 15, 30),
 )
 
-LLM_FIRST_TOKEN = Histogram(
+LLM_FIRST_TOKEN = _metric(
+    Histogram,
     "ca_llm_first_token_seconds",
     "Time-to-first-token (TTFT) for LLM streaming",
     labelnames=["mode"],
@@ -48,7 +68,8 @@ LLM_FIRST_TOKEN = Histogram(
 
 # LLM token 用量（成本可观测性）。token_type ∈ input/output/cache_read。
 # 逐轮在 _one_round 埋（core/observability/cost.observe_usage）。命名对齐 OTel GenAI 语义约定。
-LLM_TOKENS_TOTAL = Counter(
+LLM_TOKENS_TOTAL = _metric(
+    Counter,
     "ca_llm_tokens_total",
     "LLM token consumption by type (input/output/cache_read)",
     labelnames=["model", "token_type"],
@@ -57,7 +78,8 @@ LLM_TOKENS_TOTAL = Counter(
 # LLM 成本（按 run_agent_loop 调用汇总，单位美元）。cost = estimate_cost(model, 累积usage)。
 # course_id/mode label 在 loop 层才有 context，故在 run_agent_loop 的 done 处汇总埋
 # （core/observability/cost.observe_cost），不在逐轮的 _one_round 埋。
-LLM_COST_USD_TOTAL = Counter(
+LLM_COST_USD_TOTAL = _metric(
+    Counter,
     "ca_llm_cost_usd_total",
     "Estimated LLM cost in USD (aggregated per agent loop)",
     labelnames=["model", "course_id", "mode"],
@@ -67,7 +89,8 @@ LLM_COST_USD_TOTAL = Counter(
 # Tool dispatch
 # --------------------------------------------------------------------------
 
-TOOL_CALL_DURATION = Histogram(
+TOOL_CALL_DURATION = _metric(
+    Histogram,
     "ca_tool_call_duration_seconds",
     "Duration of individual tool invocations",
     labelnames=["tool_name", "status"],
@@ -78,7 +101,8 @@ TOOL_CALL_DURATION = Histogram(
 # Worker jobs
 # --------------------------------------------------------------------------
 
-WORKER_JOB_DURATION = Histogram(
+WORKER_JOB_DURATION = _metric(
+    Histogram,
     "ca_worker_job_duration_seconds",
     "Duration of background worker jobs (indexing, summaries)",
     labelnames=["job_type", "status"],
@@ -89,7 +113,8 @@ WORKER_JOB_DURATION = Histogram(
 # MCP tool invocations
 # --------------------------------------------------------------------------
 
-MCP_TOOL_DURATION = Histogram(
+MCP_TOOL_DURATION = _metric(
+    Histogram,
     "ca_mcp_tool_duration_seconds",
     "Duration of MCP tool invocations",
     labelnames=["server", "status"],
@@ -101,7 +126,8 @@ MCP_TOOL_DURATION = Histogram(
 # Leader election（多 worker 单例收敛：Cron/Bot/MCP 仅 leader 运行）
 # --------------------------------------------------------------------------
 
-LEADER_STATUS = Gauge(
+LEADER_STATUS = _metric(
+    Gauge,
     "ca_leader_is_leader",
     "1 if this worker currently holds the leader lock (runs Cron/Bot/MCP)",
     labelnames=["worker_id"],
@@ -114,7 +140,8 @@ LEADER_STATUS = Gauge(
 # 区分（每进程独立 pool + 实例池；多容器/多 worker 天然隔离）。
 # --------------------------------------------------------------------------
 
-DB_POOL_CHECKEDOUT = Gauge(
+DB_POOL_CHECKEDOUT = _metric(
+    Gauge,
     "ca_db_pool_checkedout",
     "SQLAlchemy engine pool: checked-out (in-use) connections",
     labelnames=["worker"],
@@ -122,12 +149,14 @@ DB_POOL_CHECKEDOUT = Gauge(
 # 这两个 Gauge 无 label：多 worker（gunicorn）下所有进程写同一 labelset，默认 'all' 会碰撞。
 # multiprocess_mode='livesum' 让 MultiProcessCollector 跨存活 worker 求和（总量），且自动排除
 # 已退出 worker（'live' 前缀）。pid-labeled 的 LEADER_STATUS / DB_POOL 因 labelset 各异，用默认 'all'。
-LIGHTRAG_INSTANCES = Gauge(
+LIGHTRAG_INSTANCES = _metric(
+    Gauge,
     "ca_lightrag_instances",
     "LightRAG instance pool: cached instances count",
     multiprocess_mode="livesum",
 )
-LIGHTRAG_IN_USE = Gauge(
+LIGHTRAG_IN_USE = _metric(
+    Gauge,
     "ca_lightrag_in_use",
     "LightRAG instance pool: in-use (referenced) instances count",
     multiprocess_mode="livesum",

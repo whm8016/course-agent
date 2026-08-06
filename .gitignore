@@ -83,3 +83,15 @@ pdf_extract.txt
 *_preview.png
 backend/subs/
 subtitles/
+
+# --- Generated artifacts & local scratch (do not commit) ---
+# 数据库 dump（含数据/凭证，绝不入库）
+*_pg_dump.sql
+# 评测缓存与带时间戳的评测报告（每次本地跑出来的产物）
+backend/scripts/eval_rag/cache/
+backend/scripts/eval_rag/results/*_20[0-9][0-9][0-9][0-9][0-9][0-9]_*
+# 临时抓取文件 / agent 会话 dump 日志
+.tmp_*
+20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*-agent.txt
+# Cursor 编辑器本地配置（与 .idea/ 同理）
+.cursor/

@@ -1,0 +1,9 @@
+{
+  "capability": "solve",
+  "scores": {
+    "trajectory_legal": 1.0,
+    "answer_correctness": 1.0
+  },
+  "passed": true,
+  "failures": []
+}

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import shutil
 from collections import OrderedDict
 from pathlib import Path
@@ -52,6 +53,41 @@ def _get_instances_lock() -> asyncio.Lock:
 def _workspace_name(course_id: str) -> str:
     """生成 LightRAG workspace 名称。"""
     return f"course_{course_id}"
+
+
+def _ensure_lightrag_pg_env() -> None:
+    """把 settings.db.url 桥接成 LightRAG PG 后端认的 POSTGRES_* 环境变量。
+
+    LightRAG 的 PG 后端只读自己的 POSTGRES_* env（postgres_impl.ClientManager.get_config），
+    不认项目的 SQLAlchemy DB__URL。必须在首次构造 LightRAG 前调用——ClientManager 的连接池
+    是进程级单例，首次创建时读一次 env 后不再重读。setdefault 保证幂等，多次调用无害。
+
+    两个硬约束：
+    - 绝不设 POSTGRES_WORKSPACE：postgres_impl 的 workspace 优先级是
+      PostgreSQLDB.workspace > self.workspace > "default"，一旦设了它会覆盖每门课的
+      workspace（course_{id}），所有课程数据混进同一命名空间，多租户隔离直接失效。
+    - POSTGRES_MAX_CONNECTIONS 显式压到 5：项目 SQLAlchemy 池已按 worker 严格缩放（4 worker≈20
+      连接，见 database.py），但 LightRAG 另开独立 asyncpg 池不受该缩放；5/进程 × 4 worker=20，
+      合计 40，远低于 max_connections(100)，留足余量。
+    """
+    from urllib.parse import urlparse
+
+    url = get_settings().db.url.get_secret_value()
+    # 剥掉 SQLAlchemy 的 +asyncpg driver 后缀，LightRAG PG 后端要裸 postgresql:// scheme
+    p = urlparse(url.replace("postgresql+asyncpg://", "postgresql://", 1))
+    os.environ.setdefault("POSTGRES_HOST", p.hostname or "localhost")
+    os.environ.setdefault("POSTGRES_PORT", str(p.port or 5432))
+    os.environ.setdefault("POSTGRES_USER", p.username or "postgres")
+    os.environ.setdefault("POSTGRES_PASSWORD", p.password or "")
+    os.environ.setdefault("POSTGRES_DATABASE", (p.path or "").lstrip("/"))
+    os.environ.setdefault("POSTGRES_MAX_CONNECTIONS", "5")
+
+
+# 部署形态（进程级单值，非每请求派生）。导入时算一次，避免 _get_instance（LRU miss 热路径）
+# 与 purge 每次重复 get_settings + urlparse。SQLite 部署 _IS_POSTGRES=False，env 桥接不触发。
+_IS_POSTGRES = get_settings().db.url.get_secret_value().startswith("postgres")
+if _IS_POSTGRES:
+    _ensure_lightrag_pg_env()
 
 
 def get_instance_count() -> int:
@@ -237,6 +273,17 @@ async def _get_instance(course_id: str) -> Any:
             if _role_cfgs is not None:
                 _extra_kwargs["role_llm_configs"] = _role_cfgs
 
+        # 存储后端：Postgres 部署把 KV/Vector/DocStatus 搬出进程内存（每门课常驻 RSS 从数百 MB
+        # 降到数十 MB），图谱始终 NetworkX（文件，体积小）。env 桥接 + _IS_POSTGRES 判定已在
+        # 模块导入时完成一次；SQLite 部署 _IS_POSTGRES=False 保持默认内存后端。
+        if _IS_POSTGRES:
+            _extra_kwargs["kv_storage"] = "PGKVStorage"
+            _extra_kwargs["vector_storage"] = "PGVectorStorage"
+            _extra_kwargs["doc_status_storage"] = "PGDocStatusStorage"
+            # 显式写出 NetworkX：有意保留文件图谱后端，不切 PGGraphStorage（Apache AGE 建图
+            # 官方 benchmark 434s、p95 1072ms，实测灾难；NetworkX 0.1s）。
+            _extra_kwargs["graph_storage"] = "NetworkXStorage"
+
         rag = LightRAG(
             working_dir=LIGHTRAG_WORKDIR,
             workspace=_workspace_name(course_id),
@@ -371,25 +418,85 @@ async def invalidate_signature(course_id: str) -> None:
 
 # ── 重新索引前清场 + 跨进程分布式锁 ──────────────────────────────────────────
 
+# PG 搬迁的 11 个 storage 属性名（与 LightRAG.initialize_storages / finalize_storages 同款
+# 列表对齐，仅去掉 graph：图谱始终 NetworkX 文件后端，由 rmtree 清 graphml）。LightRAG 1.5.4
+# 不暴露可迭代注册表（上游也是方法内联硬编码），故镜像其列表；测试也 import 本常量保持一致。
+_PG_STORAGE_ATTRS = (
+    "full_docs", "text_chunks", "full_entities", "full_relations",
+    "entity_chunks", "relation_chunks", "entities_vdb", "relationships_vdb",
+    "chunks_vdb", "llm_response_cache", "doc_status",
+)
+
+
+async def _drop_workspace_storages(rag: Any, course_id: str) -> None:
+    """对 rag 的 PG storage 逐个调 drop()，精准清本课程在 Postgres 的行。
+
+    drop() 发的是 ``DELETE FROM <表> WHERE workspace=$1``——按 workspace 列隔离删行，
+    **不 DROP 共享表**（PGVectorStorage.drop 文档明确），故只清本课程，不殃及其他课程。
+
+    drop() 失败不阻断：返回 status!=success 或抛异常都只记日志，因为 purge 本就是清场，
+    单个 storage 清不掉不该卡住后续 rmtree + 重索引。
+    """
+    for attr in _PG_STORAGE_ATTRS:
+        storage = getattr(rag, attr, None)
+        if storage is None:
+            continue
+        ns = getattr(storage, "namespace", attr)
+        try:
+            result = await storage.drop()
+        except Exception:
+            logger.warning(
+                "purge: storage drop 异常 course=%s ns=%s", course_id, ns, exc_info=True,
+            )
+            continue
+        if isinstance(result, dict) and result.get("status") != "success":
+            logger.warning(
+                "purge: storage drop 未成功 course=%s ns=%s result=%s", course_id, ns, result,
+            )
+
 
 async def purge_course_workspace(course_id: str) -> None:
-    """清空某课程的 LightRAG 工作区（实例池缓存 + 磁盘数据）。
+    """清空某课程的 LightRAG 工作区（实例池缓存 + Postgres 数据 + 磁盘 graphml）。
 
     重新索引前调用，避免旧文档残留导致 ainsert 把整批判为 "Duplicate document"、
     最终堆在 failed entries。仅用于全新索引（resume_from_chunk==0）；续传绝不能
     调用，否则抹掉已索引进度。
+
+    PG 搬迁后 KV/Vector/DocStatus 数据在 Postgres（按 workspace 列隔离），删它们必须通过
+    一个活实例的 storage.drop()。实例无论是否在池里，PG 数据都在；池里没有就现拉一个临时
+    实例专门来 drop，否则漏清会让重索引照样判重（purge 的全部意义就是治这个）。
     """
     ws_dir = Path(LIGHTRAG_WORKDIR) / _workspace_name(course_id)
 
-    # 先从实例池移除并 finalize storage，释放文件句柄——否则删目录后旧实例仍
-    # 持有句柄，后续写操作可能把数据写回刚清空的目录。
+    # 直接 pop 而非走 _get_instance：绕过 is_lightrag_available 检查与 _in_use 计数（purge
+    # 不该被可用性瞬时失败挡住），也确保数据已清的旧实例不被复用。drop()/finalize() 是实例
+    # 自身方法，不依赖是否在池中。
     async with _get_instances_lock():
         rag = _instances.pop(course_id, None)
+
+    # 冷缓存：实例不在池里也得清 PG 数据——否则旧 chunk 残留，重索引判重。现拉一个临时实例。
+    if rag is None:
+        try:
+            rag = await _get_instance(course_id)
+        except Exception:
+            logger.warning(
+                "purge: 无法加载 LightRAG 实例，PG 数据可能残留 course=%s",
+                course_id, exc_info=True,
+            )
+            rag = None
+
     if rag is not None:
+        # 仅 PG 部署需要 drop 行；SQLite 数据全在文件（JSON/graphml），rmtree 即可清掉。
+        if _IS_POSTGRES:
+            await _drop_workspace_storages(rag, course_id)
         try:
             await rag.finalize_storages()
         except Exception:
             logger.warning("finalize_storages 失败 course=%s", course_id, exc_info=True)
+        # 彻底移除并清引用计数：实例无论来自池（已 pop）还是临时拉起，purge 后都不应留存。
+        async with _get_instances_lock():
+            _instances.pop(course_id, None)
+        _in_use.pop(course_id, None)
 
     if ws_dir.exists():
         shutil.rmtree(ws_dir, ignore_errors=True)
@@ -403,11 +510,17 @@ _INDEX_DLOCK_TTL = 3600  # 单次续约周期 1 小时
 _INDEX_DLOCK_PREFIX = "indexing:dlock:"
 
 
-async def acquire_index_dlock(course_id: str):
-    """获取 course 级 Redis 分布式锁。返回 (lock, renew_task)；被占返回 (None, None)。"""
+async def acquire_index_dlock(course_id: str, backend: str = "lightrag"):
+    """获取 (course, backend) 级 Redis 分布式锁。返回 (lock, renew_task)；被占返回 (None, None)。
+
+    key 含 backend：同一课程 lightrag 与 pgvector 两套索引可并行构建（互不阻塞），但同一
+    后端同一课程仍互斥（防 ainsert/delete 并发写同一份 store 产生重复/损坏）。
+    """
     from core.db.cache import _get_pool
     redis = _get_pool()
-    lock = redis.lock(f"{_INDEX_DLOCK_PREFIX}{course_id}", timeout=_INDEX_DLOCK_TTL)
+    lock = redis.lock(
+        f"{_INDEX_DLOCK_PREFIX}{course_id}:{backend}", timeout=_INDEX_DLOCK_TTL
+    )
     if not await lock.acquire(blocking=False):
         return None, None
 
@@ -418,7 +531,9 @@ async def acquire_index_dlock(course_id: str):
                 try:
                     await lock.extend(_INDEX_DLOCK_TTL)
                 except Exception:
-                    logger.warning("索引锁续约失败 course=%s", course_id, exc_info=True)
+                    logger.warning(
+                        "索引锁续约失败 course=%s backend=%s", course_id, backend, exc_info=True
+                    )
         except asyncio.CancelledError:
             pass
 

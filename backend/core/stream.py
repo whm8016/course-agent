@@ -50,8 +50,11 @@ class StreamEventType(str, Enum):
     ERROR = "error"
     SESSION = "session"
 
-    # 交互（ask_user 工具预留）
+    # 交互（ask_user 工具）
     WAIT_FOR_INPUT = "wait_for_input"
+    # ask_user 暂停时 loop emit 的问题卡片事件。补枚举前的同款坑：from_dict 把未知 type
+    # 降级成 token（见上方 QUIZ_QUESTION 注释），前端永远收不到 ask_user_card。补上才透传。
+    ASK_USER_CARD = "ask_user_card"
 
 
 @dataclass

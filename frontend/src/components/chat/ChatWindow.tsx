@@ -4,6 +4,7 @@ import {
   BrainCircuit, MessageSquare, Microscope, PenLine, Zap, Target, X,
 } from 'lucide-react'
 import MessageBubble from './MessageBubble'
+import AskUserCard, { type AskUserQuestion } from './AskUserCard'
 import ImageUpload, { type PendingFile } from './ImageUpload'
 import { isImage } from './fileUtils'
 import QuizConfigPanel from '../quiz/QuizConfigPanel'
@@ -26,6 +27,9 @@ interface Props {
   sessionMode?: ChatMode
   ragEnabled?: boolean
   kbStatus?: KBStatus | null
+  /** 该课程已就绪的索引后端（'lightrag' | 'llamaindex_pg'）。仅 lightrag 就绪时显示
+   *  手动检索模式选择器；pg-only 课程只走 auto（默认），不显示选择器。 */
+  indexBackends?: string[]
   onSessionCreated: (session: Session) => void
   onOpenSidebar?: () => void
 }
@@ -201,6 +205,7 @@ export default function ChatWindow({
   sessionMode,
   ragEnabled = false,
   kbStatus = null,
+  indexBackends = [],
   onSessionCreated,
   onOpenSidebar,
 }: Props) {
@@ -225,8 +230,11 @@ export default function ChatWindow({
     setUseKb(ragEnabled)
   }, [ragEnabled])
 
-  // 知识库检索模式：mix（混合）/ naive（向量）/ local（实体），默认 mix；仅 chat 流式 rag 工具消费
-  const [ragMode, setRagMode] = useState<'mix' | 'naive' | 'local'>('mix')
+  // 知识库检索模式：auto（默认，按问题类型自动路由 lightrag 图谱/pg 向量）/ mix/naive/local
+  // （手动选 LightRAG 原生模式，需课程已建 lightrag）。仅 chat 流式 rag 工具消费。
+  // pg-only 课程不显示选择器（永远 auto）。
+  const hasLightrag = indexBackends.includes('lightrag')
+  const [ragMode, setRagMode] = useState<'auto' | 'mix' | 'naive' | 'local'>('auto')
 
   // 模型供应商（对标 DeepTutor：用户对话时可临时切换 provider/model）
   const [llmProfiles, setLlmProfiles] = useState<LlmProfileSelectable[]>([])
@@ -242,6 +250,7 @@ export default function ChatWindow({
   const [quizTraces, setQuizTraces] = useState<QuizTraceRow[]>([])
   const [quizStreamQuestions, setQuizStreamQuestions] = useState<QuizQuestion[]>([])
   const [quizError, setQuizError] = useState('')
+  const [quizAskUser, setQuizAskUser] = useState<{ intro?: string; questions: AskUserQuestion[] } | null>(null)
 
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
   const [isDragging, setIsDragging] = useState(false)
@@ -257,6 +266,8 @@ export default function ChatWindow({
   const abortControllerRef = useRef<AbortController | null>(null)
   const quizCloseRef = useRef<(() => void) | null>(null)
   const researchCloseRef = useRef<(() => void) | null>(null)
+  const quizSendRef = useRef<((msg: object) => void) | null>(null)
+  const researchSendRef = useRef<((msg: object) => void) | null>(null)
   const capMenuRef = useRef<HTMLDivElement>(null)
   const capMenuMobileRef = useRef<HTMLDivElement>(null)
 
@@ -264,11 +275,9 @@ export default function ChatWindow({
   const [researchStreaming, setResearchStreaming] = useState(false)
   const [researchTraces, setResearchTraces] = useState<{ text: string; kind: 'status' | 'progress' | 'done' | 'error' }[]>([])
   const [researchError, setResearchError] = useState('')
+  const [researchAskUser, setResearchAskUser] = useState<{ intro?: string; questions: AskUserQuestion[] } | null>(null)
   const [researchMode, setResearchMode] = useState<DeepResearchMode>('report')
   const [researchDepth, setResearchDepth] = useState<DeepResearchDepth>('standard')
-  // 默认仅联网检索（深度研究天然需查最新进展）；课程知识库(kb)由用户主动勾选，
-    // 避免用户没开 rag 却被强行接知识库（后端按 metadata.sources 映射 rag/web_search）
-    const [researchSources, setResearchSources] = useState<DeepResearchSource[]>(['web'])
 
   const chatMode: ChatMode = CAPABILITIES.find((c) => c.value === activeCap)?.chatMode ?? 'chat'
   const isQuizMode = activeCap === 'quiz'
@@ -555,7 +564,7 @@ export default function ChatWindow({
     if (quizConfig.preference.trim()) reqParts.push(quizConfig.preference.trim())
     const requirement = reqParts.join('，')
 
-    const close = connectQuestionGenerate(
+    const { close, send } = connectQuestionGenerate(
       {
         course_id: courseId,
         question: requirement,
@@ -598,12 +607,18 @@ export default function ChatWindow({
                 setQuizStreamQuestions((prev) => [...prev, qq])
               })
             }
+          } else if (t === 'ask_user_card') {
+            setQuizAskUser({
+              intro: msg.intro ? String(msg.intro) : undefined,
+              questions: (msg.questions as AskUserQuestion[]) ?? [],
+            })
           } else if (t === 'done') {
             setQuizTraces((prev) => [
               ...prev,
               { text: `生成完成，共 ${collectedQuestions.length} 道`, kind: 'done' },
             ])
             setQuizStreaming(false)
+            setQuizAskUser(null)
             const quizData: QuizData = { questions: [...collectedQuestions] }
             const assistantMsg: Message = {
               role: 'assistant',
@@ -617,6 +632,7 @@ export default function ChatWindow({
           } else if (t === 'error') {
             setQuizError(String(msg.message ?? msg.content ?? '出题失败，请重试'))
             setQuizStreaming(false)
+            setQuizAskUser(null)
           }
         },
         onClose: () => {
@@ -632,6 +648,7 @@ export default function ChatWindow({
       },
     )
     quizCloseRef.current = close
+    quizSendRef.current = send
   }, [quizConfig, input, courseId, loading, quizStreaming, onSessionCreated, pendingFiles, uploadPendingAttachments])
 
   // ---------- 深度研究 ----------
@@ -709,12 +726,16 @@ export default function ChatWindow({
       }
     }
 
-    const close = connectDeepResearch(
+    const { close, send } = connectDeepResearch(
       {
         course_id: courseId,
         question: topic.trim(),
         language: 'zh',
-        metadata: { mode: researchMode, depth: researchDepth, sources: researchSources },
+        metadata: {
+          mode: researchMode,
+          depth: researchDepth,
+          sources: [...(useKb ? ['kb'] : []), ...(useWebSearch ? ['web'] : [])] as DeepResearchSource[],
+        },
         attachments: attachments.length > 0 ? attachments : undefined,
       },
       {
@@ -739,13 +760,20 @@ export default function ChatWindow({
             const r = String(msg.report ?? '')
             if (r) reportContent = r
             finishWithReport()
+          } else if (t === 'ask_user_card') {
+            setResearchAskUser({
+              intro: msg.intro ? String(msg.intro) : undefined,
+              questions: (msg.questions as AskUserQuestion[]) ?? [],
+            })
           } else if (t === 'done') {
             finishWithReport()
             setResearchStreaming(false)
+            setResearchAskUser(null)
             researchCloseRef.current?.()
           } else if (t === 'error') {
             setResearchError(String(msg.message ?? msg.content ?? '研究失败，请重试'))
             setResearchStreaming(false)
+            setResearchAskUser(null)
           }
         },
         onClose: () => {
@@ -761,7 +789,8 @@ export default function ChatWindow({
       },
     )
     researchCloseRef.current = close
-  }, [courseId, loading, researchStreaming, researchMode, researchDepth, researchSources, onSessionCreated, pendingFiles, uploadPendingAttachments])
+    researchSendRef.current = send
+  }, [courseId, loading, researchStreaming, researchMode, researchDepth, useKb, useWebSearch, onSessionCreated, pendingFiles, uploadPendingAttachments])
 
   // ---------- 普通聊天 ----------
   const handleSend = useCallback(async () => {
@@ -1261,6 +1290,16 @@ export default function ChatWindow({
             error={quizError}
           />
         )}
+        {quizAskUser && (
+          <AskUserCard
+            intro={quizAskUser.intro}
+            questions={quizAskUser.questions}
+            onSubmit={(answers) => {
+              quizSendRef.current?.({ type: 'submit_user_reply', text: '', answers })
+              setQuizAskUser(null)
+            }}
+          />
+        )}
         {/* 深度研究流式进度气泡 */}
         {researchStreaming && (
           <div className="flex justify-start mb-4">
@@ -1282,6 +1321,16 @@ export default function ChatWindow({
               )}
             </div>
           </div>
+        )}
+        {researchAskUser && (
+          <AskUserCard
+            intro={researchAskUser.intro}
+            questions={researchAskUser.questions}
+            onSubmit={(answers) => {
+              researchSendRef.current?.({ type: 'submit_user_reply', text: '', answers })
+              setResearchAskUser(null)
+            }}
+          />
         )}
         {/* 普通聊天 loading */}
         {loading && !streamingStarted && (
@@ -1393,39 +1442,6 @@ export default function ChatWindow({
                 </button>
               ))}
             </div>
-
-            <div className="w-px bg-line self-stretch hidden sm:block" />
-
-            <div className="flex items-center gap-1 flex-wrap">
-              <span className="text-muted shrink-0">资料</span>
-              {(
-                [
-                  { v: 'kb', label: '知识库' },
-                  { v: 'web', label: '网络' },
-                  { v: 'papers', label: '论文' },
-                ] as { v: DeepResearchSource; label: string }[]
-              ).map(({ v, label }) => {
-                const selected = researchSources.includes(v)
-                return (
-                  <button
-                    key={v}
-                    type="button"
-                    onClick={() =>
-                      setResearchSources((prev) =>
-                        selected ? prev.filter((s) => s !== v) : [...prev, v],
-                      )
-                    }
-                    className={`px-2 py-0.5 rounded-full border transition ${
-                      selected
-                        ? 'border-ink bg-ink text-white font-medium'
-                        : 'border-line text-muted hover:border-ink-soft'
-                    }`}
-                  >
-                    {label}
-                  </button>
-                )
-              })}
-            </div>
           </div>
         )}
 
@@ -1488,13 +1504,14 @@ export default function ChatWindow({
             <Database size={14} strokeWidth={1.5} />
             <span className="text-[11px]">知识库</span>
           </button>
-          {useKb && ragEnabled && (
+          {useKb && ragEnabled && hasLightrag && (
             <select
               value={ragMode}
-              onChange={(e) => setRagMode(e.target.value as 'mix' | 'naive' | 'local')}
+              onChange={(e) => setRagMode(e.target.value as 'auto' | 'mix' | 'naive' | 'local')}
               title="知识库检索模式"
               className="text-[11px] px-1.5 py-1.5 rounded-[var(--radius)] border border-line bg-surface text-ink-soft focus:outline-none focus:border-ink"
             >
+              <option value="auto">自动</option>
               <option value="mix">混合</option>
               <option value="naive">向量</option>
               <option value="local">实体</option>
@@ -1575,13 +1592,14 @@ export default function ChatWindow({
             <Database size={14} strokeWidth={1.5} />
             <span className="hidden sm:inline text-[11px]">知识库</span>
           </button>
-          {useKb && ragEnabled && (
+          {useKb && ragEnabled && hasLightrag && (
             <select
               value={ragMode}
-              onChange={(e) => setRagMode(e.target.value as 'mix' | 'naive' | 'local')}
+              onChange={(e) => setRagMode(e.target.value as 'auto' | 'mix' | 'naive' | 'local')}
               title="知识库检索模式"
               className="hidden md:inline-block text-[11px] px-1.5 py-2 rounded-[var(--radius)] border border-line bg-surface text-ink-soft focus:outline-none focus:border-ink"
             >
+              <option value="auto">自动</option>
               <option value="mix">混合</option>
               <option value="naive">向量</option>
               <option value="local">实体</option>

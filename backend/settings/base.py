@@ -27,7 +27,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import warnings
 from functools import lru_cache
 from typing import Annotated, Any
@@ -241,10 +240,8 @@ class PathsConfig(BaseModel):
 
     upload_dir: str = ""
     knowledge_dir: str = ""
-    vectorstore_dir: str = ""
     db_path: str = ""
     question_log_dir: str = ""
-    llama_index_kb_root: str = ""
     lightrag_workdir: str = ""
     kb_store_dir: str = ""
     tutorbot_workspace_dir: str = ""
@@ -252,6 +249,7 @@ class PathsConfig(BaseModel):
     mcp_config_path: str = ""
     mcp_sessions_dir: str = ""
     output_cards_path: str = ""
+    parse_cache_dir: str = ""  # 解析结果内容寻址缓存（空→BASE_DIR/data/parse_cache）
 
 
 class ChunkingConfig(BaseModel):
@@ -280,7 +278,7 @@ class ChunkingConfig(BaseModel):
 
 
 class ContextPolicyConfig(BaseModel):
-    """轮内上下文预算策略（第二批）。默认全部关闭=行为与旧 _snip_tool_results 等价，便于消融对照。
+    """轮内上下文预算策略（第二批）。
 
     调研依据 arXiv:2508.21433（The Complexity Trap, JetBrains）：Observation Masking 相对
     Raw 成本减半、解题率持平；纯摘要引发 trajectory elongation。最优是 hybrid（掩码为主、
@@ -288,14 +286,33 @@ class ContextPolicyConfig(BaseModel):
     .env 前缀 CONTEXT_POLICY__*。
     """
 
-    # 总开关。关=loop 仍走旧 _snip_tool_results（按全局字符>80000 从最早 tool 替换，行为零变化）；
+    # 总开关。关=loop 走旧 _snip_tool_results（按全局字符>80000 从最早 tool 替换）；
     # 开=走 context_policy.apply 三段式（cap 单条 + 掩码窗口化 + 可选 hybrid 摘要）。
-    enabled: TruthyBool = False
+    # 默认 True：吃下「Observation Masking 成本减半、解题率持平」这份确定收益（chat KB Seed
+    # 提速改造配套开启）。CONTEXT_POLICY__ENABLED=false 一行回退到旧行为。
+    enabled: TruthyBool = True
     keep_recent_turns: int = 3      # 保留最近 M 轮 role=tool 原文，更早掩码（mask_old_observations）
     budget_chars: int = 80_000      # 总字符触发点，与旧 _snip_tool_results 一致
     tool_result_max_chars: int = 6000  # 单条 tool 结果头尾保留上限（cap_tool_result）；0=不限
-    summary_enabled: TruthyBool = False  # hybrid 兜底摘要（调 fast LLM，默认关）
+    summary_enabled: TruthyBool = False  # hybrid 兜底摘要（调 fast LLM，多花一次调用，默认关）
     summary_threshold: int = 4      # 被掩码轮数 >= 此值才触发摘要
+
+
+class KbSeedConfig(BaseModel):
+    """chat 进 loop 前的知识库预检索（对标 DeepTutor ``_retrieve_kb_seed_block``）。
+
+    一次用户回合进 agent loop 前，用原问题预检索一次课程知识库，命中则把证据作为
+    ``[知识库预检索]`` 块注入首轮消息——材料够时模型第 1 轮直接作答，省下「盲调多次 rag +
+    多轮 LLM 反刍」的开销（LatentRAG arXiv:2605.06285 实测 thought+subquery 占 agentic RAG
+    约 90% 延迟，瓶颈是轮数而非检索引擎）。只挂载在 ChatPipeline，不污染 research/quiz 共享内核。
+
+    默认开（``KB_SEED__ENABLED=false`` 回退）；超时/失败一律降级为空串，绝不拖慢主链路。
+    .env 前缀 ``KB_SEED__*``。
+    """
+
+    enabled: TruthyBool = True      # 默认开；出问题 KB_SEED__ENABLED=false 一行回退
+    max_chars: int = 4000           # 对标 DeepTutor KB_SEED_CHARS_PER_KB，单次预检索注入上限
+    timeout_s: float = 8.0          # asyncio.wait_for 超时降级为空串，绝不拖慢
 
 
 class CostQuotaConfig(BaseModel):
@@ -314,6 +331,23 @@ class CostQuotaConfig(BaseModel):
     enabled: TruthyBool = False        # 总开关。关=check/accrue 均短路，零行为变化
     daily_budget_usd: float = 1.0      # 每用户/课程/自然日 的 USD 预算上限
     degrade_model: TruthyBool = True   # 超预算→降级到 fast_model（False=仅记录不降级）
+
+
+class ResearchConfig(BaseModel):
+    """深度研究「前置澄清」配置（rephrase 阶段用 ask_user 在同 turn 内暂停问学生）。
+
+    - clarify_enabled：rephrase 是否挂 ask_user（仅 WS 入口有效；HTTP/IM 无 waiter 不挂）。
+    - clarify_wait_timeout_s：ask_user 等待学生回复的硬超时（秒）。超时不挂死，走 "User skipped."
+      续跑（见 turn_runtime._wait_for_user_reply + loop._format_reply）。该超时是 turn_runtime
+      共享 waiter 的全局上限，chat/quiz 的 ask_user 同样受益（不无限挂住 task/WS）。
+      clarify_enabled=False 时取 0=不超时（保留旧「无限等」行为，便于关澄清做对照）。
+    - clarify_max_questions：单次澄清最多问几个（提示词层约束，见 pipeline.yaml rephrase.system）。
+    .env 前缀 RESEARCH__*。
+    """
+
+    clarify_enabled: TruthyBool = True
+    clarify_wait_timeout_s: int = 120
+    clarify_max_questions: int = 3
 
 
 class LightRAGConfig(BaseModel):
@@ -384,24 +418,11 @@ class LightRAGConfig(BaseModel):
         }
 
 
-class RagConfig(BaseModel):
-    """RAG backend 选择（平台相关 + legacy alias）。
-
-    backend 的平台解析在 Settings._apply_legacy_and_fallbacks 里做（嵌套
-    BaseModel 的 field_validator 对默认值不触发，故用 model_validator）。
-    """
-
-    backend: str = ""
-    agentic_backend: str = ""
-    agentic_kb_tool: str = ""  # legacy alias，仅 Settings validator 读
-
-
 class LlamaParseConfig(BaseModel):
     """LlamaParse / LlamaIndex（图像 PDF / 扫描件解析）。"""
 
     cloud_api_key: SecretStr = SecretStr("")  # 兼容 LLAMA_CLOUD_API_KEY 语义
     parse_api_key: SecretStr = SecretStr("")  # 作 cloud_api_key 的 fallback
-    question_use_llamaindex: TruthyBool = True
 
 
 class PdfConfig(BaseModel):
@@ -419,6 +440,29 @@ class PdfConfig(BaseModel):
     backend: str = "docling"  # docling(默认) | mupdf；二选一，选定失败则跳过该文件，不降级
     do_ocr: TruthyBool = True  # 仅 docling：扫描件 OCR
     ocr_provider: str = "rapid"  # 仅 docling：rapid | easyocr
+
+
+class ParsingConfig(BaseModel):
+    """文档解析层配置（parsing/ 引擎，替代 worker 内 Docling 单例）。
+
+    默认 mineru_api（托管 API）：云端不装 torch，worker 稳态内存从 ~2.5GB 降到 ~0.4GB
+    （省下的正是给 LightRAG 腾的空间）。docling 为可选自托管引擎（装 parse-docling
+    extra，数据不出域）。单引擎，失败即报错不降级（低质量兜底比失败更糟）。
+    .env 前缀 PARSING__*（如 PARSING__ENGINE / PARSING__MINERU_API_KEY）。
+    """
+
+    engine: str = ""  # 空=用原 file_routing 解析（docling/mupdf，行为零变化）；mineru_api=换托管 API（去 torch，需配 MINERU_API_KEY）
+    # ── MinerU 托管 API（https://mineru.net/apiManage/docs）──
+    mineru_api_key: StrippedSecret = SecretStr("")
+    mineru_base_url: str = "https://mineru.net"
+    mineru_model: str = "vlm"  # vlm(MinerU2.5,表格/公式强项) | pipeline
+    mineru_language: str = "ch"  # ch | en | ...
+    enable_formula: TruthyBool = True
+    enable_table: TruthyBool = True
+    poll_interval: int = 5  # 轮询解析结果间隔（秒）
+    poll_timeout: int = 1800  # 单文件解析轮询超时（秒，30 分钟）
+    max_file_pages: int = 200  # MinerU 单文件页数上限
+    max_file_mb: int = 200  # MinerU 单文件大小上限（MB）
 
 
 class TutorBotConfig(BaseModel):
@@ -488,6 +532,9 @@ class Mem0Config(BaseModel):
     flush_max_turns: int = 3
     flush_idle_timeout: float = 120.0
     flush_scan_interval: int = 30
+    # L3 巩固（Phase 3）：热路径累计 importance 超此阈值 → enqueue consolidate_memory。
+    # 对齐 Generative Agents 的 reflection 累计触发；quiz 里程碑无视阈值直接触发。
+    consolidation_importance_threshold: float = 0.7
 
 
 class SummaryConfig(BaseModel):
@@ -496,23 +543,16 @@ class SummaryConfig(BaseModel):
     window_size: int = 5
     buffer_size: int = 2
     compress_interval: int = 3
+    # 跨进程压缩锁：生产 gunicorn -w 4 下，模块级 asyncio.Lock 只够单进程；
+    # Redis per-session SET NX EX 防多 worker 重复烧 LLM。memory://（测试）或关闭时降级不加锁。
+    distributed_lock_enabled: TruthyBool = True
+    lock_ttl: int = 60
 
 
 class QuestionConfig(BaseModel):
-    """Question coordinator (AgentCoordinator)。"""
+    """FAQ 热点缓存阈值（admin FAQ 缓存，见 api/admin.py、scripts/seed_faq_cache.py）。"""
 
-    tool_web_search: TruthyBool = True
-    tool_rag: TruthyBool = True
-    tool_code_execution: TruthyBool = True
     faq_cache_threshold: int = 3
-
-    @property
-    def default_tool_flags(self) -> dict[str, bool]:
-        return {
-            "web_search": self.tool_web_search,
-            "rag": self.tool_rag,
-            "code_execution": self.tool_code_execution,
-        }
 
 
 class ElasticsearchConfig(BaseModel):
@@ -577,9 +617,9 @@ class Settings(BaseSettings):
     paths: PathsConfig = Field(default_factory=PathsConfig)
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     lightrag: LightRAGConfig = Field(default_factory=LightRAGConfig)
-    rag: RagConfig = Field(default_factory=RagConfig)
     llamaparse: LlamaParseConfig = Field(default_factory=LlamaParseConfig)
     pdf: PdfConfig = Field(default_factory=PdfConfig)
+    parsing: ParsingConfig = Field(default_factory=ParsingConfig)
     tutorbot: TutorBotConfig = Field(default_factory=TutorBotConfig)
     qq_bot: QQBotConfig = Field(default_factory=QQBotConfig)
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
@@ -590,7 +630,9 @@ class Settings(BaseSettings):
     question: QuestionConfig = Field(default_factory=QuestionConfig)
     elasticsearch: ElasticsearchConfig = Field(default_factory=ElasticsearchConfig)
     context_policy: ContextPolicyConfig = Field(default_factory=ContextPolicyConfig)
+    kb_seed: KbSeedConfig = Field(default_factory=KbSeedConfig)
     cost_quota: CostQuotaConfig = Field(default_factory=CostQuotaConfig)
+    research: ResearchConfig = Field(default_factory=ResearchConfig)
 
     # ------------------------------------------------------------------
     # validators
@@ -607,23 +649,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _apply_legacy_and_fallbacks(self) -> "Settings":
-        # RAG backend 平台解析（chroma/fs，否则按 sys.platform）
-        raw_be = (self.rag.backend or "").strip().lower()
-        if raw_be in ("chroma", "fs"):
-            self.rag.backend = raw_be
-        else:
-            self.rag.backend = "fs" if sys.platform == "win32" else "chroma"
-
-        # AGENTIC_RAG_BACKEND legacy alias（AGENTIC_KB_TOOL=llamaindex_rag → llamaindex）
-        arg = (self.rag.agentic_backend or "").strip().lower()
-        legacy = (self.rag.agentic_kb_tool or "").strip().lower()
-        if arg in ("lightrag", "llamaindex"):
-            self.rag.agentic_backend = arg
-        elif legacy == "llamaindex_rag":
-            self.rag.agentic_backend = "llamaindex"
-        else:
-            self.rag.agentic_backend = "lightrag"
-
         # LLAMA_CLOUD_API_KEY fallback to LLAMAPARSE_API_KEY
         if not self.llamaparse.cloud_api_key.get_secret_value() and self.llamaparse.parse_api_key.get_secret_value():
             self.llamaparse.cloud_api_key = self.llamaparse.parse_api_key
@@ -645,10 +670,8 @@ class Settings(BaseSettings):
         # 路径默认值（依赖 BASE_DIR，在此组装）
         self.paths.upload_dir = self.paths.upload_dir or os.path.join(BASE_DIR, "uploads")
         self.paths.knowledge_dir = self.paths.knowledge_dir or os.path.join(BASE_DIR, "knowledge")
-        self.paths.vectorstore_dir = self.paths.vectorstore_dir or os.path.join(BASE_DIR, "vectorstore")
         self.paths.db_path = self.paths.db_path or os.path.join(BASE_DIR, "data", "sessions.db")
         self.paths.question_log_dir = self.paths.question_log_dir or os.path.join(BASE_DIR, "logs", "question")
-        self.paths.llama_index_kb_root = self.paths.llama_index_kb_root or os.path.join(BASE_DIR, "data", "knowledge_bases")
         self.paths.lightrag_workdir = self.paths.lightrag_workdir or os.path.join(BASE_DIR, "lightrag_store")
         self.paths.kb_store_dir = self.paths.kb_store_dir or os.path.join(BASE_DIR, "kb_store")
         self.paths.tutorbot_workspace_dir = self.paths.tutorbot_workspace_dir or os.path.join(BASE_DIR, "data", "tutorbot")
@@ -656,6 +679,7 @@ class Settings(BaseSettings):
         self.paths.mcp_config_path = self.paths.mcp_config_path or os.path.join(BASE_DIR, "data", "mcp.json")
         self.paths.mcp_sessions_dir = self.paths.mcp_sessions_dir or os.path.join(BASE_DIR, "data", "sessions")
         self.paths.output_cards_path = self.paths.output_cards_path or os.path.join(BASE_DIR, "data", "output_cards.json")
+        self.paths.parse_cache_dir = self.paths.parse_cache_dir or os.path.join(BASE_DIR, "data", "parse_cache")
         return self
 
     @model_validator(mode="after")

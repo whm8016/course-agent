@@ -274,9 +274,68 @@ def _chunk_ragflow_manual_strategy(
     return chunks, chunk_sources
 
 
+def _chunk_type_routed_strategy(
+    documents: list, classification: FileClassification, ingest_size: int
+) -> tuple[list[str], list[str]]:
+    """type_routed 策略：按文档结构路由分块（opt-in，settings.chunking.strategy=type_routed）。
+
+    - DOCX → chunk_docx_structured（标题层级栈 + 表格原子化，复用 ragflow_manual_docx）
+    - 有 content_list blocks（parsing 层 MinerU/docling 产出的 PDF）→ chunk_blocks_structured
+      （title/table 边界 + 超 ingest_size 递归切）
+    - 无 content_list（extract_pdf_sections 的 PDF / 纯文本）→ sentence_splitter 兜底
+
+    依赖 file_paths_to_llama_documents 把 content_list 存进 Document.metadata。同文件多
+    section 共享 content_list，按 file_path 去重只处理一次（避免重复分块）。
+    """
+    from core.rag.chunking.ragflow_manual_docx import chunk_docx_structured  # noqa: PLC0415
+    from core.rag.chunking.type_routed import chunk_blocks_structured  # noqa: PLC0415
+
+    docx_resolved = {str(Path(fp).resolve()) for fp in classification.docx_files}
+    chunks: list[str] = []
+    chunk_sources: list[str] = []
+
+    # DOCX：结构化切块（与 ragflow_manual_docx 一致）
+    for fp in classification.docx_files:
+        ck_list, sec_list = chunk_docx_structured(fp, max_section_chars=ingest_size)
+        file_name = Path(fp).name
+        resolved_fp = str(Path(fp).resolve())
+        for i, (ck, sec) in enumerate(zip(ck_list, sec_list)):
+            prefix = _build_source_prefix(section=sec, file_name=file_name)
+            chunks.append(f"{prefix}{ck}" if prefix else ck)
+            chunk_sources.append(f"{resolved_fp}::chunk-{i}")
+
+    # 非 DOCX：按 content_list 分块（有）或 sentence_splitter（无）
+    non_docx_docs = [
+        d for d in documents if str(d.metadata.get("file_path", "")) not in docx_resolved
+    ]
+    seen_blocks_files: set[str] = set()  # 同文件多 section 共享 content_list，去重
+    sentence_docs: list = []
+    for doc in non_docx_docs:
+        file_path = str(doc.metadata.get("file_path", ""))
+        blocks = doc.metadata.get("content_list")
+        if blocks and file_path and file_path not in seen_blocks_files:
+            seen_blocks_files.add(file_path)
+            ck_list, sec_list = chunk_blocks_structured(blocks, max_chars=ingest_size)
+            file_name = doc.metadata.get("file_name", "")
+            for i, (ck, sec) in enumerate(zip(ck_list, sec_list)):
+                prefix = _build_source_prefix(section=sec, file_name=file_name)
+                chunks.append(f"{prefix}{ck}" if prefix else ck)
+                chunk_sources.append(f"{file_path}::chunk-{i}")
+        elif not blocks:
+            sentence_docs.append(doc)
+
+    if sentence_docs:
+        nd_chunks, nd_sources = _chunk_by_sentence_splitter(sentence_docs)
+        chunks.extend(nd_chunks)
+        chunk_sources.extend(nd_sources)
+
+    return chunks, chunk_sources
+
+
 # 注册切块策略（模块加载时执行；新增策略在此加一行即可，_chunk_documents 分发结构不变）
 register_chunk_strategy("sentence_splitter", _chunk_sentence_splitter_strategy)
 register_chunk_strategy("ragflow_manual_docx", _chunk_ragflow_manual_strategy)
+register_chunk_strategy("type_routed", _chunk_type_routed_strategy)
 
 
 # ── 核心解析函数 ─────────────────────────────────────────────────────────────
@@ -925,8 +984,3 @@ async def _ingest_body(
         "files": len(file_paths),
         "images": images_processed,
     }
-
-
-def llama_available() -> bool:
-    """返回 LlamaIndex 是否可用（供 API 展示）。"""
-    return True

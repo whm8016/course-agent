@@ -22,16 +22,6 @@ export interface QuestionGeneratePayload {
   attachments?: AttachmentInfo[]
 }
 
-export interface QuestionMimicPayload {
-  mode: 'upload' | 'parsed'
-  kb_name: string
-  max_questions?: number
-  language?: string
-  pdf_data?: string
-  pdf_name?: string
-  paper_path?: string
-}
-
 export interface QuestionFollowupPayload {
   question_context: Record<string, unknown>
   history_context: string
@@ -42,6 +32,12 @@ export interface QuestionFollowupPayload {
 export interface QuestionGenMessage {
   type: string
   [key: string]: unknown
+}
+
+/** WS 连接句柄：close 主动关闭；send 向后端发消息（如 ask_user 的 submit_user_reply）。 */
+export interface WsHandle {
+  close: () => void
+  send: (msg: object) => void
 }
 
 function wsBaseUrl(): string {
@@ -99,7 +95,7 @@ function deepResearchWsUrl(): string {
 export function connectDeepResearch(
   payload: DeepResearchPayload,
   handlers: DeepResearchHandlers = {},
-): () => void {
+): WsHandle {
   const ws = new WebSocket(deepResearchWsUrl())
 
   const close = () => {
@@ -107,6 +103,14 @@ export function connectDeepResearch(
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close()
       }
+    } catch {
+      // ignore
+    }
+  }
+
+  const send = (msg: object) => {
+    try {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
     } catch {
       // ignore
     }
@@ -129,15 +133,11 @@ export function connectDeepResearch(
   ws.onerror = () => handlers.onError?.()
   ws.onclose = () => handlers.onClose?.()
 
-  return close
+  return { close, send }
 }
 
 function questionGenerateWsUrl(): string {
   return withToken(`${wsBaseUrl()}/api/run/quiz`)
-}
-
-function questionMimicWsUrl(): string {
-  return withToken(`${wsBaseUrl()}/api/question/mimic`)
 }
 
 function questionFollowupWsUrl(): string {
@@ -159,7 +159,7 @@ export interface QuestionGenHandlers {
 export function connectQuestionGenerate(
   payload: QuestionGeneratePayload,
   handlers: QuestionGenHandlers = {},
-): () => void {
+): WsHandle {
   const ws = new WebSocket(questionGenerateWsUrl())
 
   const close = () => {
@@ -172,38 +172,9 @@ export function connectQuestionGenerate(
     }
   }
 
-  ws.onopen = () => {
-    handlers.onOpen?.()
-    ws.send(JSON.stringify(payload))
-  }
-
-  ws.onmessage = (ev) => {
+  const send = (msg: object) => {
     try {
-      const msg = JSON.parse(String(ev.data)) as QuestionGenMessage
-      handlers.onMessage?.(msg)
-    } catch {
-      handlers.onMessage?.({ type: 'parse_error', raw: ev.data })
-    }
-  }
-
-  ws.onerror = () => handlers.onError?.()
-  ws.onclose = () => handlers.onClose?.()
-
-  return close
-}
-
-/** PDF / 已解析目录仿题（/api/question/mimic） */
-export function connectQuestionMimic(
-  payload: QuestionMimicPayload,
-  handlers: QuestionGenHandlers = {},
-): () => void {
-  const ws = new WebSocket(questionMimicWsUrl())
-
-  const close = () => {
-    try {
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close()
-      }
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
     } catch {
       // ignore
     }
@@ -226,7 +197,7 @@ export function connectQuestionMimic(
   ws.onerror = () => handlers.onError?.()
   ws.onclose = () => handlers.onClose?.()
 
-  return close
+  return { close, send }
 }
 
 /** 单题追问（/api/question/followup），服务端流式 token + answer + done */

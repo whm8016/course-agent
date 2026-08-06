@@ -42,7 +42,7 @@ class ChatRequest(BaseModel):
     attachments: list[Attachment] = Field(default_factory=list, description="附件列表（图片，支持多图）")
     tools: list[str] = Field(default_factory=list, description="启用的工具，如 ['rag', 'web_search']")
     model_profile_id: str | None = Field(default=None, description="本次对话使用的 LLM 供应商 profile id（对标 ：用户下拉选中；不传走默认/active）")
-    rag_mode: str = Field(default="naive", description="LightRAG 检索模式：mix/naive/local/global，默认 naive（纯向量+rerank，0 次内部 LLM 调用）")
+    rag_mode: str = Field(default="auto", description="检索模式：auto（默认，按 strategy 自动路由 lightrag 图谱/pgvector 向量）/ mix/naive/local（手动选 LightRAG 原生模式，需课程已建 lightrag）")
 
 
 @router.post("/chat")
@@ -59,10 +59,10 @@ async def chat(
     session_id: str | None = body.session_id
     mode: str = normalize_mode(body.chat_mode)
 
-    # rag_mode 白名单校验：只允许合法的 LightRAG 查询模式，非法/空值回退 naive
+    # rag_mode 白名单：auto（默认，自动路由）+ LightRAG 原生模式；非法/空值回退 auto
     rag_mode = (body.rag_mode or "").strip().lower()
-    if rag_mode not in {"mix", "naive", "local", "global"}:
-        rag_mode = "naive"
+    if rag_mode not in {"auto", "mix", "naive", "local", "global"}:
+        rag_mode = "auto"
 
     # 附件解析 + 图片限流 + 物化（归属校验 + 读 base64），统一在 api.upload
     attachments = resolve_attachments(body.attachments, body.image_path)
@@ -83,8 +83,8 @@ async def chat(
 
     # 读 Mem0 记忆（L3）：用当前用户消息做 query 语义检索相关记忆注入
     from core.memory.mem0_client import build_memory_context as _mem_ctx_fn, has_any as _mem0_has_any
-    _mem_ctx = await _mem_ctx_fn(str(user["id"]), message)
-    _has_memory = await _mem0_has_any(str(user["id"]))
+    _mem_ctx = await _mem_ctx_fn(str(user["id"]), message, course_id=course_id)
+    _has_memory = await _mem0_has_any(str(user["id"]), course_id=course_id)
     logger.info(
         "[chat] memory context built user_id=%s has_memory=%s ctx_len=%d",
         user["id"], _has_memory, len(_mem_ctx)

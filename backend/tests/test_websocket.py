@@ -42,15 +42,6 @@ def test_deep_solve_ws_invalid_token_rejected(app):
             pass
 
 
-def test_question_generate_ws_no_token_rejected(app):
-    with TestClient(app) as tc:
-        try:
-            with tc.websocket_connect("/api/question/generate"):
-                pass
-        except Exception:
-            pass
-
-
 def test_deep_research_ws_no_token_rejected(app):
     with TestClient(app) as tc:
         try:

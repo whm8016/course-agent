@@ -1,7 +1,7 @@
 """RAG 子系统核心类型定义。
 
 提供 RetrievalResult、IndexResult、ChunkMeta、DocumentFragment 等数据类，
-供各后端实现（LightRAG/LlamaIndex/Chroma）共用。
+供各后端实现共用。
 """
 from __future__ import annotations
 

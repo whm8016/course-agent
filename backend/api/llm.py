@@ -15,6 +15,8 @@ provider 以 profile 池形式部署级共享（管理员预配）；所有用�
 """
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
@@ -69,7 +71,7 @@ async def list_providers(user: dict = Depends(get_current_user)):
 
 @router.get("/profiles/selectable")
 async def list_selectable_profiles(user: dict = Depends(get_current_user)):
-    catalog = catalog_mod.load_catalog()
+    catalog = await catalog_mod.load_catalog_cached()
     active = catalog_mod.active_profile_id(catalog)
     return {
         "profiles": [
@@ -84,7 +86,7 @@ async def list_selectable_profiles(user: dict = Depends(get_current_user)):
 
 @router.get("/profiles")
 async def list_profiles_admin(_: dict = Depends(require_admin)):
-    catalog = catalog_mod.load_catalog()
+    catalog = await catalog_mod.load_catalog_cached()
     active = catalog_mod.active_profile_id(catalog)
     return {
         "profiles": [
@@ -101,26 +103,33 @@ async def upsert_profile_route(
 ):
     if not profile_id.strip():
         raise HTTPException(status_code=400, detail="profile id 不能为空")
-    saved = catalog_mod.upsert_profile(profile_id, payload.model_dump())
+    # 写文件丢线程池，避免阻塞事件循环；写后失效缓存，全部 worker 下次读自动 miss 重载
+    saved = await asyncio.to_thread(
+        catalog_mod.upsert_profile, profile_id, payload.model_dump()
+    )
     clear_llm_client_cache()  # key 变更后强制重建（正常路径按指纹也会自动正确，双保险）
-    catalog = catalog_mod.load_catalog()
-    active = catalog_mod.active_profile_id(catalog)
+    await catalog_mod.invalidate_catalog_cache()
+    active = await catalog_mod.active_profile_id_cached()
     return {"saved": True, "profile": catalog_mod.profile_admin_view(saved, active)}
 
 
 @router.delete("/profiles/{profile_id}")
 async def delete_profile_route(profile_id: str, _: dict = Depends(require_admin)):
-    if not catalog_mod.delete_profile(profile_id):
+    deleted = await asyncio.to_thread(catalog_mod.delete_profile, profile_id)
+    if not deleted:
         raise HTTPException(status_code=404, detail=f"profile '{profile_id}' not found")
     clear_llm_client_cache()
+    await catalog_mod.invalidate_catalog_cache()
     return {"deleted": True}
 
 
 @router.put("/active")
 async def set_active_route(payload: ActiveRequest, _: dict = Depends(require_admin)):
-    if not catalog_mod.set_active(payload.profile_id):
+    ok = await asyncio.to_thread(catalog_mod.set_active, payload.profile_id)
+    if not ok:
         raise HTTPException(status_code=404, detail=f"profile '{payload.profile_id}' not found")
     clear_llm_client_cache()
+    await catalog_mod.invalidate_catalog_cache()
     return {"active": payload.profile_id}
 
 
@@ -186,7 +195,7 @@ async def _probe_profile(prof: dict, timeout: int = 20) -> dict:
 
 @router.post("/profiles/{profile_id}/test")
 async def test_profile_route(profile_id: str, _: dict = Depends(require_admin)):
-    prof = catalog_mod.get_profile(profile_id)
+    prof = await catalog_mod.get_profile_cached(profile_id)
     if not prof:
         raise HTTPException(status_code=404, detail=f"profile '{profile_id}' not found")
     return await _probe_profile(prof)

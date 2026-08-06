@@ -1,6 +1,6 @@
 """Indexer 抽象基类。
 
-定义统一索引接口，各后端（LightRAG/LlamaIndex）实现此接口。
+定义统一索引接口，各后端实现此接口。
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 class Indexer(ABC):
     """索引器抽象基类。
 
-    所有 RAG 后端（LightRAG/LlamaIndex）都实现此接口，
+    所有 RAG 后端都实现此接口，
     允许调用方通过 registry 获取具体实现，无需硬编码后端选择。
     """
 

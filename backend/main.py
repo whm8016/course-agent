@@ -32,7 +32,6 @@ from slowapi.middleware import SlowAPIMiddleware
 from api.run import router as run_router
 from api.question import router as question_router
 from api.question_notebook import router as question_notebook_router
-from api.llama_rag import router as llama_rag_router
 from api.admin import router as admin_router
 from api.teacher import router as teacher_router
 from api.auth import router as auth_router
@@ -72,24 +71,47 @@ logger = logging.getLogger(__name__)
 
 # ---- EventBus：turn 完成后的记忆更新订阅者 ----
 async def _on_capability_complete(event) -> None:
-    """CAPABILITY_COMPLETE：批量 enqueue 到 flush_manager（debounce + 批量刷新）+ L2 摘要压缩。"""
+    """CAPABILITY_COMPLETE：写 episodic 原始层（L3 outbox，取代 Redis buffer）+ L2 摘要压缩。"""
     try:
-        from core.memory.flush_manager import get_flush_manager
+        from core.memory.episodic import record_episode
 
-        flush_mgr = get_flush_manager()
-
-        # 从 event 中提取 session_id
-        session_id = getattr(event, "session_id", "") or event.metadata.get("session_id", "") or ""
-
-        await flush_mgr.enqueue(
+        await record_episode(
             user_id=event.user_id,
-            session_id=session_id,
             course_id=event.course_id,
+            session_id=event.session_id,
+            turn_id=event.turn_id,
             user_msg=event.user_message,
             assistant_msg=event.agent_output,
+            mode=event.mode,
+            tools_used=event.metadata.get("tools_used") or (),
         )
     except Exception:
-        logger.warning("EventBus: memory enqueue failed", exc_info=True)
+        logger.warning("EventBus: record_episode failed", exc_info=True)
+
+    # L3 巩固触发（Phase 3）：importance 累计超阈值 / quiz 里程碑 → enqueue consolidate_memory。
+    # 对齐 Generative Agents 的 reflection 累计触发；5min cron safety net 兜底（worker.py）。
+    try:
+        from core.memory import consolidation, episodic
+        from settings import get_settings
+
+        score = episodic.estimate_importance(
+            user_message=event.user_message,
+            agent_output=event.agent_output,
+            mode=event.mode,
+            tools_used=event.metadata.get("tools_used") or (),
+        )
+        if score > 0:
+            accumulated = await consolidation.add_importance(event.user_id, event.course_id, score)
+            threshold = get_settings().mem0.consolidation_importance_threshold
+            if accumulated >= threshold or event.mode == "quiz":
+                pool = await get_arq_pool()
+                if pool is not None:
+                    await pool.enqueue_job(
+                        "consolidate_memory", user_id=event.user_id, course_id=event.course_id
+                    )
+                await consolidation.reset_importance(event.user_id, event.course_id)
+    except Exception:
+        logger.warning("EventBus: consolidation trigger failed", exc_info=True)
 
     # L2: 触发 session summary 增量压缩（异步，不阻塞主链路）
     session_id = getattr(event, "session_id", "") or event.metadata.get("session_id", "") or ""
@@ -434,7 +456,6 @@ app.include_router(question_notebook_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(teacher_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
-app.include_router(llama_rag_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(lightrag_router, prefix="/api")
 app.include_router(courses_router, prefix="/api")

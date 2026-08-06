@@ -54,7 +54,7 @@ async def test_deadletter_does_not_close_ctx_redis():
     ctx_redis = AsyncMock()
     ctx = {"job_try": worker._ARQ_MAX_TRIES, "job_id": "j3", "redis": ctx_redis}
     await worker._push_deadletter_if_terminal(
-        ctx, function="run_llamaindex_build", error=RuntimeError("y")
+        ctx, function="run_indexing", error=RuntimeError("y")
     )
     ctx_redis.rpush.assert_awaited_once()
     ctx_redis.aclose.assert_not_awaited()

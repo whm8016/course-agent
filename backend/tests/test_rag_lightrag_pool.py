@@ -13,10 +13,13 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+from core.rag.lightrag.instance_pool import _PG_STORAGE_ATTRS
 
 
 # ---------------------------------------------------------------------------
@@ -124,49 +127,6 @@ async def test_m22_finalize_exception_does_not_crash_evict(caplog):
     assert result == "c1"  # 仍正常淘汰
     assert "c1" not in _instances
     assert any("finalize_storages" in r.message for r in caplog.records)
-
-
-# ---------------------------------------------------------------------------
-# M-25：embedding 长度校验
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_m25_embedding_length_mismatch_raises():
-    """provider 返回向量数少于 batch → 抛 RuntimeError，不写残缺结果。"""
-    from core.rag.llamaindex.embedding_bridge import DashScopeEmbeddingClient
-
-    client = DashScopeEmbeddingClient()
-
-    # 构造一个返回 1 个向量（但 batch 有 2 条）的假 resp
-    fake_item = SimpleNamespace(embedding=[0.1, 0.2], index=0)
-    fake_resp = SimpleNamespace(data=[fake_item])  # 只有 1 个，batch=2
-
-    fake_create = AsyncMock(return_value=fake_resp)
-    fake_embeddings = SimpleNamespace(create=fake_create)
-    fake_openai = SimpleNamespace(embeddings=fake_embeddings)
-
-    with patch("core.rag.llamaindex.embedding_bridge._async_openai_client", fake_openai):
-        with pytest.raises(RuntimeError, match="返回长度不匹配"):
-            await client.embed(["text1", "text2"])
-
-
-@pytest.mark.asyncio
-async def test_m25_embedding_length_ok():
-    """正常等长返回时不抛错（回归保护）。"""
-    from core.rag.llamaindex.embedding_bridge import DashScopeEmbeddingClient
-
-    client = DashScopeEmbeddingClient()
-    fake_resp = SimpleNamespace(data=[
-        SimpleNamespace(embedding=[0.1, 0.2], index=0),
-        SimpleNamespace(embedding=[0.3, 0.4], index=1),
-    ])
-    fake_create = AsyncMock(return_value=fake_resp)
-    fake_embeddings = SimpleNamespace(create=fake_create)
-    fake_openai = SimpleNamespace(embeddings=fake_embeddings)
-
-    with patch("core.rag.llamaindex.embedding_bridge._async_openai_client", fake_openai):
-        vecs = await client.embed(["a", "b"])
-    assert len(vecs) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -340,3 +300,116 @@ async def test_m33_invalidate_clears_both_layers(monkeypatch):
 
     assert instance_pool.get_cached_signature("c1") is None
     assert "indexing:sig:c1" not in store
+
+
+# ---------------------------------------------------------------------------
+# LightRAG 存储后端 Postgres 化：purge 必须清掉 PG 里的行（per-workspace DELETE），
+# 否则重索引被判 "Duplicate document"。覆盖三条路径：PG 暖缓存全量 drop、SQLite 跳过
+# drop、PG 冷缓存现拉临时实例 + 单个 drop 抛错不阻断其余。
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _reset_pool(monkeypatch, tmp_path):
+    """每个测试前后：清实例池 + 把 LIGHTRAG_WORKDIR 重定向到 tmp_path（隔离文件副作用）。"""
+    from core.rag.lightrag import instance_pool
+    instance_pool._instances.clear()
+    instance_pool._in_use.clear()
+    monkeypatch.setattr(instance_pool, "LIGHTRAG_WORKDIR", str(tmp_path))
+    yield
+    instance_pool._instances.clear()
+    instance_pool._in_use.clear()
+
+
+def _seed_warm_course(rag, course_id="c1"):
+    """预置暖缓存实例 + 建好 workspace 目录，返回 ws_dir 供后续断言。"""
+    from core.rag.lightrag import instance_pool
+    instance_pool._instances[course_id] = rag
+    instance_pool._in_use[course_id] = 0
+    ws_dir = Path(instance_pool.LIGHTRAG_WORKDIR) / f"course_{course_id}"
+    ws_dir.mkdir(parents=True)
+    return ws_dir
+
+
+def _fake_rag_with_storages():
+    """造一个带 12 个 storage 的假 rag（11 个 PG storage + graph），drop 全是 AsyncMock。"""
+    storages = {
+        a: SimpleNamespace(namespace=a, drop=AsyncMock(return_value={"status": "success"}))
+        for a in _PG_STORAGE_ATTRS
+    }
+    # graph 始终 NetworkX 文件后端，purge 不应对它 drop（rmtree 清 graphml）
+    storages["chunk_entity_relation_graph"] = SimpleNamespace(
+        namespace="graph", drop=AsyncMock(return_value={"status": "success"})
+    )
+    return SimpleNamespace(finalize_storages=AsyncMock(), **storages)
+
+
+@pytest.mark.asyncio
+async def test_purge_pg_drops_eleven_storages_not_graph(monkeypatch):
+    """PG 部署 + 暖缓存：对 11 个 PG storage 逐个 drop，不碰 graph；finalize + 移池 + rmtree。"""
+    from core.rag.lightrag import instance_pool
+
+    monkeypatch.setattr(instance_pool, "_IS_POSTGRES", True)
+    rag = _fake_rag_with_storages()
+    ws_dir = _seed_warm_course(rag)
+
+    await instance_pool.purge_course_workspace("c1")
+
+    for attr in _PG_STORAGE_ATTRS:
+        assert getattr(rag, attr).drop.await_count == 1, f"{attr} 未被 drop"
+    assert rag.chunk_entity_relation_graph.drop.await_count == 0
+    assert rag.finalize_storages.await_count == 1
+    assert "c1" not in instance_pool._instances
+    assert "c1" not in instance_pool._in_use
+    assert not ws_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_purge_sqlite_skips_drop_only_rmtree(monkeypatch):
+    """SQLite 部署：数据全在文件（JSON/graphml），purge 不调 drop，只 finalize + rmtree。"""
+    from core.rag.lightrag import instance_pool
+
+    monkeypatch.setattr(instance_pool, "_IS_POSTGRES", False)
+    rag = _fake_rag_with_storages()
+    ws_dir = _seed_warm_course(rag)
+
+    await instance_pool.purge_course_workspace("c1")
+
+    for attr in _PG_STORAGE_ATTRS:
+        assert getattr(rag, attr).drop.await_count == 0, f"{attr} 不应被 drop"
+    assert rag.chunk_entity_relation_graph.drop.await_count == 0
+    assert rag.finalize_storages.await_count == 1
+    assert "c1" not in instance_pool._instances
+    assert not ws_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_purge_cold_cache_loads_temp_and_survives_drop_failure(monkeypatch, caplog):
+    """PG 冷缓存（实例不在池）→ 现 _get_instance 拉一个临时实例来 drop；单个 drop 抛错不阻断。"""
+    from core.rag.lightrag import instance_pool
+
+    monkeypatch.setattr(instance_pool, "_IS_POSTGRES", True)
+    rag = _fake_rag_with_storages()
+    rag.full_docs.drop = AsyncMock(side_effect=RuntimeError("db down"))  # 一个 storage drop 失败
+    loaded: list[str] = []
+
+    async def fake_get_instance(cid):
+        loaded.append(cid)
+        return rag
+
+    monkeypatch.setattr(instance_pool, "_get_instance", fake_get_instance)
+    ws_dir = Path(instance_pool.LIGHTRAG_WORKDIR) / "course_c1"
+    ws_dir.mkdir(parents=True)
+
+    with caplog.at_level("WARNING"):
+        await instance_pool.purge_course_workspace("c1")
+
+    assert loaded == ["c1"]  # 冷缓存 → 确实拉了临时实例
+    # full_docs 抛错被吞并记日志，其余 storage 仍被 drop
+    assert rag.text_chunks.drop.await_count == 1
+    assert rag.doc_status.drop.await_count == 1
+    assert any("full_docs" in r.message for r in caplog.records)
+    # 临时实例最终被移出池 + 清引用计数
+    assert "c1" not in instance_pool._instances
+    assert "c1" not in instance_pool._in_use
+    assert not ws_dir.exists()

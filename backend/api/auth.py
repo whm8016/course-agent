@@ -84,7 +84,7 @@ async def require_admin(user: dict = Depends(get_current_user)) -> dict:
     return user
 
 
-# 历史别名：admin.py / main.py / llama_rag.py 已大量使用 get_current_admin，保留以
+# 历史别名：admin.py / main.py 已大量使用 get_current_admin，保留以
 # 减少改动面；与 require_admin 完全等价（同一 function，同走 is_admin_user）。
 get_current_admin = require_admin
 

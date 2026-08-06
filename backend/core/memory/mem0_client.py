@@ -7,11 +7,15 @@ mem0 的 pgvector provider 启动时自建 memories 表（CREATE EXTENSION + 建
 
 主链路调用（mem0 新版 get_all/search 用 filters={"user_id":...} 传用户，
 add/delete_all 仍接受顶层 user_id=，delete/update 按 memory_id）：
-  get_memory()                                              -> AsyncMemory 单例（同步初始化）
-  await m.add(messages, user_id=...)                        每轮对话后提取记忆
-  await m.search(query, filters={"user_id": ...}, top_k=)   注入/检索
-  await m.get_all(filters={"user_id": ...})                 CRUD 列表
-  await m.delete(memory_id) / m.update(memory_id, data)     删/改单条
+  get_memory()                                                    -> AsyncMemory 单例（同步初始化）
+  await m.add(messages, user_id=..., metadata={"course_id": ...}) 每轮对话后提取记忆，course_id 写入 payload
+  await m.search(query, filters={"user_id": ..., "course_id": ...}, top_k=)  注入/检索，按课程隔离
+  await m.get_all(filters={"user_id": ...})                       CRUD 列表
+  await m.delete(memory_id) / m.update(memory_id, data)           删/改单条
+
+course_id 隔离：写入时把 course_id 存进 payload metadata，检索时 course_id 非空则加入
+filters 做 AND 过滤，避免 A 课程聊天产生的记忆串到 B 课程（IM 机器人等无课程概念的调用
+方留空 course_id，保持跨课程全局检索）。
 
 增强特性（通过配置开关）：
   - 时间衰减评分：recency_decay_lambda 参数让新记忆得分更高
@@ -120,7 +124,7 @@ def get_memory():
     return _memory
 
 
-async def add_turn(user_id: str, user_message: str, assistant_message: str) -> None:
+async def add_turn(user_id: str, user_message: str, assistant_message: str, course_id: str = "") -> None:
     """每轮对话后提取记忆（EventBus / worker 调用）。
 
     增强特性：
@@ -149,6 +153,7 @@ async def add_turn(user_id: str, user_message: str, assistant_message: str) -> N
             {"role": "assistant", "content": assistant_message},
         ],
         user_id=user_id,
+        metadata={"course_id": course_id},
     )
     # mem0 add 返回可能是 list 或 dict，记录提取/存储的结果
     if result:
@@ -162,8 +167,13 @@ async def add_turn(user_id: str, user_message: str, assistant_message: str) -> N
         logger.info("[mem0] add_turn COMPLETE user_id=%s stored_count=0 (no new facts)", user_id)
 
 
-async def build_memory_context(user_id: str, query_text: str, *, top_k: int = 5, max_chars: int = 1500) -> str:
+async def build_memory_context(
+    user_id: str, query_text: str, *, course_id: str = "", top_k: int = 5, max_chars: int = 1500
+) -> str:
     """注入对话：用 query_text 语义检索该用户相关记忆，拼成文本。无相关则空串。
+
+    course_id 非空时按课程隔离检索，避免 A 课程聊天产生的记忆（如"正在学 XX 实验课"）
+    串到 B 课程的对话里；留空则退化为跨课程全局检索（IM 机器人等无课程概念场景用）。
 
     增强特性（通过配置开关）：
     - 时间衰减评分：新记忆得分更高（recency_decay_lambda）
@@ -190,8 +200,11 @@ async def build_memory_context(user_id: str, query_text: str, *, top_k: int = 5,
         # 才尝试传 threshold，mem0 不接受则 TypeError 自适应降级（不阻塞检索）。
         # recency_decay_lambda 真实生效验证同样待 Docker。
         threshold = settings.mem0.search_threshold
+        search_filters: dict = {"user_id": user_id}
+        if course_id:
+            search_filters["course_id"] = course_id
         base_kwargs: dict = {
-            "filters": {"user_id": user_id},
+            "filters": search_filters,
             "top_k": top_k,
             "recency_decay_lambda": decay_lambda,
         }
@@ -205,7 +218,7 @@ async def build_memory_context(user_id: str, query_text: str, *, top_k: int = 5,
             logger.warning(
                 "[mem0] search 不接受 threshold 等关键字，降级为最小参数重试", exc_info=True
             )
-            results = await m.search(query_text, filters={"user_id": user_id}, top_k=top_k)
+            results = await m.search(query_text, filters=search_filters, top_k=top_k)
         results = results.get("results", []) if isinstance(results, dict) else (results or [])
     except Exception as exc:
         logger.warning("[mem0] build_memory_context SEARCH_FAILED user_id=%s error=%s", user_id, exc)
@@ -330,13 +343,16 @@ async def _detect_and_clean_conflicts(user_id: str, results: list[dict], setting
     return results
 
 
-async def has_any(user_id: str) -> bool:
+async def has_any(user_id: str, course_id: str = "") -> bool:
     """用户是否已有任何记忆（chat 入口的可观测性日志用）。"""
     if not user_id:
         return False
     try:
         m = get_memory()
-        results = await m.get_all(filters={"user_id": user_id}, top_k=1)
+        filters: dict = {"user_id": user_id}
+        if course_id:
+            filters["course_id"] = course_id
+        results = await m.get_all(filters=filters, top_k=1)
         items = results.get("results", []) if isinstance(results, dict) else (results or [])
         has = bool(items)
         logger.debug("[mem0] has_any user_id=%s has_memory=%s", user_id, has)

@@ -9,6 +9,9 @@ export interface Course {
   kb_status?: KBStatus | null
   /** kb_status === 'ready' 时为 true，前端用它决定走 /api/chat 还是 /api/chat/lightrag */
   rag_enabled?: boolean
+  /** 该课程已就绪的索引后端（'lightrag' | 'llamaindex_pg'）。学生端问答用它决定
+   *  检索模式选择器是否显示（仅 lightrag 就绪时显示 mix/naive/local；auto 永远可用）。 */
+  index_backends?: string[]
   /** 'builtin' | 'kb'，仅做来源标识 */
   source?: 'builtin' | 'kb'
 }

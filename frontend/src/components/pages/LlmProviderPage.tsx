@@ -189,8 +189,7 @@ function LlmAdminView({ onBack }: { onBack: () => void }) {
 
       <div className="flex-1 overflow-y-auto p-6">
         <p className="text-xs text-muted mb-4">
-          以 <b>profile 池</b>预配多个 provider+model 组合（对标 DeepTutor）。用户在对话顶部下拉临时切换，
-          后端按 profile 动态构造 client 注入 loop，<b>即时生效无需重启</b>。空字段回退 .env（active=default 通常 key/base_url 留空）。
+          以 <b>profile 池</b>预配多个 provider+model 组合；用户对话时下拉临时切换，<b>即时生效无需重启</b>。空字段回退 .env。
         </p>
         {error && (
           <div className="mb-4 px-4 py-2 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)]">{error}</div>
@@ -385,6 +384,7 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
   }
   const [providers, setProviders] = useState<LlmProviderSpec[]>([])
   const [draft, setDraft] = useState<UserProviderPayload>(EMPTY)
+  const [hasSaved, setHasSaved] = useState(false) // 服务端是否确有个人配置记录（决定「复原为默认」是否可用）
   const [apiKeySet, setApiKeySet] = useState(false)
   const [visionApiKeySet, setVisionApiKeySet] = useState(false)
   const [loading, setLoading] = useState(true)
@@ -401,6 +401,7 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
       setProviders(prov || [])
       setApiKeySet(!!view.api_key_set)
       setVisionApiKeySet(!!view.vision_api_key_set)
+      setHasSaved(!!(view.binding || view.text_model || view.vision_binding || view.vision_model))
       setDraft({
         // 对话供应商
         binding: view.binding || '',
@@ -470,20 +471,16 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
     }
   }
 
-  const handleDelete = async () => {
-    if (!confirm('确认删除个人配置，回退平台默认？')) return
+  const handleRestoreDefault = async () => {
+    if (!confirm('复原为平台默认模型？将清除你的个人配置（API Key / 模型），改用平台共享额度。')) return
     try {
       await deleteMyLlmProvider()
+      setTestResult(null)
       void reload()
     } catch (e) {
-      setError(e instanceof Error ? e.message : '删除失败')
+      setError(e instanceof Error ? e.message : '复原失败')
     }
   }
-
-  const hasOverride = !!(
-    draft.binding || draft.text_model ||
-    draft.vision_binding || draft.vision_model
-  )
 
   return (
     <div className="h-full flex flex-col bg-canvas">
@@ -491,11 +488,15 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
         <div className="flex items-center gap-3">
           <button onClick={onBack} className="text-muted hover:text-ink-soft text-sm">← 返回</button>
           <h1 className="text-lg font-semibold text-ink">我的模型配置</h1>
-          {hasOverride ? <Badge color="green">个人配置生效</Badge> : <Badge color="slate">用平台默认</Badge>}
+          {hasSaved ? <Badge color="green">个人配置生效</Badge> : <Badge color="slate">用平台默认</Badge>}
         </div>
-        {hasOverride && (
-          <button onClick={handleDelete} className="text-xs px-2 py-1 text-danger-fg hover:bg-danger-bg rounded">
-            清除个人配置
+        {hasSaved && (
+          <button
+            onClick={handleRestoreDefault}
+            className="text-xs px-3 py-1.5 text-ink-soft border border-line rounded-[var(--radius)] hover:bg-surface-2"
+            title="清除个人配置，恢复使用平台共享模型"
+          >
+            复原为默认
           </button>
         )}
       </header>
@@ -504,10 +505,8 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
         <div className="max-w-2xl mx-auto space-y-4">
           <Card className="p-4 bg-surface-2/40 border-line">
             <p className="text-xs text-ink-soft leading-relaxed">
-              自配个人模型会<b>覆盖平台默认</b>，仅对你生效（即时生效，无需重启）。留空字段回退默认。
-              对话模型与视觉模型<b>走各自独立的供应商</b>（如对话填 deepseek，视觉填 dashscope 的 qwen-vl），
-              两把 API Key / Base URL / 模型各自独立填写。视觉模型用于：当主对话模型不支持看图时，
-              由它把图片转成文字描述再交给主模型回答，这样发图片也不会再「看不到内容」。嵌入模型由平台统一（不在此开放）。
+              默认使用<b>平台共享模型</b>（按平台额度计费）。填入自己的供应商与 Key 则<b>改走你自己的额度</b>，仅对你生效、即时生效；
+              可随时「复原为默认」回到平台模型。对话与视觉模型可走<b>不同供应商</b>（如对话 deepseek、视觉 qwen-vl），嵌入模型由平台统一。
             </p>
           </Card>
 
@@ -545,7 +544,7 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
             {/* 对话模型供应商区 */}
             <Card className="p-5 space-y-3">
               <div className="text-sm font-semibold text-ink flex items-center gap-2">
-                <span className="text-base"></span> 对话模型供应商
+                对话模型供应商
                 <span className="text-xs font-normal text-muted">主回答模型</span>
               </div>
               <Field label="供应商 binding（选择后自动填默认 base_url）">
@@ -578,12 +577,11 @@ function LlmUserView({ onBack }: { onBack: () => void }) {
             {/* 视觉模型供应商区（独立，可异于对话供应商） */}
             <Card className="p-5 space-y-3">
               <div className="text-sm font-semibold text-ink flex items-center gap-2">
-                <span className="text-base"></span> 视觉模型供应商
+                视觉模型供应商
                 <span className="text-xs font-normal text-muted">看图用，可与对话供应商不同</span>
               </div>
               <p className="text-xs text-ink-soft leading-relaxed">
-                当上面的对话模型不支持看图（如 deepseek）时，由该视觉模型把图片转成文字描述再交给对话模型回答。
-                可填与对话不同的供应商（如对话 deepseek、视觉 dashscope 的 qwen-vl）。全部留空则回退平台默认视觉模型。
+                对话模型不支持看图时（如 deepseek），由它把图片转成文字再交给对话模型。全部留空则走平台默认。
               </p>
               <Field label="视觉供应商 binding（选择后自动填默认 base_url）">
                 <select value={draft.vision_binding} onChange={(e) => onPickVisionBinding(e.target.value)} className={inputCls}>

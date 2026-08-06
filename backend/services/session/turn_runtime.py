@@ -42,6 +42,7 @@ from core.observability import bind_context, log_flow
 from core.observability.metrics import observe_turn
 from core.stream import StreamEvent, StreamEventType
 from core.stream_bus import StreamBus
+from services.session import reply_channel
 from services.session.context_builder import ContextBuilder, resolve_budget
 from settings import get_settings
 TEXT_MODEL = get_settings().llm.text_model
@@ -63,9 +64,9 @@ class _TurnExecution:
     events: list[tuple[int, StreamEvent]] = field(default_factory=list)
     created_at: float = field(default_factory=time.monotonic)
     finished_at: float | None = None
-    # answer_now（立即回答）信号不挂在这里：它和 _reply_queues（ask_user）一样由 manager
-    # 统一管理（self._answer_now_events[turn_id]），在 start_turn 创建 execution 之前就
-    # 必须新建并注入 context.metadata，因此无法在 _TurnExecution 构造时传入。
+    # answer_now（立即回答）信号不挂在这里：它和 ask_user 的回复通道（reply_channel）一样
+    # 由 manager 在 start_turn 创建 execution 之前就新建并注入 context.metadata，因此无法
+    # 在 _TurnExecution 构造时传入。
 
 
 class TurnRuntimeManager:
@@ -74,10 +75,10 @@ class TurnRuntimeManager:
     def __init__(self) -> None:
         self._executions: dict[str, _TurnExecution] = {}
         self._lock = asyncio.Lock()
-        # ask_user 暂停/恢复：turn_id → asyncio.Queue，loop 挂起时 await queue.get()
-        self._reply_queues: dict[str, asyncio.Queue] = {}
+        # ask_user 暂停/恢复经 reply_channel（Redis BLPOP/RPUSH 跨 worker；memory:// 回退进程内），
+        # 状态不再挂在 manager 上——见 services.session.reply_channel。
         # answer_now 信号：turn_id → asyncio.Event，前端"立即回答"按钮 set()，loop 每轮顶部
-        # 轮询。与 _reply_queues 同生命周期（start_turn 建，_run_turn finally 清）。
+        # 轮询（与 reply_channel 同生命周期：start_turn 建，_run_turn finally 清）。
         self._answer_now_events: dict[str, asyncio.Event] = {}
 
     # ------------------------------------------------------------------
@@ -98,15 +99,26 @@ class TurnRuntimeManager:
         builder = ContextBuilder(max_history_tokens=resolve_budget(TEXT_MODEL))
         context.conversation_history = builder.build(context.conversation_history)
 
-        # 创建 reply queue 并注入 waiter 到 context.metadata
-        # loop 调用 ask_user 工具时会 await context.metadata["wait_for_user_reply"]()
-        reply_queue: asyncio.Queue = asyncio.Queue()
-        self._reply_queues[turn_id] = reply_queue
-
+        # ask_user 暂停/恢复经 reply_channel（Redis BLPOP/RPUSH，跨 worker 投递；memory:// 回退进程内）。
+        # loop 调用 ask_user 工具时 await context.metadata["wait_for_user_reply"]().
         async def _wait_for_user_reply() -> dict | None:
-            return await reply_queue.get()
+            # 硬超时：clarify_enabled 时取 settings.research.clarify_wait_timeout_s，超时返回 skip
+            # payload（loop._format_reply → "User skipped."，loop 续跑），绝不返回 None（None 会被
+            # loop 当作 turn 取消而 break）。clarify_enabled=False → timeout=0 无限等（旧「无限等」）。
+            _cfg = get_settings().research
+            timeout = _cfg.clarify_wait_timeout_s if _cfg.clarify_enabled else 0
+            raw = await reply_channel.wait_reply(turn_id, timeout)
+            if raw is None:
+                logger.info(
+                    "TurnRuntime: ask_user 等待超时/无回复 turn_id=%s（timeout=%ss），走 skip 续跑",
+                    turn_id, timeout,
+                )
+                return {"text": "", "answers": None}
+            return raw
 
         context.metadata["wait_for_user_reply"] = _wait_for_user_reply
+        # turn 归属 key：跨 worker submit_user_reply 本地 _executions miss 时回落它做 IDOR 校验
+        await reply_channel.set_turn_owner(turn_id, str(context.user_id or ""))
 
         # answer_now 信号：注入 is_answer_now_requested 回调（返回 bool，非协程），
         # run_agent_loop 每轮顶部轮询它决定是否提前直接回答。仿 wait_for_user_reply 注入模式。
@@ -184,28 +196,37 @@ class TurnRuntimeManager:
     ) -> bool:
         """向正在等待 ask_user 回复的 turn 投递用户回答。
 
+        投递走 reply_channel（Redis RPUSH，跨 worker；memory:// 回退进程内队列）。
+
         Args:
-            user_id: 可选，发起回复的当前登录用户 id。提供时做 turn 归属校验（同
-                     request_answer_now），防止 B 用户拿 A 的 turn_id 向 A 的 ask_user
+            user_id: 可选，发起回复的当前登录用户 id。提供时做 turn 归属校验：本地 _executions
+                     命中走 _turn_belongs_to；跨 worker（本地 miss）回落 Redis owner key
+                     （ca:turn:owner:{turn_id}）比对，防止 B 用户拿 A 的 turn_id 向 A 的 ask_user
                      投递回复、操纵 A 的对话（Turn IDOR，与 answer_now 同源）。
 
         Returns:
-            True  — 成功投递（turn 存在、归属相符且处于 pause 状态）
-            False — turn 不存在/已结束，或归属校验未通过
+            True  — 归属校验通过并已投递（best-effort：对方 worker 是否在等不保证，无消费者则 TTL 自清理）
+            False — 归属校验未通过（turn 不存在/已结束，或不属于该 user_id）
         """
         if user_id is not None:
             execution = self._executions.get(turn_id)
-            if execution is None or not self._turn_belongs_to(execution, user_id):
-                logger.warning(
-                    "TurnRuntime: submit_user_reply turn_id=%s 不存在/已结束/归属不符", turn_id
-                )
-                return False
-        queue = self._reply_queues.get(turn_id)
-        if queue is None:
-            logger.warning("TurnRuntime: submit_user_reply turn_id=%s 不存在或已结束", turn_id)
-            return False
+            if execution is not None:
+                # 本进程持有该 turn：直接比对 context.user_id
+                if not self._turn_belongs_to(execution, user_id):
+                    logger.warning(
+                        "TurnRuntime: submit_user_reply turn_id=%s 归属不符", turn_id
+                    )
+                    return False
+            else:
+                # 跨 worker：本地无 execution，回落 Redis owner key 做 IDOR 校验
+                owner = await reply_channel.get_turn_owner(turn_id)
+                if not owner or str(owner) != str(user_id):
+                    logger.warning(
+                        "TurnRuntime: submit_user_reply turn_id=%s 跨 worker 归属不符/不存在", turn_id
+                    )
+                    return False
         payload: dict = {"text": text or "", "answers": answers}
-        await queue.put(payload)
+        await reply_channel.push_reply(turn_id, payload)
         logger.info("TurnRuntime: submitted user reply for turn_id=%s", turn_id)
         return True
 
@@ -338,13 +359,9 @@ class TurnRuntimeManager:
                     elapsed_ms=elapsed_total,
                 )
 
-                # 清理 reply queue：若 loop 仍在 await waiter()，put(None) 让它正常返回
-                q = self._reply_queues.pop(execution.turn_id, None)
-                if q is not None:
-                    try:
-                        q.put_nowait(None)
-                    except Exception:
-                        pass
+                # 清理 reply_channel 进程内回退态（Redis 的 key 靠 TTL 自清理）。
+                # turn 被取消时 waiter 的 BLPOP 由 CancelledError 解除，无需再 put(None)。
+                reply_channel.cleanup(execution.turn_id)
                 # 清理 answer_now 信号（turn 已结束，后续 request_answer_now 返回 False）
                 self._answer_now_events.pop(execution.turn_id, None)
                 if not execution.bus._closed:

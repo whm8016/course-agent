@@ -73,7 +73,7 @@ def _snip_tool_results(messages: list[dict[str, Any]], budget_chars: int = 80_00
         total -= len(content)
         msg["content"] = _MARKER
         total += len(_MARKER)
-def _build_messages(system_prompt: str, context: UnifiedContext, *, binding: str) -> list[dict[str, Any]]:
+def _build_messages(system_prompt: str, context: UnifiedContext, *, binding: str, extra_context: str = "") -> list[dict[str, Any]]:
     """组装 system prompt + 历史对话 + 当前用户消息为 OpenAI messages 列表。
 
     图片处理三阶段（处于不同执行阶段，非平级可替换策略）：
@@ -106,6 +106,11 @@ def _build_messages(system_prompt: str, context: UnifiedContext, *, binding: str
         if doc_texts:
             user_message = (user_message + "\n\n" + "\n\n".join(doc_texts)).strip()
 
+    # extra_context（如 chat KB Seed 预检索证据）：非空时作为独立 system 消息紧贴 user 之前注入。
+    # 不并入上方 system_prompt——后者段序是 prefix-cache 资产（见 chat_pipeline.assemble_system_prompt），
+    # 插入每请求都变的内容会把缓存边界前移。loop 内已有 mid-conversation system 消息先例（answer_now）。
+    if extra_context:
+        messages.append({"role": "system", "content": extra_context})
     messages.append({"role": "user", "content": user_message})
 
     if context.attachments:
@@ -128,6 +133,7 @@ async def _one_round(
     reasoning_stage: str | None = None,
     binding: str = LLM_BINDING,
     tool_choice_override: str | None = None,
+    temperature: float = 0.7,
 ) -> RoundResult:
     """执行一次流式 LLM 调用，返回累积的 content 和 tool_calls。
 
@@ -155,7 +161,7 @@ async def _one_round(
         "model": model,
         "messages": messages,
         "stream": True,
-        "temperature": 0.7,
+        "temperature": temperature,
         "max_tokens": 8192,
         # 成本可观测性：末块携带 usage（OpenAI 原生 / Anthropic 适配器合成等价块）。
         # 不支持的端点会在 _create_with_image_fallback 内被剥除并重试（见 llm.py）。
@@ -365,6 +371,8 @@ async def run_agent_loop(
     binding: str | None = None,
     max_iterations: int = DEFAULT_MAX_ITERATIONS,
     emit_terminal_events: bool = True,
+    extra_context: str = "",
+    temperature: float | None = None,
 ) -> LoopOutcome:
     """执行 tool_calls 驱动的 Agent Loop，完成一个用户回合。
 
@@ -403,7 +411,10 @@ async def run_agent_loop(
     # 始终用 chat 主模型（对标 ）；图片乐观注入，模型不支持时 Stage-2 降级剥图
     model = model or TEXT_MODEL
     eff_binding = binding or LLM_BINDING
-    messages = _build_messages(system_prompt, context, binding=eff_binding)
+    # temperature：None=不覆盖（保持 _one_round 默认 0.7，research/quiz/deep_solve 行为零变化）；
+    # chat 传 0.3 收敛工具决策（对标 DeepTutor chat 0.2），减少「同一问题拆成多次检索」。
+    _round_temp = 0.7 if temperature is None else temperature
+    messages = _build_messages(system_prompt, context, binding=eff_binding, extra_context=extra_context)
     tools_used: list[str] = []
     turn_usage = TokenUsage()  # 本 loop 累积 usage（成本采集汇总），done 时埋 cost Counter
     final_text = ""
@@ -447,7 +458,7 @@ async def run_agent_loop(
                     result = await _one_round(ans_messages, tool_schemas, model, client,
                                               live_sink=stream, reasoning_sink=stream,
                                               reasoning_stage="answer_now", binding=eff_binding,
-                                              tool_choice_override="none")
+                                              tool_choice_override="none", temperature=_round_temp)
                     final_text = result.content
                     turn_usage = turn_usage.add(result.usage)
                 except Exception:
@@ -490,6 +501,7 @@ async def run_agent_loop(
                 reasoning_sink=stream,
                 reasoning_stage=reasoning_stage,
                 binding=eff_binding,
+                temperature=_round_temp,
             )
             observe_llm_round(
                 mode=context.mode or "chat",
@@ -597,6 +609,7 @@ async def run_agent_loop(
     loop_cost = estimate_cost(model, turn_usage)
     log_flow("agent_loop.done",
              iterations=iteration + 1,
+             rag_calls=tools_used.count("rag"),  # 去重前计数：本轮真调了几次 rag（KB Seed 改造有效的核心指标）
              tools_used=list(dict.fromkeys(tools_used)),
              answer_chars=len(final_text),
              elapsed_ms=int((time.perf_counter() - _loop_t0) * 1000),

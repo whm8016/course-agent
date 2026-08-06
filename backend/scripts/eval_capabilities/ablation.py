@@ -7,7 +7,7 @@
 真跑需 LLM key（judge 走 _ensemble_score）；mock 测试 monkeypatch 本模块 run_orchestrator +
 _ensemble_score 验证开关透传 + delta 逻辑，不依赖真 LLM。
 
-用法：python -m scripts.eval_capabilities.ablation --capability research|solve|all
+用法：python -m scripts.eval_capabilities.ablation --capability research|solve|chat|all
 """
 from __future__ import annotations
 
@@ -31,16 +31,18 @@ from .solver import run_orchestrator
 
 
 # capability → 消融开关 metadata key（research pipeline 读 research_observer，
-# solve pipeline 读 solve_force_replan，二者默认 False）
+# solve pipeline 读 solve_force_replan，chat 读 kb_seed；三者默认关/开由各自 pipeline 定）
 _SWITCH_KEY = {
     "research": "research_observer",
     "solve": "solve_force_replan",
+    "chat": "kb_seed",
 }
 
 # 对比用指标（不含 _explain 私有解释）
 _METRICS = {
     "research": ["race", "fact", "retrievals"],
     "solve": ["answer_correctness", "trajectory_legal", "replans"],
+    "chat": ["race", "rag_calls", "rounds"],
 }
 
 
@@ -94,6 +96,14 @@ def _trace_replans(trace: list[dict]) -> int:
     )
 
 
+def _trace_rounds(trace: list[dict]) -> int:
+    """chat agent loop 轮数（终结 done 事件 metadata.iterations）。无 done → 0。"""
+    for ev in reversed(trace or []):
+        if ev.get("type") == "done":
+            return int(ev.get("metadata", {}).get("iterations") or 0)
+    return 0
+
+
 async def _score_research(sample: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     answer = result.get("answer", "")
     trace = result.get("trace", [])
@@ -123,7 +133,28 @@ async def _score_solve(sample: dict[str, Any], result: dict[str, Any]) -> dict[s
     }
 
 
-_SCORERS = {"research": _score_research, "solve": _score_solve}
+async def _score_chat(sample: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+    """chat 消融判分：答案质量(race) + rag 调用次数 + loop 轮数。
+
+    rag_calls 计 tool_call 事件里 rag 的出现次数——含 KB Seed 预检索那次（seed 命中前也会
+    emit tool_call）。baseline(seed 关)≈loop 盲调多次；treatment(seed 开)≈seed 1 次 + loop 0-1 次，
+    delta 应呈断崖下降，证明「削减轮数而非换检索引擎」的提速改造有效。rounds 取 done.iterations。
+    """
+    answer = result.get("answer", "")
+    tools = result.get("tools", [])
+    trace = result.get("trace", [])
+    race, race_expl = await _ensemble_score(
+        _race_prompt(answer, sample["input"], _Target(sample.get("target", "")))
+    )
+    return {
+        "race": round(race, 4),
+        "rag_calls": tools.count("rag"),
+        "rounds": _trace_rounds(trace),
+        "_explain": {"race": race_expl},
+    }
+
+
+_SCORERS = {"research": _score_research, "solve": _score_solve, "chat": _score_chat}
 
 
 def _mean(rows: list[dict[str, Any]], key: str) -> float:
@@ -195,9 +226,10 @@ async def _main(capabilities: list[str]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="能力级消融实验（开关 on/off 对比）")
-    parser.add_argument("--capability", default="all", choices=["research", "solve", "all"])
+    parser.add_argument("--capability", default="all",
+                        choices=["research", "solve", "chat", "all"])
     args = parser.parse_args()
-    caps = ["research", "solve"] if args.capability == "all" else [args.capability]
+    caps = ["research", "solve", "chat"] if args.capability == "all" else [args.capability]
     asyncio.run(_main(caps))
 
 

@@ -12,6 +12,7 @@ chat 的 agent loop 行为规范外部化到 prompts/zh/chat.yaml（agentic_chat
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -36,6 +37,52 @@ _CHAT_PROMPT_PATH = Path(__file__).parent / "prompts" / "zh" / "chat.yaml"
 # 只告警不截断——system prompt 静默截断会破坏 prefix cache 且难排查。
 _SYSTEM_PROMPT_WARN_CHARS = 8_000
 
+# chat 探索轮温度（对标 DeepTutor chat 0.2）。0.7 对工具决策偏高，是「同一问题拆成多次检索」
+# 的推手；降到 0.3 收敛工具选择，配合 KB Seed 让材料够时第 1 轮直接作答。
+_CHAT_TEMPERATURE = 0.3
+
+
+async def retrieve_kb_seed(context: UnifiedContext, stream: StreamBus, header: str) -> str:
+    """进 loop 前用原问题预检索一次课程知识库，命中则作为 [知识库预检索] 块注入本轮消息。
+
+    复用 ``execute_tool("rag", strategy="fact")``：自动继承就绪检查（``_get_ready_backends``）、
+    mode/strategy 路由、无命中哨兵与字符上限（见 ``tool_registry._execute_rag``）。固定 fact
+    策略，避免误走每次内部跑 2 次 LightRAG 查询的 ``graph_augmented_retrieve``。``asyncio.wait_for``
+    超时/失败一律降级为空串——绝不让预检索反而拖慢主链路。
+
+    消融开关：``context.metadata["kb_seed"]`` 覆盖 settings（对齐 research_observer / solve_force_replan
+    范式），评测 harness 可 per-task 强制 on/off。返回拼接好的 ``header + 证据`` 文本，空串=不注入。
+    """
+    cfg = get_settings().kb_seed
+    # 消融开关：metadata 覆盖优先（None=回落 settings.kb_seed.enabled）
+    _override = context.metadata.get("kb_seed")
+    enabled = cfg.enabled if _override is None else bool(_override)
+    query = (context.user_message or "").strip()
+    if not enabled or "rag" not in (context.enabled_tools or []) or not query:
+        return ""
+
+    from core.agent.tool_registry import execute_tool
+    args = {"query": query, "mode": context.rag_mode or "auto", "strategy": "fact"}
+    _t0 = time.perf_counter()
+    await stream.emit({"type": "tool_call", "tool": "rag", "input": args})
+    result = None
+    try:
+        result = await asyncio.wait_for(
+            execute_tool("rag", course_id=context.course_id, user_id=context.user_id, **args),
+            timeout=cfg.timeout_s,
+        )
+    except Exception:
+        logger.exception("kb_seed 预检索失败 course=%s", context.course_id)
+    text = str(result.content).strip() if (result and result.success) else ""
+    log_flow("chat.kb_seed", hit=bool(text), chars=len(text),
+             elapsed_ms=int((time.perf_counter() - _t0) * 1000))
+    if not text:
+        return ""
+    if len(text) > cfg.max_chars:
+        text = text[: cfg.max_chars].rstrip() + "\n...[已截断]"
+    await stream.emit({"type": "tool_result", "tool": "rag", "content": text[:2000]})
+    return f"{header}\n\n{text}" if header else text
+
 
 def assemble_system_prompt(
     *,
@@ -47,6 +94,7 @@ def assemble_system_prompt(
     tool_hint_text: str = "",
     extended_tools_manifest: str = "",
     memory_context: str = "",
+    mastery_context: str = "",
     session_summary: str = "",
     now_text: str = "",
 ) -> str:
@@ -67,6 +115,7 @@ def assemble_system_prompt(
                                        内容变化不波及更靠前 tool_hint 的 cache 命中
       L2 用户级   : extended_tools_manifest — MCP 个人启用集合，内容随用户变
       L2 用户级   : memory_context   — 每用户每轮可能不同
+      L2 用户级   : mastery_context  — 掌握度薄弱点，紧邻 memory（同为用户级易变，不破前缀）
       L2 用户级   : session_summary  — 每隔几轮才更新
       L3 每请求   : now_text         — 当前时间，永远最后
 
@@ -82,6 +131,7 @@ def assemble_system_prompt(
         tool_hint_text,
         extended_tools_manifest,
         memory_context,
+        mastery_context,
         session_summary,
         now_text,
     ]
@@ -113,9 +163,13 @@ class ChatPipeline:
             over, used, budget = await check_quota(context.user_id, context.course_id)
             if over:
                 from dataclasses import replace
-                from core.llm.catalog import active_profile_id, get_profile, profile_fast_model
-                _pid = (context.llm_profile_id or "").strip() or active_profile_id()
-                _prof = get_profile(_pid)
+                from core.llm.catalog import (
+                    active_profile_id_cached,
+                    get_profile_cached,
+                    profile_fast_model,
+                )
+                _pid = (context.llm_profile_id or "").strip() or await active_profile_id_cached()
+                _prof = await get_profile_cached(_pid)
                 _fast = profile_fast_model(_prof) if _prof else None
                 if _fast and _fast != rt.text_model:
                     rt = replace(rt, text_model=_fast)
@@ -184,6 +238,7 @@ class ChatPipeline:
             tool_hint_text=tool_hint_text,
             extended_tools_manifest=context.extended_tools_manifest,
             memory_context=layers.memory_context,
+            mastery_context=layers.mastery_context,
             session_summary=layers.session_summary,
             now_text=layers.now_text,
         )
@@ -205,6 +260,14 @@ class ChatPipeline:
                 "system_prompt 超预算阈值 %d > %d chars；各段字符数(降序): %s",
                 len(system_prompt), _SYSTEM_PROMPT_WARN_CHARS, seg,
             )
+
+        # ── KB Seed 预检索：进 loop 前用原问题查一次课程知识库，命中则前置注入 ──
+        # 必须在 describe_images 之前取原始 user_message 做 query（图描述会改写 user_message）。
+        # 命中作为 [知识库预检索] 块经 extra_context 注入首轮消息，材料够时第 1 轮直接作答；
+        # 未命中/超时/未挂 rag → 返回空串，loop 行为零变化。
+        kb_seed = await retrieve_kb_seed(
+            context, stream, header=(chat_cfg.get("kb_seed") or {}).get("header") or ""
+        )
 
         # ── 两阶段图片处理（rt.text_model/binding 判断主模型能否看图）──────────
         # 主模型不支持 vision → 视觉模型描述成文字；支持 → 跳过，走 loop 内直注。
@@ -229,6 +292,8 @@ class ChatPipeline:
                 client=rt.client,
                 model=rt.text_model,
                 binding=rt.binding,
+                extra_context=kb_seed,
+                temperature=_CHAT_TEMPERATURE,
             )
         finally:
             reset_cron_owner(cron_token)

@@ -150,7 +150,7 @@ export async function chatStream(
   enabledTools: string[] = [],
   modelProfileId?: string,
   attachments?: AttachmentInfo[],
-  ragMode: string = 'mix',
+  ragMode: string = 'auto',
 ): Promise<{ aborted: boolean }> {
   const isAbortError = (err: unknown) => {
     if (err instanceof DOMException) return err.name === 'AbortError'
@@ -189,7 +189,7 @@ export async function chatStream(
         tools: enabledTools,
         model_profile_id: modelProfileId || null,
         attachments: attachments ?? [],
-        rag_mode: ragMode || 'naive',
+        rag_mode: ragMode || 'auto',
       }),
     })
   } catch (err) {

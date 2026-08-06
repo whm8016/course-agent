@@ -105,8 +105,13 @@ class Session(Base):
 
     # L2 摘要层字段
     summary = Column(Text, nullable=False, default="")  # 压缩后的摘要文本
-    summary_up_to_msg_id = Column(String(32), nullable=True)  # 摘要覆盖到哪条消息
+    summary_up_to_msg_id = Column(String(32), nullable=True)  # 摘要覆盖到哪条消息（tie-break）
     summary_updated_at = Column(Float, nullable=True)  # 摘要最后更新时间
+    # OCC 版本号：写回条件 UPDATE WHERE summary_version = old，多 worker 并发不互相覆盖
+    summary_version = Column(Integer, nullable=False, default=0, server_default="0")
+    # keyset 游标时间分量：配合 summary_up_to_msg_id 把增量区间改成 SQL 范围查询
+    # （存量行 NULL，首次压缩走 msg_id 兼容路径后回填）
+    summary_up_to_created_at = Column(Float, nullable=True)
 
     messages = relationship("Message", back_populates="session", cascade="all, delete-orphan")
 
@@ -159,7 +164,14 @@ class KnowledgeBase(Base):
     is_visible = Column(Boolean, nullable=False, default=True)
     owner_id = Column(String(32), ForeignKey("users.id"), nullable=True)
     join_code = Column(String(16), unique=True, nullable=True, index=True)
+    # 索引后端：lightrag（默认，知识图谱，慢但支持多跳关系推理）| llamaindex_pg（pgvector
+    # 快速向量检索，embedding 批调用分钟级建索引）。建库时选，per-KB 二选一。
+    index_backend = Column(String(32), nullable=False, default="lightrag")
     files = relationship("KBFile", back_populates="kb", cascade="all, delete-orphan")
+    # 每后端一条构建状态（LightRAG / pgvector 可并存）；见 KbBuild。cascade 随 KB 删除连级清理。
+    # lazy="selectin"：任何 KB 查询自动连 builds 一次取回（async 禁止 lazy 触发），_kb_to_dict /
+    # _kb_to_course 直接读 kb.builds 聚合，无需各调用点手写 selectinload。
+    builds = relationship("KbBuild", back_populates="kb", cascade="all, delete-orphan", lazy="selectin")
 
 
 class KBFile(Base):
@@ -173,6 +185,8 @@ class KBFile(Base):
     # status: uploaded | indexed | error
     status = Column(String(32), nullable=False, default="uploaded")
     error_msg = Column(Text, nullable=False, default="")
+    # 解析引擎（mineru_api/docling/mupdf），事后归因检索质量问题；空=未解析或解析层未启用
+    parser_engine = Column(String(32), nullable=True)
     created_at = Column(Float, nullable=False, default=time.time)
 
     kb = relationship("KnowledgeBase", back_populates="files")   #属性 some_kb_file.kb → 指向对应的 KnowledgeBase
@@ -180,6 +194,53 @@ class KBFile(Base):
     __table_args__ = (
         Index("idx_kb_files_kb", "kb_id", "created_at"),
     )
+
+
+class KbBuild(Base):
+    """单个索引后端的一次构建状态（一课程可同时建 LightRAG + pgvector 两套）。
+
+    knowledge_bases 1 行/课程挂源文件；本表每 (kb_id, backend) 一行、status/progress 独立。
+    UNIQUE(kb_id, backend) 保证每后端至多一条。构建/暂停/终止/续传都按本表行驱动，与 KB 行
+    解耦——KB 行上的旧 status/progress 列保留但不再被索引流程写入（改由本表聚合，见
+    _kb_to_dict / _kb_to_course）。
+    """
+
+    __tablename__ = "kb_builds"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(12))
+    kb_id = Column(String(32), ForeignKey("knowledge_bases.id", ondelete="CASCADE"), nullable=False)
+    backend = Column(String(32), nullable=False)  # lightrag | llamaindex_pg
+    # status: pending | indexing | ready | error | paused
+    status = Column(String(32), nullable=False, default="pending")
+    progress = Column(Integer, nullable=False, default=0)          # 0‑100
+    progress_msg = Column(Text, nullable=False, default="")        # 当前步骤描述
+    chunks_done = Column(Integer, nullable=False, default=0)       # 已处理 chunk 数
+    chunks_total = Column(Integer, nullable=False, default=0)      # 总 chunk 数
+    token_estimate = Column(Integer, nullable=False, default=0)    # 估算 token 消耗
+    error_msg = Column(Text, nullable=False, default="")
+    updated_at = Column(Float, nullable=False, default=time.time)
+
+    kb = relationship("KnowledgeBase", back_populates="builds")
+
+    __table_args__ = (
+        UniqueConstraint("kb_id", "backend", name="uq_kb_builds_kb_backend"),
+    )
+
+
+def aggregate_build_status(builds: list[KbBuild]) -> str:
+    """多后端 kb_builds → 单一展示状态（KB 列表徽标 / _kb_to_course.kb_status 用）。
+
+    优先级：indexing（有在建）> error > paused > ready（至少一个可用）> pending。
+    """
+    if not builds:
+        return "pending"
+    statuses = {b.status for b in builds}
+    for s in ("indexing", "error", "paused"):
+        if s in statuses:
+            return s
+    if "ready" in statuses:
+        return "ready"
+    return "pending"
 
 
 class NotebookCategory(Base):
@@ -462,6 +523,67 @@ class UserLLMProvider(Base):
     created_at = Column(Float, nullable=False, default=time.time)
 
 
+class MemoryEpisode(Base):
+    """L3 episodic 层：原始对话 turn，永不删除，同时充当巩固 outbox。
+
+    取代 Redis buffer——status（pending/processing/done/dead）天然表达重试与积压，
+    幂等靠 (session_id, turn_id) 唯一索引。巩固 job 从 pending 批量取，升格 semantic/mastery。
+    新表：非生产库由 init_db 的 create_all 自动建；生产库走 alembic 020。
+    """
+
+    __tablename__ = "memory_episodes"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(16))
+    user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    course_id = Column(String(64), nullable=False, default="")
+    session_id = Column(String(32), nullable=False, default="")
+    turn_id = Column(String(32), nullable=False, default="")
+    mode = Column(String(32), nullable=False, default="")
+    user_msg = Column(Text, nullable=False, default="")
+    assistant_msg = Column(Text, nullable=False, default="")
+    importance = Column(Float, nullable=False, default=0.0)
+    segment_id = Column(String(32), nullable=True)  # 巩固 job 按话题切分后回填
+    # pending=待巩固 / processing=巩固中 / done=已升格 / dead=永久失败
+    status = Column(String(16), nullable=False, default="pending")
+    created_at = Column(Float, nullable=False, default=time.time)
+    consolidated_at = Column(Float, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("session_id", "turn_id", name="uq_episodes_session_turn"),
+        Index("idx_episodes_outbox", "status", "created_at"),
+        Index("idx_episodes_user", "user_id", "course_id", "created_at"),
+    )
+
+
+class KnowledgeMastery(Base):
+    """L3 mastery 层：知识点掌握度（course 维度隔离），追加观测不覆盖，读时指数衰减。
+
+    与 users.knowledge_graph 的区别：带 course_id（修跨课程污染）+ 追加式观测历史
+   （evidence_episode_ids）+ 读时时间衰减（旧错误概念随时间软降权，不物理删除——
+    反复性错误的诊断证据）。参考 TASA 遗忘曲线 × 知识追踪、Graphiti bi-temporal。
+    Phase 4 期间与 users.knowledge_graph 双写（后者供教师 dashboard 读）。
+    """
+
+    __tablename__ = "knowledge_mastery"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(16))
+    user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    course_id = Column(String(64), nullable=False, default="")
+    kp_id = Column(String(64), nullable=False)  # LightRAG entity_id 或 label 哈希
+    label = Column(String(128), nullable=False, default="")
+    mastery = Column(Float, nullable=False, default=0.5)   # 0-1，越高越熟练
+    risk = Column(Float, nullable=False, default=0.5)      # 0-1，越高越薄弱
+    observation_count = Column(Integer, nullable=False, default=1)
+    first_observed_at = Column(Float, nullable=False, default=time.time)
+    last_observed_at = Column(Float, nullable=False, default=time.time)
+    evidence_episode_ids = Column(JSON, nullable=False, default=list)  # 贡献过观测的 episode id
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "course_id", "kp_id", name="uq_mastery_user_course_kp"),
+        Index("idx_mastery_user_course", "user_id", "course_id"),
+    )
+
+
 async def _ensure_column(conn, table_name: str, column_name: str, ddl: str):
     """Add a column only if it does not already exist (dialect-aware)."""
     dialect = conn.dialect.name
@@ -514,6 +636,20 @@ async def init_db():
             "sessions",
             "mode",
             "ALTER TABLE sessions ADD COLUMN mode VARCHAR(32) NOT NULL DEFAULT 'chat'",
+        )
+        # L2 OCC 版本号 + keyset 游标时间分量（迁移 019）：补建存量非生产库，保证升级前
+        # 已存在的 sessions 表也能用（create_all checkfirst 不会给已存在的表加列）。
+        await _ensure_column(
+            conn,
+            "sessions",
+            "summary_version",
+            "ALTER TABLE sessions ADD COLUMN summary_version INTEGER NOT NULL DEFAULT 0",
+        )
+        await _ensure_column(
+            conn,
+            "sessions",
+            "summary_up_to_created_at",
+            "ALTER TABLE sessions ADD COLUMN summary_up_to_created_at FLOAT",
         )
         await _ensure_column(
             conn,
@@ -629,6 +765,18 @@ async def init_db():
             "knowledge_bases",
             "join_code",
             "ALTER TABLE knowledge_bases ADD COLUMN join_code VARCHAR(16)",
+        )
+        await _ensure_column(
+            conn,
+            "knowledge_bases",
+            "index_backend",
+            "ALTER TABLE knowledge_bases ADD COLUMN index_backend VARCHAR(32) NOT NULL DEFAULT 'lightrag'",
+        )
+        await _ensure_column(
+            conn,
+            "kb_files",
+            "parser_engine",
+            "ALTER TABLE kb_files ADD COLUMN parser_engine VARCHAR(32)",
         )
         # 唯一索引（_ensure_column 只管列，索引单独建）
         await conn.execute(text("""

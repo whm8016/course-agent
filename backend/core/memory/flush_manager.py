@@ -103,16 +103,21 @@ async def enqueue(
     )
 
 
-async def _flush_turns(user_id: str, course_id: str, turns: list[dict]) -> None:
+async def _flush_turns(user_id: str, course_id: str, turns: list[dict]) -> bool:
     """批量写入 mem0 + graph_memory（Consumer 调用）。
 
     Args:
         user_id: 用户 ID
         course_id: 课程 ID
         turns: 对话列表，每项 {"u": user_msg, "a": assistant_msg}
+
+    Returns:
+        True = 关键持久化（mem0.add）成功，可安全删 key；False = mem0 写失败，调用方
+        （_flush_one）须保留 Redis key 等下次重试（Phase 1 止血，避免删 key 丢数据）。
+        graph_memory 失败属非致命（派生数据），不影响返回值。
     """
     if not turns:
-        return
+        return True  # 空批 = 无需写 = 安全删 key（与旧「return 后无条件删」语义一致）
 
     logger.info(
         "[flush_manager] FLUSH START user=%s turns=%d",
@@ -125,12 +130,13 @@ async def _flush_turns(user_id: str, course_id: str, turns: list[dict]) -> None:
         messages.append({"role": "user", "content": turn.get("u", "")})
         messages.append({"role": "assistant", "content": turn.get("a", "")})
 
-    # 2. 调用 mem0.add()（内部 1 次 LLM 提取）
+    # 2. 调用 mem0.add()（内部 1 次 LLM 提取）—— 关键持久化
+    mem0_ok = True
     try:
         from core.memory.mem0_client import get_memory
 
         m = get_memory()
-        result = await m.add(messages, user_id=user_id)
+        result = await m.add(messages, user_id=user_id, metadata={"course_id": course_id})
         if result:
             items = result if isinstance(result, list) else result.get("results", [])
             logger.info(
@@ -140,47 +146,53 @@ async def _flush_turns(user_id: str, course_id: str, turns: list[dict]) -> None:
         else:
             logger.info("[flush_manager] mem0.add complete user=%s no new facts", user_id)
     except Exception as e:
-        logger.warning("[flush_manager] mem0.add failed user=%s error=%s", user_id, e)
+        # Phase 1 止血：mem0 写失败不再静默吞——标记 False 让 _flush_one 保留 key 重试。
+        # 原实现只 warning 不外抛，_flush_one 据此误判成功并删 key → 永久丢数据（架空 H-7）。
+        mem0_ok = False
+        logger.warning("[flush_manager] mem0.add failed user=%s error=%s (key retained for retry)", user_id, e)
 
-    # 3. graph_memory 更新（已有 3 轮节流，但这里我们也批量调用）
-    try:
-        from core.memory.graph_memory import update_graphs_from_conversation
-        from core.db.database import AsyncSessionLocal
+    # 3. graph_memory 更新（已有 6 轮节流，这里批量调用）—— 仅在 mem0 成功时执行：
+    # mem0 失败会整批重试，此时跑 graph 等于白烧一次 LLM 提取（重试时还会再跑一遍）。
+    if mem0_ok:
+        try:
+            from core.memory.graph_memory import update_graphs_from_conversation
+            from core.db.database import AsyncSessionLocal
 
-        # M-12: AsyncSessionLocal 退出时默认 rollback（不 commit），
-        # 而 update_graphs_from_conversation → save_graphs 内部只 execute(update)，
-        # 不自己 commit。原代码漏 commit → graph 更新全部静默丢失。
-        # 在整个循环结束后统一 commit 一次（批量语义，单事务）。
-        async with AsyncSessionLocal() as db:
-            for turn in turns:
+            # M-12: AsyncSessionLocal 退出时默认 rollback（不 commit），
+            # 而 update_graphs_from_conversation → save_graphs 内部只 execute(update)，
+            # 不自己 commit。原代码漏 commit → graph 更新全部静默丢失。
+            # 在整个循环结束后统一 commit 一次（批量语义，单事务）。
+            async with AsyncSessionLocal() as db:
+                for turn in turns:
+                    try:
+                        await update_graphs_from_conversation(
+                            db,
+                            user_id=user_id,
+                            course_id=course_id,
+                            user_message=turn.get("u", ""),
+                            assistant_answer=turn.get("a", ""),
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "[flush_manager] graph_memory update failed turn error=%s",
+                            e
+                        )
                 try:
-                    await update_graphs_from_conversation(
-                        db,
-                        user_id=user_id,
-                        course_id=course_id,
-                        user_message=turn.get("u", ""),
-                        assistant_answer=turn.get("a", ""),
-                    )
+                    await db.commit()
                 except Exception as e:
-                    logger.warning(
-                        "[flush_manager] graph_memory update failed turn error=%s",
-                        e
-                    )
-            try:
-                await db.commit()
-            except Exception as e:
-                # commit 失败属可恢复：数据仍在 Redis key 里，下次 cron 会重试。
-                # 这里 rollback 后退出 with（防止脏事务残留）。
-                logger.warning("[flush_manager] graph_memory commit failed user=%s error=%s", user_id, e)
-                await db.rollback()
-        logger.info("[flush_manager] graph_memory update complete user=%s", user_id)
-    except Exception as e:
-        logger.warning("[flush_manager] graph_memory update failed user=%s error=%s", user_id, e)
+                    # commit 失败属可恢复：数据仍在 Redis key 里，下次 cron 会重试。
+                    # 这里 rollback 后退出 with（防止脏事务残留）。
+                    logger.warning("[flush_manager] graph_memory commit failed user=%s error=%s", user_id, e)
+                    await db.rollback()
+            logger.info("[flush_manager] graph_memory update complete user=%s", user_id)
+        except Exception as e:
+            logger.warning("[flush_manager] graph_memory update failed user=%s error=%s", user_id, e)
 
     logger.info(
-        "[flush_manager] FLUSH COMPLETE user=%s turns=%d",
-        user_id, len(turns)
+        "[flush_manager] FLUSH COMPLETE user=%s turns=%d mem0_ok=%s",
+        user_id, len(turns), mem0_ok
     )
+    return mem0_ok
 
 
 async def _scan_all_keys(r: aioredis.Redis, match: str, count: int = 200) -> list[str]:
@@ -195,7 +207,11 @@ async def _scan_all_keys(r: aioredis.Redis, match: str, count: int = 200) -> lis
     cursor: int | bytes = 0
     while True:
         cursor, batch = await r.scan(cursor=cursor, match=match, count=count)
-        all_keys.extend(batch)
+        # key 可能是 bytes：worker.py 的 cron job 优先复用 ARQ 注入的 ctx["redis"]，
+        # 那个连接池（arq.create_pool）不带 decode_responses=True，与本模块自建的
+        # _get_redis()（decode_responses=True）不一致。这里统一解码为 str，
+        # 否则下游 k.endswith(_TS_SUFFIX) 会因 bytes.endswith(str) 报 TypeError。
+        all_keys.extend(k.decode() if isinstance(k, bytes) else k for k in batch)
         # cursor 可能是 bytes（部分客户端）或 int；统一以"是否归 0"判断。
         c = int(cursor) if cursor else 0
         if c == 0:
@@ -229,7 +245,14 @@ async def _flush_one(
 
     try:
         # 2. 先 flush 成功，再删 key（H-7：flush 失败则保留 key 等下次重试）
-        await _flush_turns(meta.get("user_id", ""), meta.get("course_id", ""), turns)
+        ok = await _flush_turns(meta.get("user_id", ""), meta.get("course_id", ""), turns)
+        if not ok:
+            # Phase 1 止血：关键写（mem0）失败 → 保留 key 等下次 cron 重试，绝不删 key 丢数据。
+            # 区别于「_flush_turns 抛异常」路径：这里是 mem0 内部失败被捕获、显式返回 False。
+            logger.warning(
+                "[flush_manager] flush_one KEEP key=%s reason=critical-write-failed-will-retry", key
+            )
+            return False
 
         # flush 成功后才删除数据 key（含 :ts 和 :meta），数据安全落盘
         await r.delete(key, f"{key}{_TS_SUFFIX}", f"{key}{_META_SUFFIX}")

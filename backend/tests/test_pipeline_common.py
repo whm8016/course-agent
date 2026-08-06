@@ -162,8 +162,9 @@ async def test_resolve_profile_runtime_fallback(monkeypatch):
     """无 user_id、catalog 无 profile → 全 None 回退（loop 用全局默认）。"""
     import core.llm.catalog as catalog
 
-    monkeypatch.setattr(catalog, "active_profile_id", lambda: "")
-    monkeypatch.setattr(catalog, "get_profile", lambda pid: None)
+    # resolve_profile_runtime 走 cached 异步读路径，故 monkeypatch cached 版本
+    monkeypatch.setattr(catalog, "active_profile_id_cached", AsyncMock(return_value=""))
+    monkeypatch.setattr(catalog, "get_profile_cached", AsyncMock(return_value=None))
     rt = await resolve_profile_runtime(profile_id="", user_id="")
     assert isinstance(rt, ProfileRuntime)
     assert rt.client is None
@@ -176,8 +177,8 @@ async def test_resolve_profile_runtime_platform_profile(monkeypatch):
     import core.llm.catalog as catalog
 
     fake_prof = {"binding": "openai", "text": {"model": "gpt-4o"}}
-    monkeypatch.setattr(catalog, "active_profile_id", lambda: "p1")
-    monkeypatch.setattr(catalog, "get_profile", lambda pid: fake_prof)
+    monkeypatch.setattr(catalog, "active_profile_id_cached", AsyncMock(return_value="p1"))
+    monkeypatch.setattr(catalog, "get_profile_cached", AsyncMock(return_value=fake_prof))
     monkeypatch.setattr(catalog, "profile_text_model", lambda p: "gpt-4o")
     with patch("core.llm.provider_factory.get_llm_client_for_profile", return_value="CLIENT"):
         rt = await resolve_profile_runtime(profile_id="p1", user_id="")

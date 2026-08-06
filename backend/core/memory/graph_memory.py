@@ -49,8 +49,27 @@ _ACTIVE_LIMIT = 200  # 放宽限制，一门课知识点可能很多
 _CANDIDATE_LIMIT = 100
 _EXTRACT_EVERY_N_TURNS = 6
 
-# 全局计数器，用于节流 LLM 提取频率
-_turn_counter: dict[str, int] = {}  # user_id -> turn count
+# 节流计数存 Redis（INCR），跨 gunicorn/ARQ worker 共享、重启不归零。
+# 原模块级全局 dict 各进程独立副本 → 同用户请求分散到不同 worker 时计数永不到 6，节流失效。
+_TURN_COUNT_PREFIX = "graph_turn_count:"   # Redis key: graph_turn_count:{user_id}
+_TURN_COUNT_TTL = 7 * 24 * 3600            # 7 天无活动则计数 key 过期，避免无限堆积
+
+
+async def _incr_turn_count(user_id: str) -> int:
+    """跨进程 turn 计数（Redis INCR 原子递增），返回递增后的值。
+
+    复用 flush_manager 的 Redis 连接池（同属 core.memory 包，避免另开一个 pool）。
+    """
+    from core.memory.flush_manager import _get_redis
+
+    r = _get_redis()
+    key = f"{_TURN_COUNT_PREFIX}{user_id}"
+    pipe = r.pipeline()
+    pipe.incr(key)
+    # 每次活跃都刷新 TTL：用户持续对话则计数常驻，停止 7 天后自动清理。
+    pipe.expire(key, _TURN_COUNT_TTL)
+    count, _ = await pipe.execute()
+    return int(count)
 
 _EXTRACT_SYSTEM_PROMPT = """你是学习分析助手。根据下面的对话，提取学生涉及的知识点和错误模式。
 
@@ -502,14 +521,19 @@ async def update_graphs_from_conversation(
         logger.info("[graph] update_graphs SKIP user_id=%s (empty msg/answer)", user_id)
         return False
 
-    # 节流：每 N 轮对话才触发一次 LLM 提取
-    global _turn_counter
+    # 节流：每 N 轮对话才触发一次 LLM 提取。计数存 Redis（跨进程共享，见 _incr_turn_count）。
     if not force:
-        _turn_counter[user_id] = _turn_counter.get(user_id, 0) + 1
-        if _turn_counter[user_id] % _EXTRACT_EVERY_N_TURNS != 0:
+        try:
+            count = await _incr_turn_count(user_id)
+        except Exception as e:
+            # Redis 不可用属可恢复故障：跳过本轮提取（非致命——graph 是派生数据，
+            # mem0 已在 _flush_turns 主路径落盘）。不外抛，避免阻塞 flush 主流程。
+            logger.warning("[graph] turn_count INCR failed user_id=%s error=%s", user_id, e)
+            return False
+        if count % _EXTRACT_EVERY_N_TURNS != 0:
             logger.info(
                 "[graph] update_graphs THROTTLED user_id=%s turn=%d (every %d turns)",
-                user_id, _turn_counter[user_id], _EXTRACT_EVERY_N_TURNS
+                user_id, count, _EXTRACT_EVERY_N_TURNS
             )
             return False
 
@@ -536,6 +560,33 @@ async def update_graphs_from_conversation(
         "[graph] update_graphs DONE user_id=%s new_kg_nodes=%d new_eg_nodes=%d",
         user_id, len(new_kg.get("nodes") or []), len(new_eg.get("nodes") or [])
     )
+    return True
+
+
+async def extract_knowledge(course_id: str, user_message: str, assistant_answer: str) -> dict[str, list] | None:
+    """公开：从一轮对话提取知识点/错误模式（catalog 优先，降级开放提取）。
+
+    供 consolidate job 单次抽取后同时喂 graph 与 mastery（避免双抽取）。
+    """
+    if not (user_message or "").strip() or not (assistant_answer or "").strip():
+        return None
+    return await _extract_from_conversation(course_id, user_message, assistant_answer)
+
+
+async def merge_and_save_graphs(db: AsyncSession, user_id: str, extracted: dict | None) -> bool:
+    """公开：把提取结果合并进 users.knowledge_graph/error_graph 并保存（教师 dashboard 读）。
+
+    Phase 4 双写：consolidate job 调此维持 dashboard 数据新鲜。返回是否有更新。
+    """
+    kp_list = (extracted or {}).get("knowledge_points") or []
+    err_list = (extracted or {}).get("error_patterns") or []
+    if not kp_list and not err_list:
+        return False
+    kg, eg = await load_graphs(db, user_id)
+    new_kg = _merge_knowledge_graph(kg, kp_list) if kp_list else kg
+    new_eg = _merge_error_graph(eg, err_list) if err_list else eg
+    await save_graphs(db, user_id, knowledge=new_kg, error=new_eg)
+    await db.commit()
     return True
 
 

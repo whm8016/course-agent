@@ -15,12 +15,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_admin
 from api.courses import invalidate_courses_cache
-from api.kb_indexing import trigger_kb_indexing
+from api.kb_indexing import get_build, get_or_create_build, trigger_kb_indexing
 from settings import get_settings
 FAQ_CACHE_THRESHOLD = get_settings().question.faq_cache_threshold
 KB_STORE_DIR = get_settings().paths.kb_store_dir
 MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
-LLAMA_INDEX_KB_ROOT = get_settings().paths.llama_index_kb_root
 from core.rag import is_lightrag_available
 from core.db.limiter import limiter
 from core.llm.prompts import invalidate_course_prompt_cache
@@ -30,10 +29,12 @@ from core.db.database import (
     ApplicationStatus,
     BotNotification,
     KBFile,
+    KbBuild,
     KnowledgeBase,
     TeacherApplication,
     TeacherInvite,
     User,
+    aggregate_build_status,
     get_db,
 )
 from core.db.cache import faq_top
@@ -84,7 +85,44 @@ def _kb_raw_dir(course_id: str) -> Path:
     return Path(KB_STORE_DIR) / course_id / "raw"
 
 
+def _build_to_dict(b: KbBuild) -> dict:
+    """单个后端构建状态（前端按 backend 渲染两张卡）。"""
+    return {
+        "backend": b.backend,
+        "label": "pgvector" if b.backend == "llamaindex_pg" else "LightRAG",
+        "status": b.status,
+        "progress": b.progress,
+        "progress_msg": b.progress_msg,
+        "chunks_done": b.chunks_done,
+        "chunks_total": b.chunks_total,
+        "token_estimate": b.token_estimate,
+        "error_msg": b.error_msg,
+        "updated_at": b.updated_at,
+    }
+
+
+def _primary_build(builds: list[KbBuild], index_backend: str) -> KbBuild | None:
+    """顶层（兼容旧字段）取一个代表 build：indexing 优先 → 主后端 → ready → 首个。"""
+    for b in builds:
+        if b.status == "indexing":
+            return b
+    primary = index_backend or "lightrag"
+    for b in builds:
+        if b.backend == primary:
+            return b
+    for b in builds:
+        if b.status == "ready":
+            return b
+    return builds[0] if builds else None
+
+
 def _kb_to_dict(kb: KnowledgeBase) -> dict:
+    # 状态/进度由 kb_builds 聚合（indexing 写本表，KB 行旧列不再被写、仅作历史保留）。
+    # builds 经 lazy="selectin" 随 KB 一起取回，这里直接读。顶层字段取一个代表 build，
+    # 供旧 UI / 列表徽标用；detail 面板按 builds 数组渲染两后端。
+    builds = sorted(kb.builds, key=lambda b: b.backend)
+    agg_status = aggregate_build_status(builds)
+    p = _primary_build(builds, kb.index_backend or "lightrag")
     return {
         "id": kb.id,
         "course_id": kb.course_id,
@@ -93,25 +131,22 @@ def _kb_to_dict(kb: KnowledgeBase) -> dict:
         "icon": kb.icon,
         "system_prompt": kb.system_prompt,
         "sort_order": kb.sort_order,
-        "status": kb.status,
+        "status": agg_status,
         "file_count": kb.file_count,
-        "error_msg": kb.error_msg,
-        "progress": kb.progress,
-        "progress_msg": kb.progress_msg,
-        "chunks_done": kb.chunks_done,
-        "chunks_total": kb.chunks_total,
-        "token_estimate": kb.token_estimate,
+        "error_msg": p.error_msg if p else "",
+        "progress": p.progress if p else 0,
+        "progress_msg": p.progress_msg if p else "",
+        "chunks_done": p.chunks_done if p else 0,
+        "chunks_total": p.chunks_total if p else 0,
+        "token_estimate": p.token_estimate if p else 0,
         "created_at": kb.created_at,
         "updated_at": kb.updated_at,
         "is_visible": bool(kb.is_visible),
         "owner_id": kb.owner_id,
         "join_code": kb.join_code,
         "lightrag_built": bool(kb.file_count > 0),
-        # LlamaIndex 是否已建：以索引产物 docstore.json 是否落盘为准（无独立 DB 列）。
-        # 前端据此显示"LlamaIndex 索引已完成"绿勾、切换"首次构建/重新构建"按钮。
-        "llamaindex_built": (
-            Path(LLAMA_INDEX_KB_ROOT) / kb.course_id / "llamaindex_storage" / "docstore.json"
-        ).exists(),
+        "index_backend": kb.index_backend or "lightrag",
+        "builds": [_build_to_dict(b) for b in builds],
     }
 
 
@@ -132,9 +167,14 @@ async def _run_indexing(
     course_id: str,
     file_paths: list[str],
     resume_from_chunk: int = 0,
+    backend: str = "lightrag",
 ) -> None:
-    """后台任务：LlamaIndex 解析 → LightRAG 摄入（附带进度回调，支持断点续传）。"""
-    # 1. 重置/保留进度，更新状态为 indexing
+    """后台任务：LlamaIndex 解析 → LightRAG 摄入（附带进度回调，支持断点续传）。
+
+    状态/进度按 backend 写 kb_builds 行（与 KB 行解耦）；backend 由调用方传入，
+    不再从 kb.index_backend 读取。
+    """
+    # 1. 重置/保留进度，更新状态为 indexing（写本 build 行）
     async with AsyncSessionLocal() as db:
         async with db.begin():
             result = await db.execute(
@@ -143,20 +183,28 @@ async def _run_indexing(
             kb = result.scalar_one_or_none()
             if not kb:
                 return
-            kb.status = "indexing"
-            kb.error_msg = ""
+            build = await get_or_create_build(db, kb_id, backend)
+            build.status = "indexing"
+            build.error_msg = ""
             if resume_from_chunk == 0:
-                kb.progress = 0
-                kb.progress_msg = "准备中…"
-                kb.chunks_done = 0
-                kb.chunks_total = 0
-                kb.token_estimate = 0
+                build.progress = 0
+                build.progress_msg = "准备中…"
+                build.chunks_done = 0
+                build.chunks_total = 0
+                build.token_estimate = 0
             else:
-                kb.progress_msg = f"续传中（从第 {resume_from_chunk} 个文本块继续）…"
-            kb.updated_at = time.time()
+                build.progress_msg = f"续传中（从第 {resume_from_chunk} 个文本块继续）…"
+            build.updated_at = time.time()
 
     # 状态从 pending/error/paused → indexing，让前端的「就绪/未就绪」徽章及时变更
     await invalidate_courses_cache()
+
+    # llamaindex_pg 分流：embedding 批调用分钟级完成，走独立的轻量路径（无需 LightRAG 的
+    # control / 逐 chunk 进度 / purge），完成后早返回。下方 lightrag 主体零变化。
+    if backend == "llamaindex_pg":
+        await _run_indexing_llamaindex_pg(kb_id, course_id, file_paths, resume_from_chunk, backend)
+        await invalidate_courses_cache()
+        return
 
     # 进度回调
     async def _on_progress(
@@ -168,17 +216,14 @@ async def _run_indexing(
     ) -> None:
         async with AsyncSessionLocal() as db:
             async with db.begin():
-                result = await db.execute(
-                    select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
-                )
-                kb = result.scalar_one_or_none()
-                if kb:
-                    kb.progress = progress
-                    kb.progress_msg = msg
-                    kb.chunks_done = chunks_done
-                    kb.chunks_total = chunks_total
-                    kb.token_estimate = token_estimate
-                    kb.updated_at = time.time()
+                build = await get_build(db, kb_id, backend)
+                if build:
+                    build.progress = progress
+                    build.progress_msg = msg
+                    build.chunks_done = chunks_done
+                    build.chunks_total = chunks_total
+                    build.token_estimate = token_estimate
+                    build.updated_at = time.time()
 
     # 控制信号走 Redis，跨 worker 共享；先清掉上次残留
     control = IndexingControl(kb_id)
@@ -242,35 +287,32 @@ async def _run_indexing(
     async def _apply_final() -> None:
         async with AsyncSessionLocal() as db:
             async with db.begin():
-                result = await db.execute(
-                    select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
-                )
-                kb = result.scalar_one_or_none()
-                if not kb:
+                build = await get_build(db, kb_id, backend)
+                if not build:
                     return
                 # 期间若被 pause/stop 接口强制改态（≠indexing），说明用户已主动干预，
                 # 不覆盖——否则被强制终止的任务跑完会回写 ready/paused，与用户意图冲突。
-                if kb.status != "indexing":
+                if build.status != "indexing":
                     logger.info(
-                        "索引终态被外部干预 kb=%s 当前=%s，不覆盖为 %s",
-                        kb_id, kb.status, final_status,
+                        "索引终态被外部干预 kb=%s backend=%s 当前=%s，不覆盖为 %s",
+                        kb_id, backend, build.status, final_status,
                     )
                     return
-                kb.status = final_status
-                kb.error_msg = final_err
-                kb.updated_at = time.time()
+                build.status = final_status
+                build.error_msg = final_err
+                build.updated_at = time.time()
                 if abort_action == "pause":
-                    kb.chunks_done = abort_chunks_done
-                    kb.progress_msg = (
+                    build.chunks_done = abort_chunks_done
+                    build.progress_msg = (
                         f"已暂停（已完成 {abort_chunks_done}"
-                        f"{f'/{kb.chunks_total}' if kb.chunks_total else ''} 个文本块）"
+                        f"{f'/{build.chunks_total}' if build.chunks_total else ''} 个文本块）"
                     )
                 elif abort_action == "stop":
-                    kb.progress = 0
-                    kb.progress_msg = "已终止"
-                    kb.chunks_done = 0
-                    kb.chunks_total = 0
-                    kb.token_estimate = 0
+                    build.progress = 0
+                    build.progress_msg = "已终止"
+                    build.chunks_done = 0
+                    build.chunks_total = 0
+                    build.token_estimate = 0
 
     try:
         await asyncio.shield(_apply_final())
@@ -281,6 +323,96 @@ async def _run_indexing(
 
     # 索引结束（ready / error / paused / pending），重要：ready 时前端要切到 LightRAG 路径
     await invalidate_courses_cache()
+
+
+async def _run_indexing_llamaindex_pg(
+    kb_id: str,
+    course_id: str,
+    file_paths: list[str],
+    resume_from_chunk: int = 0,
+    backend: str = "llamaindex_pg",
+) -> None:
+    """llamaindex_pg 后台索引：调 LlamaIndexIndexer.index，写 kb_builds 终态。
+
+    与 _run_indexing（lightrag）的分工：本函数只处理 pgvector 后端，走 embedding 批调用
+    （分钟级），无需 LightRAG 的 IndexingControl（暂停/终止）、逐 chunk 进度回调、
+    purge_course_workspace。但复用同款"只在 status==indexing 时覆盖"的终态回写守卫，
+    保证 status 不卡 indexing（与 _run_indexing._apply_final 同构）。
+
+    全新索引（resume_from_chunk==0）先 delete 旧向量行，避免重复索引产生重复 chunk
+    （node_id 虽确定性，但 PGVectorStore.add 不保证按 node_id upsert）。
+    """
+    from core.rag import get_indexer  # noqa: PLC0415
+
+    final_status = "error"
+    final_err = "索引任务未正常结束"
+    chunks_created = 0
+
+    try:
+        indexer = get_indexer("llamaindex_pg")
+
+        # 全新索引：先清旧向量行（杜绝重复 chunk）；失败仅告警不阻断（最坏多几条重复行）
+        if resume_from_chunk == 0:
+            try:
+                await indexer.delete(course_id)
+            except Exception:
+                logger.warning(
+                    "llamaindex_pg 清旧数据失败 course=%s（继续索引）",
+                    course_id, exc_info=True,
+                )
+
+        result = await indexer.index(
+            course_id, file_paths, resume_from_chunk=resume_from_chunk
+        )
+        # IndexResult.status: success | skipped | error
+        if result.status in ("success", "skipped"):
+            final_status = "ready"
+            final_err = ""
+            chunks_created = result.chunks_created
+        else:
+            final_status = "error"
+            final_err = result.error or "索引失败"
+    except asyncio.CancelledError:
+        # ARQ worker 超时/OOM/重启会取消任务；不兜底则 status 永久卡 indexing
+        logger.warning("llamaindex_pg 索引任务被取消 kb_id=%s course=%s", kb_id, course_id)
+        final_status = "error"
+        final_err = "索引任务被中断（worker 超时/OOM/重启），可重试"
+        task = asyncio.current_task()
+        if task is not None:
+            task.uncancel()
+    except Exception as e:
+        logger.exception("llamaindex_pg 索引失败 kb_id=%s course=%s", kb_id, course_id)
+        final_status = "error"
+        final_err = str(e)[:500]
+
+    # 终态回写（与 _run_indexing 同款守卫：只在 status==indexing 时覆盖，避免压掉用户手动干预）
+    async def _apply_final() -> None:
+        async with AsyncSessionLocal() as db:
+            async with db.begin():
+                build = await get_build(db, kb_id, backend)
+                if not build:
+                    return
+                if build.status != "indexing":
+                    logger.info(
+                        "llamaindex_pg 终态被外部干预 kb=%s 当前=%s，不覆盖为 %s",
+                        kb_id, build.status, final_status,
+                    )
+                    return
+                build.status = final_status
+                build.error_msg = final_err
+                build.updated_at = time.time()
+                if final_status == "ready":
+                    build.progress = 100
+                    build.progress_msg = "pgvector 索引完成"
+                    build.chunks_total = chunks_created
+                    build.chunks_done = chunks_created
+
+    try:
+        await asyncio.shield(_apply_final())
+    except asyncio.CancelledError:
+        logger.warning("llamaindex_pg 终态回写收到取消信号 kb_id=%s（shield 内已尽力）", kb_id)
+    except Exception:
+        logger.exception("llamaindex_pg 终态回写失败 kb_id=%s course=%s", kb_id, course_id)
 
 
 # ── 系统信息 ──────────────────────────────────────────────────────────────────
@@ -318,6 +450,8 @@ class CreateKBBody(BaseModel):
     system_prompt: str = ""
     sort_order: int = 0
     is_visible: bool = True
+    # 索引后端：lightrag（默认，知识图谱，慢但支持多跳）| llamaindex_pg（pgvector 快速向量，分钟级索引）
+    index_backend: str = "lightrag"
 
 @router.post("/kb", status_code=201)
 async def create_kb(
@@ -340,6 +474,7 @@ async def create_kb(
         system_prompt=body.system_prompt,
         sort_order=body.sort_order,
         is_visible=body.is_visible,
+        index_backend=body.index_backend,
     )
     db.add(kb)
     await db.flush()
@@ -350,7 +485,63 @@ async def create_kb(
     _kb_raw_dir(body.course_id).mkdir(parents=True, exist_ok=True)
     logger.info("创建知识库 course_id=%s", body.course_id)
     await invalidate_courses_cache()
+    # 新建 KB 尚无 builds；显式加载避免 _kb_to_dict 访问 kb.builds 触发 async lazy-load（MissingGreenlet）
+    await db.refresh(kb, ["builds"])
     return _kb_to_dict(kb)
+
+
+@router.get("/rag/engines")
+async def list_rag_engines(_: dict = Depends(get_current_admin)):
+    """索引后端 + 解析引擎能力探测（前端建库选择用）。
+
+    托管引擎看 API key 是否配置；自托管引擎用 importlib 探测（对标 DeepTutor
+    services/rag/factory.py 的两层 readiness）。
+    """
+    from core.rag.parsing.registry import is_engine_available  # noqa: PLC0415
+    from core.rag.registry import is_backend_available  # noqa: PLC0415
+
+    index_backends = [
+        {
+            "id": "lightrag",
+            "name": "LightRAG（知识图谱）",
+            "description": "逐 chunk LLM 实体抽取，慢但支持多跳关系推理",
+            "requires_api_key": False,
+        },
+        {
+            "id": "llamaindex_pg",
+            "name": "pgvector（快速向量）",
+            "description": "embedding 批调用分钟级建索引，dense+sparse 融合检索",
+            "requires_api_key": False,
+        },
+    ]
+    for b in index_backends:
+        ok, reason = is_backend_available(b["id"])
+        b["configured"] = ok
+        if not ok:
+            b["reason"] = reason
+
+    parse_cfg = get_settings().parsing
+    parse_engines = [
+        {
+            "id": "mineru_api",
+            "name": "MinerU API（托管，去 torch）",
+            "description": "云端托管，不装 torch，公式/表格强项",
+            "requires_api_key": True,
+        },
+        {
+            "id": "docling",
+            "name": "Docling（自托管）",
+            "description": "本地版面/表格/OCR，需装 parse-docling extra",
+            "requires_api_key": False,
+        },
+    ]
+    for e in parse_engines:
+        if e["id"] == "mineru_api":
+            e["configured"] = bool(parse_cfg.mineru_api_key.get_secret_value())
+        else:
+            e["configured"] = is_engine_available(e["id"])
+
+    return {"index_backends": index_backends, "parse_engines": parse_engines}
 
 
 class UpdateKBBody(BaseModel):
@@ -497,8 +688,10 @@ async def upload_files(
     )
     kb.file_count = count_result.scalar_one()
     kb.updated_at = time.time()
-    if kb.status == "ready":
-        kb.status = "pending"  # 有新文件，需要重新索引
+    # 有新文件：已就绪的后端索引失效，置 pending 等待重建（读取方按 kb_builds 聚合）
+    for b in kb.builds:
+        if b.status == "ready":
+            b.status = "pending"
 
     logger.info("上传 %d 个文件到知识库 course_id=%s", len(saved_names), course_id)
     return {"uploaded": saved_names, "total_files": kb.file_count}
@@ -544,35 +737,41 @@ async def delete_file(
 async def index_kb(
     course_id: str,
     request: Request,
+    backend: str | None = None,
     force: bool = False,
     resume: bool = False,
     _: dict = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """触发知识库索引（后台任务：LlamaIndex 解析 → LightRAG 摄入）。
+    """触发知识库索引（后台任务：LlamaIndex 解析 → LightRAG / pgvector 摄入）。
 
+    - backend：lightrag | llamaindex_pg；未传则回退 kb.index_backend（兼容旧前端）。
     - force=true：强制重新索引（即使正在进行中）
     - resume=true：从上次中断位置续传（仅限 error 状态）
 
     公共逻辑（状态校验 / DB 预置 / ARQ 入队）见 api.kb_indexing.trigger_kb_indexing。
     """
     kb = await _get_kb_or_404(db, course_id)
-    return await trigger_kb_indexing(db, kb, course_id, force, resume)
+    backend = backend or kb.index_backend or "lightrag"
+    return await trigger_kb_indexing(db, kb, course_id, backend, force, resume)
 
 
 @router.post("/kb/{course_id}/index/pause")
 async def pause_index(
     course_id: str,
+    backend: str = "lightrag",
     _: dict = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
     """请求暂停正在进行的索引（在下一个 batch 边界生效，进度可续传）。
 
     控制信号写入 Redis，跨 worker 通知；运行索引的那个 worker 在下一个
-    batch 检查点会读到 "pause" 并主动中断。
+    batch 检查点会读到 "pause" 并主动中断。仅 lightrag 后端有 batch 检查点
+    （IndexingControl）；backend 参数定位具体 kb_builds 行。
     """
     kb = await _get_kb_or_404(db, course_id)
-    if kb.status != "indexing":
+    build = await get_or_create_build(db, kb.id, backend)
+    if build.status != "indexing":
         raise HTTPException(status_code=409, detail="当前没有正在进行的索引任务")
 
     ctrl = IndexingControl(kb.id)
@@ -584,21 +783,22 @@ async def pause_index(
     # 立即落库为 paused：超大文档的 ainsert 会长时间阻塞 worker 事件循环，导致
     # checkpoint 永远读不到信号、前端卡在"请求已发送"。这里直接置 paused 让前端
     # 立即解脱；worker 终态写入有"不覆盖非 indexing 状态"保护，跑完不会回写。
-    done = kb.chunks_done or 0
-    total = kb.chunks_total or 0
-    kb.status = "paused"
-    kb.progress_msg = f"已暂停（已完成 {done}{f'/{total}' if total else ''} 个文本块）"
-    kb.updated_at = time.time()
-    logger.info("已暂停 course_id=%s", course_id)
+    done = build.chunks_done or 0
+    total = build.chunks_total or 0
+    build.status = "paused"
+    build.progress_msg = f"已暂停（已完成 {done}{f'/{total}' if total else ''} 个文本块）"
+    build.updated_at = time.time()
+    logger.info("已暂停 course_id=%s backend=%s", course_id, backend)
     await invalidate_courses_cache()
     # 不清 Redis 控制信号：留给 worker 的 checkpoint 读到后自行 cancel 停止，
     # worker 终止后会在 finally 里 control.clear()。这里清了反而让 worker 读不到、继续跑。
-    return {"message": "已暂停", "course_id": course_id}
+    return {"message": "已暂停", "course_id": course_id, "backend": backend}
 
 
 @router.post("/kb/{course_id}/index/stop")
 async def stop_index(
     course_id: str,
+    backend: str = "lightrag",
     _: dict = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -608,8 +808,9 @@ async def stop_index(
     - paused：直接清零进度并置回 pending。
     """
     kb = await _get_kb_or_404(db, course_id)
+    build = await get_or_create_build(db, kb.id, backend)
 
-    if kb.status == "indexing":
+    if build.status == "indexing":
         ctrl = IndexingControl(kb.id)
         try:
             await ctrl.request_stop()  # 通知 worker；事件循环被阻塞读不到也无妨
@@ -617,32 +818,32 @@ async def stop_index(
             raise HTTPException(status_code=503, detail=f"无法下发终止信号（Redis 异常）：{e}")
 
         # 立即落库为 pending 并清零进度：见 pause 的说明。worker 跑完不会回写。
-        kb.status = "pending"
-        kb.progress = 0
-        kb.progress_msg = "已终止"
-        kb.chunks_done = 0
-        kb.chunks_total = 0
-        kb.token_estimate = 0
-        kb.error_msg = ""
-        kb.updated_at = time.time()
-        logger.info("已终止 course_id=%s", course_id)
+        build.status = "pending"
+        build.progress = 0
+        build.progress_msg = "已终止"
+        build.chunks_done = 0
+        build.chunks_total = 0
+        build.token_estimate = 0
+        build.error_msg = ""
+        build.updated_at = time.time()
+        logger.info("已终止 course_id=%s backend=%s", course_id, backend)
         await invalidate_courses_cache()
         # 不清 Redis 控制信号：留给 worker 的 checkpoint 读到后自行 cancel 停止，
         # worker 终止后会在 finally 里 control.clear()。这里清了反而让 worker 读不到、继续跑。
-        return {"message": "已终止", "course_id": course_id}
+        return {"message": "已终止", "course_id": course_id, "backend": backend}
 
-    if kb.status == "paused":
-        kb.status = "pending"
-        kb.progress = 0
-        kb.progress_msg = "已终止"
-        kb.chunks_done = 0
-        kb.chunks_total = 0
-        kb.token_estimate = 0
-        kb.error_msg = ""
-        kb.updated_at = time.time()
-        logger.info("已清除暂停进度 course_id=%s", course_id)
+    if build.status == "paused":
+        build.status = "pending"
+        build.progress = 0
+        build.progress_msg = "已终止"
+        build.chunks_done = 0
+        build.chunks_total = 0
+        build.token_estimate = 0
+        build.error_msg = ""
+        build.updated_at = time.time()
+        logger.info("已清除暂停进度 course_id=%s backend=%s", course_id, backend)
         await invalidate_courses_cache()
-        return {"message": "已终止并清除进度", "course_id": course_id}
+        return {"message": "已终止并清除进度", "course_id": course_id, "backend": backend}
 
     raise HTTPException(status_code=409, detail="当前状态不可终止")
 

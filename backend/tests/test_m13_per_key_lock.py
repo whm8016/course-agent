@@ -111,18 +111,21 @@ async def test_lock_released_after_flush_so_next_can_acquire():
     lock_state: dict = {}
     r = _make_lockable_redis(store, lock_state)
 
-    done1 = await flush_manager._flush_one(
-        r, key, [{"u": "q", "a": "ans"}], {"user_id": "u1", "course_id": "c1"}
-    )
-    assert done1 is True
+    # Phase 1：_flush_turns 真实调用会触 mem0（测试环境无 mem0 模块 → 返回 False），
+    # 但本用例只验「锁释放后可再次抢锁」，故隔离 _flush_turns 为成功（True）。
+    with patch.object(flush_manager, "_flush_turns", AsyncMock(return_value=True)):
+        done1 = await flush_manager._flush_one(
+            r, key, [{"u": "q", "a": "ans"}], {"user_id": "u1", "course_id": "c1"}
+        )
+        assert done1 is True
 
-    # 第一次 flush 已删 key 且释放锁；重新塞回数据模拟"又有新对话进来"
-    store[key] = ['{"u": "q2", "a": "a2"}']
-    store[f"{key}:ts"] = "0"
-    store[f"{key}:meta"] = '{"user_id": "u1", "course_id": "c1"}'
+        # 第一次 flush 已删 key 且释放锁；重新塞回数据模拟"又有新对话进来"
+        store[key] = ['{"u": "q2", "a": "a2"}']
+        store[f"{key}:ts"] = "0"
+        store[f"{key}:meta"] = '{"user_id": "u1", "course_id": "c1"}'
 
-    done2 = await flush_manager._flush_one(
-        r, key, [{"u": "q2", "a": "a2"}], {"user_id": "u1", "course_id": "c1"}
-    )
-    assert done2 is True, "锁已释放，第二次应能正常抢锁 flush（不能被残留锁永久阻塞）"
-    assert f"{key}:lock" not in lock_state
+        done2 = await flush_manager._flush_one(
+            r, key, [{"u": "q2", "a": "a2"}], {"user_id": "u1", "course_id": "c1"}
+        )
+        assert done2 is True, "锁已释放，第二次应能正常抢锁 flush（不能被残留锁永久阻塞）"
+        assert f"{key}:lock" not in lock_state

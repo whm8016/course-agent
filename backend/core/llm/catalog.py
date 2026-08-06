@@ -15,6 +15,7 @@ chat_pipeline 的 profile 解析逻辑）——立即生效、无需重启、不
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
 import os
@@ -24,6 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel, SecretStr
 
+from core.db.cache import cache_delete, cache_get, cache_set
 from settings import BASE_DIR
 
 CATALOG_PATH = os.getenv(
@@ -205,6 +207,49 @@ def get_profile(profile_id: str, catalog: dict[str, Any] | None = None) -> dict[
     return None
 
 
+# ── 运行期缓存层（Redis cache-aside + 写时显式失效）────────────────────────────
+# 与 prompts.get_course_prompt 同构：admin 改配置 → invalidate → 全部 worker 下次
+# 读自动 miss 重载。TTL 纯兜底（正常靠写时失效，不靠过期）。Redis 故障自动降级永远
+# miss（core/db/cache.py 已兜底），不崩。详见 plan「Model Catalog Redis 缓存」。
+#
+# 上面 load_catalog / get_profile / active_profile_id 是**同步**读文件函数，直接摆在
+# async 协程里会阻塞整个 worker 事件循环（gunicorn -w 4）。这里提供 async cached 版本
+# 供热路径（resolve_profile_runtime / chat_pipeline / 对话下拉）使用：命中走非阻塞
+# Redis 往返，未命中丢线程池读文件（asyncio.to_thread）。
+
+_CATALOG_CACHE_KEY = "llm:catalog"
+_CATALOG_CACHE_TTL = 300  # 秒，纯兜底
+
+
+async def load_catalog_cached() -> dict[str, Any]:
+    """cache-aside 读整个 catalog：Redis 命中直返；未命中 to_thread(load_catalog) 后回填。"""
+    cached = await cache_get(_CATALOG_CACHE_KEY)
+    if cached is not None:
+        return cached
+    data = await asyncio.to_thread(load_catalog)
+    await cache_set(_CATALOG_CACHE_KEY, data, ttl=_CATALOG_CACHE_TTL)
+    return data
+
+
+async def get_profile_cached(profile_id: str) -> dict[str, Any] | None:
+    """按 id 取 profile（基于 load_catalog_cached 的 dict 索引，非线性扫描文件）。"""
+    if not profile_id:
+        return None
+    data = await load_catalog_cached()
+    by_id = {p.get("id"): p for p in (data.get("profiles") or []) if isinstance(p, dict)}
+    return by_id.get(profile_id)
+
+
+async def active_profile_id_cached() -> str:
+    data = await load_catalog_cached()
+    return str(data.get("active_profile") or "default")
+
+
+async def invalidate_catalog_cache() -> None:
+    """写后失效：下一次任意 worker 的 load_catalog_cached 自动 miss 重载新文件。"""
+    await cache_delete(_CATALOG_CACHE_KEY)
+
+
 # ── profile 视图投影 ──────────────────────────────────────────────────────
 
 def profile_display_name(p: dict[str, Any]) -> str:
@@ -339,6 +384,10 @@ __all__ = [
     "active_profile_id",
     "list_profiles",
     "get_profile",
+    "load_catalog_cached",
+    "get_profile_cached",
+    "active_profile_id_cached",
+    "invalidate_catalog_cache",
     "profile_display_name",
     "profile_text_model",
     "profile_fast_model",

@@ -97,7 +97,8 @@ async def test_flush_success_deletes_redis_key(buffer_store):
     r = _make_redis(buffer_store)
     data_key = "mem_flush:u1:s1"
 
-    with patch.object(flush_manager, "_flush_turns", AsyncMock(return_value=None)):
+    # Phase 1：_flush_turns 返回 bool——True 表示 mem0 关键写成功（可删 key）。
+    with patch.object(flush_manager, "_flush_turns", AsyncMock(return_value=True)):
         n = await flush_manager.scan_and_flush(r, max_turns=1, idle_timeout=1.0)
 
     assert n == 1

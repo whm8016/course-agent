@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.auth import get_current_teacher
 from api.admin import _kb_to_dict, _ALLOWED_EXT, _MAX_BYTES, _safe_upload_name
 from api.courses import invalidate_courses_cache
-from api.kb_indexing import trigger_kb_indexing, trigger_llamaindex_build
+from api.kb_indexing import get_or_create_build, trigger_kb_indexing
 from settings import get_settings
 KB_STORE_DIR = get_settings().paths.kb_store_dir
 MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
@@ -80,6 +80,8 @@ class CreateCourseBody(BaseModel):
     icon: str = "📘"
     system_prompt: str = ""
     is_visible: bool = True
+    # 索引后端：lightrag（默认，知识图谱）| llamaindex_pg（pgvector 快速向量，分钟级索引）
+    index_backend: str = "lightrag"
 
 
 @router.post("/courses", status_code=201)
@@ -102,6 +104,7 @@ async def create_course(
         system_prompt=body.system_prompt,
         is_visible=body.is_visible,
         owner_id=teacher["id"],
+        index_backend=body.index_backend,
     )
     db.add(kb)
     await db.flush()
@@ -111,6 +114,8 @@ async def create_course(
     _kb_raw_dir(body.course_id).mkdir(parents=True, exist_ok=True)
     logger.info("教师创建课程 course_id=%s owner=%s", body.course_id, teacher["id"])
     await invalidate_courses_cache()
+    # 新建 KB 尚无 builds；显式加载避免 _kb_to_dict 访问 kb.builds 触发 async lazy-load（MissingGreenlet）
+    await db.refresh(kb, ["builds"])
     return _kb_to_dict(kb)
 
 
@@ -185,8 +190,10 @@ async def upload_files(
     )
     kb.file_count = count_result.scalar_one()
     kb.updated_at = time.time()
-    if kb.status == "ready":
-        kb.status = "pending"
+    # 有新文件：已就绪的后端索引失效，置 pending 等待重建（读取方按 kb_builds 聚合）
+    for b in kb.builds:
+        if b.status == "ready":
+            b.status = "pending"
     return {"uploaded": saved, "total_files": kb.file_count}
 
 
@@ -197,14 +204,19 @@ async def upload_files(
 async def index_course(
     course_id: str,
     request: Request,
+    backend: str | None = None,
     force: bool = False,
     resume: bool = False,
     teacher: dict = Depends(get_current_teacher),
     db: AsyncSession = Depends(get_db),
 ):
-    """触发知识库索引（ARQ 后台任务）。公共逻辑见 api.kb_indexing.trigger_kb_indexing。"""
+    """触发知识库索引（ARQ 后台任务）。公共逻辑见 api.kb_indexing.trigger_kb_indexing。
+
+    backend: lightrag | llamaindex_pg；未传则回退 kb.index_backend（兼容旧前端）。
+    """
     kb = await _get_owned_kb(db, course_id, teacher)
-    return await trigger_kb_indexing(db, kb, course_id, force, resume)
+    backend = backend or kb.index_backend or "lightrag"
+    return await trigger_kb_indexing(db, kb, course_id, backend, force, resume)
 
 
 # ── 学生管理（选课） ──────────────────────────────────────────────────────────
@@ -399,11 +411,13 @@ async def delete_course_file(
 @router.post("/courses/{course_id}/index/pause")
 async def pause_course_index(
     course_id: str,
+    backend: str = "lightrag",
     teacher: dict = Depends(get_current_teacher),
     db: AsyncSession = Depends(get_db),
 ):
     kb = await _get_owned_kb(db, course_id, teacher)
-    if kb.status != "indexing":
+    build = await get_or_create_build(db, kb.id, backend)
+    if build.status != "indexing":
         raise HTTPException(status_code=409, detail="当前没有正在进行的索引任务")
     ctrl = IndexingControl(kb.id)
     try:
@@ -413,68 +427,57 @@ async def pause_course_index(
     # 立即落库为 paused：超大文档的 ainsert 会长时间阻塞 worker 事件循环，导致
     # checkpoint 永远读不到信号、前端卡在"请求已发送"。这里直接置 paused 让前端
     # 立即解脱；worker 终态写入有"不覆盖非 indexing 状态"保护，跑完不会回写。
-    done = kb.chunks_done or 0
-    total = kb.chunks_total or 0
-    kb.status = "paused"
-    kb.progress_msg = f"已暂停（已完成 {done}{f'/{total}' if total else ''} 个文本块）"
-    kb.updated_at = time.time()
+    done = build.chunks_done or 0
+    total = build.chunks_total or 0
+    build.status = "paused"
+    build.progress_msg = f"已暂停（已完成 {done}{f'/{total}' if total else ''} 个文本块）"
+    build.updated_at = time.time()
     await invalidate_courses_cache()
     # 不清 Redis 控制信号：留给 worker 的 checkpoint 读到后自行 cancel 停止，
     # worker 终止后会在 finally 里 control.clear()。这里清了反而让 worker 读不到、继续跑。
-    return {"message": "已暂停", "course_id": course_id}
+    return {"message": "已暂停", "course_id": course_id, "backend": backend}
 
 
 @router.post("/courses/{course_id}/index/stop")
 async def stop_course_index(
     course_id: str,
+    backend: str = "lightrag",
     teacher: dict = Depends(get_current_teacher),
     db: AsyncSession = Depends(get_db),
 ):
     kb = await _get_owned_kb(db, course_id, teacher)
-    if kb.status == "indexing":
+    build = await get_or_create_build(db, kb.id, backend)
+    if build.status == "indexing":
         ctrl = IndexingControl(kb.id)
         try:
             await ctrl.request_stop()  # 通知 worker；事件循环被阻塞读不到也无妨
         except Exception as e:
             raise HTTPException(status_code=503, detail=f"无法下发终止信号：{e}")
         # 立即落库为 pending 并清零进度：见 pause 的说明。worker 跑完不会回写。
-        kb.status = "pending"
-        kb.progress = 0
-        kb.progress_msg = "已终止"
-        kb.chunks_done = 0
-        kb.chunks_total = 0
-        kb.token_estimate = 0
-        kb.error_msg = ""
-        kb.updated_at = time.time()
+        build.status = "pending"
+        build.progress = 0
+        build.progress_msg = "已终止"
+        build.chunks_done = 0
+        build.chunks_total = 0
+        build.token_estimate = 0
+        build.error_msg = ""
+        build.updated_at = time.time()
         await invalidate_courses_cache()
         # 不清 Redis 控制信号：留给 worker 的 checkpoint 读到后自行 cancel 停止，
         # worker 终止后会在 finally 里 control.clear()。这里清了反而让 worker 读不到、继续跑。
-        return {"message": "已终止", "course_id": course_id}
-    if kb.status == "paused":
-        kb.status = "pending"
-        kb.progress = 0
-        kb.progress_msg = "已终止"
-        kb.chunks_done = 0
-        kb.chunks_total = 0
-        kb.token_estimate = 0
-        kb.error_msg = ""
-        kb.updated_at = time.time()
+        return {"message": "已终止", "course_id": course_id, "backend": backend}
+    if build.status == "paused":
+        build.status = "pending"
+        build.progress = 0
+        build.progress_msg = "已终止"
+        build.chunks_done = 0
+        build.chunks_total = 0
+        build.token_estimate = 0
+        build.error_msg = ""
+        build.updated_at = time.time()
         await invalidate_courses_cache()
-        return {"message": "已终止并清除进度", "course_id": course_id}
+        return {"message": "已终止并清除进度", "course_id": course_id, "backend": backend}
     raise HTTPException(status_code=409, detail="当前状态不可终止")
-
-
-# ── LlamaIndex 向量索引构建 ───────────────────────────────────────────────────
-
-@router.post("/courses/{course_id}/llamaindex/build")
-async def build_llamaindex_index(
-    course_id: str,
-    teacher: dict = Depends(get_current_teacher),
-    db: AsyncSession = Depends(get_db),
-):
-    """触发 LlamaIndex 向量索引构建（后台任务）。公共逻辑见 api.kb_indexing.trigger_llamaindex_build。"""
-    kb = await _get_owned_kb(db, course_id, teacher)
-    return await trigger_llamaindex_build(db, kb, course_id)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

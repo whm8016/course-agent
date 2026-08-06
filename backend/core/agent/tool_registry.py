@@ -15,32 +15,89 @@ logger = logging.getLogger(__name__)
 
 # ── RAG Tool ────────────────────────────────────────────────────────────────
 
+
+async def _get_ready_backends(course_id: str) -> set[str]:
+    """查 kb_builds 中 status==ready 且真摄入 chunks 的后端集合；无 KB / 查询失败 → 空集。
+
+    双索引时代一门课可同时就绪 lightrag + llamaindex_pg；_execute_rag 据此 + 用户 mode +
+    Agent strategy 决定走哪个后端。每次 RAG 工具调用查一次（按 course_id join，轻量）。
+    """
+    try:
+        from sqlalchemy import select
+
+        from core.db.database import AsyncSessionLocal, KbBuild, KnowledgeBase
+
+        async with AsyncSessionLocal() as db:
+            r = await db.execute(
+                select(KbBuild.backend)
+                .join(KnowledgeBase, KnowledgeBase.id == KbBuild.kb_id)
+                .where(
+                    KnowledgeBase.course_id == course_id,
+                    KbBuild.status == "ready",
+                    KbBuild.chunks_total > 0,
+                )
+            )
+            return {row[0] for row in r.all()}
+    except Exception:
+        logger.debug(
+            "_get_ready_backends 查询失败 course=%s", course_id, exc_info=True
+        )
+        return set()
+
+
 @safe_traceable(name="rag.retrieve", run_type="retriever")
 async def _execute_rag(course_id: str, query: str, **kwargs) -> ToolResult:
-    """调用 LightRAG 检索，返回 ToolResult。"""
+    """调用课程知识库检索，按 用户mode + Agent strategy + 已就绪后端 路由，返回 ToolResult。
+
+    mode（用户每请求选，经 tool_dispatch 注入 kwarg）：
+      - mix/naive/local/global：手动选 LightRAG 原生模式（要求 lightrag 已就绪），优先级最高。
+      - auto（默认）：strategy==relationship 且 lightrag 就绪 → LightRAG 图增强（多跳）；
+        否则优先 pgvector 向量（普通/事实），再退 LightRAG naive。
+    strategy（LLM 按 rag.yaml 自选）：fact | relationship。与 mode 正交，仅 auto 下生效。
+    """
     # 未选课 / 自由问答：无课程知识库，直接短路，避免对空库误检索
     if not course_id or course_id == "general":
         return ToolResult(content="（未选择课程，知识库不可用）", success=False)
     from core.rag import get_retriever
     try:
-        retriever = get_retriever("lightrag")
-        # Phase 4 自适应路由：
-        #   fact         → 向量检索（naive；ES 启用时 retrieve_context 内部走 hybrid BM25+Dense）
-        #   relationship → 图增强检索（向量召回 + 知识图谱邻域扩展，擅长多跳关系）
+        ready = await _get_ready_backends(course_id)
+        if not ready:
+            return ToolResult(content="（该课程知识库尚未就绪）", success=False)
+        mode = str(kwargs.get("mode") or "auto").strip().lower()
         strategy = str(kwargs.get("strategy") or "fact").strip().lower()
-        if strategy == "relationship":
+        top_k = kwargs.get("top_k", 5)
+
+        if mode in ("mix", "naive", "local", "global"):
+            # 用户手动选 LightRAG 模式：要求 lightrag 已就绪，优先级最高（不看 strategy）
+            if "lightrag" not in ready:
+                return ToolResult(
+                    content="（该课程未构建 LightRAG 索引，无法使用此检索模式。）",
+                    success=False,
+                )
+            retriever = get_retriever("lightrag")
+            content = await retriever.retrieve_context(
+                course_id=course_id, query=query, top_k=top_k, mode=mode
+            )
+        elif strategy == "relationship" and "lightrag" in ready:
+            # auto + 多跳/关系型 → LightRAG 图增强（仅 lightrag 有知识图谱）
+            retriever = get_retriever("lightrag")
             content = await retriever.graph_augmented_retrieve(
-                course_id=course_id,
-                query=query,
-                top_k=kwargs.get("top_k", 5),
+                course_id=course_id, query=query, top_k=top_k
+            )
+        elif "llamaindex_pg" in ready:
+            # auto + 普通/事实 → pgvector 向量检索
+            retriever = get_retriever("llamaindex_pg")
+            content = await retriever.retrieve_context(
+                course_id=course_id, query=query, top_k=top_k
+            )
+        elif "lightrag" in ready:
+            # auto 但无 pg：退到 LightRAG naive 向量
+            retriever = get_retriever("lightrag")
+            content = await retriever.retrieve_context(
+                course_id=course_id, query=query, top_k=top_k, mode="naive"
             )
         else:
-            content = await retriever.retrieve_context(
-                course_id=course_id,
-                query=query,
-                top_k=kwargs.get("top_k", 5),
-                mode="naive",
-            )
+            return ToolResult(content="（该课程知识库尚未就绪）", success=False)
         # 二次截断上限读 settings.lightrag.agentic_rag_max_chars（默认 10000）：
         # 与 retrieve_context/graph_augmented 的单块上限协调，避免拼接好的多证据被二次砍断。
         # 原硬编码 8000 改读这个曾无人使用的孤儿字段，默认更宽松（10000），方向安全。

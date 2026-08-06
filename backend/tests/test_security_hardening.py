@@ -59,24 +59,6 @@ async def test_h2_lightrag_index_denies_non_owner(client: AsyncClient, admin_hea
 
 
 # ---------------------------------------------------------------------------
-# H-3 exam_mimic 路径遍历：paper_path 越界 → _validate_paper_path 返回 None
-# ---------------------------------------------------------------------------
-
-def test_h3_paper_path_traversal_rejected():
-    from api.question import _validate_paper_path
-    from core.question.path import get_question_dir
-
-    # 绝对路径越界
-    assert _validate_paper_path("/etc/passwd") is None
-    # 相对路径穿越
-    assert _validate_paper_path("../../etc/passwd") is None
-    assert _validate_paper_path("../../../windows/system32/config/sam") is None
-    # 合法：question 目录内
-    legit = get_question_dir() / "mimic_papers" / "x.pdf"
-    assert _validate_paper_path(str(legit)) is not None
-
-
-# ---------------------------------------------------------------------------
 # H-4 file_path 任意文件读取：越界路径不读盘，图片被丢弃
 # ---------------------------------------------------------------------------
 

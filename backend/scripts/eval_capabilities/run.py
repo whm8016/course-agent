@@ -17,6 +17,34 @@ import sys
 from . import config
 from .gate import check_gate
 
+# eval 在 inspect 多 sample 执行下，core.observability.metrics 的模块级 Histogram()/Counter()
+# 会在单进程内被重复构造：生产 gunicorn 每 worker 是 fork 出的独立进程、各自 REGISTRY 不触发；
+# eval 单进程内 inspect 反复驱动 solver 的 import 链 → 同一全局 REGISTRY 重复 register，
+# 抛 Duplicated timeseries 让 capability 全 ERROR。eval 不消费 Prometheus 指标，对重复注册静默跳过。
+import os as _os
+
+# .env 继承的 PROMETHEUS_MULTIPROC_DIR 会让 prometheus_client 走多进程模式（MmapedDict
+# 打开 /dev/shm/prometheus_multiproc/*.db），eval 容器未 mkdir 该目录 → Gauge 构造崩
+# FileNotFoundError。eval 是单进程离线评测、不需要多进程指标聚合，强制单进程模式规避。
+_os.environ.pop("PROMETHEUS_MULTIPROC_DIR", None)
+
+import types as _types
+
+import prometheus_client as _pc
+
+_orig_register = _pc.REGISTRY.register
+
+
+def _register_tolerant(self, collector):  # type: ignore[no-redef]
+    try:
+        return _orig_register(collector)
+    except ValueError:
+        # Duplicated timeseries（inspect 多 sample 重复 import 模块级 metric）→ 跳过，不阻塞评测
+        return
+
+
+_pc.REGISTRY.register = _types.MethodType(_register_tolerant, _pc.REGISTRY)
+
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s | %(message)s"
 )

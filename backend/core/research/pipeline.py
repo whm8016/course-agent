@@ -49,6 +49,7 @@ from core.research.data_structures import (
     ToolTrace,
 )
 from core.stream_bus import StreamBus
+from settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +58,13 @@ _PROMPT_PATH = Path(__file__).parent / "prompts" / "zh" / "pipeline.yaml"
 
 # research 阶段每块 loop 允许的工具（出证据，不需要 ask_user）
 _RESEARCH_TOOLS = ("rag", "web_search")
+# rephrase 阶段允许的工具：rag/web_search 快速确认主题边界 + ask_user（仅 WS 入口挂载）做前置澄清。
+# 与 _RESEARCH_TOOLS 分开：研究块/报告不该问用户（跑到中后期再问收益为负，见 plan 调研依据）。
+_REPHRASE_TOOLS = ("rag", "web_search", "ask_user")
 
-DEFAULT_REPHRASE_MAX_ITERATIONS = 2
+# rephrase 挂 ask_user 后，暂停吃掉一轮、恢复后还要留一轮出 refined_topic，末轮 loop 强制 tools=None。
+# 2→3：旧值 2 时若第 1 轮调 ask_user，恢复后只剩 1 轮且末轮强制无工具，refined_topic 易退化。
+DEFAULT_REPHRASE_MAX_ITERATIONS = 3
 DEFAULT_DECOMPOSE_NUM_SUBTOPICS = 5
 DEFAULT_BLOCK_MAX_ITERATIONS = 5
 DEFAULT_MAX_PARALLEL_TOPICS = 3
@@ -340,7 +346,15 @@ class ResearchPipeline:
     ) -> str:
         rephrase_cfg = cfg.get("rephrase") or {}
         system_prompt = with_common_prompt(rephrase_cfg.get("system", ""), self._layers)
-        tools = [t for t in context.enabled_tools if t in _RESEARCH_TOOLS]
+        # rephrase 是主题澄清阶段：rag/web_search 快速确认边界；ask_user 仅在「澄清开关开 + WS 入口
+        # （注入了 wait_for_user_reply callable）」时挂载。HTTP/IM 无 waiter 时不挂——否则 LLM 一旦
+        # 调用 ask_user，loop 因无 waiter 直接结束（loop.py ask_user 分支），research 提前夭折。
+        # 每块 research（出证据）/ reporting 不挂 ask_user——不打断检索与写报告。
+        tools = [t for t in context.enabled_tools if t in _REPHRASE_TOOLS]
+        if get_settings().research.clarify_enabled and callable(
+            context.metadata.get("wait_for_user_reply")
+        ):
+            tools.append("ask_user")
         ctx = replace(
             context,
             user_message=await describe_images(

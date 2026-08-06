@@ -5,9 +5,8 @@
 
 包含后台任务：
 1. run_indexing         – LightRAG 知识库索引（替代 BackgroundTasks）
-2. run_llamaindex_build – LlamaIndex 向量索引（替代 BackgroundTasks）
-3. cron_flush_memory    – Mem0 批量刷新（cron，每 30s 扫描 Redis mem_flush:* key）
-4. flush_all_pending_job – Shutdown 时 Flush 所有 pending buffer
+2. cron_flush_memory    – Mem0 批量刷新（cron，每 30s 扫描 Redis mem_flush:* key）
+3. flush_all_pending_job – Shutdown 时 Flush 所有 pending buffer
 """
 from __future__ import annotations
 
@@ -41,9 +40,9 @@ logger = logging.getLogger(__name__)
 _JOB_EVENTS_TTL = 3600  # 进度事件列表在 Redis 中保留 1 小时
 
 # ARQ 任务重试与死信（plan 第三批-2）
-_ARQ_MAX_TRIES = 3  # 单任务最大尝试次数（含首次）。两索引任务重跑幂等（LightRAG purge /
-                    # LlamaIndex persist 覆盖写），自动重试不产生重复数据；flush 任务内部
-                    # 全 catch 不 re-raise，max_tries 对它们无实际作用。
+_ARQ_MAX_TRIES = 3  # 单任务最大尝试次数（含首次）。索引任务重跑幂等（LightRAG purge 清空
+                    # 旧数据），自动重试不产生重复数据；flush 任务内部全 catch 不 re-raise，
+                    # max_tries 对它们无实际作用。
 _DEADLETTER_KEY = "arq:deadletter"  # 全局死信 list（复用 job:{job_id}:events 的 list 风格）
 _DEADLETTER_TTL = 7 * 24 * 3600     # 死信保留 7 天供运维排查/重放
 
@@ -114,7 +113,7 @@ async def _push_deadletter_if_terminal(
 
 
 # ---------------------------------------------------------------------------
-# 任务 1 & 2：知识库索引（复用 admin.py 中的实现）
+# 任务 1：知识库索引（复用 admin.py 中的实现）
 # ---------------------------------------------------------------------------
 
 async def run_indexing(
@@ -123,8 +122,9 @@ async def run_indexing(
     course_id: str,
     file_paths: list[str],
     resume_from_chunk: int = 0,
+    backend: str = "lightrag",
 ) -> None:
-    """LightRAG 知识库索引后台任务。"""
+    """知识库索引后台任务（lightrag / llamaindex_pg，按 backend 写 kb_builds 行）。"""
     import time
     from core.observability import bind_context, log_flow
     from core.rag.lightrag import acquire_index_dlock, release_index_dlock
@@ -132,11 +132,11 @@ async def run_indexing(
     # 分布式索引锁：跨 worker 进程互斥（多容器/多进程也能护住），根治多任务并发
     # ainsert 同一份 lightrag_store 导致的"重复文档"刷屏与卡死。被占 = 已有任务在跑，
     # 直接跳过（DB status 仍是 indexing，前端继续等原任务）。
-    lock, renew = await acquire_index_dlock(course_id)
+    lock, renew = await acquire_index_dlock(course_id, backend)
     if lock is None:
         logger.warning(
-            "课程 %s 已有索引任务在运行（分布式锁），跳过本次 job_id=%s",
-            course_id, ctx.get("job_id"),
+            "课程 %s 的 %s 索引任务已在运行（分布式锁），跳过本次 job_id=%s",
+            course_id, backend, ctx.get("job_id"),
         )
         return
     try:
@@ -147,7 +147,7 @@ async def run_indexing(
                  kb_id=kb_id, files=len(file_paths), resume_from_chunk=resume_from_chunk)
         try:
             from api.admin import _run_indexing
-            await _run_indexing(kb_id, course_id, file_paths, resume_from_chunk)
+            await _run_indexing(kb_id, course_id, file_paths, resume_from_chunk, backend)
             _el = int((time.perf_counter() - t0) * 1000)
             log_flow("worker.indexing.complete", job_id=job_id, course_id=course_id, elapsed_ms=_el)
             from core.observability.metrics import observe_worker_job
@@ -160,72 +160,6 @@ async def run_indexing(
             observe_worker_job("indexing", "error", _el)
             await _push_deadletter_if_terminal(ctx, function="run_indexing", error=exc)
             raise
-    finally:
-        await release_index_dlock(lock, renew)
-
-
-async def run_llamaindex_build(
-    ctx,
-    kb_id: str,
-    course_id: str,
-    file_paths: list[str],
-) -> None:
-    """LlamaIndex 向量索引后台任务。"""
-    import time
-    from core.observability import bind_context, log_flow
-    from core.rag.lightrag import acquire_index_dlock, release_index_dlock
-
-    # 分布式索引锁：与 run_indexing 共用 course 级锁，同一课程不能同时跑两种索引。
-    lock, renew = await acquire_index_dlock(course_id)
-    if lock is None:
-        logger.warning(
-            "课程 %s 已有索引任务在运行（分布式锁），跳过本次 job_id=%s",
-            course_id, ctx.get("job_id"),
-        )
-        return
-    try:
-        job_id = str(ctx.get("job_id", kb_id or ""))
-        bind_context(job_id=job_id, course_id=course_id)
-        t0 = time.perf_counter()
-        log_flow("worker.llamaindex.start", job_id=job_id, course_id=course_id,
-                 kb_id=kb_id, files=len(file_paths))
-        try:
-            from api.llama_rag import _run_llamaindex_build
-            await _run_llamaindex_build(kb_id, course_id, file_paths)
-            log_flow("worker.llamaindex.complete", job_id=job_id, course_id=course_id,
-                     elapsed_ms=int((time.perf_counter() - t0) * 1000))
-        except Exception as exc:
-            log_flow("worker.llamaindex.error", logger=logger, level=logging.ERROR,
-                     job_id=job_id, error=str(exc),
-                     elapsed_ms=int((time.perf_counter() - t0) * 1000))
-            await _push_deadletter_if_terminal(ctx, function="run_llamaindex_build", error=exc)
-            raise
-        finally:
-            # 终态兜底：_run_llamaindex_build 内部静默吞所有异常（_mark_final 自带 try/except），
-            # 若 DB 写入 3 次重试仍失败，status 会卡在 indexing、worker 却报 complete。这里在
-            # 任务结束后复查 DB，仍为 indexing 才强制改 error（不覆盖 ready/paused/pending 等已落
-            # 终态或被用户主动干预的状态），给用户重试入口，杜绝永久卡死。
-            try:
-                from core.db.database import AsyncSessionLocal, KnowledgeBase
-                from sqlalchemy import select
-                async with AsyncSessionLocal() as db:
-                    async with db.begin():
-                        r = await db.execute(
-                            select(KnowledgeBase).where(KnowledgeBase.id == kb_id)
-                        )
-                        kb = r.scalar_one_or_none()
-                        if kb and kb.status == "indexing":
-                            logger.warning(
-                                "LlamaIndex 终态兜底：status 仍为 indexing，强制改为 error kb_id=%s",
-                                kb_id,
-                            )
-                            kb.status = "error"
-                            kb.error_msg = "索引任务已结束但终态回写失败，请重试"
-                            kb.updated_at = time.time()
-                from api.courses import invalidate_courses_cache
-                await invalidate_courses_cache()
-            except Exception:
-                logger.exception("LlamaIndex 终态兜底失败 kb_id=%s", kb_id)
     finally:
         await release_index_dlock(lock, renew)
 
@@ -291,6 +225,100 @@ async def flush_all_pending_job(ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 任务 5：L3 记忆巩固（事件驱动 + cron safety net）
+# ---------------------------------------------------------------------------
+
+
+async def consolidate_memory(ctx, user_id: str, course_id: str = "") -> None:
+    """消费某 user(+course) 的 episodic pending → mem0 语义层升格。
+
+    事件驱动触发（main.py _on_capability_complete）：importance 累计超阈值 / quiz 里程碑。
+    幂等：mem0.add 内部去重，崩溃重试不产生重复事实。
+    """
+    import time
+    t0 = time.perf_counter()
+    try:
+        from core.db.database import AsyncSessionLocal
+        from core.memory.consolidation import consolidate
+
+        async with AsyncSessionLocal() as db:
+            result = await consolidate(db, user_id, course_id)
+        if result["claimed"]:
+            logger.info(
+                "[worker] consolidate_memory user=%s course=%s claimed=%d promoted=%d elapsed_ms=%d",
+                user_id, course_id, result["claimed"], result["promoted"],
+                int((time.perf_counter() - t0) * 1000),
+            )
+    except Exception as exc:
+        logger.warning(
+            "[worker] consolidate_memory error user=%s course=%s: %s",
+            user_id, course_id, exc, exc_info=True,
+        )
+        await _push_deadletter_if_terminal(ctx, function="consolidate_memory", error=exc)
+        raise
+
+
+async def cron_consolidate_memory(ctx) -> None:
+    """5min safety net：捞长期 pending + 超时 processing 孤儿 → enqueue consolidate_memory。
+
+    两种孤儿：
+    1. pending 超过 _PENDING_STALE_SECONDS（session 空闲等价触发，importance 未攒够也兜底）
+    2. processing 超过 _PROCESSING_TIMEOUT_SECONDS（崩溃遗留，用 created_at 近似）→ 回 pending 重领
+    """
+    import time
+    from sqlalchemy import select, update
+
+    from core.arq_pool import get_arq_pool
+    from core.db.database import AsyncSessionLocal, MemoryEpisode
+    from core.memory.consolidation import (
+        _PENDING_STALE_SECONDS,
+        _PROCESSING_TIMEOUT_SECONDS,
+    )
+
+    now = time.time()
+    try:
+        async with AsyncSessionLocal() as db:
+            # 1. 崩溃遗留的 processing → 回 pending（下次 consolidate 重领；mem0 去重保证幂等）
+            await db.execute(
+                update(MemoryEpisode)
+                .where(
+                    MemoryEpisode.status == "processing",
+                    MemoryEpisode.created_at < now - _PROCESSING_TIMEOUT_SECONDS,
+                )
+                .values(status="pending")
+            )
+            await db.commit()
+            # 2. 长期 pending 的 (user, course) → 收集去重
+            rows = (
+                await db.execute(
+                    select(MemoryEpisode.user_id, MemoryEpisode.course_id).where(
+                        MemoryEpisode.status == "pending",
+                        MemoryEpisode.created_at < now - _PENDING_STALE_SECONDS,
+                    )
+                )
+            ).all()
+
+        targets = {(r[0], r[1] or "") for r in rows}
+        if not targets:
+            return
+        pool = await get_arq_pool()
+        if pool is None:
+            return
+        enqueued = 0
+        for uid, cid in targets:
+            try:
+                await pool.enqueue_job("consolidate_memory", user_id=uid, course_id=cid)
+                enqueued += 1
+            except Exception:
+                logger.warning(
+                    "[worker] cron_consolidate enqueue failed user=%s", uid, exc_info=True
+                )
+        logger.info("[worker] cron_consolidate_memory targets=%d enqueued=%d", len(targets), enqueued)
+    except Exception as exc:
+        logger.warning("[worker] cron_consolidate_memory error: %s", exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # WorkerSettings
 # ---------------------------------------------------------------------------
 
@@ -312,17 +340,18 @@ class WorkerSettings:
         database=int((_parsed.path or "/0").lstrip("/") or 0),
     )
 
-    functions = [run_indexing, run_llamaindex_build, flush_all_pending_job]
+    functions = [run_indexing, flush_all_pending_job, consolidate_memory]
     max_jobs = 10
     job_timeout = 36000   # 单个任务最长 10 小时
     keep_result = 300    # 任务结果保留 5 分钟
     max_tries = _ARQ_MAX_TRIES  # 失败自动重试：网络抖动/OOM/瞬时 DB 锁的容错（含首次）
     retry_jobs = True           # 显式开启重试（默认即 True，声明便于阅读；幂等性见 _ARQ_MAX_TRIES 注释）
 
-    # Mem0 批量刷新 cron：每 30s 扫描一次 Redis
+    # Mem0 批量刷新 cron：降级为 5min（Phase 2 后 Redis buffer 不再被喂，主路径已是
+    # episodic + consolidate_memory；保留以排干 Phase 2 之前的残留 buffer）。
     from arq import cron
-    from settings.base import get_settings
-    _settings = get_settings()
     cron_jobs = [
-        cron(cron_flush_memory, second=set(range(0, 60, _settings.mem0.flush_scan_interval))),
+        cron(cron_flush_memory, minute=set(range(0, 60, 5))),
+        # 5min episodic safety net：捞长期 pending + 超时 processing 孤儿 → enqueue consolidate
+        cron(cron_consolidate_memory, minute=set(range(0, 60, 5))),
     ]

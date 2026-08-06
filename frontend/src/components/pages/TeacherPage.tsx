@@ -69,7 +69,6 @@ export default function TeacherPage({ user, onBack }: Props) {
   const [loadingCourses, setLoadingCourses] = useState(false)
   const [loadingStudents, setLoadingStudents] = useState(false)
   const [generatingCode, setGeneratingCode] = useState(false)
-  const [llamaIndexSubmitting, setLlamaIndexSubmitting] = useState<string | null>(null)
   const [indexSubmitting, setIndexSubmitting] = useState<string | null>(null)
   const [error, setError] = useState('')
   const [joinCodeInput, setJoinCodeInput] = useState('')
@@ -90,6 +89,7 @@ export default function TeacherPage({ user, onBack }: Props) {
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
   const [newIcon, setNewIcon] = useState('📘')
+  const [newIndexBackend, setNewIndexBackend] = useState('lightrag')
   const [creating, setCreating] = useState(false)
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -241,13 +241,14 @@ export default function TeacherPage({ user, onBack }: Props) {
     }
   }
 
-  const handleIndex = async (courseId: string, force = false, resume = false) => {
+  const handleIndex = async (courseId: string, force = false, resume = false, backend?: string) => {
     setIndexSubmitting(courseId)
     setError('')
     try {
       const params = new URLSearchParams()
       if (force) params.set('force', 'true')
       if (resume) params.set('resume', 'true')
+      if (backend) params.set('backend', backend)
       const qs = params.toString()
       await apiFetch(`/teacher/courses/${courseId}/index${qs ? '?' + qs : ''}`, { method: 'POST' })
       // 乐观更新：接口已提前写 indexing（见后端 index_course），这里同步本地状态，
@@ -264,9 +265,10 @@ export default function TeacherPage({ user, onBack }: Props) {
     }
   }
 
-  const handlePauseIndex = async (courseId: string) => {
+  const handlePauseIndex = async (courseId: string, backend?: string) => {
     try {
-      await apiFetch(`/teacher/courses/${courseId}/index/pause`, { method: 'POST' })
+      const qs = backend ? `?backend=${encodeURIComponent(backend)}` : ''
+      await apiFetch(`/teacher/courses/${courseId}/index/pause${qs}`, { method: 'POST' })
       await loadCourses()
       if (selectedKB?.course_id === courseId) await loadKBDetail(courseId)
     } catch (e) {
@@ -274,27 +276,14 @@ export default function TeacherPage({ user, onBack }: Props) {
     }
   }
 
-  const handleStopIndex = async (courseId: string) => {
+  const handleStopIndex = async (courseId: string, backend?: string) => {
     try {
-      await apiFetch(`/teacher/courses/${courseId}/index/stop`, { method: 'POST' })
+      const qs = backend ? `?backend=${encodeURIComponent(backend)}` : ''
+      await apiFetch(`/teacher/courses/${courseId}/index/stop${qs}`, { method: 'POST' })
       await loadCourses()
       if (selectedKB?.course_id === courseId) await loadKBDetail(courseId)
     } catch (e) {
       setError(e instanceof Error ? e.message : '终止失败')
-    }
-  }
-
-  const handleLlamaIndexBuild = async (courseId: string) => {
-    setLlamaIndexSubmitting(courseId)
-    setError('')
-    try {
-      await apiFetch(`/teacher/courses/${courseId}/llamaindex/build`, { method: 'POST' })
-      await loadCourses()
-      if (selectedKB?.course_id === courseId) await loadKBDetail(courseId)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'LlamaIndex 构建失败')
-    } finally {
-      setLlamaIndexSubmitting(null)
     }
   }
 
@@ -344,10 +333,11 @@ export default function TeacherPage({ user, onBack }: Props) {
           name: newName.trim(),
           description: newDesc.trim(),
           icon: newIcon.trim() || '📘',
+          index_backend: newIndexBackend,
         }),
       })
       setShowCreate(false)
-      setNewId(''); setNewName(''); setNewDesc(''); setNewIcon('📘')
+      setNewId(''); setNewName(''); setNewDesc(''); setNewIcon('📘'); setNewIndexBackend('lightrag')
       await loadCourses()
     } catch (e) {
       setError(e instanceof Error ? e.message : '创建失败')
@@ -460,8 +450,6 @@ export default function TeacherPage({ user, onBack }: Props) {
                 onIndex={handleIndex}
                 onPause={handlePauseIndex}
                 onStop={handleStopIndex}
-                onLlamaIndexBuild={handleLlamaIndexBuild}
-                llamaIndexSubmitting={llamaIndexSubmitting === selectedKB.course_id}
                 indexSubmitting={indexSubmitting === selectedKB.course_id}
                 onRefresh={() => loadKBDetail(selectedKB.course_id)}
                 onUploaded={async () => { await loadKBDetail(selectedKB.course_id); await loadCourses() }}
@@ -705,6 +693,17 @@ export default function TeacherPage({ user, onBack }: Props) {
                     className="w-full rounded-[var(--radius)] border border-line px-4 py-2.5 text-sm text-center focus:outline-none focus:border-ink focus:ring-2 focus:ring-ink/10 transition"
                   />
                 </div>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-ink-soft mb-1">索引后端</label>
+                <select
+                  value={newIndexBackend}
+                  onChange={e => setNewIndexBackend(e.target.value)}
+                  className="w-full rounded-[var(--radius)] border border-line px-4 py-2.5 text-sm focus:outline-none focus:border-ink focus:ring-2 focus:ring-ink/10 transition"
+                >
+                  <option value="lightrag">LightRAG（知识图谱，慢但支持多跳）</option>
+                  <option value="llamaindex_pg">pgvector（快速向量，分钟级索引）</option>
+                </select>
               </div>
               <div className="flex gap-3 pt-2">
                 <button

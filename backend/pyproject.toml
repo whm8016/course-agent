@@ -42,6 +42,8 @@ dependencies = [
     # ── RAG / Document processing ───────────────────────────
     "llama-index-core>=0.12",
     "llama-index-readers-file>=0.3",
+    "llama-index-vector-stores-postgres",  # pgvector 索引后端：HNSW ANN + tsvector 全文（llamaindex_pg 后端）
+    "llama-index-embeddings-openai",       # OpenAI 兼容 embedding model，接 DashScope text-embedding-v3
     "llama-parse",
     "lightrag-hku==1.5.4",  # 精确锁定，API 不稳定
     "elasticsearch[async]>=8,<9",  # Phase 3 hybrid search BM25 路（可选，未装则降级纯 dense）
@@ -55,7 +57,7 @@ dependencies = [
     "openpyxl",
     "pillow",
     "readability-lxml",
-    "docling",                # PDF 默认 backend：版面/表格/标题/页码 + OCR(RapidOCR)；docling 自动拉 rapidocr3.x + onnxruntime
+    # docling 移到 [parse-docling] extra（云端默认不装 torch；配 PARSING__ENGINE=mineru_api 走托管 API）
 
     # ── Database ─────────────────────────────────────────────
     "sqlalchemy[asyncio]>=2.0",
@@ -126,6 +128,12 @@ eval = [
     # PyPI 仅 0.3.NNN 系列（日期式递增），实测 0.3.249 API；无 1.x。@solver 直调
     # orchestrator.handle() 零 HTTP，model_graded_qa 支持 model list 异家族 ensemble。
     "inspect-ai>=0.3,<0.4",
+]
+# ── 自托管 Docling 解析引擎（数据不出域的部署；含 torch，云端默认不装）─────────
+#   uv pip install -e ".[parse-docling]"
+# 云端默认走 MinerU 托管 API（PARSING__ENGINE=mineru_api），不装此 extra 即不拉 torch。
+parse-docling = [
+    "docling",  # PDF 版面/表格/标题/页码 + OCR(RapidOCR)；自动拉 rapidocr3.x + onnxruntime
 ]
 
 [project.urls]

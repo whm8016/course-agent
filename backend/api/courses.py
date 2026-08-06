@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.auth import get_current_user
 from core.codes import normalize_code
 from core.db.cache import cache_delete, cache_delete_pattern, cache_get, cache_set, course_access_get, course_access_set
-from core.db.database import Enrollment, KnowledgeBase, get_db
+from core.db.database import Enrollment, KnowledgeBase, aggregate_build_status, get_db
 
 router = APIRouter()
 
@@ -15,15 +15,22 @@ _COURSES_CACHE_TTL = 100
 
 
 def _kb_to_course(kb: KnowledgeBase, include_join_code: bool = False) -> dict:
+    builds = kb.builds
+    # 已就绪的后端（status==ready 且真摄入 chunks）：学生端按此决定 RAG 可用 + 选择器可见性。
+    # chunks_total>0 防空库（两后端索引完成都会写 chunks_total）。
+    ready_backends = sorted(
+        {b.backend for b in builds if b.status == "ready" and (b.chunks_total or 0) > 0}
+    )
     d: dict = {
         "id": kb.course_id,
         "name": kb.name or kb.course_id,
         "icon": kb.icon or "📘",
         "description": kb.description or "",
-        "kb_status": kb.status,
-        # chat/quiz/solve/research 只查 LightRAG；必须 LightRAG 真摄入(chunks_total>0)才算可答。
-        # 光建 LlamaIndex(status 也会变 ready)不算——否则 chat 去查空 LightRAG 吐 no-context。
-        "rag_enabled": kb.status == "ready" and (kb.chunks_total or 0) > 0,
+        # kb_status 由 kb_builds 聚合（indexing/error/paused/ready/pending）；任一后端就绪即 rag_enabled。
+        "kb_status": aggregate_build_status(builds),
+        "rag_enabled": bool(ready_backends),
+        # 学生端问答选择器：仅当 lightrag 已就绪才显示 mix/naive/local；auto 永远可用
+        "index_backends": ready_backends,
         "source": "db",
     }
     if include_join_code:

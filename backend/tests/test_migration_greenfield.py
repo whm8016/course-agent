@@ -159,8 +159,50 @@ def test_013_runs_when_kb_table_present():
             mod.upgrade()  # 表存在 → 守卫不命中 → 正常执行 backfill（0 行）
 
 
-def test_migration_chain_head_is_015():
-    """015 被识别为唯一 head，且 down_revision 链回 014（链不断、无分叉）。
+def test_020_creates_memory_episodes():
+    """020 在仅含 users 的空库上建出 memory_episodes（含唯一约束 + 索引）。"""
+    mod = _load_migration("020_memory_episodes.py")
+    engine = _engine_with_users()
+    with engine.begin() as conn:
+        ctx = MigrationContext.configure(conn)
+        with Operations.context(ctx):
+            mod.upgrade()
+        insp = sa.inspect(conn)
+
+        tables = set(insp.get_table_names())
+        assert "memory_episodes" in tables
+
+        # (session_id, turn_id) 唯一约束——幂等基础
+        uq = {u["name"] for u in insp.get_unique_constraints("memory_episodes")}
+        assert "uq_episodes_session_turn" in uq
+        # outbox 扫描索引 + user 维度索引
+        idx = {i["name"] for i in insp.get_indexes("memory_episodes")}
+        assert "idx_episodes_outbox" in idx
+        assert "idx_episodes_user" in idx
+
+
+def test_021_creates_knowledge_mastery():
+    """021 在仅含 users 的空库上建出 knowledge_mastery（含唯一约束 + 索引）。"""
+    mod = _load_migration("021_knowledge_mastery.py")
+    engine = _engine_with_users()
+    with engine.begin() as conn:
+        ctx = MigrationContext.configure(conn)
+        with Operations.context(ctx):
+            mod.upgrade()
+        insp = sa.inspect(conn)
+
+        tables = set(insp.get_table_names())
+        assert "knowledge_mastery" in tables
+
+        # (user_id, course_id, kp_id) 唯一约束——追加观测靠 UPDATE 不新增行
+        uq = {u["name"] for u in insp.get_unique_constraints("knowledge_mastery")}
+        assert "uq_mastery_user_course_kp" in uq
+        idx = {i["name"] for i in insp.get_indexes("knowledge_mastery")}
+        assert "idx_mastery_user_course" in idx
+
+
+def test_migration_chain_head_is_021():
+    """021 被识别为唯一 head，且 down_revision 链回 base（链不断、无分叉）。
 
     防止 revision/down_revision 写错导致 alembic 不识别或多 head。ScriptDirectory
     只解析 versions 目录，不连 DB、不 exec env.py，故无需 settings/env 配置。
@@ -170,8 +212,9 @@ def test_migration_chain_head_is_015():
 
     cfg = Config(str(VERSIONS.parent.parent / "alembic.ini"))
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["015"]
+    assert script.get_heads() == ["021"]
 
     revisions = [r.revision for r in script.walk_revisions()]
-    # head 能倒走回 base，证明链完整
-    assert "015" in revisions and "014" in revisions and "001" in revisions
+    # head 能倒走回 base，证明链完整（021→020→019→018→017→016→015→…→001）
+    assert "021" in revisions and "020" in revisions and "019" in revisions
+    assert "018" in revisions and "017" in revisions and "016" in revisions and "001" in revisions

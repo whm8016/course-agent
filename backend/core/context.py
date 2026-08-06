@@ -32,7 +32,8 @@ class UnifiedContext:
             由 API 层调用 normalize_mode() 后写入（旧 vision/summarize 已废弃，归入 chat）。
         enabled_tools: 用户本轮启用的工具名列表（如 ["rag", "web_search"]）。
             空列表表示未启用任何可选工具。
-        rag_mode: LightRAG 检索模式（"mix" | "naive" | "local" | "global"），默认 "naive"。
+        rag_mode: 检索模式，默认 "auto"（按 Agent strategy 自动路由 lightrag 图谱/pg 向量）；
+            手动可选 "mix" | "naive" | "local" | "global"（LightRAG 原生模式，需课程已建 lightrag）。
             用户在对话界面选择，注入到 chat 流式的 rag 工具调用（覆盖 retrieve_context
             默认的 naive）。仅 chat 工具消费；出题/研究等其它路径各自写死 mode，不受影响。
         memory_context: 记忆快照文本，由 build_memory_context(user) 生成，
@@ -55,8 +56,9 @@ class UnifiedContext:
     attachments: list[Attachment] = field(default_factory=list)
     mode: str = "chat"
     enabled_tools: list[str] = field(default_factory=list)
-    rag_mode: str = "naive"  # LightRAG 检索模式：mix/naive/local/global（chat 工具注入）
+    rag_mode: str = "auto"  # 检索模式：auto（自动路由）/ mix/naive/local（LightRAG 原生）；chat 工具注入
     memory_context: str = ""  # L3: mem0 事实记忆
+    mastery_context: str = ""  # L3: 知识点掌握度（薄弱点），可预置覆盖，否则 build_common_context_layers 从 DB 构建
     session_summary: str = ""  # L2: 早期对话摘要
     language: str = "zh"
     skills_manifest: str = ""

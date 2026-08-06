@@ -77,7 +77,6 @@ export default function AdminPage({ user, onBack }: Props) {
   const [selectedKB, setSelectedKB] = useState<KB | null>(null)
   const [error, setError] = useState('')
   const [showCreateModal, setShowCreateModal] = useState(false)
-  const [llamaIndexSubmitting, setLlamaIndexSubmitting] = useState<string | null>(null)
   const [indexSubmitting, setIndexSubmitting] = useState<string | null>(null)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const [inviteCodes, setInviteCodes] = useState<InviteCode[]>([])
@@ -257,13 +256,14 @@ export default function AdminPage({ user, onBack }: Props) {
     }
   }
 
-  const handleIndex = async (courseId: string, force = false, resume = false) => {
+  const handleIndex = async (courseId: string, force = false, resume = false, backend?: string) => {
     setIndexSubmitting(courseId)
     setError('')
     try {
       const params = new URLSearchParams()
       if (force) params.set('force', 'true')
       if (resume) params.set('resume', 'true')
+      if (backend) params.set('backend', backend)
       const qs = params.toString()
       await apiFetch(`/admin/kb/${courseId}/index${qs ? '?' + qs : ''}`, { method: 'POST' })
       // 乐观更新：接口已提前写 indexing（见后端 index_kb），这里同步本地状态，
@@ -280,9 +280,10 @@ export default function AdminPage({ user, onBack }: Props) {
     }
   }
 
-  const handlePauseIndex = async (courseId: string) => {
+  const handlePauseIndex = async (courseId: string, backend?: string) => {
     try {
-      await apiFetch(`/admin/kb/${courseId}/index/pause`, { method: 'POST' })
+      const qs = backend ? `?backend=${encodeURIComponent(backend)}` : ''
+      await apiFetch(`/admin/kb/${courseId}/index/pause${qs}`, { method: 'POST' })
       await loadKBs()
       if (selectedKB?.course_id === courseId) await loadKBDetail(courseId)
     } catch (e) {
@@ -290,27 +291,14 @@ export default function AdminPage({ user, onBack }: Props) {
     }
   }
 
-  const handleStopIndex = async (courseId: string) => {
+  const handleStopIndex = async (courseId: string, backend?: string) => {
     try {
-      await apiFetch(`/admin/kb/${courseId}/index/stop`, { method: 'POST' })
+      const qs = backend ? `?backend=${encodeURIComponent(backend)}` : ''
+      await apiFetch(`/admin/kb/${courseId}/index/stop${qs}`, { method: 'POST' })
       await loadKBs()
       if (selectedKB?.course_id === courseId) await loadKBDetail(courseId)
     } catch (e) {
       setError(e instanceof Error ? e.message : '终止失败')
-    }
-  }
-
-  const handleLlamaIndexBuild = async (courseId: string) => {
-    setLlamaIndexSubmitting(courseId)
-    setError('')
-    try {
-      await apiFetch(`/admin/kb/${courseId}/llamaindex/build`, { method: 'POST' })
-      await loadKBs()
-      if (selectedKB?.course_id === courseId) await loadKBDetail(courseId)
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'LlamaIndex 构建索引失败')
-    } finally {
-      setLlamaIndexSubmitting(null)
     }
   }
 
@@ -427,8 +415,6 @@ export default function AdminPage({ user, onBack }: Props) {
                   onIndex={handleIndex}
                   onPause={handlePauseIndex}
                   onStop={handleStopIndex}
-                  onLlamaIndexBuild={handleLlamaIndexBuild}
-                  llamaIndexSubmitting={llamaIndexSubmitting === selectedKB.course_id}
                   indexSubmitting={indexSubmitting === selectedKB.course_id}
                   onRefresh={() => loadKBDetail(selectedKB.course_id)}
                   onUploaded={async () => { await loadKBDetail(selectedKB.course_id); await loadKBs() }}
@@ -748,6 +734,7 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
   const [icon, setIcon] = useState('📘')
   const [systemPrompt, setSystemPrompt] = useState('')
   const [isVisible, setIsVisible] = useState(true)
+  const [indexBackend, setIndexBackend] = useState('lightrag')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -766,6 +753,7 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
           icon,
           system_prompt: systemPrompt,
           is_visible: isVisible,
+          index_backend: indexBackend,
         }),
       })
       onCreated()
@@ -852,6 +840,17 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
               {isVisible ? '对学生可见' : '对学生隐藏'}
             </span>
           </label>
+          <div>
+            <label className="block text-sm font-medium text-ink-soft mb-1">索引后端</label>
+            <select
+              value={indexBackend}
+              onChange={e => setIndexBackend(e.target.value)}
+              className="w-full border border-ink-soft rounded-[var(--radius)] px-3 py-2 text-sm focus:outline-none focus:border-ink"
+            >
+              <option value="lightrag">LightRAG（知识图谱，慢但支持多跳）</option>
+              <option value="llamaindex_pg">pgvector（快速向量，分钟级索引）</option>
+            </select>
+          </div>
           <div className="flex gap-3 pt-2">
             <button
               type="submit"

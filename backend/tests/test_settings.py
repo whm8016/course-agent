@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import os
-import sys
 
 import pytest
 
@@ -46,10 +45,8 @@ _INTERFERING_ENV = [
     "SECURITY__JWT_SECRET", "SECURITY__JWT_EXPIRE_HOURS",
     "SECURITY__ALLOWED_ORIGINS", "SECURITY__ADMIN_USERNAME",
     "SECURITY__PROVIDER_ENCRYPTION_KEY",
-    # RAG
-    "RAG__BACKEND", "RAG__AGENTIC_BACKEND", "RAG__AGENTIC_KB_TOOL",
     # LlamaParse
-    "LLAMAPARSE__CLOUD_API_KEY", "LLAMAPARSE__PARSE_API_KEY", "LLAMAPARSE__QUESTION_USE_LLAMAINDEX",
+    "LLAMAPARSE__CLOUD_API_KEY", "LLAMAPARSE__PARSE_API_KEY",
     # Chunking
     "CHUNKING__SIZE", "CHUNKING__OVERLAP", "CHUNKING__TOP_K",
     "CHUNKING__INGEST_SIZE", "CHUNKING__INGEST_OVERLAP",
@@ -58,8 +55,8 @@ _INTERFERING_ENV = [
     # Mem0 / Summary
     "MEM0__TIME_DECAY_ENABLED", "SUMMARY__WINDOW_SIZE",
     # Paths（.env 可能显式设相对路径，需清理才能测默认值）
-    "PATHS__UPLOAD_DIR", "PATHS__KNOWLEDGE_DIR", "PATHS__VECTORSTORE_DIR", "PATHS__DB_PATH",
-    "PATHS__QUESTION_LOG_DIR", "PATHS__LLAMA_INDEX_KB_ROOT", "PATHS__LIGHTRAG_WORKDIR",
+    "PATHS__UPLOAD_DIR", "PATHS__KNOWLEDGE_DIR", "PATHS__DB_PATH",
+    "PATHS__QUESTION_LOG_DIR", "PATHS__LIGHTRAG_WORKDIR",
     "PATHS__KB_STORE_DIR", "PATHS__TUTORBOT_WORKSPACE_DIR", "PATHS__SEARCH_CONFIG_PATH",
     "PATHS__MCP_CONFIG_PATH", "PATHS__MCP_SESSIONS_DIR", "PATHS__OUTPUT_CARDS_PATH",
 ]
@@ -279,34 +276,6 @@ def test_paths_explicit_not_overridden(monkeypatch, tmp_path):
     custom = str(tmp_path / "my-uploads")
     s = _fresh(monkeypatch, PATHS__UPLOAD_DIR=custom)
     assert s.paths.upload_dir == custom
-
-
-# ── rag backend / legacy alias ───────────────────────────────────────────────
-
-def test_rag_backend_explicit(monkeypatch):
-    assert _fresh(monkeypatch, RAG__BACKEND="chroma").rag.backend == "chroma"
-    assert _fresh(monkeypatch, RAG__BACKEND="fs").rag.backend == "fs"
-
-
-def test_rag_backend_platform_default(monkeypatch):
-    """未指定时按平台：win32→fs，否则 chroma。"""
-    s = _fresh(monkeypatch)
-    expected = "fs" if sys.platform == "win32" else "chroma"
-    assert s.rag.backend == expected
-
-
-def test_agentic_rag_backend_explicit(monkeypatch):
-    assert _fresh(monkeypatch, RAG__AGENTIC_BACKEND="lightrag").rag.agentic_backend == "lightrag"
-    assert _fresh(monkeypatch, RAG__AGENTIC_BACKEND="llamaindex").rag.agentic_backend == "llamaindex"
-
-
-def test_agentic_rag_backend_legacy_alias(monkeypatch):
-    """RAG__AGENTIC_KB_TOOL=llamaindex_rag → agentic_backend=llamaindex。"""
-    assert _fresh(monkeypatch, RAG__AGENTIC_KB_TOOL="llamaindex_rag").rag.agentic_backend == "llamaindex"
-
-
-def test_agentic_rag_backend_default(monkeypatch):
-    assert _fresh(monkeypatch).rag.agentic_backend == "lightrag"
 
 
 # ── lightrag 计算方法（原 rag_config 计算函数，内聚至 LightRAGConfig）─────────

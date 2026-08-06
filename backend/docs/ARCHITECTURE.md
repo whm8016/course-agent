@@ -48,7 +48,7 @@ The last iteration always runs with `tools=None`, forcing a text answer (forced 
 
 ### 上下文预算治理（in-loop context budget）
 
-多轮工具调用会让 `messages` 滚雪球撑爆 context window（complexity trap）。`core/agentic/context_policy.py` 在每轮 LLM 调用前做三段式裁剪，`settings.context_policy.enabled=False`（默认）时 loop 仍走旧 `_snip_tool_results`（按全局字符 > 80000 从最早 tool 替换），**行为零变化**，便于做 raw vs masking 消融对照：
+多轮工具调用会让 `messages` 滚雪球撑爆 context window（complexity trap）。`core/agentic/context_policy.py` 在每轮 LLM 调用前做三段式裁剪。`settings.context_policy.enabled=True`（默认）→ 走 `apply` 三段式（`cap_tool_result` 单条 6000 字 + `mask_old_observations` 按轮掩码；hybrid 摘要默认关，要多花一次 LLM 调用故暂不启用），吃下「Observation Masking 成本减半、解题率持平」的确定收益；`CONTEXT_POLICY__ENABLED=false` 一行回退到旧 `_snip_tool_results`（按全局字符 > 80000 从最早 tool 替换）。这是**四条 pipeline 共享**的行为变更（research 多证据块也会被单条 6000 字上限影响，由 `scripts/eval_capabilities/` 回归把关）。评测四臂仍经 contextvar `set_arm` 覆盖（生产 settings 不受影响）：
 
 | 函数 | 作用 | 调研依据 |
 |------|------|---------|
@@ -81,8 +81,9 @@ POST /api/chat
  ├── TurnRuntimeManager.start_turn(ctx)
  └── SSE: subscribe_turn(turn_id) → yield events
  └── (TRM drives) CourseOrchestrator → ChatCapability → ChatPipeline
+ ├── KB Seed 预检索（retrieve_kb_seed：进 loop 前用原问题查一次课程知识库，命中则作 [知识库预检索] 块前置注入；未命中/超时/未挂 rag → 空串降级，loop 行为零变化）
  ├── assemble system_prompt (chat.yaml loop spec + course prompt + persona + memory)
- └── run_agent_loop(...)
+ └── run_agent_loop(extra_context=kb_seed, temperature=0.3)
 ```
 
 Key files:
@@ -364,8 +365,8 @@ The backend supports **per-request provider/model switching** admins pre-configu
 ```
 ChatWindow (model dropdown) ──► POST /api/chat { model_profile_id }
  └── UnifiedContext.llm_profile_id
- └── ChatPipeline._resolve_profile_runtime
- ├── core/llm/catalog.get_profile(id) # read JSON (live)
+ └── pipeline_common.resolve_profile_runtime
+ ├── core/llm/catalog.get_profile_cached(id) # Redis cache-aside（miss→to_thread 读 JSON）
  └── provider_factory.get_llm_client_for_profile # fingerprint-cached client
  └── run_agent_loop(client=<profile>, model=<profile.text>) # loop already accepts client/model
 ```
@@ -374,10 +375,10 @@ Key points:
 - **`run_agent_loop`'s core loop is unchanged** — it already accepted a `client` override (`loop.py:214/258`); this is a clean injection path, not a rewrite of the scheduling kernel.
 - **Empty fields fall back to `.env`** (`get_llm_client_for_profile`): `active=default` (catalog key/base_url usually empty) still constructs correctly via the startup constants — so "no selection" and "select active profile" behave identically.
 - **Fingerprint-cached clients**: same `(binding, key, base_url, api_version)` reuses one client (avoids per-request `new`).
-- **No selection → uses catalog `active_profile` (read live)**, so `set_active` also takes effect immediately (not just post-restart).
+- **No selection → uses catalog `active_profile`**. 运行期读走 `load_catalog_cached()`（Redis cache-aside，TTL 300s 纯兜底）；admin 写端点（`upsert`/`delete`/`set_active`）调 `invalidate_catalog_cache()` 显式失效 → 下一个请求全部 4 个 worker 都看到新值（无重启、无"幽灵 profile"）。复用 `core/db/cache.py`，与 `get_course_prompt` 同构。
 - **Scope**: only the chat / deep_solve turn is per-request switchable (both route through `/api/chat` → ChatPipeline). Embedding / LightRAG / Bot subsystems keep using the startup constants — .
 
-Management API (`api/llm.py`, admin): CRUD profiles + `/probe` test connection + `/active` default; `/profiles/selectable` feeds the dropdown (**api_key stripped**). Catalog read/write layer: `core/llm/catalog.py` (live file reads → API writes visible next request). Frontend: `LlmProviderPage` (admin CRUD+test) + `ChatWindow` model dropdown (all users).
+Management API (`api/llm.py`, admin): CRUD profiles + `/probe` test connection + `/active` default; `/profiles/selectable` feeds the dropdown (**api_key stripped**). Catalog read/write layer: `core/llm/catalog.py` —— 同步 `load_catalog/get_profile`（启动期 / 单测用）+ async `*_cached`（运行期热路径：Redis cache-aside + `asyncio.to_thread` 读文件，避免同步 I/O 阻塞 worker 事件循环；写后 `invalidate_catalog_cache` 显式失效）。写端点用 `asyncio.to_thread` 包文件写。Frontend: `LlmProviderPage`（admin CRUD+test；学生视图可自配个人 Key 覆盖平台默认、走自己额度，支持「复原为默认」回退平台共享模型）+ `ChatWindow` model dropdown (all users).
 
 ## RAG 检索架构（`core/rag/`）
 
@@ -411,6 +412,24 @@ Management API (`api/llm.py`, admin): CRUD profiles + `/probe` test connection +
 
 **启用 ES**：`.env` 设 `ELASTICSEARCH__ENABLED=true` + `ELASTICSEARCH__URL`（docker 网络用服务名 `http://elasticsearch:9200`），装 ik 插件（见 `docker-compose.yml` 注释）。
 
+**索引后端（per-KB，`core/rag/registry.py` + `KnowledgeBase.index_backend`）**：一门课可**同时构建 LightRAG 与 pgvector 两套索引**（双索引，状态存 `kb_builds` 子表），问答时按用户 `rag_mode` + Agent `strategy` 自动路由；也兼容只建一个后端的老课程（迁移自动回填一条 `kb_builds`，行为等价旧单后端）：
+- `lightrag`（默认）：知识图谱，逐 chunk LLM 实体/关系抽取（慢，数千 chunk 即数小时），但支持多跳关系推理（relationship 路径走 `graph_augmented_retrieve` 图邻域扩展）。
+  - 存储后端（`instance_pool._get_instance`）：Postgres 部署把 KV/Vector/DocStatus 三类存储从进程内存搬到 Postgres（`PGKVStorage`/`PGVectorStorage`/`PGDocStatusStorage`，按 `workspace=course_{id}` 列隔离，LIGHTRAG_* 表 `IF NOT EXISTS` 幂等建），把每门课常驻 RSS 从数百 MB 降到数十 MB；图谱显式保留 `NetworkXStorage`（文件 graphml，体积小；不上 AGE/Neo4j，前者建图实测 434s 灾难、后者超 4GB 内存预算）。SQLite 部署（本地/测试）保持默认内存后端——由 `_ensure_lightrag_pg_env()` 把 `settings.db.url` 桥接成 LightRAG 认的 `POSTGRES_*` env（`MAX_CONNECTIONS=5`/进程；绝不设 `POSTGRES_WORKSPACE`，否则覆盖 per-course workspace 致多租户混串）。`purge_course_workspace` 重索引前对 11 个 PG storage 调 `drop()`（`DELETE WHERE workspace=$1`，不 DROP 共享表）+ rmtree graphml。
+- `llamaindex_pg`（pgvector 快速向量）：给"量大、只需事实检索、受不了几小时索引"的课。复用 `ingestion.parse_files` 切好的 chunks → embedding 批调用 → 存 Postgres（`PGVectorStore` + HNSW + tsvector），分钟级建索引，进程不常驻（治旧 `SimpleVectorStore` 落 JSON 的三病：暴力扫描无 ANN、每 worker 常驻一份、索引文件与 PG 分家）。
+  - 检索绕开 PGVectorStore 无融合的 hybrid 模式（它只去重合并、无 RRF、alpha 被忽略，见 run-llama/llama_index Discussion #19606）：dense（DEFAULT 走 HNSW）+ sparse（SPARSE 走 tsvector 全文）各查一次 → 交 `hybrid_retriever` 做 RRF 融合。两路查同一张表 `data_kb_chunks`，chunk_id（node_id）天然一致，无需像 LightRAG+ES 双写对齐。
+  - 存储层 `core/rag/llamaindex/pg_store.py`：PGVectorStore 单例 + 官方 `OpenAIEmbedding` 接 `settings.embedding`（DashScope text-embedding-v3）；`perform_setup=True` 自动建表+HNSW（幂等），`course_id` 用 metadata filter 隔离（`indexed_metadata_keys` 建索引避免全表扫）。
+  - 构建分流（per-backend，写 `kb_builds` 行）：`trigger_kb_indexing(db,kb,course_id,backend)` → ARQ `run_indexing(...,backend)`，分布式锁 key 含 backend（`{course_id}:{backend}`）→ 两后端可并行构建不互斥；`_run_indexing`（lightrag）与 `_run_indexing_llamaindex_pg` 各写自己的 `kb_builds` 终态（KB 行旧 status/progress 列保留但不再被写，改由 `_kb_to_dict`/`_kb_to_course` 从 `kb_builds` 聚合派生，`lazy="selectin"` 自动连表）。建库/索引 API（admin/teacher `index`/`pause`/`stop`）接受 `backend` 参数。
+  - 检索路由（`tool_registry._execute_rag`，修了 `mode="naive"` 硬编码 bug——前端 `rag_mode` 经 `tool_dispatch` 注入的 `mode` 此前被吃掉从未生效）：`mode`=用户每请求选（`auto` 默认 / `mix`/`naive`/`local` 手动）；`strategy`=LLM 按 `rag.yaml` 自选（`fact`/`relationship`），两者正交。手动模式直接透传 lightrag `retrieve_context(mode=)`；`auto`：`relationship` + lightrag 就绪 → `graph_augmented_retrieve`（多跳），否则优先 pg 向量，再退 lightrag naive。`_get_ready_backends(course_id)` 查 `kb_builds` 就绪集合驱动路由。
+  - 迁移：`016_kb_index_backend` 加 `index_backend` 列（存量回填 `lightrag`）；`018_kb_builds` 加 `kb_builds` 子表（`UNIQUE(kb_id,backend)`，从存量 KB 行回填一条）。向量表 schema 由 PGVectorStore 自动维护（不手写 migration 对齐其内部结构，避免版本耦合）。
+
+**解析层（第二期，`core/rag/parsing/`，opt-in）**：文档解析独立成层，默认引擎 MinerU 托管 API（替代 worker 内 Docling，去 torch，稳态内存 ~2.5GB→~0.4GB——省下的给 LightRAG）。借鉴 DeepTutor `services/parsing/`：ParsedDocument IR（markdown+blocks）+ 内容寻址缓存（键=字节 sha256+parser_signature，`manifest.json` 最后写=ready）+ Parser Protocol + Service 调度（格式不支持直接报错不换引擎，单引擎哲学）。`engines/mineru_api.py` 同步 httpx 四步（POST file-urls/batch→PUT 上传→轮询 extract-results→下载 zip 解包，业务码双层检查+zip Slip/bomb 防护）。**opt-in**：`settings.parsing.engine` 空=走原 file_routing（docling/mupdf，行为零变化），配 `mineru_api`=换托管 API。docling 移到 `[parse-docling]` extra（云端默认不装 torch）。`KBFile.parser_engine` 列（事后归因）。
+
+**type_routed 分块（第三期，opt-in）**：`chunking/type_routed.py` 按 MinerU `content_list` 块结构分块（title 开新 section、table 原子化、超 ingest_size 递归切），比 sentence_splitter 盲切保留语义边界。`blocks_to_sections`（parsing/types.py）与 `to_sections`/type_routed 共用。`register_chunk_strategy("type_routed")`。**opt-in**：默认仍 `sentence_splitter`（行为零变化）——plan 明确 chunk_size 改默认（1200→512）必须 eval_rag 验证不直接上线。
+
+**第四期收尾**：
+- `GET /admin/rag/engines`：索引后端（lightrag/llamaindex_pg）+ 解析引擎（mineru_api/docling）能力探测（托管看 api_key、自托管看 find_spec），给前端建库选择用。前端建库表单（TeacherPage/AdminPage CreateKBModal）加 index_backend select。
+- **drop-es**：docker-compose 移除 elasticsearch 服务（省 512MB JVM）。混合检索的 sparse 路改用 PG tsvector（llamaindex_pg 的 SPARSE 模式；LightRAG 的 ES 混合 opt-in 默认关，`get_es_store` 连不上自动降级纯 dense）。
+
 ## RAG 评估系统（`scripts/eval_rag/`）
 
 离线评测 LightRAG 各检索模式（naive/local/global/mix）与生产路径的检索 + 生成质量，用 RAGAS 0.4.3 量化，CI 质量门禁阻断回归。`--ablation` 模式遍历检索配置消融组合（见下）。
@@ -435,3 +454,29 @@ Management API (`api/llm.py`, admin): CRUD profiles + `/probe` test connection +
 **Phase 6 诚实边界**：`production_feedback.py` 从 `messages` 表导出真实 (question, answer) + 启发式初筛可疑低质量（过短 / 拒绝话术 / 错误标记），产出**无 ground_truth 的待标注候选池**（`datasets/v3_production_candidates.json`）。本项目**无点踩/差评功能，RAG 命中信号（empty/retrieved_chars）只打日志不落库**，故这是真实问答导出 + 零成本粗筛，**非用户负反馈闭环**；真正的闭环需要 messages.metadata 写入 RAG 命中字段 + 前端点踩按钮（独立功能，不在本脚本范围）。初筛顺序为 empty → refusal(语义) → too_short(长度)，确保短拒绝（"我不知道"）命中高置信 refusal 而非被长度截胡。
 
 **测试**：`tests/test_ragas_eval_smoke.py`（14，mock LightRAG/RAGAS 纯逻辑 + 两步查询）+ `tests/test_production_feedback.py`（8，配对 / 初筛纯函数）。真实分数需在有 DashScope key 的环境跑 `python -m scripts.eval_rag.run_eval`。
+
+## 记忆系统（L2/L3 四层架构，`core/memory/`）
+
+四层职责（episodic / semantic / mastery / procedural）+ 事件驱动巩固。诊断与依据见 plan `l3记忆沉淀重构`。
+
+```
+热路径(零LLM)                后台巩固(慢模型)                   读路径(每轮)
+CAPABILITY_COMPLETE ──► INSERT memory_episodes ──► consolidate_memory job ──► 注入 prompt
+  (record_episode)        status=pending         segment→mem0.add         memory_context
+  + importance 累计        +importance阈值/quiz   →merge graph+append       mastery_context
+  超阈值→enqueue job       里程碑/cron兜底         mastery→procedural
+```
+
+- **episodic**（`memory_episodes` 表，alembic 020）：原始 turn，永不删除，兼巩固 outbox。`(session_id,turn_id)` 唯一幂等；status pending/processing/done/dead。`record_episode`（`episodic.py`）在 EventBus `_on_capability_complete` 里写，importance 用零 LLM 启发式（长度/疑问/纠错/工具/模式）。
+- **semantic**（mem0）：事实条目，由巩固 job 从 segment 升格（`mem0.add`，ADD-only 不覆盖——教育场景「上周不会这周会了」是状态演进不是冲突）。
+- **mastery**（`knowledge_mastery` 表，alembic 021）：知识点掌握度，**带 course_id**（修 `users.knowledge_graph` 跨课程污染）。`append_mastery`（`mastery.py`）追加观测不覆盖（blend mastery/risk + count++ + evidence_episode_ids）；读时 `get_mastery_context` 按 `last_observed_at` 做 `exp(-λ·age)` 软衰减（半衰期 ~69 天，不物理删除——反复性错误证据留存）。
+- **procedural**（personal SKILL.md）：巩固 job 攒够观测后生成学习画像草稿（`procedural.py`），写 personal 层，**不自动 always** + frontmatter `auto_generated:true` 待人工确认。
+
+**巩固 job**（`consolidation.py` + `worker.consolidate_memory`）：claim pending（条件 UPDATE 并发安全）→ 按 session 分组（对齐 SeCom segment 级）→ 每组 mem0.add 升格 + 单次抽取喂 graph(dashboard)+mastery → 成功标 done / mem0 失败回 pending 重试。触发：热路径 importance 累计 ≥ 阈值(`mem0.consolidation_importance_threshold=0.7`) 或 quiz 里程碑 → enqueue；`cron_consolidate_memory`(5min) safety net 兜底长期 pending + 超时 processing。老 `cron_flush_memory` 降级 5min 排干旧 Redis buffer。
+
+**回流 prompt**（`pipeline_common.build_common_context_layers`）：mastery_context 紧跟 memory_context 之后（L2 用户级易变段，**不破 prefix cache 前缀**），四条 pipeline(chat/solve/research/quiz) 共享此入口都拿到掌握度。
+
+**评测**（`scripts/eval_memory/`）：照 LongMemEval 的 knowledge updates / abstention 维度，对 mastery 层做三维程序化判分（knowledge_update/abstention/decay，无需 LLM 可入 CI）。`python -m scripts.eval_memory.run`，门禁全过 exit 0。
+
+**止血修复（Phase 1）**：`flush_manager._flush_turns` 返回 bool——mem0 关键写失败返回 False，`_flush_one` 保留 key 重试（修「写失败即永久丢数据」，原实现吞异常架空 H-7）；`graph_memory._turn_counter` 模块 dict 改 Redis INCR（跨 worker 共享）。注意：Phase 2 后 Redis buffer 不再被喂，老 flush 路径仅排干残留。
+

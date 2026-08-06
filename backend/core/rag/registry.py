@@ -1,10 +1,10 @@
 """RAG Registry —— 工厂 + 门面。
 
-提供统一的后端获取接口，调用方无需硬编码选择 LightRAG/LlamaIndex/Chroma。
+提供统一的后端获取接口，调用方无需硬编码选择后端。
 支持：
 - register_retriever / register_indexer 注册后端实现
 - get_retriever / get_indexer 获取实例
-- 根据 settings.RAG_BACKEND 或参数选择后端
+- 根据参数选择后端（当前仅 lightrag）
 """
 from __future__ import annotations
 
@@ -40,10 +40,7 @@ def register_indexer(name: str, cls: type[Indexer]) -> None:
 
 def get_retriever(backend: str | None = None) -> Retriever:
     """获取 Retriever 实例。"""
-    from settings import get_settings
-    RAG_BACKEND = get_settings().rag.backend
-
-    name = backend or RAG_BACKEND or "lightrag"
+    name = backend or "lightrag"
 
     if name not in _retrievers:
         _auto_register(name)
@@ -57,10 +54,7 @@ def get_retriever(backend: str | None = None) -> Retriever:
 
 def get_indexer(backend: str | None = None) -> Indexer:
     """获取 Indexer 实例。"""
-    from settings import get_settings
-    RAG_BACKEND = get_settings().rag.backend
-
-    name = backend or RAG_BACKEND or "lightrag"
+    name = backend or "lightrag"
 
     if name not in _indexers:
         _auto_register(name)
@@ -76,7 +70,12 @@ def get_indexer(backend: str | None = None) -> Indexer:
 
 
 def _auto_register(name: str) -> None:
-    """自动导入并注册后端实现。"""
+    """自动导入并注册后端实现。
+
+    各后端实现惰性导入（首次 get_retriever/get_indexer 时触发），core 不在模块加载期
+    import 重依赖——llamaindex_pg 缺 llama-index-vector-stores-postgres 时 import 失败，
+    仅 warning 不阻断 lightrag 默认链路。
+    """
     if name == "lightrag":
         try:
             from core.rag.retriever.lightrag import LightRAGRetriever
@@ -85,20 +84,14 @@ def _auto_register(name: str) -> None:
             register_indexer("lightrag", LightRAGIndexer)
         except ImportError as e:
             logger.warning("Failed to auto-register lightrag: %s", e)
-
-    elif name == "llamaindex":
+    elif name == "llamaindex_pg":
         try:
-            # LlamaIndex Retriever/Indexer 已废弃，不实现
-            pass
+            from core.rag.retriever.llamaindex_pg import LlamaIndexRetriever
+            from core.rag.indexer.llamaindex_pg import LlamaIndexIndexer
+            register_retriever("llamaindex_pg", LlamaIndexRetriever)
+            register_indexer("llamaindex_pg", LlamaIndexIndexer)
         except ImportError as e:
-            logger.warning("Failed to auto-register llamaindex: %s", e)
-
-    elif name == "chroma":
-        try:
-            # Chroma Retriever/Indexer 已废弃，不实现
-            pass
-        except ImportError as e:
-            logger.warning("Failed to auto-register chroma: %s", e)
+            logger.warning("Failed to auto-register llamaindex_pg: %s", e)
 
 
 # ── 后端可用性检查 ───────────────────────────────────────────────────────────
@@ -109,6 +102,9 @@ def is_backend_available(backend: str) -> tuple[bool, str]:
     if backend == "lightrag":
         from core.rag.lightrag import is_lightrag_available
         return is_lightrag_available()
+    if backend == "llamaindex_pg":
+        from core.rag.llamaindex.pg_store import is_llamaindex_pg_available
+        return is_llamaindex_pg_available()
 
     return False, f"Backend '{backend}' not implemented"
 

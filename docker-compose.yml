@@ -32,31 +32,11 @@ services:
       timeout: 3s
       retries: 5
 
-  # ── Elasticsearch（Phase 3 hybrid search 的 BM25 路）──────────────────────
-  # 可选服务：settings.elasticsearch.enabled=false（默认）时不启用，backend/worker
-  # 自动降级为纯 dense（LightRAG naive）。启用步骤：
-  #   1) .env 设 ELASTICSEARCH__ENABLED=true、ELASTICSEARCH__URL=http://elasticsearch:9200
-  #      （docker 网络内用服务名；本机开发用 http://localhost:9200）
-  #   2) 装中文分词 ik 插件（官方镜像不带，否则 BM25 中文按字切效果差）：进入容器执行
-  #      bin/elasticsearch-plugin install https://get.infini.cloud/elasticsearch/analysis-ik/8.14.0
-  #      后重启 ES；或 build 一个预装 ik 的自定义镜像。ik 版本必须与 ES 版本精确匹配。
-  elasticsearch:
-    image: elasticsearch:8.14.0
-    restart: unless-stopped
-    environment:
-      - discovery.type=single-node
-      - xpack.security.enabled=false
-      - ES_JAVA_OPTS=-Xms512m -Xmx512m
-    ports:
-      - "127.0.0.1:9200:9200"
-    volumes:
-      - esdata:/usr/share/elasticsearch/data
-    healthcheck:
-      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-      start_period: 60s
+  # ── Elasticsearch 已移除（第四期 drop-es）─────────────────────────────────
+  # 混合检索的 sparse/BM25 路改用 Postgres tsvector：llamaindex_pg 的 SPARSE 模式
+  # 走 PG 全文；LightRAG 的 ES 混合由 settings.elasticsearch.enabled=false（默认）关闭，
+  # get_es_store 连不上时自动降级纯 dense。省 512MB JVM 堆 + 一个容器。
+  # 若仍要用 ES（自托管混合检索），自行加回此服务块 + .env 开 ELASTICSEARCH__ENABLED=true。
 
   backend:
     build:
@@ -78,6 +58,7 @@ services:
       BACKEND_WORKERS: "${BACKEND_WORKERS:-4}"
       LLM_TIMEOUT_SEC: "${LLM_TIMEOUT_SEC:-120}"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PROMETHEUS_MULTIPROC_DIR: /dev/shm/prometheus_multiproc
     depends_on:
       postgres:
         condition: service_healthy
@@ -87,7 +68,7 @@ services:
       - ./backend:/app
       - backend_venv:/app/.venv
       - backend_uploads:/app/uploads
-    command: ["sh", "-c", "until .venv/bin/alembic upgrade head; do echo 'alembic failed, retrying in 5s...'; sleep 5; done && .venv/bin/gunicorn main:app -k uvicorn.workers.UvicornWorker -w ${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
+    command: ["sh", "-c", "mkdir -p /dev/shm/prometheus_multiproc && rm -rf /dev/shm/prometheus_multiproc/* && until .venv/bin/alembic upgrade head; do echo 'alembic failed, retrying in 5s...'; sleep 5; done && .venv/bin/gunicorn main:app -k uvicorn.workers.UvicornWorker -w $${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/api/health')\""]
       interval: 15s
@@ -120,7 +101,38 @@ services:
       - ./backend:/app
       - backend_venv:/app/.venv
       - backend_uploads:/app/uploads
-    command: [".venv/bin/python", "-m", "arq", "worker.WorkerSettings"]
+    # 与 backend 一致：先建 PROMETHEUS_MULTIPROC_DIR（Dockerfile ENV 对 worker 也生效，
+    # 但 ENV 不创建目录）。缺目录会让多进程模式下指标构造 FileNotFoundError（eval 注释已记录
+    # 同坑）→ 模块体中途失败被驱逐 → ARQ 重试二次 import 撞 Duplicated timeseries。
+    command: ["sh", "-c", "mkdir -p /dev/shm/prometheus_multiproc && rm -rf /dev/shm/prometheus_multiproc/* && exec .venv/bin/python -m arq worker.WorkerSettings"]
+
+  # ── 评测专用服务（非生产运行时）──────────────────────────────────────────
+  # pyproject 把 inspect-ai/ragas 隔离在 eval 组（注释明确"不污染生产环境"），
+  # 故独立 service + 独立 venv volume(eval_venv)，与生产 backend_venv 完全隔离。
+  # 常驻 sleep infinity，按需 docker compose exec eval ... 跑 scripts/eval_*。
+  # 连同一 default 网络访问 pg/redis；LLM key 经 env_file(./backend/.env) 注入。
+  # eval_venv 首次挂载会从镜像拷贝生产 venv，再叠加 eval 组（命名 volume 初始化行为）：
+  #   docker compose exec eval .venv/bin/pip install -e ".[eval]"
+  eval:
+    image: course-agent-backend  # 复用已 build 的 backend 镜像，不重复 build
+    restart: "no"
+    env_file:
+      - ./backend/.env
+    environment:
+      DB__URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/course_agent
+      DB__REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - eval_venv:/app/.venv
+      - backend_uploads:/app/uploads
+    command: ["sleep", "infinity"]
 
   frontend:
     build:
@@ -136,5 +148,5 @@ volumes:
   pgdata:
   backend_uploads:
   backend_venv:
+  eval_venv:
   redisdata:
-  esdata:

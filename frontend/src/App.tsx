@@ -288,12 +288,12 @@ export default function App() {
       desc: '个人搜索偏好',
       onClick: () => { setShowSettingsHub(false); setShowUserSearchSettings(true) },
     },
-    {
+    ...(isTeacherOrAdmin ? [{
       icon: Bot,
       label: 'Bot 管理',
       desc: '定时提醒与 Bot 任务',
       onClick: () => { setShowSettingsHub(false); setShowBots(true) },
-    },
+    }] : []),
     {
       icon: Bell,
       label: '通知',
@@ -459,6 +459,7 @@ export default function App() {
             sessionMode={activeSession?.mode}
             ragEnabled={Boolean(displayCourse.rag_enabled)}
             kbStatus={displayCourse.kb_status ?? null}
+            indexBackends={displayCourse.index_backends}
             onSessionCreated={handleSessionCreated}
             onOpenSidebar={() => setSidebarOpen(true)}
           />

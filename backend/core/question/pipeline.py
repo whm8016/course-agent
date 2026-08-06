@@ -65,8 +65,8 @@ class QuizPipeline:
         rt = await resolve_profile_runtime(context.llm_profile_id, context.user_id)
         layers = await build_common_context_layers(context)
 
-        # explore 可用工具：仅 rag/web_search（出题不需要 ask_user）
-        explore_tools = [t for t in context.enabled_tools if t in ("rag", "web_search")]
+        # explore 可用工具：rag/web_search 检索素材 + ask_user（出题要求不清时让学生澄清，仅 WS 入口可暂停）
+        explore_tools = [t for t in context.enabled_tools if t in ("rag", "web_search")] + ["ask_user"]
 
         # ── Stage 1: explore — 多轮检索收集素材 ──────────────────────────
         _t_stage = _time.perf_counter()
