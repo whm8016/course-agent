@@ -89,7 +89,6 @@ export default function TeacherPage({ user, onBack }: Props) {
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
   const [newIcon, setNewIcon] = useState('📘')
-  const [newIndexBackend, setNewIndexBackend] = useState('lightrag')
   const [creating, setCreating] = useState(false)
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -333,11 +332,10 @@ export default function TeacherPage({ user, onBack }: Props) {
           name: newName.trim(),
           description: newDesc.trim(),
           icon: newIcon.trim() || '📘',
-          index_backend: newIndexBackend,
         }),
       })
       setShowCreate(false)
-      setNewId(''); setNewName(''); setNewDesc(''); setNewIcon('📘'); setNewIndexBackend('lightrag')
+      setNewId(''); setNewName(''); setNewDesc(''); setNewIcon('📘')
       await loadCourses()
     } catch (e) {
       setError(e instanceof Error ? e.message : '创建失败')
@@ -693,17 +691,6 @@ export default function TeacherPage({ user, onBack }: Props) {
                     className="w-full rounded-[var(--radius)] border border-line px-4 py-2.5 text-sm text-center focus:outline-none focus:border-ink focus:ring-2 focus:ring-ink/10 transition"
                   />
                 </div>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-ink-soft mb-1">索引后端</label>
-                <select
-                  value={newIndexBackend}
-                  onChange={e => setNewIndexBackend(e.target.value)}
-                  className="w-full rounded-[var(--radius)] border border-line px-4 py-2.5 text-sm focus:outline-none focus:border-ink focus:ring-2 focus:ring-ink/10 transition"
-                >
-                  <option value="lightrag">LightRAG（知识图谱，慢但支持多跳）</option>
-                  <option value="llamaindex_pg">pgvector（快速向量，分钟级索引）</option>
-                </select>
               </div>
               <div className="flex gap-3 pt-2">
                 <button

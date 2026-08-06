@@ -734,7 +734,6 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
   const [icon, setIcon] = useState('📘')
   const [systemPrompt, setSystemPrompt] = useState('')
   const [isVisible, setIsVisible] = useState(true)
-  const [indexBackend, setIndexBackend] = useState('lightrag')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
 
@@ -753,7 +752,6 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
           icon,
           system_prompt: systemPrompt,
           is_visible: isVisible,
-          index_backend: indexBackend,
         }),
       })
       onCreated()
@@ -840,17 +838,6 @@ function CreateKBModal({ onClose, onCreated }: { onClose: () => void; onCreated:
               {isVisible ? '对学生可见' : '对学生隐藏'}
             </span>
           </label>
-          <div>
-            <label className="block text-sm font-medium text-ink-soft mb-1">索引后端</label>
-            <select
-              value={indexBackend}
-              onChange={e => setIndexBackend(e.target.value)}
-              className="w-full border border-ink-soft rounded-[var(--radius)] px-3 py-2 text-sm focus:outline-none focus:border-ink"
-            >
-              <option value="lightrag">LightRAG（知识图谱，慢但支持多跳）</option>
-              <option value="llamaindex_pg">pgvector（快速向量，分钟级索引）</option>
-            </select>
-          </div>
           <div className="flex gap-3 pt-2">
             <button
               type="submit"
