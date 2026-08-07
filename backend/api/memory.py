@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Literal
 
@@ -23,6 +24,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
+from core.db.cache import cache_get, cache_set
 from core.db.database import get_db
 from core.memory.mem0_client import get_memory
 from core.memory.graph_memory import delete_graph_node, load_graphs
@@ -176,16 +178,30 @@ async def delete_node(
     return result
 
 
+_DASHBOARD_TTL = 45  # 短 TTL：止血用，结合前端 SWR 感知延迟近零
+
+
 @router.get("/dashboard")
 async def get_dashboard(
     user: dict = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     user_id = user["id"]
-    logger.info("[mem0-api] GET /memory/dashboard user_id=%s", user_id)
+    # 短 TTL 读缓存（cache-aside）：重复打开页面命中缓存，避免每次现算 mem0 + 大 JSON
+    ck = f"dashboard:{user_id}"
+    cached = await cache_get(ck)
+    if cached is not None:
+        logger.info("[mem0-api] GET /memory/dashboard HIT user_id=%s", user_id)
+        return cached
+
+    logger.info("[mem0-api] GET /memory/dashboard MISS user_id=%s", user_id)
     m = get_memory()
-    items = _results(await m.get_all(filters={"user_id": user_id}, top_k=50))
-    kg, eg = await load_graphs(db, user_id)
+    # mem0（自有 pgvector 连接）与 load_graphs（请求 db）互相独立，并行跑砍串行叠加
+    raw, (kg, eg) = await asyncio.gather(
+        m.get_all(filters={"user_id": user_id}, top_k=50),
+        load_graphs(db, user_id),
+    )
+    items = _results(raw)
     high_risk = sorted(
         [n for n in (kg.get("nodes") or []) if n.get("status") == "active"],
         key=lambda n: -(n.get("risk") or 0),
@@ -200,12 +216,14 @@ async def get_dashboard(
         len(high_risk), len(frequent_errors)
     )
     memories = [{"content": i.get("memory", "")} for i in items]
-    return {
+    payload = {
         "memories": memories,
         # 前端 DashboardData.summary（"学习轨迹"区块）：把记忆条目拼成纯文本展示
-        "summary": "\n".join(f"- {m['content']}" for m in memories if m.get("content")),
+        "summary": "\n".join(f"- {mem['content']}" for mem in memories if mem.get("content")),
         "high_risk_points": high_risk,
         "frequent_errors": frequent_errors,
         "knowledge_node_count": len(kg.get("nodes") or []),
         "error_node_count": len(eg.get("nodes") or []),
     }
+    await cache_set(ck, payload, ttl=_DASHBOARD_TTL)
+    return payload

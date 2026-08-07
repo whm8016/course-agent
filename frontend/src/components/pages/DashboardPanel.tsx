@@ -1,30 +1,60 @@
 import { useEffect, useState, useCallback } from 'react'
 import { ArrowLeft, Network } from 'lucide-react'
 import { fetchDashboard, type DashboardData } from '../../services/api'
+import { getUser } from '../../services/auth'
 import { Button } from '../ui'
 
+// stale-while-revalidate：sessionStorage 缓存上次仪表盘数据，挂载先渲染旧值再后台刷新，
+// 感知延迟接近零（止血方案，学情分析四模块设计 §模块四 P1）。按用户 id 命名空间，
+// 避免共用浏览器时闪现他人数据。
+const DASHBOARD_CACHE_PREFIX = 'dashboard:cache:'
+
+function readDashboardCache(): DashboardData | null {
+  const uid = getUser()?.id
+  if (!uid) return null
+  try {
+    const raw = sessionStorage.getItem(DASHBOARD_CACHE_PREFIX + uid)
+    return raw ? (JSON.parse(raw) as DashboardData) : null
+  } catch {
+    return null
+  }
+}
+
+function writeDashboardCache(data: DashboardData): void {
+  const uid = getUser()?.id
+  if (!uid) return
+  try {
+    sessionStorage.setItem(DASHBOARD_CACHE_PREFIX + uid, JSON.stringify(data))
+  } catch {
+    /* quota / 隐私模式：忽略，缓存非必需 */
+  }
+}
+
 export default function DashboardPanel({ onBack, onGraph }: { onBack: () => void; onGraph: () => void }) {
-  const [data, setData] = useState<DashboardData | null>(null)
-  const [loading, setLoading] = useState(true)
+  // 挂载即尝试用缓存渲染（避免空白闪烁）；无缓存才显示 skeleton
+  const [data, setData] = useState<DashboardData | null>(() => readDashboardCache())
+  const [loading, setLoading] = useState(() => readDashboardCache() === null)
+  const [refreshing, setRefreshing] = useState(false)
 
   const load = useCallback(async () => {
-    setLoading(true)
+    setRefreshing(true)
     try {
-      setData(await fetchDashboard())
-    } catch { /* ignore */ }
-    setLoading(false)
+      const fresh = await fetchDashboard()
+      setData(fresh)
+      writeDashboardCache(fresh)
+    } catch {
+      /* 失败则保留已有数据（缓存或上次结果），不阻塞展示 */
+    } finally {
+      setRefreshing(false)
+      setLoading(false)
+    }
   }, [])
 
-  // 挂载时拉取一次数据（load 是 useCallback 稳定引用，不会触发级联渲染）
-  // eslint-disable-next-line react-hooks/set-state-in-effect
+  // 挂载时后台拉取最新数据（load 是 useCallback 稳定引用，不会触发级联渲染）
   useEffect(() => { void load() }, [load])
 
   if (loading) {
-    return (
-      <div className="h-screen flex items-center justify-center bg-canvas text-muted">
-        加载中...
-      </div>
-    )
+    return <DashboardSkeleton onBack={onBack} onGraph={onGraph} />
   }
 
   if (!data) {
@@ -42,6 +72,9 @@ export default function DashboardPanel({ onBack, onGraph }: { onBack: () => void
           返回
         </Button>
         <h1 className="text-lg font-serif text-ink">学习仪表盘</h1>
+        {refreshing && (
+          <span className="text-xs text-muted animate-pulse">刷新中…</span>
+        )}
         <div className="ml-auto">
           <Button variant="primary" size="sm" icon={Network} onClick={onGraph}>
             查看图谱
@@ -139,6 +172,49 @@ function RiskBar({ value }: { value: number }) {
         className="h-full bg-danger-fg rounded-full"
         style={{ width: `${pct}%` }}
       />
+    </div>
+  )
+}
+
+function SkeletonBlock({ className }: { className: string }) {
+  return <div className={`animate-pulse rounded bg-surface-2 ${className}`} />
+}
+
+/** 仪表盘骨架屏：镜像真实布局（4 统计卡 + 两段内容），消除全屏空白。 */
+function DashboardSkeleton({ onBack, onGraph }: { onBack: () => void; onGraph: () => void }) {
+  return (
+    <div className="h-screen flex flex-col bg-canvas">
+      <header className="flex items-center gap-4 px-4 md:px-6 py-3 bg-surface border-b border-line">
+        <Button variant="ghost" size="sm" icon={ArrowLeft} onClick={onBack}>
+          返回
+        </Button>
+        <h1 className="text-lg font-serif text-ink">学习仪表盘</h1>
+        <div className="ml-auto">
+          <Button variant="primary" size="sm" icon={Network} onClick={onGraph}>
+            查看图谱
+          </Button>
+        </div>
+      </header>
+
+      <div className="flex-1 overflow-y-auto p-4 md:p-6">
+        <div className="max-w-4xl mx-auto space-y-6">
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[0, 1, 2, 3].map((i) => (
+              <div key={i} className="rounded-[var(--radius)] border border-line bg-surface p-4">
+                <SkeletonBlock className="h-7 w-10" />
+                <SkeletonBlock className="h-3 w-14 mt-2" />
+              </div>
+            ))}
+          </div>
+          {[0, 1].map((s) => (
+            <div key={s} className="bg-surface rounded-[var(--radius)] border border-line p-5 space-y-3">
+              {[0, 1].map((i) => (
+                <SkeletonBlock key={i} className="h-5 w-3/4" />
+              ))}
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }
