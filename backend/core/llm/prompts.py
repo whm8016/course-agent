@@ -2,14 +2,18 @@ from __future__ import annotations
 
 from core.db.cache import cache_delete, cache_get, cache_set
 
-_FALLBACK_PROMPT = "你是一个通用学习助手。请尽力回答学生与课程学习相关的问题。如果问题与课程学习完全无关，请礼貌拒绝。"
-
 _PROMPT_CACHE_KEY = "course:prompt:{}"
 _PROMPT_CACHE_TTL = 600  # 10 分钟
 
 
 async def get_course_prompt(course_id: str) -> str:
-    """从 Redis 缓存或数据库获取课程 system_prompt。"""
+    """从 Redis 缓存或数据库获取课程 system_prompt。
+
+    教师未设置时返回空串——不兜底默认人设。agent loop 的通用行为规范（chat.yaml /
+    solve.yaml 的 loop.system）已覆盖助手身份，再叠一句课程级默认人设会造成两段身份
+    描述打架。空串会被 assemble_system_prompt / assemble_common_context 的空段过滤丢弃，
+    故未设置 system_prompt 的课程，loop 只用通用 prompt，保持干净。
+    """
     key = _PROMPT_CACHE_KEY.format(course_id)
     cached = await cache_get(key)
     if cached is not None:
@@ -25,8 +29,6 @@ async def get_course_prompt(course_id: str) -> str:
         row = result.first()
 
     prompt = (row[0] or "").strip() if row else ""
-    if not prompt:
-        prompt = _FALLBACK_PROMPT
 
     await cache_set(key, prompt, ttl=_PROMPT_CACHE_TTL)
     return prompt
