@@ -786,12 +786,15 @@ async def analytics_student_stats(
     )).all()
     last_active_map: dict[str, float] = {r.user_id: r.last for r in last_active_rows}
 
-    # 5. Quiz stats per student (NotebookEntry via session → course)
+    # 5. Quiz stats per student（按课程过滤：JOIN Session 取 course_id，
+    #    与 student/{id}/detail 口径一致；旧实现仅按 user_id 全局聚合，
+    #    会把他课程的答题也算进本课程，导致 list/detail 正确率对不上）
     quiz_rows = (await db.execute(
         select(NotebookEntry.user_id,
                func.count(NotebookEntry.id).label("total"),
                func.sum(func.cast(NotebookEntry.is_correct, Integer)).label("correct"))
-        .where(NotebookEntry.user_id.in_(student_ids))
+        .join(Session, NotebookEntry.session_id == Session.id)
+        .where(Session.course_id == course_id, NotebookEntry.user_id.in_(student_ids))
         .group_by(NotebookEntry.user_id)
     )).all()
     quiz_map: dict[str, dict] = {r.user_id: {"total": r.total, "correct": r.correct or 0} for r in quiz_rows}
