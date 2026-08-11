@@ -80,26 +80,42 @@ class LlamaIndexIndexer(Indexer):
 
             _chunk_cfg = get_settings().chunking
 
-            # Phase 4：图片 VLM 描述回填（复用 LightRAG 路径同款管线：image_extractor 的
-            # collect_image_candidates + desc_cache，跳过知识图谱写入——pgvector 无图谱）。
-            # 与 LightRAG 共用同一个开关 chunking.inline_image_descriptions；两个后端各自
-            # 建 course 目录下的 image_desc_cache.json，互不冲突、也不会对同一张图重复调 VLM。
+            # Phase 4：图片位置回填 + 描述追加。
+            # caption_images_from_files 此前是被导入却不存在的函数（静默 ImportError 死代码），
+            # 现已实现：给图片生成 VLM 描述、落盘 desc_cache + blob 位置清单（不写 KG——pg 无图谱）。
+            # 与 LightRAG 共用开关 chunking.inline_image_descriptions；两后端各自 course 目录下
+            # 的缓存互不冲突、同一张图不会重复调 VLM（desc_cache 跨后端按 base64sha 去重）。
+            img_cache = (
+                Path(get_settings().paths.ingest_chunks_dir)
+                / f"course_{course_id}"
+                / "image_desc_cache.json"
+            )
             if _chunk_cfg.inline_image_descriptions:
-                img_cache = (
-                    Path(get_settings().paths.ingest_chunks_dir)
-                    / f"course_{course_id}"
-                    / "image_desc_cache.json"
-                )
                 try:
-                    from core.rag.ingestion import _append_image_desc_chunks  # noqa: PLC0415
                     from core.rag.llamaindex.image_extractor import (  # noqa: PLC0415
                         caption_images_from_files,
                     )
-
                     await caption_images_from_files(
                         file_paths, cache_path=str(img_cache)
                     )
-                    added = _append_image_desc_chunks(all_chunks, all_sources, img_cache)
+                except Exception as exc:
+                    logger.warning(
+                        "图片描述生成失败（降级跳过）course=%s: %s", course_id, exc,
+                    )
+
+            # 回填占位符：ragflow_manual_docx 切块总会埋 [[IMG:sha16]]，必须处理——
+            # 开关开则按清单回填真实描述，关则清理占位符，避免索引留下字面量。
+            from core.rag.ingestion import (  # noqa: PLC0415
+                _append_image_desc_chunks, _resolve_image_placeholders,
+            )
+            all_chunks, inlined = _resolve_image_placeholders(
+                all_chunks, img_cache, fill=_chunk_cfg.inline_image_descriptions,
+            )
+
+            # 追加未内联图片的孤儿 chunk（开关门控）。
+            if _chunk_cfg.inline_image_descriptions:
+                try:
+                    added = _append_image_desc_chunks(all_chunks, all_sources, img_cache, inlined)
                     if added:
                         logger.info(
                             "图片描述回填 course=%s 追加 %d 条 (llamaindex_pg)",

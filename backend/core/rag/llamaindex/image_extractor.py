@@ -64,6 +64,10 @@ class _ImageCandidate:
     image_index: int
     entity_name: str
     captions: list[str]
+    # 原图字节 sha256（转码前 blob），作为「身份」与 DOCX 切块占位符 join 的 key。
+    # 与 desc_cache 的 key（sha256(base64(转码后 PNG))）刻意不同：后者随 WMF→PNG
+    # 转码字节变化，无法回连原文位置；blob_sha256 是稳定身份。
+    blob_sha256: str = ""
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -247,11 +251,95 @@ def _save_desc_cache(cache_path: Path | None, cache: dict[str, str]) -> None:
         logger.warning("无法写入图片描述缓存 %s: %s", cache_path, exc)
 
 
+# 位置清单文件名（与 image_desc_cache.json 同目录）。key=原图 blob sha256，
+# value={"desc": str, "source": str}。desc_cache 的 key 随转码字节变，无法回连
+# 原文位置；本清单用稳定身份（blob sha）让 DOCX 占位符能 join 回原位置。
+_BLOB_MANIFEST_NAME = "image_desc_by_blob.json"
+
+
+def _blob_manifest_path(cache_path: Path | None) -> Path | None:
+    """image_desc_cache.json → 同目录的 image_desc_by_blob.json。"""
+    if not cache_path:
+        return None
+    return cache_path.parent / _BLOB_MANIFEST_NAME
+
+
+def _load_blob_manifest(path: Path | None) -> dict[str, dict[str, str]]:
+    """读位置清单（key=blob sha256, value={desc, source}）。缺失/损坏→空 dict。"""
+    if not path or not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            return {str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)}
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("无法读取图片位置清单 %s: %s", path, exc)
+    return {}
+
+
+def _save_blob_manifest(path: Path | None, manifest: dict[str, dict[str, str]]) -> None:
+    if not path:
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.warning("无法写入图片位置清单 %s: %s", path, exc)
+
+
+def _build_b64_to_blob(candidates: list[_ImageCandidate]) -> dict[str, str]:
+    """构建 {desc_cache 的 cache_key: candidate.blob_sha256}。
+
+    desc_cache 的 key = sha256(base64(转码后 PNG 字节串))；candidate.img_path 就是
+    那张转码后 PNG，故读其字节、同款 base64+sha256 即得到与 caption_func 内部
+    cache_key 同口径的值。这是把「转码后字节身份」翻译回「原图 blob 身份」的桥。
+    """
+    import base64
+
+    mapping: dict[str, str] = {}
+    for c in candidates:
+        if not c.blob_sha256:
+            continue
+        try:
+            b64 = base64.b64encode(Path(c.img_path).read_bytes()).decode("utf-8")
+        except OSError:
+            continue
+        mapping[_sha256_bytes(b64.encode("utf-8"))] = c.blob_sha256
+    return mapping
+
+
+def _fill_manifest_sources(
+    manifest: dict[str, dict[str, str]],
+    candidates: list[_ImageCandidate],
+) -> None:
+    """把 candidate.source_file 回填进 manifest[blob_sha]["source"]。
+
+    caption_func 只能填 desc（它拿不到 source_file）；source 是把孤儿 chunk 锚回
+    真实文件路径的依据，由 candidates 在这里补齐。
+    """
+    blob_to_source = {c.blob_sha256: c.source_file for c in candidates if c.blob_sha256}
+    for blob_sha, entry in manifest.items():
+        if not entry.get("source") and blob_sha in blob_to_source:
+            entry["source"] = blob_to_source[blob_sha]
+
+
 def _make_vision_caption_func(
     desc_cache: dict[str, str],
     cache_lock: asyncio.Lock,
+    blob_manifest: dict[str, dict[str, str]] | None = None,
+    b64_to_blob: dict[str, str] | None = None,
 ) -> Callable[..., Any]:
-    """返回 ImageModalProcessor 所需的 async modal_caption_func（qwen-vl-plus）。"""
+    """返回 ImageModalProcessor 所需的 async modal_caption_func（qwen-vl-plus）。
+
+    desc_cache 的 key 是 sha256(base64(转码后 PNG 字节串))——随 WMF→PNG 转码变，
+    无法回连原文位置。blob_manifest 额外按「原图 blob sha256」索引同一条描述，
+    供 DOCX 切块占位符 join 回原位置：b64_to_blob 把 caption_func 内部算出的
+    cache_key 映射到 candidate.blob_sha256。读路径命中缓存时也补写 manifest
+    （否则缓存命中的图永远进不了位置清单）。
+    """
 
     async def vision_caption_func(
         prompt: str,
@@ -268,7 +356,17 @@ def _make_vision_caption_func(
             cache_key = _sha256_bytes(image_data.encode("utf-8") if isinstance(image_data, str) else image_data)
             async with cache_lock:
                 if cache_key in desc_cache:
-                    return desc_cache[cache_key]
+                    content = desc_cache[cache_key]
+                    if (
+                        blob_manifest is not None
+                        and b64_to_blob
+                        and cache_key in b64_to_blob
+                    ):
+                        blob_manifest.setdefault(
+                            b64_to_blob[cache_key],
+                            {"desc": content, "source": ""},
+                        )
+                    return content
 
         from openai import AsyncOpenAI
 
@@ -326,6 +424,15 @@ def _make_vision_caption_func(
         if cache_key and content.strip():
             async with cache_lock:
                 desc_cache[cache_key] = content
+                if (
+                    blob_manifest is not None
+                    and b64_to_blob
+                    and cache_key in b64_to_blob
+                ):
+                    blob_manifest[b64_to_blob[cache_key]] = {
+                        "desc": content,
+                        "source": "",
+                    }
         return content
 
     return vision_caption_func
@@ -395,6 +502,7 @@ def _extract_pdf_images(
                         image_index=img_index,
                         entity_name=entity_name,
                         captions=[f"第{page_no + 1}页插图"],
+                        blob_sha256=blob_hash,
                     )
                 )
     finally:
@@ -495,6 +603,7 @@ def _extract_docx_images(
                 image_index=img_index,
                 entity_name=f"{p.stem}_{section_label}_嵌入图{img_index + 1}" if section_label else f"{p.stem}_嵌入图{img_index + 1}",
                 captions=[f"{p.stem} {section_label} 嵌入图".strip()],
+                blob_sha256=blob_hash,
             )
         )
         img_index += 1
@@ -551,6 +660,7 @@ def _standalone_image_candidates(
                 image_index=idx,
                 entity_name=p.stem,
                 captions=[p.name],
+                blob_sha256=h,
             )
         )
     return candidates
@@ -622,7 +732,6 @@ async def ingest_images_from_files(
     cache_file = Path(cache_path) if cache_path else None
     desc_cache = _load_desc_cache(cache_file)
     cache_lock = asyncio.Lock()
-    caption_func = _make_vision_caption_func(desc_cache, cache_lock)
 
     work_dir = cache_file.parent if cache_file else Path(tempfile.gettempdir()) / "course_agent_images"
     candidates = await asyncio.to_thread(collect_image_candidates, file_paths, work_dir)
@@ -631,6 +740,14 @@ async def ingest_images_from_files(
     if max_images is not None and max_images > 0:
         candidates = candidates[:max_images]
         logger.info("图片摄入上限 max_images=%d，仅处理前 %d 张", max_images, len(candidates))
+
+    # 位置清单：caption_func 按 blob sha 写 manifest（让 DOCX 占位符能 join 回原位置）。
+    # b64_to_blob 在拿到 candidates 后才能建（要读每张转码后 PNG 的字节）。
+    blob_manifest: dict[str, dict[str, str]] = {}
+    b64_to_blob = _build_b64_to_blob(candidates)
+    caption_func = _make_vision_caption_func(
+        desc_cache, cache_lock, blob_manifest, b64_to_blob,
+    )
 
     sem = asyncio.Semaphore(semaphore_limit)
     done_count = 0
@@ -697,6 +814,8 @@ async def ingest_images_from_files(
         await asyncio.gather(*tasks, return_exceptions=True)
         raise
     _save_desc_cache(cache_file, desc_cache)
+    _fill_manifest_sources(blob_manifest, candidates)
+    _save_blob_manifest(_blob_manifest_path(cache_file), blob_manifest)
     logger.info("图片知识图谱摄入完成: %d/%d", done_count, total)
     return done_count
 
@@ -725,7 +844,6 @@ async def caption_images_from_files(
     cache_file = Path(cache_path) if cache_path else None
     desc_cache = _load_desc_cache(cache_file)
     cache_lock = asyncio.Lock()
-    caption_func = _make_vision_caption_func(desc_cache, cache_lock)
 
     work_dir = cache_file.parent if cache_file else Path(tempfile.gettempdir()) / "course_agent_images"
     candidates = await asyncio.to_thread(collect_image_candidates, file_paths, work_dir)
@@ -734,6 +852,14 @@ async def caption_images_from_files(
     if max_images is not None and max_images > 0:
         candidates = candidates[:max_images]
         logger.info("图片描述上限 max_images=%d，仅处理前 %d 张", max_images, len(candidates))
+
+    # 位置清单（与 ingest_images_from_files 同款）：caption_func 按 blob sha 写 manifest，
+    # 让 DOCX 占位符能 join 回原位置。b64_to_blob 桥接 desc_cache 的 base64sha key 与 blob sha。
+    blob_manifest: dict[str, dict[str, str]] = {}
+    b64_to_blob = _build_b64_to_blob(candidates)
+    caption_func = _make_vision_caption_func(
+        desc_cache, cache_lock, blob_manifest, b64_to_blob,
+    )
 
     sem = asyncio.Semaphore(semaphore_limit)
     done_count = 0
@@ -759,5 +885,7 @@ async def caption_images_from_files(
 
     await asyncio.gather(*(_one(c) for c in candidates))
     _save_desc_cache(cache_file, desc_cache)
+    _fill_manifest_sources(blob_manifest, candidates)
+    _save_blob_manifest(_blob_manifest_path(cache_file), blob_manifest)
     logger.info("图片 VLM 描述生成完成: %d/%d（pgvector 路径）", done_count, len(candidates))
     return done_count
