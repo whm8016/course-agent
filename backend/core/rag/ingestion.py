@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -120,6 +121,7 @@ _TOKEN_OVERHEAD_PER_CHUNK = 2000
 # ── LlamaIndex（可选）────────────────────────────────────────────────────────
 try:
     from llama_index.core.node_parser import SentenceSplitter
+    from llama_index.core.schema import Document as _LIDoc
     logger.info("LlamaIndex 可用，将使用智能文档解析")
 except ImportError as e:
     raise ImportError(
@@ -178,35 +180,112 @@ def _build_source_prefix(section: str = "", file_name: str = "", page: int = 0) 
 def _chunk_by_sentence_splitter(documents: list) -> tuple[list[str], list[str]]:
     """默认切块策略：LlamaIndex SentenceSplitter → chunks + sources。
 
-    从 parse_files 原逻辑原样提取（纯重构，行为不变）。每个 chunk 注入【章节/来源】
-    前缀，source 加 ::chunk-<idx> 全局唯一后缀。
+    SentenceSplitter 的 chunk_size 默认按 tiktoken **token** 计数
+    （``_token_size = len(self._tokenizer(text))``，默认 tokenizer 是 cl100k_base），
+    与 ``.env`` 的 ``INGEST_SIZE``「字符数」直觉不符——传 ``tokenizer=lambda t: t``
+    让其按**字符**计数，chunk_size/overlap 真正以字符为单位（对齐 .env.example 注释
+    「LlamaIndex 按字数切」的本意）。
+
+    PDF/MinerU markdown 正文含内嵌 HTML ``<table>``：按表格边界拆段，正文走
+    SentenceSplitter，表格原子化（``_atomize_table``），避免数值从单元格内部被锯断
+    （实测 AutoAct 论文 Table 1 被切成 4 块、``49.09`` 断成 ``49.``/``09``）。
+    每个 chunk 注入【章节/来源】前缀，source 加 ``::chunk-<idx>`` 全局唯一后缀，
+    顺序保留文档内 text/table 交错次序。
     """
-    nodes = SentenceSplitter(
+    splitter = SentenceSplitter(
         chunk_size=INGEST_CHUNK_SIZE,
         chunk_overlap=INGEST_CHUNK_OVERLAP,
-    ).get_nodes_from_documents(documents)
+        # 按字符计数：默认 tiktoken token 计数会让 chunk 实际字符数远超 INGEST_SIZE
+        tokenizer=lambda t: t,
+    )
 
     chunks: list[str] = []
     chunk_sources: list[str] = []
-    for idx, n in enumerate(nodes):
-        content = n.get_content().strip()
-        if not content:
-            continue
-        meta = getattr(n, "metadata", None) or {}
+    # 给每个 chunk 的来源加全局唯一后缀（::chunk-<node 索引>），规避 LightRAG 的
+    # filename 去重：同文件多 chunk 贴同一 file_path 会被标 DUPLICATE:filename 丢弃。
+    # Windows 文件名禁用 ':'、Linux 路径不含 '::'，故不与真实文件名冲突；
+    # 检索端 strip_chunk_suffix 会剥掉它还原真实文件名。
+    for doc in documents:
+        meta = getattr(doc, "metadata", None) or {}
         file_path = str(meta.get("file_path", "") or "")
         section = str(meta.get("section", "") or "")
         file_name = str(meta.get("file_name", "") or "")
         page = int(meta.get("page", 0) or 0)
-
         prefix = _build_source_prefix(section=section, file_name=file_name, page=page)
-        chunks.append(f"{prefix}{content}" if prefix else content)
-        # 给每个 chunk 的来源加全局唯一后缀（::chunk-<node 索引>），规避 LightRAG 的
-        # filename 去重：同文件多 chunk 贴同一 file_path 会被标 DUPLICATE:filename 丢弃。
-        # Windows 文件名禁用 ':'、Linux 路径不含 '::'，故不与真实文件名冲突；
-        # 检索端 strip_chunk_suffix 会剥掉它还原真实文件名。
         base_src = file_path if file_path else "unknown_source"
-        chunk_sources.append(f"{base_src}::chunk-{idx}")
+
+        for seg, is_table in _split_markdown_by_tables(doc.get_content()):
+            if is_table:
+                pieces = _atomize_table(seg, INGEST_CHUNK_SIZE)
+            elif seg.strip():
+                pieces = [
+                    n.get_content()
+                    for n in splitter.get_nodes_from_documents(
+                        [_LIDoc(text=seg, metadata=meta)]
+                    )
+                ]
+            else:
+                continue
+            for content in pieces:
+                content = content.strip()
+                if not content:
+                    continue
+                chunks.append(f"{prefix}{content}" if prefix else content)
+                chunk_sources.append(f"{base_src}::chunk-{len(chunks) - 1}")
     return chunks, chunk_sources
+
+
+# ── PDF markdown 表格原子化 ───────────────────────────────────────────────────
+# MinerU markdown 表格是内嵌 HTML ``<table><tr><td rowspan/colspan>…</td></tr></table>``
+# （实测 AutoAct 论文 7 张表全 HTML、0 markdown 表）。SentenceSplitter 把它当纯文本
+# 会从单元格内部锯断数值，故按 ``<table>`` 边界拆段，表格整块（与 DOCX 路径
+# ``_flush_table``+``serialize_table`` 同理）。
+_TABLE_RE = re.compile(r"<table[^>]*>.*?</table>", re.DOTALL)
+_TR_RE = re.compile(r"<tr[^>]*>.*?</tr>", re.DOTALL)
+
+
+def _split_markdown_by_tables(text: str) -> list[tuple[str, bool]]:
+    """按 ``<table>...</table>`` 边界把 markdown 拆成有序 ``[(段, 是否表格), ...]``。
+
+    表格外的正文段 ``is_table=False``；表格段 ``is_table=True``（含完整 ``<table>`` 标签）。
+    不匹配任何表格时返回整段正文（``[(text, False)]``），行为等价原直通。
+    """
+    out: list[tuple[str, bool]] = []
+    pos = 0
+    for m in _TABLE_RE.finditer(text):
+        if m.start() > pos:
+            out.append((text[pos:m.start()], False))
+        out.append((m.group(0), True))
+        pos = m.end()
+    if pos < len(text):
+        out.append((text[pos:], False))
+    return out
+
+
+def _atomize_table(table_html: str, max_chars: int) -> list[str]:
+    """表格原子化：整表一块；超过 ``max_chars`` 才按 ``<tr>`` 边界分组，每组前置首行表头。
+
+    绝不在 ``<tr>`` 中间切（保证单元格数值完整）。单行即超阈值时整行保留
+    （无法再切，宁超不断）。多行表头（rowspan/colspan 跨多 ``<tr>``）只重复**首个**
+    ``<tr>``——优先级是「不断单元格」，多行表头可读性次之（已知近似）。
+    """
+    if max_chars <= 0 or len(table_html) <= max_chars:
+        return [table_html]
+    rows = _TR_RE.findall(table_html)
+    if len(rows) <= 1:  # 无 body 行可分组，整表保留
+        return [table_html]
+    header = rows[0]
+    groups: list[str] = []
+    cur = f"<table>{header}"
+    head_only = f"<table>{header}"
+    for row in rows[1:]:
+        # 加入本行就超阈值、且当前组已有 body 行 → 落盘当前组、起新组（带表头）
+        if len(cur) + len(row) + len("</table>") > max_chars and cur != head_only:
+            groups.append(f"{cur}</table>")
+            cur = head_only
+        cur += row
+    groups.append(f"{cur}</table>")
+    return groups
 
 
 def _chunk_documents(
@@ -274,75 +353,16 @@ def _chunk_ragflow_manual_strategy(
     return chunks, chunk_sources
 
 
-def _chunk_type_routed_strategy(
-    documents: list, classification: FileClassification, ingest_size: int
-) -> tuple[list[str], list[str]]:
-    """type_routed 策略：按文档结构路由分块（opt-in，settings.chunking.strategy=type_routed）。
-
-    - DOCX → chunk_docx_structured（标题层级栈 + 表格原子化，复用 ragflow_manual_docx）
-    - 有 content_list blocks（parsing 层 MinerU/docling 产出的 PDF）→ chunk_blocks_structured
-      （title/table 边界 + 超 ingest_size 递归切）
-    - 无 content_list（extract_pdf_sections 的 PDF / 纯文本）→ sentence_splitter 兜底
-
-    依赖 file_paths_to_llama_documents 把 content_list 存进 Document.metadata。同文件多
-    section 共享 content_list，按 file_path 去重只处理一次（避免重复分块）。
-    """
-    from core.rag.chunking.ragflow_manual_docx import chunk_docx_structured  # noqa: PLC0415
-    from core.rag.chunking.type_routed import chunk_blocks_structured  # noqa: PLC0415
-
-    docx_resolved = {str(Path(fp).resolve()) for fp in classification.docx_files}
-    chunks: list[str] = []
-    chunk_sources: list[str] = []
-
-    # DOCX：结构化切块（与 ragflow_manual_docx 一致）
-    for fp in classification.docx_files:
-        ck_list, sec_list = chunk_docx_structured(fp, max_section_chars=ingest_size)
-        file_name = Path(fp).name
-        resolved_fp = str(Path(fp).resolve())
-        for i, (ck, sec) in enumerate(zip(ck_list, sec_list)):
-            prefix = _build_source_prefix(section=sec, file_name=file_name)
-            chunks.append(f"{prefix}{ck}" if prefix else ck)
-            chunk_sources.append(f"{resolved_fp}::chunk-{i}")
-
-    # 非 DOCX：按 content_list 分块（有）或 sentence_splitter（无）
-    non_docx_docs = [
-        d for d in documents if str(d.metadata.get("file_path", "")) not in docx_resolved
-    ]
-    seen_blocks_files: set[str] = set()  # 同文件多 section 共享 content_list，去重
-    sentence_docs: list = []
-    for doc in non_docx_docs:
-        file_path = str(doc.metadata.get("file_path", ""))
-        blocks = doc.metadata.get("content_list")
-        if blocks and file_path and file_path not in seen_blocks_files:
-            seen_blocks_files.add(file_path)
-            ck_list, sec_list = chunk_blocks_structured(blocks, max_chars=ingest_size)
-            file_name = doc.metadata.get("file_name", "")
-            for i, (ck, sec) in enumerate(zip(ck_list, sec_list)):
-                prefix = _build_source_prefix(section=sec, file_name=file_name)
-                chunks.append(f"{prefix}{ck}" if prefix else ck)
-                chunk_sources.append(f"{file_path}::chunk-{i}")
-        elif not blocks:
-            sentence_docs.append(doc)
-
-    if sentence_docs:
-        nd_chunks, nd_sources = _chunk_by_sentence_splitter(sentence_docs)
-        chunks.extend(nd_chunks)
-        chunk_sources.extend(nd_sources)
-
-    return chunks, chunk_sources
-
-
 # 注册切块策略（模块加载时执行；新增策略在此加一行即可，_chunk_documents 分发结构不变）
 register_chunk_strategy("sentence_splitter", _chunk_sentence_splitter_strategy)
 register_chunk_strategy("ragflow_manual_docx", _chunk_ragflow_manual_strategy)
-register_chunk_strategy("type_routed", _chunk_type_routed_strategy)
 
 
 # ── 核心解析函数 ─────────────────────────────────────────────────────────────
 
-def parse_files(file_paths: list[str]) -> tuple[list[str], list[str], dict[str, list[str]]]:
+def parse_files(file_paths: list[str]) -> tuple[list[str], list[str], dict[str, list[str]], list[str]]:
     """
-    解析文件列表，返回 (文本 chunk 列表, chunk 来源路径列表, 按文件分段的全文 dict)。
+    解析文件列表，返回 (文本 chunk 列表, chunk 来源路径列表, 按文件分段的全文 dict, 解析失败原因列表)。
 
     chunk_sources 与 chunks 等长，第 i 个元素 = 第 i 个 chunk 的来源 file_path，
     供 ingest_to_lightrag 传给 rag.ainsert(file_paths=...) 做来源溯源。
@@ -352,15 +372,15 @@ def parse_files(file_paths: list[str]) -> tuple[list[str], list[str], dict[str, 
       dict[绝对路径, list[str]]  — PDF 每页 / DOCX 每 section / PPTX 每 slide / 纯文本单元素
     """
     if not file_paths:
-        return [], [], {}
+        return [], [], {}, []
 
-    documents, classification = file_paths_to_llama_documents(
+    documents, classification, parse_errors = file_paths_to_llama_documents(
         file_paths, log=logger
     )
 
     if not documents:
         logger.warning("摄入解析结果为空（无有效文档）")
-        return [], [], {}
+        return [], [], {}, parse_errors
 
     # 构建 doc_texts：按文件路径分组，复用已解析的 Document 内容
     doc_texts: dict[str, list[str]] = {}
@@ -384,7 +404,7 @@ def parse_files(file_paths: list[str]) -> tuple[list[str], list[str], dict[str, 
         len(chunks),
         strategy,
     )
-    return chunks, chunk_sources, doc_texts
+    return chunks, chunk_sources, doc_texts, parse_errors
 
 
 # ── Phase 2: Contextual Chunking 接入辅助 ────────────────────────────────────
@@ -418,51 +438,69 @@ async def _apply_contextual_enrichment(
     *,
     model: str = "",
 ) -> list[str]:
-    """对 chunks 做文档背景前缀注入，返回等长 enriched 列表。
+    """对 chunks 做文档背景前缀注入，返回等长 enriched 列表（绝不抛异常）。
 
-    按来源文件分组：同一文件的 chunks 共享该文件全文作 document_text（provider 侧
-    prompt caching 友好）。磁盘 cache 跨索引复用，单 chunk LLM 失败降级原文。
+    自门控：``chunking.contextual_enrichment`` 关闭或无 chunk 时直接返回原文，调用方无需
+    再包 gate + try/except。整体异常也降级返回原文 chunks（单 chunk LLM 失败已在更内层降级）。
+    按来源文件分组：同一文件的 chunks 共享该文件全文作 document_text。磁盘 cache 跨索引复用。
     """
-    from core.rag.contextual_chunking import contextualize_chunks
-    from core.llm.llm import chat_complete
+    if not chunks:
+        return chunks
+    _chunk_cfg = get_settings().chunking
+    if not _chunk_cfg.contextual_enrichment:
+        return chunks
+    try:
+        from core.rag.contextual_chunking import contextualize_chunks, summarize_document
+        from core.llm.llm import chat_complete
 
-    fast_model = model or get_settings().llm.fast_model or get_settings().llm.text_model
-
-    async def _llm_func(prompt: str) -> str:
-        return await chat_complete(
-            system_prompt="",
-            history=[],
-            user_message=prompt,
-            model=fast_model,
-            temperature=0.3,
-            max_tokens=200,
+        fast_model = (
+            model or _chunk_cfg.contextual_model
+            or get_settings().llm.fast_model or get_settings().llm.text_model
         )
 
-    cache_path = _lightrag_ingest_chunks_dir(course_id) / "contextual_cache.json"
-    cache = _load_contextual_cache(cache_path)
+        async def _llm_func(prompt: str) -> str:
+            return await chat_complete(
+                system_prompt="",
+                history=[],
+                user_message=prompt,
+                model=fast_model,
+                temperature=0.3,
+                max_tokens=200,
+            )
 
-    # 按来源文件分组 chunk 索引，每组共享对应文件全文
-    groups: dict[str, list[int]] = {}
-    for i, src in enumerate(sources):
-        groups.setdefault(strip_chunk_suffix(src), []).append(i)
+        cache_path = _lightrag_ingest_chunks_dir(course_id) / "contextual_cache.json"
+        cache = _load_contextual_cache(cache_path)
 
-    enriched = list(chunks)
-    for fp, idxs in groups.items():
-        doc_parts = doc_texts.get(fp) or []
-        document_text = "\n\n".join(doc_parts) if isinstance(doc_parts, list) else str(doc_parts)
-        group_chunks = [chunks[i] for i in idxs]
-        enc = await contextualize_chunks(
-            group_chunks, document_text, _llm_func, cache=cache,
+        # 按来源文件分组 chunk 索引，每组共享对应文件全文
+        groups: dict[str, list[int]] = {}
+        for i, src in enumerate(sources):
+            groups.setdefault(strip_chunk_suffix(src), []).append(i)
+
+        enriched = list(chunks)
+        for fp, idxs in groups.items():
+            doc_parts = doc_texts.get(fp) or []
+            document_text = "\n\n".join(doc_parts) if isinstance(doc_parts, list) else str(doc_parts)
+            group_chunks = [chunks[i] for i in idxs]
+            # 文档级摘要：每篇文档 1 次 LLM，本组所有 chunk 共享（对标 dsRAG AutoContext）。
+            # 摘要按 md5(document_text) 缓存，重复索引不重复调用。
+            doc_summary = await summarize_document(document_text, _llm_func, cache=cache)
+            enc = await contextualize_chunks(
+                group_chunks, document_text, _llm_func, cache=cache, doc_summary=doc_summary,
+            )
+            for i, text in zip(idxs, enc):
+                enriched[i] = text
+
+        _save_contextual_cache(cache_path, cache)
+        logger.info(
+            "Contextual enrichment 完成 course=%s files=%d chunks=%d",
+            course_id, len(groups), len(chunks),
         )
-        for i, text in zip(idxs, enc):
-            enriched[i] = text
-
-    _save_contextual_cache(cache_path, cache)
-    logger.info(
-        "Contextual enrichment 完成 course=%s files=%d chunks=%d",
-        course_id, len(groups), len(chunks),
-    )
-    return enriched
+        return enriched
+    except Exception as exc:
+        logger.warning(
+            "Contextual enrichment 整体失败，降级原文 chunks course=%s: %s", course_id, exc,
+        )
+        return chunks
 
 
 async def _index_batch_to_es(es_store, course_id: str, chunks: list[str], sources: list[str]) -> None:
@@ -495,24 +533,50 @@ def _lightrag_ingest_chunks_dir(course_id: str) -> Path:
     return Path(LIGHTRAG_WORKDIR) / f"course_{course_id}" / LIGHTRAG_INGEST_CHUNKS_SUBDIR
 
 
-def _persist_lightrag_ingest_chunks(
+def persist_ingest_chunks(
     course_id: str,
     file_paths: list[str],
     all_chunks: list[str],
     resume_from_chunk: int,
     all_sources: list[str] | None = None,
+    *,
+    backend: str = "lightrag",
+    node_ids: list[str] | None = None,
 ) -> Path | None:
     """
-    将摄入前切分好的文本块写入 JSON（供排查/审计；不参与 LightRAG 加载）。
+    将摄入前切分好的文本块写入审计 JSON（供排查/审计；不参与检索加载）。
+
+    两个后端共用一个 writer——审计的价值正在于对照同一份 ``parse_files`` 输出在
+    LightRAG / pgvector 两边吃到的 chunk 是否完全一致（schema 分裂就失去这个作用）：
+
+    - ``backend="lightrag"``：写 ``lightrag_store/course_{id}/ingest_chunks/``（含可选
+      snapshot），gate 读 ``lightrag.save_ingest_chunks``；行为与历史一致，仅 payload
+      多 ``backend`` 字段、``version`` 升 2。
+    - ``backend="llamaindex_pg"``：写独立根 ``data/ingest_chunks/course_{id}/``（无
+      snapshot），gate 读 ``chunking.save_pg_ingest_chunks``；额外记 ``node_ids``
+      （= ``data_kb_chunks.node_id`` 主键），把审计文本直接 join 回 PG 行。
+
     返回写入的 latest.json 路径；失败时记日志并返回 None。
     """
-    if not LIGHTRAG_SAVE_INGEST_CHUNKS:
+    settings = get_settings()
+    if backend == "lightrag":
+        if not LIGHTRAG_SAVE_INGEST_CHUNKS:
+            return None
+        out_dir = _lightrag_ingest_chunks_dir(course_id)
+        snapshot = LIGHTRAG_INGEST_CHUNKS_SNAPSHOT
+    elif backend == "llamaindex_pg":
+        if not settings.chunking.save_pg_ingest_chunks:
+            return None
+        out_dir = Path(settings.paths.ingest_chunks_dir) / f"course_{course_id}"
+        snapshot = False
+    else:
+        logger.warning("persist_ingest_chunks 未知 backend=%s，跳过", backend)
         return None
-    out_dir = _lightrag_ingest_chunks_dir(course_id)
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
-        payload = {
-            "version": 1,
+        payload: dict = {
+            "version": 2,
+            "backend": backend,
             "course_id": course_id,
             "saved_at": datetime.now(timezone.utc).isoformat(),
             "source_files": [str(Path(p).name) for p in file_paths],
@@ -522,21 +586,24 @@ def _persist_lightrag_ingest_chunks(
             "chunks": all_chunks,
             "chunk_sources": all_sources if all_sources is not None else [],
         }
+        if node_ids is not None:
+            payload["node_ids"] = node_ids
         latest = out_dir / "latest.json"
         text = json.dumps(payload, ensure_ascii=False, indent=2)
         latest.write_text(text, encoding="utf-8")
-        if LIGHTRAG_INGEST_CHUNKS_SNAPSHOT:
+        if snapshot:
             ts_name = f"chunks_{int(datetime.now(timezone.utc).timestamp())}.json"
             (out_dir / ts_name).write_text(text, encoding="utf-8")
         logger.info(
-            "已保存 LightRAG 摄入切块 course=%s dir=%s chunks=%d",
+            "已保存摄入切块 backend=%s course=%s dir=%s chunks=%d",
+            backend,
             course_id,
             out_dir,
             len(all_chunks),
         )
         return latest
     except OSError as e:
-        logger.warning("保存摄入切块失败 course=%s: %s", course_id, e)
+        logger.warning("保存摄入切块失败 backend=%s course=%s: %s", backend, course_id, e)
         return None
 
 
@@ -675,23 +742,15 @@ async def _ingest_body(
         if is_resume else f"开始解析 {len(file_paths)} 个文件…"
     await _emit(5, parse_label, resume_from_chunk, 0, 0)
     logger.info("开始解析 %d 个文件 course=%s resume_from=%d", len(file_paths), course_id, resume_from_chunk)
-    all_chunks, all_sources, doc_texts = await asyncio.to_thread(parse_files, file_paths)
+    all_chunks, all_sources, doc_texts, parse_errors = await asyncio.to_thread(parse_files, file_paths)
 
     # Phase 2: Contextual Chunking（可选）——给每个 chunk 注入文档背景前缀，提升
-    # embedding/BM25 命中率。仅当 chunking.contextual_enrichment 开启时执行；单 chunk
-    # LLM 失败降级原文，整体异常也不阻断索引。默认关闭，需 .env 显式开启。
+    # embedding/BM25 命中率。自门控 + 整体降级已下沉到 _apply_contextual_enrichment 内部，
+    # 开关默认关（需 .env 显式开启）。_chunk_cfg 后续图片摄入也用。
     _chunk_cfg = get_settings().chunking
-    if _chunk_cfg.contextual_enrichment and all_chunks:
-        try:
-            all_chunks = await _apply_contextual_enrichment(
-                course_id, all_chunks, all_sources, doc_texts,
-                model=_chunk_cfg.contextual_model,
-            )
-        except Exception as exc:
-            logger.warning(
-                "Contextual enrichment 整体失败，降级原文 chunks course=%s: %s",
-                course_id, exc,
-            )
+    all_chunks = await _apply_contextual_enrichment(
+        course_id, all_chunks, all_sources, doc_texts,
+    )
 
     # Step 1b: 图片摄入（复用 doc_texts，不再重复提取文本）
     # rag 由调用方通过 lease_instance 注入，Step 1b 与 Step 2 共用同一实例（H-10）。
@@ -761,7 +820,8 @@ async def _ingest_body(
     if not all_chunks and images_processed == 0:
         logger.warning("解析结果为空 course=%s", course_id)
         await _emit(100, "解析结果为空，无可索引内容", 0, 0, 0)
-        return {"status": "empty", "chunks": 0, "files": len(file_paths), "images": 0}
+        # parse_errors 透传给索引层写 kb_builds.error_msg（如「MinerU 解析失败: 超过 200 页上限」）
+        return {"status": "empty", "chunks": 0, "files": len(file_paths), "images": 0, "parse_errors": parse_errors}
 
     # Phase 4: 图片描述回填（可选）——把 VLM 图片描述作为独立文本 chunk 追加，
     # 让纯向量检索(fact)也能召回图片内容。复用 image_extractor 写好的 desc_cache，不重花 VLM。
@@ -772,7 +832,7 @@ async def _ingest_body(
             logger.info("图片描述回填 course=%s 追加 %d 条", course_id, added)
 
     await asyncio.to_thread(
-        _persist_lightrag_ingest_chunks,
+        persist_ingest_chunks,
         course_id,
         file_paths,
         all_chunks,

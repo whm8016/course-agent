@@ -14,11 +14,18 @@ import asyncio
 import hashlib
 import json
 import logging
+from pathlib import Path
 
 from core.rag.indexer.base import Indexer
 from core.rag.types import IndexResult
 
 logger = logging.getLogger(__name__)
+
+
+def _node_id(course_id: str, text: str) -> str:
+    """与 data_kb_chunks.node_id 同源（``md5(course_id|text)``）；审计 JSON 与入库行靠它
+    对齐，不可有第二份公式——否则 JSON 里的 node_ids 与实际 PG 主键漂移后这列就是废的。"""
+    return hashlib.md5(f"{course_id}|{text}".encode("utf-8")).hexdigest()
 
 
 class LlamaIndexIndexer(Indexer):
@@ -35,7 +42,7 @@ class LlamaIndexIndexer(Indexer):
         kwargs:
             resume_from_chunk: 断点续传，跳过前 N 个 chunk（与 LightRAG 续传语义一致）。
         """
-        from core.rag.ingestion import parse_files  # noqa: PLC0415
+        from core.rag.ingestion import parse_files, persist_ingest_chunks  # noqa: PLC0415
         from core.rag.llamaindex.pg_store import (  # noqa: PLC0415
             get_embed_model,
             get_vector_store,
@@ -45,18 +52,63 @@ class LlamaIndexIndexer(Indexer):
 
         try:
             # Step 1: 复用摄入前半段——解析 + 切块（CPU 密集，放线程池，与 LightRAG 同源）
-            all_chunks, all_sources, _doc_texts = await asyncio.to_thread(
+            all_chunks, all_sources, doc_texts, parse_errors = await asyncio.to_thread(
                 parse_files, file_paths
             )
 
             if not all_chunks:
+                # 解析失败的真正原因（如「MinerU 解析失败: 超过 200 页上限」）透传给索引层，
+                # 写进 kb_builds.error_msg；无失败原因兜底 no_chunks。
                 return IndexResult(
                     course_id=course_id,
                     files_indexed=0,
                     chunks_created=0,
                     status="skipped",
-                    error="no_chunks",
+                    error="; ".join(parse_errors) or "no_chunks",
                 )
+
+            from settings import get_settings  # noqa: PLC0415
+
+            # Phase 3: Contextual Chunking（与 LightRAG 侧同源，共用 _apply_contextual_enrichment
+            # 与同一份 contextual_cache.json）。pgvector 的 BM25 走 zhparser tsvector，contextual
+            # 文本能同时改善 dense 与稀疏召回——Anthropic 方案中收益最大的那一半（contextual BM25）
+            # 此前在此后端完全缺失。自门控 + 整体降级已下沉到 helper 内，开关默认关 = 零变化。
+            from core.rag.ingestion import _apply_contextual_enrichment  # noqa: PLC0415
+            all_chunks = await _apply_contextual_enrichment(
+                course_id, all_chunks, all_sources, doc_texts,
+            )
+
+            _chunk_cfg = get_settings().chunking
+
+            # Phase 4：图片 VLM 描述回填（复用 LightRAG 路径同款管线：image_extractor 的
+            # collect_image_candidates + desc_cache，跳过知识图谱写入——pgvector 无图谱）。
+            # 与 LightRAG 共用同一个开关 chunking.inline_image_descriptions；两个后端各自
+            # 建 course 目录下的 image_desc_cache.json，互不冲突、也不会对同一张图重复调 VLM。
+            if _chunk_cfg.inline_image_descriptions:
+                img_cache = (
+                    Path(get_settings().paths.ingest_chunks_dir)
+                    / f"course_{course_id}"
+                    / "image_desc_cache.json"
+                )
+                try:
+                    from core.rag.ingestion import _append_image_desc_chunks  # noqa: PLC0415
+                    from core.rag.llamaindex.image_extractor import (  # noqa: PLC0415
+                        caption_images_from_files,
+                    )
+
+                    await caption_images_from_files(
+                        file_paths, cache_path=str(img_cache)
+                    )
+                    added = _append_image_desc_chunks(all_chunks, all_sources, img_cache)
+                    if added:
+                        logger.info(
+                            "图片描述回填 course=%s 追加 %d 条 (llamaindex_pg)",
+                            course_id, added,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "图片描述回填失败（降级跳过）course=%s: %s", course_id, exc,
+                    )
 
             # 断点续传：跳过前 N 个（前 N 个已写入，只 embed/写入剩余）
             start = min(resume_from_chunk, len(all_chunks))
@@ -82,7 +134,7 @@ class LlamaIndexIndexer(Indexer):
                 TextNode(
                     text=text,
                     metadata={"course_id": course_id, "file_path": src},
-                    id_=hashlib.md5(f"{course_id}|{text}".encode("utf-8")).hexdigest(),
+                    id_=_node_id(course_id, text),
                 )
                 for text, src in zip(chunks, sources)
                 if text and text.strip()
@@ -92,6 +144,21 @@ class LlamaIndexIndexer(Indexer):
                     course_id=course_id, files_indexed=len(file_paths), chunks_created=0,
                     status="skipped", error="no_nonempty_chunks",
                 )
+
+            # 落盘摄入切块审计 JSON（先于 embed：embedding 失败也能看到切块）。落盘的是**全量**
+            # all_chunks + resume_from_chunk 标记（与 LightRAG 侧对齐，非续传后的切片）；
+            # node_ids 与上面 TextNode.id_ 同源（_node_id 单一公式），供审计 JSON 直接 join
+            # 回 data_kb_chunks 行。开关 chunking.save_pg_ingest_chunks 默认开。
+            await asyncio.to_thread(
+                persist_ingest_chunks,
+                course_id,
+                file_paths,
+                all_chunks,
+                resume_from_chunk,
+                all_sources,
+                backend="llamaindex_pg",
+                node_ids=[_node_id(course_id, t) for t in all_chunks],
+            )
 
             # Step 3: VectorStoreIndex embed + 写入 PGVectorStore（同步阻塞，放线程池）
             def _build_and_embed() -> None:
