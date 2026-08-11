@@ -63,6 +63,8 @@ backend/scripts/debug_*.py
 react_paper_images/
 # 第三方 npm 包压缩文件（本地依赖，不提交）
 *.tgz
+# arxiv API 调研抓取的原始 XML（临时产物，不提交）
+arxiv_check*.xml
 
 # --- Frontend (monorepo root) ---
 frontend/node_modules/
