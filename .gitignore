@@ -65,6 +65,11 @@ react_paper_images/
 *.tgz
 # arxiv API 调研抓取的原始 XML（临时产物，不提交）
 arxiv_check*.xml
+# 私人学术写作材料（论文初稿/技术汇报/论文翻译/案例申报/项目架构），不入代码仓库
+/论文初稿_*.md
+/电路分析基础实验智能体*
+/*论文完整中文翻译.md
+/项目架构.*
 
 # --- Frontend (monorepo root) ---
 frontend/node_modules/
