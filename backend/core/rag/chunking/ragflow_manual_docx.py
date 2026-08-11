@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from pathlib import Path
 
@@ -24,6 +25,7 @@ logger = logging.getLogger(__name__)
 _NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 _DML = "http://schemas.openxmlformats.org/drawingml/2006/main"
 _PIC = "http://schemas.openxmlformats.org/drawingml/2006/picture"
+_RELS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 # pStyle val → Heading 层级。覆盖英文 style_id（Heading1..6）与中文 Word 常见的
 # OOXML 内置数字 id（"1".."6"）。与 file_routing._H1_SVALS 同源，扩展到 H1-H6。
@@ -52,6 +54,26 @@ def _has_image(p_element) -> bool:
         p_element.find(f".//{{{_DML}}}blip") is not None
         or p_element.find(f".//{{{_PIC}}}pic") is not None
     )
+
+
+def _image_blob_sha(p_element, doc) -> str | None:
+    """取段落首张嵌入图的「原图 blob sha256」。
+
+    经 <a:blip r:embed="rIdN"> → doc.part.rels[rId].target_part.blob → sha256。
+    这个 blob 与 image_extractor._extract_docx_images 读的是同一份 target_part.blob，
+    故两侧 sha 同口径，DOCX 占位符 [[IMG:sha16]] 能与位置清单 image_desc_by_blob 精确 join。
+    无图 / 取不到 rels → None。
+    """
+    blip = p_element.find(f".//{{{_DML}}}blip")
+    if blip is None:
+        return None
+    rId = blip.get(f"{{{_RELS}}}embed")
+    if not rId:
+        return None
+    try:
+        return hashlib.sha256(doc.part.rels[rId].target_part.blob).hexdigest()
+    except (KeyError, AttributeError):
+        return None
 
 
 def _split_oversize(text: str, max_chars: int) -> list[str]:
@@ -174,8 +196,16 @@ def chunk_docx_structured(
 
             # 非标题段落：图片占位 or 正文累积
             if _has_image(child):
-                label = f"[图: {txt}]" if txt else "[图: 电路图]"
-                last_answer_parts.append(label)
+                # 埋 [[IMG:sha16]] 占位符，ingestion 阶段按位置清单回填真实 VLM 描述。
+                # Word 自带图注 txt 继续保留（权威命名）；占位符前置于图注。
+                sha = _image_blob_sha(child, d)
+                if sha:
+                    last_answer_parts.append(
+                        f"[[IMG:{sha[:16]}]]" + (f" {txt}" if txt else "")
+                    )
+                elif txt:
+                    last_answer_parts.append(txt)
+                # 无 sha 又无图注：不再制造 "[图: 电路图]" 噪声，直接跳过
             elif txt:
                 last_answer_parts.append(txt)
 

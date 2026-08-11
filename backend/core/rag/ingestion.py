@@ -663,33 +663,102 @@ async def ingest_to_lightrag(
         )
 
 
+# DOCX 切块阶段埋的图片位置占位符：[[IMG:原图blob sha256 前16位]]
+_IMG_PLACEHOLDER_RE = re.compile(r"\[\[IMG:([0-9a-f]{16})\]\]")
+
+
+def _resolve_image_placeholders(
+    chunks: list[str],
+    img_cache: Path,
+    *,
+    fill: bool = True,
+) -> tuple[list[str], set[str]]:
+    """把 chunk 里的 [[IMG:sha16]] 占位符按位置清单回填成 [图: desc]。
+
+    位置清单 image_desc_by_blob.json 与 image_desc_cache.json 同目录，key 为原图 blob
+    sha256 全量（占位符取其前 16 位）。清单里查不到的占位符降级为空串（移除），不再制造
+    "[图: 电路图]" 噪声。
+
+    fill=False（``chunking.inline_image_descriptions`` 关）时只清理占位符、不回填描述，
+    返回空 inlined 集合——因为 LightRAG 路径的 KG 摄入总会产出清单，需用 fill 门控避免
+    描述在开关关时仍漏进正文。
+
+    Returns:
+        (回填后的 chunks, 已成功回填的 sha16 集合)。后者供 _append_image_desc_chunks
+        去重——已内联进正文的图不再追加孤儿 chunk（GPT-RAG：figures never duplicated）。
+        位置清单缺失/损坏 → 占位符全部降级为空串、返回空集，不抛异常。
+    """
+    inlined: set[str] = set()
+    if not fill:
+        return [_IMG_PLACEHOLDER_RE.sub("", c) for c in chunks], inlined
+
+    from core.rag.llamaindex.image_extractor import (
+        _blob_manifest_path, _load_blob_manifest,
+    )
+
+    manifest = _load_blob_manifest(_blob_manifest_path(img_cache))
+    by16: dict[str, str] = {
+        k[:16]: v["desc"] for k, v in manifest.items() if v.get("desc")
+    }
+
+    def _replace(match: "re.Match[str]") -> str:
+        sha16 = match.group(1)
+        desc = by16.get(sha16)
+        if desc:
+            inlined.add(sha16)
+            return f"[图: {desc}]"
+        return ""  # 清单无此图（如公式碎片被过滤）→ 移除占位符，不造噪声
+
+    resolved = [_IMG_PLACEHOLDER_RE.sub(_replace, c) for c in chunks]
+    return resolved, inlined
+
+
 def _append_image_desc_chunks(
     all_chunks: list[str],
     all_sources: list[str],
     img_cache: Path,
+    inlined: set[str] | None = None,
 ) -> int:
-    """Phase 4：把 VLM 图片描述作为独立文本 chunk 追加进 all_chunks/all_sources。
+    """Phase 4：把未内联进正文的图片描述作为独立 chunk 追加（带来源前缀、去重）。
 
-    复用 image_extractor 写好的 desc_cache（dict[sha256(图), 描述]），不重花 VLM。
-    每条描述包成 `【图片描述】\n{desc}` 追加，source 用 `image_desc::img-{i}`
-    （与现有 file_path::chunk-idx 同构，ainsert 的 file_paths 不校验格式）。
-    chunks/sources 严格配对 append。返回追加条数。
-    desc_cache 不存在/空/读失败 → 降级返回 0，不抛异常（绝不阻断索引）。
+    读位置清单 image_desc_by_blob.json（key=原图 blob sha256, value={desc, source}）。
+    凡已通过 [[IMG:sha16]] 占位符内联进正文（sha16 ∈ inlined）的图，不再重复追加孤儿
+    chunk（GPT-RAG：figures never duplicated）；其余（页眉/页脚图、PDF 图等正文无占位符
+    的）追加为带【来源: 文件名】前缀的独立 chunk——前缀在 chunk 文本里，LLM 可见、不再悬空。
+    source 用 `{file_path}::image-{sha16}`（真实路径，可溯源/可过滤，替原有的假 image_desc::img-N）。
+
+    chunks/sources 严格配对 append，返回追加条数。
+    位置清单缺失/空/读失败 → 降级返回 0，不抛异常（绝不阻断索引）。
     """
     try:
-        from core.rag.llamaindex.image_extractor import _load_desc_cache
+        from core.rag.llamaindex.image_extractor import (
+            _blob_manifest_path, _load_blob_manifest,
+        )
 
-        img_descs = _load_desc_cache(img_cache)
+        manifest = _load_blob_manifest(_blob_manifest_path(img_cache))
     except Exception as exc:
         logger.warning("图片描述回填失败（降级跳过）: %s", exc)
         return 0
+
+    skip = inlined or set()
     added = 0
-    for desc in img_descs.values():
-        desc = (desc or "").strip()
+    for blob_sha, entry in manifest.items():
+        desc = (entry.get("desc") or "").strip()
         if not desc:
             continue
-        all_chunks.append(f"【图片描述】\n{desc}")
-        all_sources.append(f"image_desc::img-{added}")
+        sha16 = blob_sha[:16]
+        if sha16 in skip:
+            continue  # 已内联进正文，不重复追加
+        source_path = entry.get("source") or ""
+        file_name = Path(source_path).name if source_path else ""
+        prefix = _build_source_prefix(file_name=file_name)
+        all_chunks.append(f"{prefix}【图片描述】\n{desc}")
+        src = (
+            f"{source_path}::image-{sha16}"
+            if source_path
+            else f"image_desc::image-{sha16}"
+        )
+        all_sources.append(src)
         added += 1
     return added
 
@@ -823,11 +892,19 @@ async def _ingest_body(
         # parse_errors 透传给索引层写 kb_builds.error_msg（如「MinerU 解析失败: 超过 200 页上限」）
         return {"status": "empty", "chunks": 0, "files": len(file_paths), "images": 0, "parse_errors": parse_errors}
 
-    # Phase 4: 图片描述回填（可选）——把 VLM 图片描述作为独立文本 chunk 追加，
-    # 让纯向量检索(fact)也能召回图片内容。复用 image_extractor 写好的 desc_cache，不重花 VLM。
-    # 默认关，需 CHUNKING__INLINE_IMAGE_DESCRIPTIONS=true。
+    # Phase 4: 图片位置回填 + 描述追加。
+    # 回填无条件跑：ragflow_manual_docx 切块已埋 [[IMG:sha16]] 占位符，无论开关与否都要
+    # 处理——开关关（fill=False）时占位符降级为空串被清理，避免索引留下字面量；
+    # 开关开时按 image_desc_by_blob 清单回填真实描述。inlined = 已内联进正文的 sha16。
+    # （LightRAG 路径的 KG 摄入总会产出清单，故必须用 fill 门控，否则关开关时描述仍漏进正文。）
+    all_chunks, inlined = _resolve_image_placeholders(
+        all_chunks, img_cache, fill=_chunk_cfg.inline_image_descriptions,
+    )
+
+    # 追加孤儿 chunk 仍由开关门控（默认关，需 CHUNKING__INLINE_IMAGE_DESCRIPTIONS=true）：
+    # 把未内联进正文的图片描述作为独立 chunk 追加，让纯向量检索也能召回图片内容。
     if _chunk_cfg.inline_image_descriptions and not skip_images_on_resume:
-        added = _append_image_desc_chunks(all_chunks, all_sources, img_cache)
+        added = _append_image_desc_chunks(all_chunks, all_sources, img_cache, inlined)
         if added:
             logger.info("图片描述回填 course=%s 追加 %d 条", course_id, added)
 
