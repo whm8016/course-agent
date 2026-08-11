@@ -75,3 +75,44 @@ async def check_quota(user_id: str, course_id: str) -> tuple[bool, float, float]
         )
         return (False, 0.0, budget)
     return (used >= budget, round(used, 6), budget)
+
+
+async def reconcile_quota_from_db() -> int:
+    """启动时从 llm_usage_daily 回填当日 Redis 配额键（SETNX，不覆盖已有值）。
+
+    防 Redis 失联后配额静默重置：Redis 丢数据后当日 key 缺失，check_quota 读到 0 -> 超预算
+    用户被错误放行。本函数从 DB 日汇总（rollup_usage 每小时重算，滞后≤1h）回填缺失键，使
+    配额近似恢复。已存在的键不覆盖（Redis 是正常运行时的权威源）。best-effort，返回回填条数。
+    """
+    if not get_settings().cost_quota.enabled:
+        return 0
+    try:
+        from core.db.cache import _get_pool
+        from core.db.database import AsyncSessionLocal, LlmUsageDaily
+        from sqlalchemy import func, select
+
+        r = _get_pool()
+        day = datetime.now(timezone.utc).strftime("%Y%m%d")
+        async with AsyncSessionLocal() as db:
+            rows = (await db.execute(
+                select(
+                    LlmUsageDaily.user_id,
+                    LlmUsageDaily.course_id,
+                    func.sum(LlmUsageDaily.cost_usd).label("spent"),
+                )
+                .where(LlmUsageDaily.day == day)
+                .group_by(LlmUsageDaily.user_id, LlmUsageDaily.course_id)
+            )).all()
+        n = 0
+        for row in rows:
+            if not row.user_id or not (row.spent or 0) > 0:
+                continue
+            # nx=True：仅当 key 不存在时回填，绝不覆盖 Redis 已累积的权威值
+            if await r.set(_day_key(row.user_id, row.course_id or ""),
+                           str(round(float(row.spent), 6)),
+                           ex=_KEY_TTL, nx=True):
+                n += 1
+        return n
+    except Exception:
+        logger.debug("cost_quota reconcile failed", exc_info=True)
+        return 0

@@ -133,7 +133,7 @@ def _load_documents(file_paths: list[Path]) -> list[str]:
         file_paths_to_llama_documents,
     )
 
-    documents, _classification = file_paths_to_llama_documents(
+    documents, _classification, _parse_errors = file_paths_to_llama_documents(
         [str(p) for p in file_paths], log=logger
     )
     if not documents:
@@ -142,6 +142,8 @@ def _load_documents(file_paths: list[Path]) -> list[str]:
     nodes = SentenceSplitter(
         chunk_size=LLAMA_INDEX_CHUNK_SIZE,
         chunk_overlap=LLAMA_INDEX_CHUNK_OVERLAP,
+        # 按字符计数，与生产摄入 _chunk_by_sentence_splitter 保持一致
+        tokenizer=lambda t: t,
     ).get_nodes_from_documents(documents)
 
     chunks: list[str] = []

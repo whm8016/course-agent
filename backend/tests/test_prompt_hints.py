@@ -43,8 +43,12 @@ def test_build_hint_text_basic():
 
 
 def test_build_hint_text_empty_names():
-    assert build_tool_hint_text([], "zh") == ""
-    assert build_tool_hint_text(None, "zh") == ""
+    # 空 names 仍渲染 always-on 工具（记忆读写），不再返回空串：always_on 工具无视 names 追加
+    text = build_tool_hint_text([], "zh")
+    assert "`read_memory`" in text
+    assert "`write_memory`" in text
+    text_none = build_tool_hint_text(None, "zh")
+    assert "`read_memory`" in text_none
 
 
 def test_build_hint_text_skips_missing_hint_files():

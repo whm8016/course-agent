@@ -135,6 +135,24 @@ async def _maybe_compress_summary(session_id: str) -> None:
         logger.warning("[L2] session summary compress failed session=%s", session_id, exc_info=True)
 
 
+async def _on_complete_record_learning_event(event) -> None:
+    """CAPABILITY_COMPLETE 订阅者：落一条 verb=asked 学情事件（L0）。
+
+    供 p2-c FAQ 语义聚类 / p2-b rollup 聚合。作为独立订阅者并发派发（见上）。
+    record_learning_event 内部吞异常，best-effort。
+    """
+    from core.analytics.events import record_learning_event
+    session_id = getattr(event, "session_id", "") or event.metadata.get("session_id") or ""
+    await record_learning_event(
+        user_id=event.user_id,
+        course_id=event.course_id,
+        verb="asked",
+        object_text=(event.user_message or "")[:1000],
+        session_id=session_id,
+        metadata={"mode": event.mode, "tools_used": list(event.metadata.get("tools_used") or ())},
+    )
+
+
 # ---- Leader 单例服务：启停解耦为运行时可调用（竞选接管时动态拉起/停止）----
 _singletons_started = False
 
@@ -201,20 +219,10 @@ async def start_singleton_services() -> None:
     except Exception as e:
         logger.warning(f"Cron service startup failed (non-fatal): {e}")
 
-    try:
-        from core.mcp.manager import get_mcp_manager
-        mcp = get_mcp_manager()
-        await mcp.ensure_started()
-        if is_shutting_down():
-            logger.info("Shutdown signaled during MCP start; rolling back mcp+cron+bot")
-            await _safe_call(mcp.shutdown, "mcp.shutdown")
-            for fn, label in reversed(started):
-                await _safe_call(fn, label)
-            return
-        started.append((mcp.shutdown, "mcp.shutdown"))
-        logger.info("MCP manager initialized")
-    except Exception as e:
-        logger.warning(f"MCP manager startup failed (non-fatal): {e}")
+    # MCP 不在此处：它不是"全局只需一份"的后台任务（如 Cron/Bot），而是每个 worker
+    # 处理各自对话时都要用到的工具连接——leader-only 会导致非 leader worker 的
+    # get_mcp_manager() 永远拿不到任何工具。改为每个 worker 在 lifespan() 里独立
+    # ensure_started()（见下方 MCP 小节 + lifespan 内对应调用）。
 
     _singletons_started = True
 
@@ -228,13 +236,7 @@ async def stop_singleton_services() -> None:
     if not _singletons_started:
         return
 
-    # 与 start 逆序停止：MCP → Cron → Bot
-    try:
-        from core.mcp.manager import get_mcp_manager
-        await get_mcp_manager().shutdown()
-    except Exception:
-        pass
-
+    # 与 start 逆序停止：Cron → Bot（MCP 生命周期已独立于 leader，见 lifespan）
     try:
         from services.cron.service import get_cron_service
         await get_cron_service().stop()
@@ -251,12 +253,42 @@ async def stop_singleton_services() -> None:
     _singletons_started = False
 
 
+# ---- MCP：每个 worker 独立连接（不走 leader-only）----
+# MCP 工具要被"每个 worker 各自处理的对话请求"调用到，性质上更接近 DB 连接池
+# （每个 worker 都要有一份能用的连接），而不是 Cron/Bot 那种"全局跑一份就够"的
+# 后台任务。放进 leader-only 的 start_singleton_services 会导致：单容器
+# gunicorn -w N 下，只有当选 leader 的那个 worker 建立了连接，其余 N-1 个
+# worker 的 get_mcp_manager() 永远是空的——落在它们身上的对话请求会静默看不到
+# 任何 MCP 工具（dynamic_tools.resolve() 的 pool 为空，不报错）。
+_mcp_reload_task: asyncio.Task | None = None
+
+
+async def _mcp_reload_loop() -> None:
+    """轮询 data/mcp.json 签名并同步连接。
+
+    admin 的 POST/DELETE /api/mcp/servers/{name} 只会在受理该 HTTP 请求的那个
+    worker 里调用一次 reload()——其余 worker 需要靠这个轮询才能跟上配置变化。
+    reload() 内部按 connection_signature() 比对，未变化的 server 不会被重连，
+    轮询开销可忽略。
+    """
+    from core.mcp.manager import get_mcp_manager
+
+    mgr = get_mcp_manager()
+    interval = get_settings().mcp.reload_interval_s
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await mgr.reload()
+        except Exception:
+            logger.warning("MCP periodic reload failed (non-fatal)", exc_info=True)
+
+
 # ---- 资源水位采样：DB 连接池 + LightRAG 实例池 → Prometheus Gauge（压测/运维观测）----
 _resource_sampler_task: asyncio.Task | None = None
 
 
 async def _sample_resource_gauges() -> None:
-    """每 5s 采样 DB 连接池 checkedout 数 + LightRAG 实例池水位，写入 Prometheus Gauge。
+    """每 5s 采样 DB 连接池 checkedout 数 + LightRAG 实例池水位 + 整卷磁盘水位，写 Prometheus。
 
     仅观测用，任何采样失败都静默（SQLite StaticPool/NullPool 无 checkedout、实例池未
     初始化等），绝不影响主链路。worker label 用 pid 区分（多容器/多 worker 各自独立
@@ -264,13 +296,17 @@ async def _sample_resource_gauges() -> None:
     """
     from core.observability.metrics import (
         DB_POOL_CHECKEDOUT,
+        DISK_USED_BYTES,
         LIGHTRAG_INSTANCES,
         LIGHTRAG_IN_USE,
     )
     from core.db.database import engine
     from core.rag.lightrag.instance_pool import _instances, _in_use
+    import shutil
 
     worker_id = os.getenv("BACKEND_WORKER_ID") or str(os.getpid())
+    # 整卷水位锚点：取 LightRAG workdir 所在卷（业务数据盘）。resolve 一次，循环里只 disk_usage。
+    disk_anchor = str(get_settings().paths.lightrag_workdir)
     while True:
         try:
             # AsyncEngine.sync_engine.pool 是底层 Pool；QueuePool 有 checkedout()，
@@ -285,7 +321,44 @@ async def _sample_resource_gauges() -> None:
             LIGHTRAG_IN_USE.set(len(_in_use))
         except Exception:
             pass
+        try:
+            # 廉价 syscall（statfs）；写整卷水位，供磁盘告警观测。
+            DISK_USED_BYTES.labels(target="volume").set(shutil.disk_usage(disk_anchor).used)
+        except Exception:
+            pass
         await asyncio.sleep(5)
+
+
+# ---- 上下文窗口探测：启动预热（best-effort，不阻塞启动）----
+# 对标 DeepTutor 的「配置期探测」分工：探测在请求热路径之外跑（GET /models），结果落
+# data/context_window_cache.json，热路径 resolve_effective_window 只同步读缓存、零网络。
+# 失败只告警不阻塞启动；缓存已有未过期条目则跳过（避免每重启都打 /models）。
+_window_probe_task: asyncio.Task | None = None
+
+
+async def _warmup_context_window_probe() -> None:
+    """启动预热：探测 active profile 的 text+fast 模型真实窗口，写入探测缓存。
+
+    best-effort：任何异常只告警。缓存命中（未过期）则跳过该模型。
+    """
+    try:
+        from core.agentic.window_probe import warmup_probe
+
+        results = await warmup_probe()
+        for r in results:
+            if r.get("detected"):
+                logger.info(
+                    "context window probe: model=%s window=%d (cached=%s)",
+                    r["model"], r["detected"], r.get("skipped_cached", False),
+                )
+            elif not r.get("skipped_cached"):
+                # 探测失败：供应商 /models 未暴露窗口或不可达，退回 _MODEL_WINDOWS 表（属正常降级）
+                logger.debug(
+                    "context window probe: model=%s returned no window (will fall back to table/heuristic)",
+                    r["model"],
+                )
+    except Exception:
+        logger.warning("context window probe warmup failed (non-fatal)", exc_info=True)
 
 
 @asynccontextmanager
@@ -293,9 +366,31 @@ async def lifespan(app: FastAPI):
     logger.info("Application startup – initializing database tables")
     await init_db()
 
+    # Mem0 预热：get_memory() 内部 AsyncMemory.from_config 是同步调用，首次执行时
+    # 建连 + CREATE TABLE IF NOT EXISTS memories（mem0 Issue #2755）。不预热则该开销
+    # 摊到第一条对话/第一次 GET /memory 上；这里启动期做掉，顺带保证 memories 表
+    # 一定存在，不会出现「表有时查得到有时查不到」。best-effort，不阻塞启动。
+    try:
+        from core.memory.mem0_client import get_memory
+        get_memory()
+        logger.info("Mem0 warmed up (memories table ensured)")
+    except Exception:
+        logger.warning("Mem0 warmup failed (non-fatal)", exc_info=True)
+
+    # P4：从 DB 回填当日 Redis 配额键（防 Redis 失联后配额静默重置）。best-effort，不阻塞启动。
+    try:
+        from core.quota.cost_quota import reconcile_quota_from_db
+        n = await reconcile_quota_from_db()
+        if n:
+            logger.info("cost_quota: reconciled %d keys from DB", n)
+    except Exception:
+        logger.debug("cost_quota reconcile on startup failed", exc_info=True)
+
     # 注册 EventBus 处理器（turn 完成后记忆更新）
     from events.event_bus import get_event_bus, EventType
-    get_event_bus().subscribe(EventType.CAPABILITY_COMPLETE, _on_capability_complete)
+    bus = get_event_bus()
+    bus.subscribe(EventType.CAPABILITY_COMPLETE, _on_capability_complete)
+    bus.subscribe(EventType.CAPABILITY_COMPLETE, _on_complete_record_learning_event)
     logger.info("EventBus: registered capability_complete handlers")
 
     # 尝试初始化 ARQ 任务队列连接池
@@ -315,9 +410,23 @@ async def lifespan(app: FastAPI):
     # 当选则内部走 on_gain 拉单例；未当选则起竞选 loop，锁可被接管时再走 on_gain
     await try_become_leader()
 
+    # MCP：每个 worker 独立连接 + 启动周期性 reload（与 leader 选举无关，见上方说明）
+    global _mcp_reload_task
+    try:
+        from core.mcp.manager import get_mcp_manager
+        await get_mcp_manager().ensure_started()
+        logger.info("MCP manager initialized (per-worker)")
+    except Exception as e:
+        logger.warning(f"MCP manager startup failed (non-fatal): {e}")
+    _mcp_reload_task = asyncio.create_task(_mcp_reload_loop())
+
     # 资源水位采样 task（DB pool / LightRAG 实例池 → Prometheus，压测/运维观测）
     global _resource_sampler_task
     _resource_sampler_task = asyncio.create_task(_sample_resource_gauges())
+
+    # 上下文窗口探测启动预热（best-effort，不阻塞启动；详见 _warmup_context_window_probe）
+    global _window_probe_task
+    _window_probe_task = asyncio.create_task(_warmup_context_window_probe())
 
     yield
 
@@ -338,6 +447,20 @@ async def lifespan(app: FastAPI):
     # 停止单例服务（leader 经 on_lose 回调）+ 清理 leader 选举资源（cancel loop、释放锁）
     await shutdown_leader()
 
+    # 停止本 worker 的 MCP 连接 + 周期性 reload task
+    if _mcp_reload_task is not None:
+        _mcp_reload_task.cancel()
+        try:
+            await _mcp_reload_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _mcp_reload_task = None
+    try:
+        from core.mcp.manager import get_mcp_manager
+        await get_mcp_manager().shutdown()
+    except Exception:
+        pass
+
     # 取消资源水位采样 task（须在 close_db 前，否则采样读到已释放的 engine 报错）。
     # _resource_sampler_task 在函数顶部 startup 段已 global 声明（line 297），整个
     # lifespan 作用域生效，此处无需重复声明（重复 global 且前面已赋值 → SyntaxError）。
@@ -348,6 +471,23 @@ async def lifespan(app: FastAPI):
         except (asyncio.CancelledError, Exception):
             pass
         _resource_sampler_task = None
+
+    # 取消上下文窗口探测预热 task（best-effort；探测自带超时，cancel 仅作干净退出）。
+    if _window_probe_task is not None:
+        _window_probe_task.cancel()
+        try:
+            await _window_probe_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        _window_probe_task = None
+
+    # 停止 LightRAG idle reaper（若本 worker 因检索/索引懒启动过它）。须在 close_db 前，
+    # 避免 reaper 在 DB 已释放后还去 finalize 实例。
+    try:
+        from core.rag.lightrag.instance_pool import stop_idle_reaper
+        await stop_idle_reaper()
+    except Exception:
+        logger.warning("stop_idle_reaper failed (non-fatal)", exc_info=True)
 
     logger.info("Application shutdown – closing database pool")
     await close_db()

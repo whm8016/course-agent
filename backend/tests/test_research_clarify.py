@@ -114,7 +114,10 @@ async def test_wait_for_user_reply_timeout_returns_skip(monkeypatch):
                 "R",
                 (),
                 {"clarify_enabled": True, "clarify_wait_timeout_s": 1, "clarify_max_questions": 3},
-            )()
+            )(),
+            # turn_runtime.start_turn 读 context_budget.coordinator_enabled（Phase 3 协调器开关）；
+            # False -> 走旧 ContextBuilder 裁剪分支，不触发协调器逻辑
+            "context_budget": type("CB", (), {"coordinator_enabled": False})(),
         },
     )()
     monkeypatch.setattr("services.session.turn_runtime.get_settings", lambda: _stub)

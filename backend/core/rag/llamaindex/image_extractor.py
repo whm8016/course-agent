@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -34,6 +35,10 @@ _MAX_IMAGES_PER_FILE = IMAGE_INGEST_MAX_PER_FILE
 _SEMAPHORE_LIMIT = IMAGE_INGEST_SEMAPHORE
 # WMF blob < 此字节数视为公式碎片，跳过（有意义的电路图通常 > 2000B）
 _WMF_MIN_BLOB_SIZE = IMAGE_INGEST_WMF_MIN_BLOB
+
+# VLM 图片描述 prompt——本模块 caption_images_from_files 与 markdown_sections 的
+# _vlm_caption_sync/_prefetch_descriptions 共用同一常量，避免两处漂移导致描述风格不一致。
+_IMAGE_DESC_PROMPT = "请用一句话简要描述这张图片的内容。"
 
 
 def _image_meets_threshold(width: int, height: int) -> bool:
@@ -267,51 +272,55 @@ def _make_vision_caption_func(
 
         from openai import AsyncOpenAI
 
-        client = AsyncOpenAI(api_key=VISION_API_KEY, base_url=VISION_BASE_URL)
         max_tokens = int(kwargs.pop("max_tokens", 2048))
 
-        if messages:
-            resp = await client.chat.completions.create(
-                model=INDEX_VISION_MODEL,
-                messages=messages,
-                max_tokens=max_tokens,
-                **kwargs,
-            )
-        elif image_data:
-            import base64
+        # async with 确保 client 在本函数返回前完成 aclose()——若在 asyncio.run() 的临时
+        # loop 里裸建 client 不关闭，httpx 的异步清理会拖到 loop 已关闭之后才跑，
+        # 触发 "RuntimeError: Event loop is closed"（asyncio 报 Task exception was never
+        # retrieved）。同一 client 在这里生命周期最短，close 成本可忽略。
+        async with AsyncOpenAI(api_key=VISION_API_KEY, base_url=VISION_BASE_URL) as client:
+            if messages:
+                resp = await client.chat.completions.create(
+                    model=INDEX_VISION_MODEL,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+            elif image_data:
+                import base64
 
-            raw = base64.b64decode(image_data)
-            mime = _mime_for_image_bytes(raw)
-            msgs: list[dict] = []
-            if system_prompt:
-                msgs.append({"role": "system", "content": system_prompt})
-            msgs.append({
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:{mime};base64,{image_data}"},
-                    },
-                ],
-            })
-            resp = await client.chat.completions.create(
-                model=INDEX_VISION_MODEL,
-                messages=msgs,
-                max_tokens=max_tokens,
-                **kwargs,
-            )
-        else:
-            msgs = []
-            if system_prompt:
-                msgs.append({"role": "system", "content": system_prompt})
-            msgs.append({"role": "user", "content": prompt})
-            resp = await client.chat.completions.create(
-                model=INDEX_VISION_MODEL,
-                messages=msgs,
-                max_tokens=max_tokens,
-                **kwargs,
-            )
+                raw = base64.b64decode(image_data)
+                mime = _mime_for_image_bytes(raw)
+                msgs: list[dict] = []
+                if system_prompt:
+                    msgs.append({"role": "system", "content": system_prompt})
+                msgs.append({
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime};base64,{image_data}"},
+                        },
+                    ],
+                })
+                resp = await client.chat.completions.create(
+                    model=INDEX_VISION_MODEL,
+                    messages=msgs,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
+            else:
+                msgs = []
+                if system_prompt:
+                    msgs.append({"role": "system", "content": system_prompt})
+                msgs.append({"role": "user", "content": prompt})
+                resp = await client.chat.completions.create(
+                    model=INDEX_VISION_MODEL,
+                    messages=msgs,
+                    max_tokens=max_tokens,
+                    **kwargs,
+                )
 
         content = resp.choices[0].message.content or ""
         if cache_key and content.strip():
@@ -689,4 +698,66 @@ async def ingest_images_from_files(
         raise
     _save_desc_cache(cache_file, desc_cache)
     logger.info("图片知识图谱摄入完成: %d/%d", done_count, total)
+    return done_count
+
+
+async def caption_images_from_files(
+    file_paths: list[str],
+    *,
+    cache_path: str | None = None,
+    semaphore_limit: int = _SEMAPHORE_LIMIT,
+    max_images: int | None = None,
+) -> int:
+    """提取嵌入图并生成 VLM 描述写入 desc_cache——不写知识图谱，供 pgvector 复用。
+
+    与 ``ingest_images_from_files`` 共用前半段管线（``collect_image_candidates`` 做
+    DOCX/PDF 图片抽取+去重+尺寸过滤，``_make_vision_caption_func``+desc_cache 做 VLM 调用
+    +缓存），跳过 ``ImageModalProcessor`` 的知识图谱写入（pgvector 无图谱，也不依赖
+    raganything 包）。desc_cache 与 ``ingest_images_from_files`` 同 key 空间（base64 串
+    sha256），两个后端各建各的 course 目录、互不冲突，也不会对同一张图重复调 VLM。
+
+    Returns:
+        成功生成描述的图片数量。
+    """
+    if not file_paths:
+        return 0
+
+    cache_file = Path(cache_path) if cache_path else None
+    desc_cache = _load_desc_cache(cache_file)
+    cache_lock = asyncio.Lock()
+    caption_func = _make_vision_caption_func(desc_cache, cache_lock)
+
+    work_dir = cache_file.parent if cache_file else Path(tempfile.gettempdir()) / "course_agent_images"
+    candidates = await asyncio.to_thread(collect_image_candidates, file_paths, work_dir)
+    if not candidates:
+        return 0
+    if max_images is not None and max_images > 0:
+        candidates = candidates[:max_images]
+        logger.info("图片描述上限 max_images=%d，仅处理前 %d 张", max_images, len(candidates))
+
+    sem = asyncio.Semaphore(semaphore_limit)
+    done_count = 0
+
+    async def _one(candidate: _ImageCandidate) -> bool:
+        nonlocal done_count
+        try:
+            raw = await asyncio.to_thread(Path(candidate.img_path).read_bytes)
+        except OSError as exc:
+            logger.debug("读取图片失败 %s: %s", candidate.img_path, exc)
+            return False
+        image_data = base64.b64encode(raw).decode()
+        async with sem:
+            try:
+                desc = await caption_func(_IMAGE_DESC_PROMPT, image_data=image_data)
+            except Exception as exc:  # noqa: BLE001 — 单张失败不中断整批
+                logger.debug("VLM 描述失败 %s: %s", candidate.entity_name, exc)
+                return False
+        if (desc or "").strip():
+            done_count += 1
+            return True
+        return False
+
+    await asyncio.gather(*(_one(c) for c in candidates))
+    _save_desc_cache(cache_file, desc_cache)
+    logger.info("图片 VLM 描述生成完成: %d/%d（pgvector 路径）", done_count, len(candidates))
     return done_count

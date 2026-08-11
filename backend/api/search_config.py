@@ -10,7 +10,7 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,9 +42,11 @@ def _empty_cfg() -> dict:
 
 
 def _override_to_dict(row: UserSearchConfig) -> dict:
+    from utils.crypto import decrypt_secret_or_plain
     return {
         "provider": row.provider or "",
-        "api_key": row.api_key or "",
+        # 1.5：api_key 加密落库，读出时解密（兼容 legacy 明文行：解密失败回退原值）
+        "api_key": decrypt_secret_or_plain(row.api_key or ""),
         "base_url": row.base_url or "",
         "max_results": row.max_results or 0,
         "proxy": row.proxy or "",
@@ -99,6 +101,9 @@ async def put_my_config(
 ):
     """保存当前用户的搜索 override（全员，upsert）。"""
     uid = str(user.get("id") or "")
+    from utils.crypto import encrypt_secret
+    # 1.5：api_key 加密落库（与 UserLLMProvider 同口径，明文不进 DB）
+    encrypted_key = encrypt_secret(payload.api_key or "")
     row = (
         await db.execute(
             select(UserSearchConfig).where(UserSearchConfig.user_id == uid)
@@ -108,7 +113,7 @@ async def put_my_config(
         row = UserSearchConfig(
             user_id=uid,
             provider=payload.provider,
-            api_key=payload.api_key,
+            api_key=encrypted_key,
             base_url=payload.base_url,
             max_results=payload.max_results,
             proxy=payload.proxy,
@@ -116,7 +121,7 @@ async def put_my_config(
         db.add(row)
     else:
         row.provider = payload.provider
-        row.api_key = payload.api_key
+        row.api_key = encrypted_key
         row.base_url = payload.base_url
         row.max_results = payload.max_results
         row.proxy = payload.proxy
@@ -141,4 +146,12 @@ async def delete_my_config(
 @router.post("/probe")
 async def probe(payload: ProbeRequest, user: dict = Depends(get_current_user)):
     """测试连通（给定 provider+key，不持久化；admin/user 都可）。"""
+    # 1.6 SSRF：学生账号即可调用本端点，校验自定义 base_url 指向公网（拒内网/元数据地址）。
+    # base_url 留空走供应商默认，不校验。
+    if payload.base_url:
+        from utils.url_guard import assert_public_http_url
+        try:
+            assert_public_http_url(payload.base_url)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"base_url 不安全：{exc}")
     return probe_search(payload.provider, payload.api_key, payload.base_url)

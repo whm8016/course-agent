@@ -725,4 +725,5 @@ __all__ = [
     "purge_course_workspace",
     "acquire_index_dlock",
     "release_index_dlock",
+    "_INDEX_DLOCK_PREFIX",
 ]

@@ -90,14 +90,47 @@ class TurnRuntimeManager:
 
         后台任务：调用 ContextBuilder 裁剪历史 → 驱动 orchestrator 生成事件流。
         """
-        turn_id = str(uuid.uuid4())
+        turn_id = uuid.uuid4().hex  # 32 位无横杠——需塞进 memory_episodes.turn_id VARCHAR(32)
         if not context.session_id:
             context.session_id = turn_id
         context.metadata["turn_id"] = turn_id  # orchestrator 用于注册全局 bus
 
-        # ContextBuilder：裁剪历史到 token 预算
-        builder = ContextBuilder(max_history_tokens=resolve_budget(TEXT_MODEL))
-        context.conversation_history = builder.build(context.conversation_history)
+        # 历史裁剪：coordinator_enabled 时走 plan_turn（MECW 感知 + 可选摘要续接，Phase 3），
+        # 否则旧 ContextBuilder + resolve_budget（20% 窗口，逐字节同旧行为）。
+        # 埋点：两条分支都记 before/after 计数——之前这里是全哑的，LangSmith 和应用日志都看不到
+        # 任何裁剪痕迹，只能靠事后临时脚本翻 ctx.metadata 才能确认真的裁了。
+        _history_before = len(context.conversation_history)
+        if get_settings().context_budget.coordinator_enabled:
+            from core.agentic.context_budget import plan_turn
+            _plan = plan_turn(
+                history=context.conversation_history,
+                model=TEXT_MODEL,
+                session_summary_text=context.session_summary or "",
+            )
+            context.conversation_history = _plan.keep_history
+            context.metadata["_budget_plan"] = _plan
+            if _plan.carry_forward_added:
+                context.session_summary = ""  # 摘要已前插历史，清 system 切片避免双付
+            context.metadata["_ctx_pretrim"] = {
+                "coordinator_enabled": True,
+                "history_before": _history_before,
+                "history_after": len(context.conversation_history),
+                "dropped": _plan.dropped_count,
+                "carry_forward_added": _plan.carry_forward_added,
+                "mecw": _plan.mecw,
+                "target_input_tokens": _plan.target_input_tokens,
+            }
+        else:
+            builder = ContextBuilder(max_history_tokens=resolve_budget(TEXT_MODEL))
+            context.conversation_history = builder.build(context.conversation_history)
+            context.metadata["_ctx_pretrim"] = {
+                "coordinator_enabled": False,
+                "history_before": _history_before,
+                "history_after": len(context.conversation_history),
+                "dropped": _history_before - len(context.conversation_history),
+                "carry_forward_added": False,
+            }
+        log_flow("turn.context_pretrim", turn_id=turn_id, **context.metadata["_ctx_pretrim"])
 
         # ask_user 暂停/恢复经 reply_channel（Redis BLPOP/RPUSH，跨 worker 投递；memory:// 回退进程内）。
         # loop 调用 ask_user 工具时 await context.metadata["wait_for_user_reply"]().
@@ -135,6 +168,10 @@ class TurnRuntimeManager:
         )
         log_flow("turn.start", turn_id=turn_id, mode=context.mode,
                  user_id=context.user_id, course_id=context.course_id)
+
+        # 把 turn_id 写进 context.metadata，供 loop 层的 record_llm_usage 回溯落库明细（loop 只能
+        # 读 context，看不到 turn_runtime 的 execution）。turn_id 缺失不影响聚合（明细按 day rollup）。
+        context.metadata["turn_id"] = turn_id
 
         execution = _TurnExecution(turn_id=turn_id, context=context)
 
@@ -191,6 +228,7 @@ class TurnRuntimeManager:
         turn_id: str,
         text: str | None = None,
         answers: list[dict] | None = None,
+        outline: list[dict] | None = None,
         *,
         user_id: str | None = None,
     ) -> bool:
@@ -199,6 +237,9 @@ class TurnRuntimeManager:
         投递走 reply_channel（Redis RPUSH，跨 worker；memory:// 回退进程内队列）。
 
         Args:
+            text/answers: ask_user 工具的常规回复（文本 / 选项回答）。
+            outline: 深度研究大纲确认的编辑结果（list[{title, overview}]）；与 ask_user 共用同一
+                     回复通道，pipeline 侧用 reply.get("outline") 取。三者互斥使用，按触发场景给。
             user_id: 可选，发起回复的当前登录用户 id。提供时做 turn 归属校验：本地 _executions
                      命中走 _turn_belongs_to；跨 worker（本地 miss）回落 Redis owner key
                      （ca:turn:owner:{turn_id}）比对，防止 B 用户拿 A 的 turn_id 向 A 的 ask_user
@@ -225,7 +266,7 @@ class TurnRuntimeManager:
                         "TurnRuntime: submit_user_reply turn_id=%s 跨 worker 归属不符/不存在", turn_id
                     )
                     return False
-        payload: dict = {"text": text or "", "answers": answers}
+        payload: dict = {"text": text or "", "answers": answers, "outline": outline}
         await reply_channel.push_reply(turn_id, payload)
         logger.info("TurnRuntime: submitted user reply for turn_id=%s", turn_id)
         return True
@@ -294,6 +335,8 @@ class TurnRuntimeManager:
 
         # 顶层 turn trace：下游所有 @traceable 工具/RAG 与 wrap_openai 的 LLM run
         # 通过 langsmith contextvars run tree 自动成为本 turn 的子 run。
+        # 回合前裁剪（plan_turn/ContextBuilder）发生在 start_turn，早于本 trace 开始，故把
+        # 结果塞进 metadata 直接挂在 turn 根 run 上，而非等它自然成为子 run（等不到）。
         async with trace_context(
             name="turn",
             metadata={
@@ -301,6 +344,7 @@ class TurnRuntimeManager:
                 "user_id": str(execution.context.user_id or ""),
                 "course_id": str(execution.context.course_id or ""),
                 "mode": str(execution.context.mode or ""),
+                **{f"pretrim_{k}": v for k, v in (execution.context.metadata.get("_ctx_pretrim") or {}).items()},
             },
             tags=[f"mode:{execution.context.mode or 'chat'}"],
         ):

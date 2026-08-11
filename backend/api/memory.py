@@ -86,6 +86,12 @@ async def edit_memory(memory_id: str, payload: MemoryUpdate, user: dict = Depend
     user_id = user["id"]
     logger.info("[mem0-api] PUT /memory/%s user_id=%s content_len=%d", memory_id, user_id, len(payload.content))
     m = get_memory()
+    # 越权校验：改删前先按 id 取记忆，校验 user_id 归属；不存在或不属于当前用户 -> 404
+    # （统一 404 而非 403，避免泄露记忆是否存在）。mem0.get 把 payload 里的 user_id
+    # 提升到返回 dict 顶层（promoted key），故取 existing["user_id"] 而非 existing["metadata"]。
+    existing = await m.get(memory_id)
+    if not existing or str(existing.get("user_id", "")) != str(user_id):
+        raise HTTPException(status_code=404, detail="记忆不存在或无权操作")
     try:
         await m.update(memory_id, payload.content)
         logger.info("[mem0-api] PUT /memory/%s OK user_id=%s", memory_id, user_id)
@@ -100,6 +106,10 @@ async def remove_memory(memory_id: str, user: dict = Depends(get_current_user)):
     user_id = user["id"]
     logger.info("[mem0-api] DELETE /memory/%s user_id=%s", memory_id, user_id)
     m = get_memory()
+    # 越权校验：同 PUT，先取记忆判归属，不属于当前用户 -> 404。
+    existing = await m.get(memory_id)
+    if not existing or str(existing.get("user_id", "")) != str(user_id):
+        raise HTTPException(status_code=404, detail="记忆不存在或无权操作")
     try:
         await m.delete(memory_id)
         logger.info("[mem0-api] DELETE /memory/%s OK user_id=%s", memory_id, user_id)
@@ -202,17 +212,19 @@ async def get_dashboard(
         load_graphs(db, user_id),
     )
     items = _results(raw)
+    kg_nodes = kg.get("nodes") or []
+    eg_nodes = eg.get("nodes") or []
     high_risk = sorted(
-        [n for n in (kg.get("nodes") or []) if n.get("status") == "active"],
+        [n for n in kg_nodes if n.get("status") == "active"],
         key=lambda n: -(n.get("risk") or 0),
     )[:5]
     frequent_errors = sorted(
-        [n for n in (eg.get("nodes") or []) if (n.get("error_count") or 0) > 1],
+        [n for n in eg_nodes if (n.get("error_count") or 0) > 1],
         key=lambda n: -(n.get("error_count") or 0),
     )[:5]
     logger.info(
         "[mem0-api] GET /memory/dashboard OK user_id=%s mem_count=%d kg_nodes=%d eg_nodes=%d high_risk=%d frequent_err=%d",
-        user_id, len(items), len(kg.get("nodes") or []), len(eg.get("nodes") or []),
+        user_id, len(items), len(kg_nodes), len(eg_nodes),
         len(high_risk), len(frequent_errors)
     )
     memories = [{"content": i.get("memory", "")} for i in items]
@@ -222,8 +234,8 @@ async def get_dashboard(
         "summary": "\n".join(f"- {mem['content']}" for mem in memories if mem.get("content")),
         "high_risk_points": high_risk,
         "frequent_errors": frequent_errors,
-        "knowledge_node_count": len(kg.get("nodes") or []),
-        "error_node_count": len(eg.get("nodes") or []),
+        "knowledge_node_count": len(kg_nodes),
+        "error_node_count": len(eg_nodes),
     }
     await cache_set(ck, payload, ttl=_DASHBOARD_TTL)
     return payload

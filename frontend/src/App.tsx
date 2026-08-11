@@ -30,7 +30,9 @@ export default function App() {
   const [showGraph, setShowGraph] = useState(false)
   const [showDashboard, setShowDashboard] = useState(false)
   const [showSkillKnowledge, setShowSkillKnowledge] = useState(false)
-  const [showMcpSettings, setShowMcpSettings] = useState(false)
+  const [showMcpSettings, setShowMcpSettings] = useState(
+    () => sessionStorage.getItem('_mcp_settings') === '1',
+  )
   const [showLlmProvider, setShowLlmProvider] = useState(false)
   const [showSearchAdmin, setShowSearchAdmin] = useState(false)
   const [showUserSearchSettings, setShowUserSearchSettings] = useState(false)
@@ -163,9 +165,14 @@ export default function App() {
     return () => clearInterval(t)
   }, [user, courses, reloadCourses])
 
+  // 请求代次：快速切课程 A→B→A 时，慢响应会覆盖新状态。每次请求自增 token，
+  // 只有最新一次的响应才生效，旧的丢弃。
+  const sessionsReqRef = useRef(0)
   const loadSessions = useCallback(async (courseId: string) => {
+    const myToken = ++sessionsReqRef.current
     try {
       const list = await fetchSessions(courseId)
+      if (myToken !== sessionsReqRef.current) return // 被更新的请求取代
       setSessions(list)
       if (list.length > 0) {
         setActiveSessionId(list[0].id)
@@ -173,6 +180,7 @@ export default function App() {
         setActiveSessionId(null)
       }
     } catch {
+      if (myToken !== sessionsReqRef.current) return
       setSessions([])
       setActiveSessionId(null)
     }
@@ -274,7 +282,11 @@ export default function App() {
       icon: Plug,
       label: 'MCP 工具',
       desc: role === 'admin' ? '部署与配置 MCP 服务器' : '选择启用的 MCP 工具',
-      onClick: () => { setShowSettingsHub(false); setShowMcpSettings(true) },
+      onClick: () => {
+        setShowSettingsHub(false)
+        sessionStorage.setItem('_mcp_settings', '1')
+        setShowMcpSettings(true)
+      },
     },
     ...(role === 'admin' ? [{
       icon: Search,
@@ -372,7 +384,14 @@ export default function App() {
       />
     )
   } else if (showMcpSettings) {
-    overlay = <McpSettingsPage onBack={() => setShowMcpSettings(false)} />
+    overlay = (
+      <McpSettingsPage
+        onBack={() => {
+          sessionStorage.removeItem('_mcp_settings')
+          setShowMcpSettings(false)
+        }}
+      />
+    )
   } else if (showLlmProvider) {
     overlay = <LlmProviderPage onBack={() => setShowLlmProvider(false)} />
   } else if (showSearchAdmin) {

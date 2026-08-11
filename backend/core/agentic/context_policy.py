@@ -19,19 +19,22 @@
   形态照抄 compaction API 的 trigger 接口。
 
 【token 计数】复用 ``services/session/context_builder.count_tokens``（tiktoken + len//4 降级），
-不自造。阈值判定按字符（与旧 _snip_tool_results 同口径，便于行为对照）。
+不自造。阈值判定改 token 口径（``compute_budgets`` 的 soft_trigger），与 ``context_budget.enforce``
+级联同一软阈值驱动；旧字符口径 ``budget_chars`` 已 dormant。
 
-【默认行为】全部由 ``settings.context_policy`` 控制，``enabled=False`` 时 loop 仍走旧
-``_snip_tool_results``（行为零变化），便于做 raw vs masking vs masking+summary 消融对照。
+【默认行为】``mask_old_observations``/``apply``/``apply_arm`` 供评测臂（``set_arm`` per-task
+覆盖）与 ``context_policy.apply`` 路径使用。生产轮内主路径已统一走 ``context_budget.enforce``
+三级级联（L1 清旧 tool 结果->L2 LLM 摘要->L3 丢最旧 20%）；本模块的掩码/摘要作为评测对照臂保留。
 """
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
 import re
 from typing import Any
 
-from services.session.context_builder import count_tokens
+from core.agentic.context_window import compute_budgets, count_tokens
 from settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -189,23 +192,20 @@ def _split_turns(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     return turns
 
 
-def _total_chars(messages: list[dict[str, Any]]) -> int:
-    return sum(len(str(m.get("content", ""))) for m in messages)
-
-
 def mask_old_observations(
     messages: list[dict[str, Any]],
     keep_recent_turns: int,
-    budget_chars: int,
+    soft_trigger: int,
     masked_originals: list[str] | None = None,
 ) -> int:
     """掩码：保留最近 ``keep_recent_turns`` 轮的 role=tool 原文，更早的替换占位符。
 
-    仅在总字符超 ``budget_chars`` 时实际掩码（未超返回 0，行为等价）。贪心：从最早轮掩码，
+    仅在总 token 超 ``soft_trigger`` 时实际掩码（未超返回 0，行为等价）。token 口径（count_tokens
+    之和，与 enforce 级联同一软阈值驱动，避免字符/token 双口径不一致）。贪心：从最早轮掩码，
     总量降到预算内即提前停（少掩码多保信息）。改写前把被掩码 tool 原文 append 到
     ``masked_originals``（供 hybrid 摘要使用）。返回被掩码的轮数。
     """
-    if _total_chars(messages) <= budget_chars:
+    if token_estimate(messages) <= soft_trigger:
         return 0
     turns = _split_turns(messages)
     if len(turns) <= 1:
@@ -223,7 +223,7 @@ def mask_old_observations(
                 touched = True
         if touched:
             masked_turns += 1
-            if _total_chars(messages) <= budget_chars:  # 贪心：够省就停
+            if token_estimate(messages) <= soft_trigger:  # 贪心：够省就停
                 break
     return masked_turns
 
@@ -248,19 +248,23 @@ async def _summarize_masked_text(masked_text: str, model: str) -> str:
         return ""
 
 
-async def apply(messages: list[dict[str, Any]], model: str) -> None:
+async def apply(messages: list[dict[str, Any]], model: str) -> int:
     """上下文预算治理入口（loop 每轮调用一次）：掩码窗口化 + （可选）hybrid 摘要。
 
     单条 cap（``cap_tool_result``）已在 ``tool_dispatch`` 入口完成——单条结果产生即裁，
     本处不重复（避免冗余）。本函数就地修改 messages。被 ``settings.context_policy.enabled``
-    守卫；关闭时 loop 不调本函数（走旧 _snip_tool_results）。
+    守卫；loop 轮内主路径已统一走 ``context_budget.enforce`` 三级级联，本函数供 apply 路径与评测臂使用。
+
+    返回本轮被掩码的轮数（``masked_turns``），供 loop 累加进 ``context.metadata`` 做压缩量
+    记账（与 coordinator 臂的 ``_cb_cleared_tool_results`` 对照）。未超预算返回 0。
     """
     cfg = get_settings().context_policy
 
     # 掩码窗口化（仅在超预算时动作；改写前收集被掩码原文供摘要）
+    soft_trigger, _ = compute_budgets(model)
     masked_originals: list[str] = []
     masked_turns = mask_old_observations(
-        messages, cfg.keep_recent_turns, cfg.budget_chars, masked_originals,
+        messages, cfg.keep_recent_turns, soft_trigger, masked_originals,
     )
 
     # hybrid 兜底摘要：被掩码轮数达阈值时，把摘要塞进首个被掩码位（结构不变，仅改 content）
@@ -271,6 +275,7 @@ async def apply(messages: list[dict[str, Any]], model: str) -> None:
                 if m.get("content") == _MASK_MARKER:
                     m["content"] = f"[早期工具结果摘要] {summary}"
                     break
+    return masked_turns
 
 
 # ---------------------------------------------------------------------------
@@ -342,17 +347,18 @@ async def apply_arm(messages: list[dict[str, Any]], model: str, arm: str) -> int
     为评测新增。就地修改 messages。
     """
     cfg = get_settings().context_policy
+    soft_trigger, _ = compute_budgets(model)
     if arm == "raw":
         return 0
     if arm == "masking":
-        mask_old_observations(messages, cfg.keep_recent_turns, cfg.budget_chars)
+        mask_old_observations(messages, cfg.keep_recent_turns, soft_trigger)
         return 0
     if arm == "summary_only":
         return await _summarize_old_turns(messages, cfg.keep_recent_turns, model)
     if arm == "hybrid":
         masked_originals: list[str] = []
         masked_turns = mask_old_observations(
-            messages, cfg.keep_recent_turns, cfg.budget_chars, masked_originals,
+            messages, cfg.keep_recent_turns, soft_trigger, masked_originals,
         )
         if masked_turns >= cfg.summary_threshold and masked_originals:
             summary = await _summarize_masked_text(
@@ -370,5 +376,11 @@ async def apply_arm(messages: list[dict[str, Any]], model: str, arm: str) -> int
 
 
 def token_estimate(messages: list[dict[str, Any]]) -> int:
-    """便利函数：估算 messages 总 token（供测试/日志断言落在窗口预算内）。"""
-    return sum(count_tokens(str(m.get("content", ""))) for m in messages)
+    """便利函数：估算 messages 总 token（content + tool_calls，供测试/日志断言落在窗口预算内）。"""
+    total = 0
+    for m in messages:
+        total += count_tokens(str(m.get("content", "")))
+        tcs = m.get("tool_calls")
+        if tcs:
+            total += count_tokens(json.dumps(tcs, ensure_ascii=False))
+    return total

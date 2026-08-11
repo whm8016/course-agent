@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_teacher
@@ -48,18 +47,6 @@ def _compact_contexts_for_sse(contexts: list[object]) -> list[object]:
 class IndexBody(BaseModel):
     course_id: str
     force: bool = False
-    source_dir: str | None = None
-
-
-class LightRagChatRequest(BaseModel):
-    course_id: str = Field(default="stamp", description="课程 ID")
-    message: str = Field(default="", description="用户消息")
-    history: list[dict[str, Any]] = Field(default_factory=list, description="历史消息列表")
-    mode: str | None = Field(default=None, description="显式模式（可选，优先级高于 chat_mode）")
-    chat_mode: str = Field(default="chat", description="模式：chat / deep_solve / deep_research / quiz")
-    session_id: str | None = Field(default=None, description="会话 ID（可选）")
-    tools: list[str] = Field(default_factory=list, description='启用的工具，如 ["rag", "web_search"]')
-    image_path: str | None = Field(default=None, description="图片上传路径（可选）")
 
 
 # [DEPRECATED] 旧 chat 路径（agentic_pipeline 四阶段：Thinking→Acting→Observing→Responding）。
@@ -86,16 +73,15 @@ async def index_lightrag(
     await check_course_access(db, body.course_id, user)
 
     logger.info(
-        "POST /api/chat/lightrag/index user=%s course=%s force=%s source_dir=%s",
+        "POST /api/chat/lightrag/index user=%s course=%s force=%s",
         user["id"],
         body.course_id,
         body.force,
-        body.source_dir,
     )
 
     indexer = get_indexer("lightrag")
     result = await asyncio.wait_for(
-        indexer.index(body.course_id, [], force=body.force, source_dir=body.source_dir),
+        indexer.index(body.course_id, [], force=body.force),
         timeout=LIGHTRAG_TIMEOUT_SEC,
     )
     return {

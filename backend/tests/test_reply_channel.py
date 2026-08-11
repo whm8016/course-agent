@@ -111,7 +111,7 @@ async def test_owner_key_idor(monkeypatch):
     # 归属相符 → 投递成功，且回复能被 waiter 取到
     ok = await mgr.submit_user_reply("t_idor", text="回答", user_id="userA")
     assert ok is True
-    assert await rc.wait_reply("t_idor", timeout=1) == {"text": "回答", "answers": None}
+    assert await rc.wait_reply("t_idor", timeout=1) == {"text": "回答", "answers": None, "outline": None}
     # 他人 user_id → 拒绝（IDOR）
     bad = await mgr.submit_user_reply("t_idor", text="投毒", user_id="userB")
     assert bad is False

@@ -32,6 +32,7 @@ class ServerConfigRequest(BaseModel):
     url: str = ""
     headers: dict[str, str] = Field(default_factory=dict)
     tool_timeout: int = 30
+    connect_timeout: int = 15
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])
     enabled: bool = True
 
@@ -46,9 +47,42 @@ async def _upsert(name: str, payload: ServerConfigRequest) -> dict:
 
 @router.get("/servers")
 async def list_servers(_: dict = Depends(require_admin)):
+    cfg = load_mcp_config()
+    # 管理页每次拉列表都 reload 当前 worker，避免 save 落在别的 worker 后 UI 仍显示旧 error
+    await get_mcp_manager().reload()
+    status_map = {row["name"]: row for row in get_mcp_manager().status()}
+    servers: list[dict] = []
+    for name, server_cfg in cfg.servers.items():
+        row = status_map.get(name)
+        if row is not None:
+            servers.append(row)
+        elif not server_cfg.enabled:
+            servers.append(
+                {
+                    "name": name,
+                    "transport": server_cfg.resolved_type() or "",
+                    "status": "disabled",
+                    "error": "",
+                    "tools": [],
+                }
+            )
+        else:
+            servers.append(
+                {
+                    "name": name,
+                    "transport": server_cfg.resolved_type() or "",
+                    "status": "connecting",
+                    "error": "",
+                    "tools": [],
+                }
+            )
     return {
-        "servers": get_mcp_manager().status(),
-        "config": load_mcp_config().model_dump(mode="json"),
+        "servers": servers,
+        # 前端期望 config 为 { serverName: MCPServerConfig }，不是 MCPConfig 整包
+        "config": {
+            name: server_cfg.model_dump(mode="json")
+            for name, server_cfg in cfg.servers.items()
+        },
     }
 
 

@@ -152,3 +152,35 @@ async def test_manual_mix_without_lightrag_fails(monkeypatch):
     assert result.success is False
     assert "LightRAG" in result.content
     assert pg.calls == []  # 手动 LightRAG 模式不退到 pg
+
+
+# ── 显式 pgvector（llamaindex_pg）路由 ────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_explicit_pgvector_forces_pg_over_lightrag(monkeypatch):
+    """显式 llamaindex_pg：强制走 pg 向量，优先级最高——即使 lightrag 就绪、strategy=relationship 也不抢。"""
+    lr = _RecordingRetriever("LR 图谱")
+    pg = _RecordingRetriever("PG 向量证据")
+    _patch(monkeypatch, ready={"lightrag", "llamaindex_pg"}, lightrag=lr, pg=pg)
+    result = await _execute_rag(
+        course_id="c1", query="q", mode="llamaindex_pg", strategy="relationship"
+    )
+
+    assert pg.calls and pg.calls[0][0] == "retrieve"
+    assert pg.calls[0][1].get("mode") is None  # pg 检索器不接 mode 参数
+    assert lr.calls == []                       # lightrag 不抢
+    assert result.success is True
+    assert "PG 向量证据" in result.content
+
+
+@pytest.mark.asyncio
+async def test_explicit_pgvector_without_pg_fails(monkeypatch):
+    """显式 llamaindex_pg 但课程未建 pg（仅 lightrag 就绪）→ success=False，不降级到 lightrag。"""
+    lr = _RecordingRetriever("LR")
+    _patch(monkeypatch, ready={"lightrag"}, lightrag=lr)
+    result = await _execute_rag(course_id="c1", query="q", mode="llamaindex_pg")
+
+    assert result.success is False
+    assert "pgvector" in result.content
+    assert lr.calls == []  # 显式 pg 不退到 lightrag

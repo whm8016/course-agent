@@ -46,17 +46,19 @@ for iteration in range(max_iterations):
 
 The last iteration always runs with `tools=None`, forcing a text answer (forced finish + true chunk streaming; first-token latency ≈ model first token). Multi-stage capabilities (solve / question / research) are orchestrated in code as **multiple `run_agent_loop` calls** (one per stage), with `dataclasses.replace` to isolate context between stages.
 
-### 上下文预算治理（in-loop context budget）
+### 通用上下文管理（in-loop context budget）
 
-多轮工具调用会让 `messages` 滚雪球撑爆 context window（complexity trap）。`core/agentic/context_policy.py` 在每轮 LLM 调用前做三段式裁剪。`settings.context_policy.enabled=True`（默认）→ 走 `apply` 三段式（`cap_tool_result` 单条 6000 字 + `mask_old_observations` 按轮掩码；hybrid 摘要默认关，要多花一次 LLM 调用故暂不启用），吃下「Observation Masking 成本减半、解题率持平」的确定收益；`CONTEXT_POLICY__ENABLED=false` 一行回退到旧 `_snip_tool_results`（按全局字符 > 80000 从最早 tool 替换）。这是**四条 pipeline 共享**的行为变更（research 多证据块也会被单条 6000 字上限影响，由 `scripts/eval_capabilities/` 回归把关）。评测四臂仍经 contextvar `set_arm` 覆盖（生产 settings 不受影响）：
+多轮工具调用会让 `messages` 滚雪球撑爆 context window（complexity trap）。重构为业界顶级实现通用的「绝对阈值 + 减法留白 + 分级级联 + 反应式兜底」架构，不绑定具体模型/供应商。调研依据：Claude Code 五级压缩级联、Anthropic Context Management API 参数语义、context rot 论文（arXiv:2606.29718）、When Refusals Fail（arXiv:2512.02445 标称窗口不可信）、arXiv:2508.21433（Observation Masking 成本减半）。
 
-| 函数 | 作用 | 调研依据 |
-|------|------|---------|
-| `cap_tool_result` | 单条工具结果**段落边界感知截断**（按空行切段、最后一段在句号处截断、尾部「来源」段优先保留）；单段无边界退化为头尾各半 | RECOMP（arXiv:2310.04408）extractive compressor：按语义边界选内容不破坏句子；消除「前端截 2000 字、messages 收全量」的不对称 |
-| `mask_old_observations` | 按 **assistant-with-tool_calls 边界**切轮，保留最近 M 轮 tool 原文，更早替换占位（**按轮不按全局字符**） | arXiv:2508.21433（JetBrains，SWE-bench Verified）：Observation Masking 相对 raw 成本减半、解题率持平 |
-| `apply`（hybrid 兜底） | 被掩码轮数 ≥ 阈值时，用 fast LLM 把被掩码原文压成摘要塞回原位（结构不变，仅改 tool content，不破坏 `tool_call_id` 匹配） | 论文：纯摘要引发 trajectory elongation，最优是 hybrid |
+**窗口解析 + 双阈值**（`core/agentic/context_window.py`）：`resolve_effective_window(model)` 四级解析（显式配置 `LLM__CONTEXT_WINDOW` / catalog -> 探测缓存 `data/context_window_cache.json` -> 模型名模式 `_MODEL_WINDOWS` -> heuristic `max(16384, max_tokens×4)` 兜底并 `log_flow` 告警，杜绝旧实现「未知模型静默按 32768 跑」）。探测层（`core/agentic/window_probe.py`，对标 DeepTutor `detect_context_window`）在请求热路径之外跑--`main.py` lifespan 启动预热 + admin `POST /admin/context-window/probe` 手动重探，`GET {base_url}/models` 递归扫 8 个候选字段 + model id 别名匹配拿真实窗口，落缓存（键=base_url+model，带 detected_at + 7 天 TTL）；热路径 `resolve_effective_window` 只同步读缓存、零网络开销，探测拿不到时退回 `_MODEL_WINDOWS` 表（原生 OpenAI /models 不暴露窗口属正常降级）。`resolve_effective_window_with_source` 返回 `(window, source)` 供 admin 端点展示当前生效层级（explicit/probe/table/heuristic）。`compute_budgets(model)` 返回 `(soft_trigger, hard_ceiling)`，减法留白：`hard_ceiling = window - min(max_output, output_reserve) - safety_margin`，`soft_trigger = min(rot_threshold_tokens, int(window * quality_ratio), hard_ceiling)`（三取 min：窗口比例线 quality_ratio，RULER 实测有效长度多为窗口 0.25-0.5 取 0.5；绝对上限 rot_threshold_tokens 在比例线算出过大时钳制，rot 论文 64k 为成本可接受上界；再被硬天花板钳制。128k 模型算出 64000 与旧默认逐字相同，1M 模型放开到 128k）。软阈值驱动主动压缩追求质量，硬天花板驱动紧急降级保证可用。
 
-**评测四臂**（contextvar `set_arm`/`apply_arm`，对照 arXiv:2508.21433）：`raw`（真基线，不裁）/ `masking`（按轮掩码）/ `summary_only`（每轮摘要，测 H2 elongation）/ `hybrid`（掩码为主+摘要兜底，论文最优）。arm 经 contextvar 注入，串行评测 set→跑→reset 不污染下一组合，生产代码零侵入。消融 runner 见 `scripts/eval_context/`（`run_ablation` 量化各臂 token 成本/轮数/额外压缩调用）。
+**三级级联执行器**（`core/agentic/context_budget.enforce`，loop 每轮调一次，永远先用最便宜的手段）：L1 清旧 tool 结果（免费，`keep_recent_turns` + `exclude_tools` 白名单保护 ask_user 不可重建输入）-> L2 LLM 摘要续接（L1 后仍超软阈值才触发，`<context_summary>` 前插）-> L3 丢最旧 20% 消息组（仍超硬天花板，保请求发得出去）。未超软阈值时 L1 noop（等价 raw）。取代旧「窗口百分比 + 策略互斥开关」四路分支。
+
+**反应式回合前裁剪**（`plan_turn`）：未超软阈值直接原样返回（零信息损失），超了才裁历史 + 摘要续接（`carry_forward_location="history_prefix"` 时前插 `<session_summary>`，turn_runtime 据此清 system 切片避免双付）。`coordinator_enabled` 开启时由 `turn_runtime.start_turn` 调用（默认关=旧 `resolve_budget` 20% 裁历史）。
+
+**反应式兜底 + 熔断**（`loop._one_round`）：估算失误（tokenizer 差异/多模态/工具结果突增）导致 provider 拒 context-length 时，紧急 L3 丢最旧 20% 后重试；连续失败 `max_consecutive_failures`（默认 3）次熔断，返回错误而非无限重试烧钱。对标 Claude Code Reactive Compact + `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES=3`。
+
+**评测臂**（`context_policy.apply_arm`，contextvar `set_arm` 覆盖，对照 arXiv:2508.21433）：`raw`/`masking`/`summary_only`/`hybrid` 四臂经 contextvar 注入（串行 set->跑->reset 不污染下一组合，生产零侵入）。掩码/摘要改 token 口径（与级联同一 `soft_trigger`）；`cap_tool_result` 单条 6000 字段落边界截断仍在 tool_dispatch 入口即裁（RECOMP arXiv:2310.04408 思路）。消融 runner 见 `scripts/eval_context/`。
 
 **Skill 预算**（`core/skills/skill_service.load_for_context`）：always-on skill 全文合计超 `_ALWAYS_MAX_CHARS` 时从尾部裁低优先级（personal 优先保留），防 skill 清单本身吃掉上下文。
 
@@ -116,6 +118,13 @@ Key files:
 | deep_research | `core/research/pipeline.py` | rephrase → decompose → research (`DynamicTopicQueue` + parallel) → reporting (outline/intro/sections/conclusion + `CitationManager`) |
 
 Each capability externalizes its prompts to `core/<cap>/prompts/zh/*.yaml`, loaded via `load_prompt_dict`.
+
+### 深度研究：前置澄清 + 可恢复暂停（plan: research_clarification_pause_resume）
+
+- **前置澄清**：rephrase 阶段挂 `ask_user`（双重 gate：`settings.research.clarify_enabled` 且 WS 入口注入了 `wait_for_user_reply`），主题模糊时在同 turn 内暂停问学生、回复后续跑；HTTP/IM 无 waiter 不挂（否则 loop 无 waiter 直接结束）。`_REPHRASE_TOOLS` 与 `_RESEARCH_TOOLS` 分开——研究块/报告不问用户（中后期提问收益为负）。waiter 硬超时 `clarify_wait_timeout_s`（默认 120），超时返回 skip payload（`_format_reply`→"User skipped."续跑），不返回 None（None 被 loop 当取消）。
+- **跨 worker 回复**（`services/session/reply_channel.py`）：ask_user 回复走 Redis `BLPOP`/`RPUSH`（`ca:askuser:reply:{turn_id}`），任意 worker 的 `submit_user_reply` 都能投到正在等待的 worker，不再依赖 Nginx `ip_hash`；`memory://`/连不上回退进程内 `asyncio.Queue`（降级范式照 `core/arq_pool.py`）。turn 归属 key `ca:turn:owner:{turn_id}` 供跨 worker IDOR 校验（本地 `_executions` miss 时回落）。
+- **阶段级 checkpoint**（`core/research/checkpoint.py` + 迁移 `022` + `ResearchCheckpoint` 模型）：`pipeline.run()` 每阶段末存 checkpoint（phase + state_json，含 `DynamicTopicQueue.to_dict`）；`resume_research_id` 命中→`_phases_done(phase)` 跳过已完成阶段、被中断阶段整段重放（接受该阶段内部 LLM/检索成本重付一次，与 LangGraph「node 从头重跑」同语义）。`research_id` 随 `stage_start "init"` 提前下发，前端保存供断线重连。
+- **awaiting_user 恢复**：loop 暂停前调 `context.metadata["on_ask_user_pause"]` 回调（pipeline 注入）落 `status=awaiting_user`+卡片；重连时 pipeline 重发同一份卡片、等回复、把回复当 refined_topic。**注意：awaiting_user 判断必须在「phase∈done_phases」之前**——awaiting_user 行的 phase 常已是 rephrase，否则跳过分支先命中、永远不恢复卡片。
 
 ---
 
@@ -214,6 +223,18 @@ The IM Bot (`core/bot/`) **already shares the same Agent engine as the Web API**
 
 ---
 
+## Schema 设计原则
+
+数据库 schema 的完整设计规范（"宪法"）见 **[`SCHEMA_DESIGN_PRINCIPLES.md`](./SCHEMA_DESIGN_PRINCIPLES.md)**——7 条原则 + 27 表体检打分 + P0–P4 收尾路线图。新表/迁移/重构以其为准绳。三条最常踩的核心原则固化如下：
+
+1. **分层归属（一概念一真相源）**：每表归属原始事件 / 派生读模型 / 可变状态 / 引用配置 之一；一个概念只能有一个权威存储（如 KB 构建状态只在 `kb_builds`，不在 KB 行死列）。
+2. **读写分离（CQRS）**：原始层只 INSERT、内容永不 UPDATE；rollup 层 cron 重算（delete-then-reinsert），读路径只读 rollup 不现算。
+3. **多租户就地隔离**：凡课程级可查的行，**写时落盘 `course_id`**，使查询无需 JOIN Session 即可确定租主（`messages`/`notebook_entries`/`bot_notifications` 当前缺此列，见路线图 P1）。
+
+其余四条（FK 故意分裂 / 可变列 OCC 或 append / Expand/Contract 演进 / ID-时间戳约定一致）详见宪法文档。
+
+---
+
 ## Frontend Integration
 
 Frontend (`frontend/`, React 19 + TypeScript + Vite + Tailwind) talks to the backend through two entry points; all four capabilities run on the new pipelines (old WS endpoints retired).
@@ -241,10 +262,53 @@ Frontend (`frontend/`, React 19 + TypeScript + Vite + Tailwind) talks to the bac
 |------|------|---------|
 | CronService ×4 | 定时任务执行 4 次 | Leader 选举，仅 leader 启动 Cron |
 | TutorBotManager ×4 | IM 消息重复处理 | Leader 选举，仅 leader 启动 Bot |
-| MCP Connection ×4 | stdio 子进程 ×4 | Leader 选举，仅 leader 启动 MCP |
+| MCP 工具对非 leader worker 不可见 | 落在非 leader worker 的对话请求看不到任何 MCP 工具（曾错误套用 leader-only 模式，见下方说明） | **不**用 leader 选举：每个 worker 独立 `ensure_started()` + 周期 `reload()`（间隔 `settings.mcp.reload_interval_s`，`main.py` `_mcp_reload_loop`） |
 | TurnRuntime KeyError | SSE 断线重连路由到不同 worker → `_executions` 找不到 | Nginx `ip_hash` 粘性会话 |
 | Circuit Breaker 语义减弱 | 每个进程独立 failure_threshold → 总阈值放大 N 倍 | 参数缩放：`failure_threshold // workers`（最小 2） |
 | LightRAG LRU 缓存 | 4 份缓存，内存占用 ×4 | 容量缩放：`capacity // workers` |
+
+### MCP 为什么不用 leader 选举
+
+Cron/Bot 的副作用发生在 DB/外部渠道，"谁执行都一样"，其他 worker 不需要感知，适合 leader-only。
+MCP 连接不同：它的 adapter 要被**每个 worker 各自处理的对话请求**用到，性质更接近 DB 连接池（每
+个 worker 都要有一份能用的连接）。若套用 leader-only（早期版本如此），单容器 `gunicorn -w N` 下只
+有 leader worker 建立了连接，其余 worker 的 `get_mcp_manager()` 是空的——落在它们身上的请求会
+静默看不到任何 MCP 工具（`dynamic_tools.resolve()` 的 `pool` 为空，不报错，只是清单里没有）。且
+nginx 侧只有单个 `server backend:8002`（见 `frontend/nginx.conf`），`ip_hash` 在只有一个上游节点
+时不影响 gunicorn 内部 4 个 worker 间的请求分配，无法保证请求总落到 leader 上。
+
+现改为：每个 worker 在 `lifespan()` 里各自 `ensure_started()`（`main.py`），并起一个周期
+`_mcp_reload_loop` 调 `manager.reload()`——因为 admin 保存/删除 MCP server 配置（`POST`/`DELETE
+/api/mcp/servers/{name}`）只会在受理该请求的那个 worker 里触发一次 `reload()`，其余 worker 靠这
+个轮询跟上配置变化（`reload()` 内部按 `connection_signature()` 比对，未变化的 server 不重连，轮
+询开销可忽略）。轮询间隔配置化 `settings.mcp.reload_interval_s`（默认 30s，`.env` `MCP__RELOAD_INTERVAL_S`）；
+项目无 Redis pub/sub 基建，「改配置」低频，最终一致即可，不建跨进程消息通道。stdio N 份子进程的代价
+已由下方 gateway sidecar 消除。
+
+### MCP gateway sidecar（`mcp-gateway/` + `docker-compose.yml`）
+
+`_mcp_reload_loop` 解决了「非受理 worker 感知配置变化」，但 stdio server 仍有「每 worker 各起一份
+子进程 = 4N 份常驻」的内存代价。引入独立 `mcp-gateway` 容器收敛：容器内一份 `mcp-proxy`（sparfenyuk
+版，transport 桥）把多个 stdio server 暴露成命名 SSE 端点（`/servers/{name}/sse`），backend 的 4 个
+worker 全改以 HTTP 客户端接入这一个 gateway，stdio 子进程全网只剩 gateway 内那一份（4→1，省内存）：
+
+```
+backend（4 worker）──SSE──> mcp-gateway（1 份 mcp-proxy）
+                                  ├─ modelscope-mcp-server（本地，替代不可靠的云端 SSE 接口）
+                                  └─ mcp-server-fetch（替代每 worker 一份的 uvx 子进程）
+deepwiki 直连官方 https://mcp.deepwiki.com/mcp（streamableHttp，免认证无子进程），不走 gateway
+```
+
+- **构建期预装、运行时零网络**：gateway Dockerfile 用 `uv tool install` 把 server 版本钉死装进独立
+  venv，运行时直接 exec 已装入口，不再 `uvx` 运行时拉包；版本变更走一次 build → 可复现/可回滚/可审计
+  （对冲 `@latest` 的 installer spoofing）。`UV_OFFLINE=1` 兜底，意外拉包快速失败而非卡超时。
+- **mcp 版本隔离**：`modelscope-mcp-server`（mcp 2.x）与 `mcp-server-fetch`（mcp<2）各自独立 tool venv，
+  互不冲突；`--pass-environment` 把 `MODELSCOPE_API_TOKEN` 透传给子进程。
+- **transport 选 SSE**：sparfenyuk/mcp-proxy 服务端只暴露 SSE，manager 的 `sse_client` 成熟且有测试；
+  backend 每个 server 配 `type=sse` + `url=http://mcp-gateway:8096/servers/{name}/sse`。
+- **资源隔离**：gateway 独立容器、不挂 `/app` 业务卷、`mem_limit: 1g`，第三方代码读不到业务数据。
+- **lazy 解耦**：backend 不 `depends_on` gateway——MCP 懒连接（首 turn），gateway 未就绪只令该 server
+  标 `error`，不阻塞 backend 启动。
 
 ### Leader 选举（`core/leader.py`）
 
@@ -337,7 +401,7 @@ LANGSMITH_API_KEY=lsv2_pt_...
 LANGSMITH_PROJECT=course-agent-dev
 ```
 
-### 成本核算与业务指标（Prometheus）
+### 成本核算与业务指标（Prometheus + 账单落库）
 
 业务级指标定义在 `core/observability/metrics.py`（`ca_` 前缀），LLM 成本核算在 `core/observability/cost.py`。两类 LLM 成本指标命名对齐 OTel GenAI 语义约定：
 
@@ -355,6 +419,8 @@ LANGSMITH_PROJECT=course-agent-dev
 **成本配额（软降级，第四批）**：`core/quota/cost_quota.py` 按 **user × course × 自然日** 在 Redis 计数（键 `ca:costquota:{user}:{course}:{YYYYMMDD}`，TTL 2 天自清理）。`loop.py` 在 `estimate_cost` 后 `accrue_cost` 累加；`chat_pipeline` 解析 runtime 后 `check_quota`，超 `settings.cost_quota.daily_budget_usd` 时把模型从 `text_model` 降到便宜档 `fast_model`（`dataclasses.replace`，**只降级不拒绝**——避免「上一轮刚好超限→下一轮被锁死」）。默认 `enabled=False`（行为零变化）；Redis 不可用时 check 放行、accrue 静默跳过，绝不阻塞业务。软滞后：成本 loop 结束后才累加，故「推过预算的那一轮」本身不降级，下一轮才降级（软限流固有特性，非 bug）。
 
 **stream_options 安全降级**：不支持的 OpenAI 兼容端点会对 `stream_options` 报 400 而非静默忽略。`llm._create_with_image_fallback` 内捕获该错误后剥掉 `stream_options` 重试一次（与 Stage-2 剥图降级同套路，发生在 create 层、reliability 之前，丢本轮 usage 但保 turn 不挂）。
+
+**用量持久化（账单级，落库）**：Prometheus Counter 无法按 `user_id` 展开（label 基数爆炸，Prometheus 硬约束），Redis 配额键只留 2 天，故「按人/按课查账」另落 PG。`core/analytics/token_usage.py` 两级存储：`llm_usage_records`（明细，每 `run_agent_loop` 一行，无 FK 抗级联删，带 `mode`/`rounds` 供 cost-of-pass 分析，`cost_usd` 摄取时按价目表快照落库——日后改价不篡改历史账）+ `llm_usage_daily`（日聚合读模型）。`loop.py` 在 `observe_cost`/`accrue_cost` 旁 `record_llm_usage`（`usage_tracking.enabled` 默认 True，best-effort 不阻塞）；ARQ `cron_rollup_usage` 每小时 :11 删今日+昨日聚合行后重插（幂等）+ 清过期明细（`detail_retention_days`，日汇总永久保留）。查询 `GET /admin/usage/summary`（全量，group_by day|user|course|model）与 `GET /teacher/courses/{id}/analytics/usage`（`_get_owned_kb` 归属隔离，group_by day|user|model）只读 daily 表。`done` 事件 `metadata.usage` 透出本轮 token（学生端气泡底部小字；美元成本仅 `expose_cost_to_student` 开启时带）。
 
 ---
 
@@ -388,10 +454,10 @@ Management API (`api/llm.py`, admin): CRUD profiles + `/probe` test connection +
 - `fact`（默认）→ `retrieve_context(mode="naive")` 纯向量精确匹配；ES 启用时 `retrieve_context` 内部自动走 hybrid。
 - `relationship` → `graph_augmented_retrieve`：local 图谱邻域（实体中心 1-hop 扩展，解释多跳关系）+ naive 向量事实证据，去重拼接。比 mix 更聚焦（去掉 global 全局摘要噪声）。
 
-**相关性三道防线（`lightrag.py` + `tool_registry._execute_rag`）**：检索召回后串三道闸防「无命中被当成证据」：
-1. **无命中哨兵拦截**：LightRAG naive_query 无 chunk 时返回 None → `aquery_llm` 用 `fail_response` 兜底，产出 `"Sorry, I'm not able to provide an answer to that question.[no-context]"` 非空字符串。`_extract_contexts` 在**单一 chokepoint** 匹配 `[no-context]` 标记拦截（覆盖 retrieve/retrieve_context/_retrieve_hybrid/dense_search/graph_augmented_retrieve/query 全部 6 条路径），命中返回 `[]`——否则会被包成 `[证据1]` 喂给 Agent + 带 sources 弹来源卡片。
-2. **相关性阈值过滤**：`settings.lightrag.min_rerank_score`（默认 0.0=不过滤=行为不变）经 `instance_pool` 签名注入 LightRAG 原生 `min_rerank_score`（1.5.4+），低于阈值的 chunk 在 rerank 后被丢弃。仅在 `enable_rerank=True` 且 `rerank_model_func` 已挂载（需 `EMBEDDING__API_KEY`）时生效；缺 key 静默失效，但哨兵修复不受影响。口径是 gte-rerank-v2 的 `relevance_score`，不可照搬裸余弦 0.5。
-3. **工具层无命中信号**：`_execute_rag` 空 content（含被哨兵拦截的）返回 `success=False` + 中文无命中提示且**不带 sources**，让 Agent 转而说明「课程资料未覆盖」而非用通用知识硬答。`rag.yaml` 的 note 同步该语义。
+**相关性三道防线（`lightrag.py` + `hybrid_retriever.py` + `tool_registry._execute_rag`）**：检索召回后串三道闸防「无命中被当成证据」。第 1、2 层各后端各自实现且**默认不常开**（第 1 层按后端命中形态不同、第 2 层需精排开启），**只有第 3 层两后端共享且常开**：
+1. **无命中判定（各后端各自实现）**：LightRAG naive_query 无 chunk 时返回 None -> `aquery_llm` 用 `fail_response` 兜底，产出 `"Sorry, I'm not able to provide an answer to that question.[no-context]"` 非空字符串，`_extract_contexts` 在**单一 chokepoint** 匹配 `[no-context]` 标记拦截（覆盖 retrieve/retrieve_context/_retrieve_hybrid/dense_search/graph_augmented_retrieve/query 全部 6 条路径）命中返回 `[]`。pgvector 路无此病--无命中即空 list，`retrieve_context` 直接 `return ""`，不需哨兵。
+2. **相关性阈值过滤（两后端同口径，默认关）**：低于阈值的 chunk 在 rerank 后被丢弃。LightRAG 走原生 `settings.lightrag.min_rerank_score`（经 `instance_pool` 签名注入）；pgvector 走 `settings.rerank.min_score` -> `llamaindex_pg._fuse` 经 `replace(...)` 注入 `RetrievalConfig.min_rerank_score` -> `hybrid_retriever.retrieve` 精排成功后过滤。**两后端同为 qwen3-rerank 的 `relevance_score`，同一数值可共用**。默认 0.0=不过滤=行为不变；仅在精排开启（LightRAG `enable_rerank=True` / pg `RERANK__ENABLED=true`）且拿到 `rerank_score` 时生效。阈值放在 `hybrid_retriever` 的 `try` 内 `fused=reranked` 之后：精排 API 失败降级回融合结果时无 `rerank_score`，阈值不生效（不把一次 API 抖动变成全课程拒答）；未被精排打分的 leftover/tail 一并丢弃（与 LlamaIndex `SimilarityPostprocessor` 丢 `score=None` 同语义）。**不可照搬裸余弦/RRF 分数的 0.5**--cross-encoder 分数跨 query 不可比，阈值须在本课程含负样本的留出集上标定（见 plan 的 risk-coverage 调研）。
+3. **工具层无命中信号（两后端共享，唯一常开）**：`_execute_rag` 空 content（含被哨兵拦截的、或被阈值全滤掉的）返回 `success=False` + 中文无命中提示且**不带 sources**，让 Agent 转而说明「课程资料未覆盖」而非用通用知识硬答。`rag.yaml` 的 note 同步该语义。阈值把结果全滤掉时 -> `results` 为空 -> `retrieve_context` 返回 `""` -> 本层自动拒答，第 2、3 层天然串起，无需新增管道。
 
 
 
@@ -412,23 +478,24 @@ Management API (`api/llm.py`, admin): CRUD profiles + `/probe` test connection +
 
 **启用 ES**：`.env` 设 `ELASTICSEARCH__ENABLED=true` + `ELASTICSEARCH__URL`（docker 网络用服务名 `http://elasticsearch:9200`），装 ik 插件（见 `docker-compose.yml` 注释）。
 
-**索引后端（per-KB，`core/rag/registry.py` + `KnowledgeBase.index_backend`）**：一门课可**同时构建 LightRAG 与 pgvector 两套索引**（双索引，状态存 `kb_builds` 子表），问答时按用户 `rag_mode` + Agent `strategy` 自动路由；也兼容只建一个后端的老课程（迁移自动回填一条 `kb_builds`，行为等价旧单后端）：
+**索引后端（per-KB，`core/rag/registry.py` + `KnowledgeBase.index_backend`）**：一门课可**同时构建 LightRAG 与 pgvector 两套索引**（双索引，状态存 `kb_builds` 子表），问答时按 `rag_mode` 路由（`tool_registry._execute_rag`）：`llamaindex_pg`/`mix`/`naive`/`local`/`global` 显式指定（`llamaindex_pg` 强制走 pg 向量，后三者走 LightRAG 原生模式），`auto`（默认）按 Agent `strategy` 自动选（relationship→图谱、fact→pg 向量）；也兼容只建一个后端的老课程（迁移自动回填一条 `kb_builds`，行为等价旧单后端）：
 - `lightrag`（默认）：知识图谱，逐 chunk LLM 实体/关系抽取（慢，数千 chunk 即数小时），但支持多跳关系推理（relationship 路径走 `graph_augmented_retrieve` 图邻域扩展）。
   - 存储后端（`instance_pool._get_instance`）：Postgres 部署把 KV/Vector/DocStatus 三类存储从进程内存搬到 Postgres（`PGKVStorage`/`PGVectorStorage`/`PGDocStatusStorage`，按 `workspace=course_{id}` 列隔离，LIGHTRAG_* 表 `IF NOT EXISTS` 幂等建），把每门课常驻 RSS 从数百 MB 降到数十 MB；图谱显式保留 `NetworkXStorage`（文件 graphml，体积小；不上 AGE/Neo4j，前者建图实测 434s 灾难、后者超 4GB 内存预算）。SQLite 部署（本地/测试）保持默认内存后端——由 `_ensure_lightrag_pg_env()` 把 `settings.db.url` 桥接成 LightRAG 认的 `POSTGRES_*` env（`MAX_CONNECTIONS=5`/进程；绝不设 `POSTGRES_WORKSPACE`，否则覆盖 per-course workspace 致多租户混串）。`purge_course_workspace` 重索引前对 11 个 PG storage 调 `drop()`（`DELETE WHERE workspace=$1`，不 DROP 共享表）+ rmtree graphml。
-- `llamaindex_pg`（pgvector 快速向量）：给"量大、只需事实检索、受不了几小时索引"的课。复用 `ingestion.parse_files` 切好的 chunks → embedding 批调用 → 存 Postgres（`PGVectorStore` + HNSW + tsvector），分钟级建索引，进程不常驻（治旧 `SimpleVectorStore` 落 JSON 的三病：暴力扫描无 ANN、每 worker 常驻一份、索引文件与 PG 分家）。
-  - 检索绕开 PGVectorStore 无融合的 hybrid 模式（它只去重合并、无 RRF、alpha 被忽略，见 run-llama/llama_index Discussion #19606）：dense（DEFAULT 走 HNSW）+ sparse（SPARSE 走 tsvector 全文）各查一次 → 交 `hybrid_retriever` 做 RRF 融合。两路查同一张表 `data_kb_chunks`，chunk_id（node_id）天然一致，无需像 LightRAG+ES 双写对齐。
-  - 存储层 `core/rag/llamaindex/pg_store.py`：PGVectorStore 单例 + 官方 `OpenAIEmbedding` 接 `settings.embedding`（DashScope text-embedding-v3）；`perform_setup=True` 自动建表+HNSW（幂等），`course_id` 用 metadata filter 隔离（`indexed_metadata_keys` 建索引避免全表扫）。
-  - 构建分流（per-backend，写 `kb_builds` 行）：`trigger_kb_indexing(db,kb,course_id,backend)` → ARQ `run_indexing(...,backend)`，分布式锁 key 含 backend（`{course_id}:{backend}`）→ 两后端可并行构建不互斥；`_run_indexing`（lightrag）与 `_run_indexing_llamaindex_pg` 各写自己的 `kb_builds` 终态（KB 行旧 status/progress 列保留但不再被写，改由 `_kb_to_dict`/`_kb_to_course` 从 `kb_builds` 聚合派生，`lazy="selectin"` 自动连表）。建库/索引 API（admin/teacher `index`/`pause`/`stop`）接受 `backend` 参数。
+- `llamaindex_pg`（pgvector 快速向量）：给"量大、只需事实检索、受不了几小时索引"的课。复用 `ingestion.parse_files` 切好的 chunks → embedding 批调用 → 存 Postgres（`PGVectorStore` + HNSW + tsvector），分钟级建索引，进程不常驻（治旧 `SimpleVectorStore` 落 JSON 的三病：暴力扫描无 ANN、每 worker 常驻一份、索引文件与 PG 分家）。摄入时 `persist_ingest_chunks(backend="llamaindex_pg")` 会落一份 `data/ingest_chunks/course_{id}/latest.json`——这是**审计副本**（含全量 chunks + `node_ids`，供排查时 join 回 `data_kb_chunks` 主键行），与检索无关：向量仍只在 PG，不是回退到旧 JSON 索引；与 LightRAG 侧 `lightrag_store/.../ingest_chunks/` 共用同一 writer，便于对照两后端吃到的 chunk 是否一致。
+  - 检索绕开 PGVectorStore 无融合的 hybrid 模式（它只去重合并、无 RRF、alpha 被忽略，见 run-llama/llama_index Discussion #19606）：dense（DEFAULT 走 HNSW）+ sparse（PG tsvector 全文，zhparser 按词切分）各查一次 → 交 `hybrid_retriever` 做 RRF 融合。两路查同一张表 `data_kb_chunks`，chunk_id（node_id）天然一致，无需像 LightRAG+ES 双写对齐。
+  - 精排（可选，默认关）：`_fuse` 经 `core/rag/rerank.py::build_rerank_fn` 注入 DashScope qwen3-rerank（`RERANK__ENABLED`，凭证复用 `EMBEDDING__API_KEY`），对 RRF 融合结果做候选池截断（`candidate_top_n=20`）→ Cross-Encoder 精排（`rerank_top_n` 跟随调用方 `top_k`）。无 key / 关闭时返回 None、行为同无精排；失败由 hybrid_retriever 降级回 RRF 排序。召回档 `bm25_top_k/dense_top_k=20`（融合后≤40）是按精排 token 成本定的（见 plan 调研），可调。
+  - 存储层 `core/rag/llamaindex/pg_store.py`：PGVectorStore 单例 + 官方 `OpenAIEmbedding` 接 `settings.embedding`（DashScope text-embedding-v3）；`perform_setup=True` 自动建表+HNSW（幂等），`course_id` 用 metadata filter 隔离（`indexed_metadata_keys` 建索引避免全表扫）。`text_search_config='chinese'`（zhparser 中文分词；`simple` 不分词会让整句压成一个 token、sparse 路 0 召回）。sparse 查询侧 `_PgSparseStore.bm25_search` **绕开库的 SPARSE 模式**（llama-index `base.py:956` 用 `to_tsquery` 且其预处理 `re.sub(r'\W+',' ',q)` 对中文不分词，整串一个 token），改直接 SQL：`unnest(to_tsvector('chinese',q))` 取 lexeme 用 `|` 连成 OR tsquery -> `ts_rank` 排序，与文档侧 `text_search_tsv` 同源分词、token 对齐。zhparser 默认 `dict_in_memory=off`，词典走 mmap 共享 OS page cache，per-connection 内存趋近 0（适配 4GB 部署）。
+  - 构建分流（per-backend，写 `kb_builds` 行）：`trigger_kb_indexing(db,kb,course_id,backend)` → ARQ `run_indexing(...,backend)`，分布式锁 key 含 backend（`{course_id}:{backend}`）→ 两后端可并行构建不互斥；`_run_indexing`（lightrag）与 `_run_indexing_llamaindex_pg` 各写自己的 `kb_builds` 终态（KB 行旧 status/progress 列保留但不再被写，改由 `_kb_to_dict`/`_kb_to_course` 从 `kb_builds` 聚合派生，`lazy="selectin"` 自动连表）。就绪判定三处同口径：`status=='ready'` 且 `chunks_total>0`（`aggregate_build_status` 徽章 / `ready_backends` 按钮启用 / `_get_ready_backends` 检索路由）；0-chunk（解析全失败/空文档）的 build 终态判 `error` 并把解析失败原因（透传自 `parse_files` 的 `parse_errors`）写进 `error_msg`，杜绝空索引被误判就绪、徽章绿而按钮禁用。建库/索引 API（admin/teacher `index`/`pause`/`stop`）接受 `backend` 参数。
   - 检索路由（`tool_registry._execute_rag`，修了 `mode="naive"` 硬编码 bug——前端 `rag_mode` 经 `tool_dispatch` 注入的 `mode` 此前被吃掉从未生效）：`mode`=用户每请求选（`auto` 默认 / `mix`/`naive`/`local` 手动）；`strategy`=LLM 按 `rag.yaml` 自选（`fact`/`relationship`），两者正交。手动模式直接透传 lightrag `retrieve_context(mode=)`；`auto`：`relationship` + lightrag 就绪 → `graph_augmented_retrieve`（多跳），否则优先 pg 向量，再退 lightrag naive。`_get_ready_backends(course_id)` 查 `kb_builds` 就绪集合驱动路由。
-  - 迁移：`016_kb_index_backend` 加 `index_backend` 列（存量回填 `lightrag`）；`018_kb_builds` 加 `kb_builds` 子表（`UNIQUE(kb_id,backend)`，从存量 KB 行回填一条）。向量表 schema 由 PGVectorStore 自动维护（不手写 migration 对齐其内部结构，避免版本耦合）。
+  - 迁移：`016_kb_index_backend` 加 `index_backend` 列（存量回填 `lightrag`）；`018_kb_builds` 加 `kb_builds` 子表（`UNIQUE(kb_id,backend)`，从存量 KB 行回填一条）。向量表 schema 由 PGVectorStore 自动维护（不手写 migration 对齐其内部结构，避免版本耦合）；`030_zhparser_chinese_fts` 是例外--重建 `text_search_tsv` 列的 generated 表达式从 `to_tsvector('simple',text)` 改 `to_tsvector('chinese',text)`（装 zhparser 扩展，见 `postgres/Dockerfile`）。
 
-**解析层（第二期，`core/rag/parsing/`，opt-in）**：文档解析独立成层，默认引擎 MinerU 托管 API（替代 worker 内 Docling，去 torch，稳态内存 ~2.5GB→~0.4GB——省下的给 LightRAG）。借鉴 DeepTutor `services/parsing/`：ParsedDocument IR（markdown+blocks）+ 内容寻址缓存（键=字节 sha256+parser_signature，`manifest.json` 最后写=ready）+ Parser Protocol + Service 调度（格式不支持直接报错不换引擎，单引擎哲学）。`engines/mineru_api.py` 同步 httpx 四步（POST file-urls/batch→PUT 上传→轮询 extract-results→下载 zip 解包，业务码双层检查+zip Slip/bomb 防护）。**opt-in**：`settings.parsing.engine` 空=走原 file_routing（docling/mupdf，行为零变化），配 `mineru_api`=换托管 API。docling 移到 `[parse-docling]` extra（云端默认不装 torch）。`KBFile.parser_engine` 列（事后归因）。
+**解析层（第二期，`core/rag/parsing/`，opt-in）**：文档解析独立成层，默认引擎 MinerU 托管 API（替代 worker 内 Docling，去 torch，稳态内存 ~2.5GB→~0.4GB——省下的给 LightRAG）。借鉴 DeepTutor `services/parsing/`：ParsedDocument IR（markdown+blocks）+ 内容寻址缓存（键=字节 sha256+parser_signature，`manifest.json` 最后写=ready）+ Parser Protocol + Service 调度（格式不支持直接报错不换引擎，单引擎哲学）。`engines/mineru_api.py` 同步 httpx 四步（POST file-urls/batch→PUT 上传→轮询 extract-results→下载 zip 解包，业务码双层检查+zip Slip/bomb 防护）。**大 PDF 分片**：页数超 `settings.parsing.max_file_pages`（默认 200）时引擎内部自动分片——fitz 按页等切子 PDF（不重叠）→ 逐片顺序走四步 → 按页序合并 markdown / content_list（各 block 的 `page_idx` 加该片起始偏移还原全局页码）/ images（按内容哈希命名跨片幂等覆盖）→ 清临时目录；上游缓存键=原文件字节 hash、service/ingestion 只见一个完整 ParsedDocument，分片是引擎内部实现细节。加密/损坏读不出页数则整文件直递（让 MinerU 自己拒）。**opt-in**：`settings.parsing.engine` 空=走原 file_routing（docling/mupdf，行为零变化），配 `mineru_api`=换托管 API。docling 移到 `[parse-docling]` extra（云端默认不装 torch）。`KBFile.parser_engine` 列（事后归因）。
 
-**type_routed 分块（第三期，opt-in）**：`chunking/type_routed.py` 按 MinerU `content_list` 块结构分块（title 开新 section、table 原子化、超 ingest_size 递归切），比 sentence_splitter 盲切保留语义边界。`blocks_to_sections`（parsing/types.py）与 `to_sections`/type_routed 共用。`register_chunk_strategy("type_routed")`。**opt-in**：默认仍 `sentence_splitter`（行为零变化）——plan 明确 chunk_size 改默认（1200→512）必须 eval_rag 验证不直接上线。
+**markdown 分节（MinerU PDF 主路径，`parsing/markdown_sections.py`）**：MinerU 摄入走 DeepTutor 式 markdown 路线——`indexing_documents` 的 `_parsing_engine` 分支不再调 `ParsedDocument.to_sections()`（= `blocks_to_sections`），改调 `markdown_to_sections(parsed.markdown)`：`full.md` → LlamaIndex `MarkdownNodeParser`（按标题分节，大小仍交下游 `SentenceSplitter`，不在解析层预写 chunk）+ `resolve_image_refs`（图片 `![](images/…)` inline 成文本，默认删 marker 留 `Figure/图` 图注，无图注才 fallback VLM，pgvector 无多模态 embedding 故必须 inline）。`settings.parsing.image_vlm_always`（默认关）开启后有图注的图也调 VLM，在 marker 位置插 `[图: 描述]`、图注保留——让「图 1-1 股权架构图」这类纯标题图里的结构/数字可被向量召回；先 `_prefetch_descriptions` 按 sha256(bytes) 去重 + `gather`+`Semaphore(image_ingest.semaphore)` 并发预取（181 张图不再串行 10 分钟），desc_cache 持久化、重复索引不重花。**根因**：MinerU 标题块是 `type=text`+`text_level`（非 `type=title`），`blocks_to_sections` 分不出节、整篇 PDF 拼成单 section；markdown 路线直接吃 `full.md` 的 `#`/`##` 层级才是正确分节（实测 MinerU `full.md` 已干净，0 条 header/footnote 混入）。**注意**：`MarkdownNodeParser.header_path` 元数据只含祖先标题，叶子标题是节点内容首行 `#`——`title` 与参考文献过滤都从内容首行取叶子。`title` 取叶子标题（与 DOCX/PPTX/docling 各 extractor 一致）。`blocks_to_sections`/`to_sections` **保留**（解析层通用 blocks→sections IR，有独立单测覆盖；生产 mineru 路径已不走它）。`settings.parsing.drop_references`（默认开）过滤 References/参考文献/Bibliography 章节（省 embedding + 减检索噪声）；`load_ir` 显式排除 `*_content_list_v2.json`（v2 是 `list[list[dict]]`，误选形状错）。`settings.pdf.backend` 默认改 `mupdf`（PyMuPDF 核心依赖，开箱即用；docling 降为 opt-in）。
 
 **第四期收尾**：
 - `GET /admin/rag/engines`：索引后端（lightrag/llamaindex_pg）+ 解析引擎（mineru_api/docling）能力探测（托管看 api_key、自托管看 find_spec），给前端建库选择用。前端建库表单（TeacherPage/AdminPage CreateKBModal）加 index_backend select。
-- **drop-es**：docker-compose 移除 elasticsearch 服务（省 512MB JVM）。混合检索的 sparse 路改用 PG tsvector（llamaindex_pg 的 SPARSE 模式；LightRAG 的 ES 混合 opt-in 默认关，`get_es_store` 连不上自动降级纯 dense）。
+- **drop-es**：docker-compose 移除 elasticsearch 服务（省 512MB JVM）。混合检索的 sparse 路改用 PG tsvector + zhparser 中文分词（llamaindex_pg 绕开库 SPARSE 自写 OR tsquery；LightRAG 的 ES 混合 opt-in 默认关，`get_es_store` 连不上自动降级纯 dense）。
 
 ## RAG 评估系统（`scripts/eval_rag/`）
 
@@ -467,6 +534,7 @@ CAPABILITY_COMPLETE ──► INSERT memory_episodes ──► consolidate_memor
   超阈值→enqueue job       里程碑/cron兜底         mastery→procedural
 ```
 
+- **L2 会话摘要**（`session_summary.py`，存 `sessions.summary` 单列 JSON）：v2 格式 `{"v":2,"items":[{k,key,t,ts,n}]}`，7 类 kind（topic/fact/decision/open_question/next_step/intent/misconception）。LLM 只抽【新增】并输出 slot key + resolved，代码用 `max(ts)` 做单值槽（fact/next_step）冲突裁决 + salience（`kind_weight×exp(-Δt/half_life)×(1+ln n)`，token 预算+每类上限）淘汰--替旧「精确去重 + `combined[-5:]` 硬截断」，治 P0 矛盾条目并存与「丢最旧而非最没用」。`ts` 代码盖章（增量末条消息 created_at），不让 LLM 出时间戳（arXiv:2606.01435）。v1 五键 dict 自动升级、旧自由文本透传。锁/OCC/keyset 增量逻辑不变。注入点 `chat.py`(SSE)+`run.py`(WS) 经 `get_summary` 渲染。评测 `scripts/eval_l2_summary/`（knowledge_update 基线 0% -> 新管线 100%）。
 - **episodic**（`memory_episodes` 表，alembic 020）：原始 turn，永不删除，兼巩固 outbox。`(session_id,turn_id)` 唯一幂等；status pending/processing/done/dead。`record_episode`（`episodic.py`）在 EventBus `_on_capability_complete` 里写，importance 用零 LLM 启发式（长度/疑问/纠错/工具/模式）。
 - **semantic**（mem0）：事实条目，由巩固 job 从 segment 升格（`mem0.add`，ADD-only 不覆盖——教育场景「上周不会这周会了」是状态演进不是冲突）。
 - **mastery**（`knowledge_mastery` 表，alembic 021）：知识点掌握度，**带 course_id**（修 `users.knowledge_graph` 跨课程污染）。`append_mastery`（`mastery.py`）追加观测不覆盖（blend mastery/risk + count++ + evidence_episode_ids）；读时 `get_mastery_context` 按 `last_observed_at` 做 `exp(-λ·age)` 软衰减（半衰期 ~69 天，不物理删除——反复性错误证据留存）。

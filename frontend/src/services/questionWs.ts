@@ -20,6 +20,8 @@ export interface QuestionGeneratePayload {
   }
   language?: string
   attachments?: AttachmentInfo[]
+  /** 显式启用的工具。出题默认 ['rag']：始终基于该课程知识库检索，避免模型凭空发挥 */
+  tools?: string[]
 }
 
 export interface QuestionFollowupPayload {
@@ -54,12 +56,6 @@ function withToken(url: string): string {
 // Deep Research
 // ============================================================
 
-/** 与 backend/core/research/request_config.py ResearchMode 一致 */
-export type DeepResearchMode = 'notes' | 'report' | 'comparison' | 'learning_path'
-
-/** 与 backend ResearchDepth 一致 */
-export type DeepResearchDepth = 'quick' | 'standard' | 'deep' | 'manual'
-
 /** 与 backend ResearchSource 一致 */
 export type DeepResearchSource = 'kb' | 'web' | 'papers'
 
@@ -68,8 +64,6 @@ export interface DeepResearchPayload {
   course_id: string
   question: string
   metadata?: {
-    mode?: DeepResearchMode
-    depth?: DeepResearchDepth
     sources?: DeepResearchSource[]
   }
   language?: string

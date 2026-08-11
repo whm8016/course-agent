@@ -2,7 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { ArrowLeft, Network } from 'lucide-react'
 import { fetchDashboard, type DashboardData } from '../../services/api'
 import { getUser } from '../../services/auth'
-import { Button } from '../ui'
+import { Button, Skeleton } from '../ui'
 
 // stale-while-revalidate：sessionStorage 缓存上次仪表盘数据，挂载先渲染旧值再后台刷新，
 // 感知延迟接近零（止血方案，学情分析四模块设计 §模块四 P1）。按用户 id 命名空间，
@@ -32,8 +32,9 @@ function writeDashboardCache(data: DashboardData): void {
 
 export default function DashboardPanel({ onBack, onGraph }: { onBack: () => void; onGraph: () => void }) {
   // 挂载即尝试用缓存渲染（避免空白闪烁）；无缓存才显示 skeleton
-  const [data, setData] = useState<DashboardData | null>(() => readDashboardCache())
-  const [loading, setLoading] = useState(() => readDashboardCache() === null)
+  const initial = readDashboardCache()
+  const [data, setData] = useState<DashboardData | null>(initial)
+  const [loading, setLoading] = useState(initial === null)
   const [refreshing, setRefreshing] = useState(false)
 
   const load = useCallback(async () => {
@@ -176,10 +177,6 @@ function RiskBar({ value }: { value: number }) {
   )
 }
 
-function SkeletonBlock({ className }: { className: string }) {
-  return <div className={`animate-pulse rounded bg-surface-2 ${className}`} />
-}
-
 /** 仪表盘骨架屏：镜像真实布局（4 统计卡 + 两段内容），消除全屏空白。 */
 function DashboardSkeleton({ onBack, onGraph }: { onBack: () => void; onGraph: () => void }) {
   return (
@@ -201,15 +198,15 @@ function DashboardSkeleton({ onBack, onGraph }: { onBack: () => void; onGraph: (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             {[0, 1, 2, 3].map((i) => (
               <div key={i} className="rounded-[var(--radius)] border border-line bg-surface p-4">
-                <SkeletonBlock className="h-7 w-10" />
-                <SkeletonBlock className="h-3 w-14 mt-2" />
+                <Skeleton className="h-7 w-10" />
+                <Skeleton className="h-3 w-14 mt-2" />
               </div>
             ))}
           </div>
           {[0, 1].map((s) => (
             <div key={s} className="bg-surface rounded-[var(--radius)] border border-line p-5 space-y-3">
               {[0, 1].map((i) => (
-                <SkeletonBlock key={i} className="h-5 w-3/4" />
+                <Skeleton key={i} className="h-5 w-3/4" />
               ))}
             </div>
           ))}

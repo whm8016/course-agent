@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 940" width="1600" height="940" font-family="'Microsoft YaHei','PingFang SC','Noto Sans SC',sans-serif">
+  <defs>
+    <marker id="arrowEnd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2c3e50"/>
+    </marker>
+    <marker id="arrowStart" viewBox="0 0 10 10" refX="2" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2c3e50"/>
+    </marker>
+    <linearGradient id="kernelGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#eaf1ff"/>
+      <stop offset="1" stop-color="#dbe8fb"/>
+    </linearGradient>
+    <symbol id="personIcon" viewBox="0 0 24 24">
+      <circle cx="12" cy="7.5" r="4.3"/>
+      <path d="M3 21c0-4.6 4-8 9-8s9 3.4 9 8"/>
+    </symbol>
+    <symbol id="loopIcon" viewBox="0 0 24 24">
+      <path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/>
+    </symbol>
+    <symbol id="capIcon" viewBox="0 0 24 24">
+      <path d="M12 3L1 9l4 2.18v6L12 21l7-3.82v-6l2-1.09V17h2V9L12 3zm6.82 6L12 12.72 5.18 9 12 5.28 18.82 9zM17 15.99l-5 2.73-5-2.73v-3.72L12 15l5-2.73v3.72z"/>
+    </symbol>
+    <style>
+      .title{font-size:27px;font-weight:700;fill:#152442;text-anchor:middle;}
+      .subtitle{font-size:14px;fill:#5a6b8c;text-anchor:middle;}
+      .colTitle{font-weight:700;font-size:16px;}
+      .colSub{font-size:11.5px;}
+      .boxTitle{font-size:13px;font-weight:600;text-anchor:middle;}
+      .boxSub{font-size:10.5px;text-anchor:middle;}
+      .lineLbl{font-size:12px;fill:#43587e;}
+      .edge{fill:none;stroke:#2c3e50;stroke-width:1.6;}
+      .edgeSoft{fill:none;stroke:#8a94a6;stroke-width:1.3;stroke-dasharray:4,3;}
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="940" fill="#fbfbfd"/>
+
+  <text x="800" y="30" class="title">课程助手智能体系统 —— 总体架构</text>
+  <text x="800" y="52" class="subtitle">《电路分析基础实验》课程部署案例</text>
+
+  <!-- ===== Actors row ===== -->
+  <g>
+    <rect x="50" y="72" width="260" height="96" rx="14" fill="#eef3fc" stroke="#2c3e50" stroke-width="1.4"/>
+    <use href="#personIcon" x="70" y="98" width="42" height="42" fill="#2c3e50"/>
+    <text x="128" y="108" font-size="17" font-weight="700" fill="#152442">教师</text>
+    <text x="128" y="130" font-size="12.5" fill="#4a5a78">上传课程讲义 · 建立知识库</text>
+    <text x="128" y="148" font-size="11.5" fill="#7a889f">按课程维护 / 更新内容</text>
+  </g>
+  <g>
+    <rect x="1290" y="72" width="260" height="96" rx="14" fill="#eef3fc" stroke="#2c3e50" stroke-width="1.4"/>
+    <use href="#personIcon" x="1310" y="98" width="42" height="42" fill="#2c3e50"/>
+    <text x="1368" y="108" font-size="17" font-weight="700" fill="#152442">学生</text>
+    <text x="1368" y="130" font-size="12.5" fill="#4a5a78">凭课程码加入课程</text>
+    <text x="1368" y="148" font-size="11.5" fill="#7a889f">问答 / 解题 / 出题 / 深度研究请求</text>
+  </g>
+
+  <path class="edge" marker-end="url(#arrowEnd)" d="M180,168 C180,220 220,250 522,255"/>
+  <text x="215" y="200" class="lineLbl">上传 / 建库</text>
+  <path class="edge" marker-end="url(#arrowEnd)" d="M1420,168 C1420,215 1300,250 1078,258"/>
+  <text x="1300" y="200" class="lineLbl" text-anchor="end">课程码加入 · 提问</text>
+
+  <!-- ===== Kernel ===== -->
+  <rect x="520" y="190" width="560" height="140" rx="16" fill="url(#kernelGrad)" stroke="#2c3e50" stroke-width="1.8"/>
+  <use href="#loopIcon" x="536" y="200" width="22" height="22" fill="#2c3e50"/>
+  <text x="800" y="216" text-anchor="middle" font-size="15.5" font-weight="700" fill="#14335c">统一调度内核 · 工具调用 推理-行动循环（ReAct Loop）</text>
+
+  <g>
+    <rect x="528" y="235" width="127" height="36" rx="8" fill="#ffffff" stroke="#3d64a6"/>
+    <text x="591.5" y="258" text-anchor="middle" font-size="13" fill="#1d3d6b">问答</text>
+    <rect x="667" y="235" width="127" height="36" rx="8" fill="#ffffff" stroke="#3d64a6"/>
+    <text x="730.5" y="258" text-anchor="middle" font-size="13" fill="#1d3d6b">解题</text>
+    <rect x="806" y="235" width="127" height="36" rx="8" fill="#ffffff" stroke="#3d64a6"/>
+    <text x="869.5" y="258" text-anchor="middle" font-size="13" fill="#1d3d6b">出题</text>
+    <rect x="945" y="235" width="127" height="36" rx="8" fill="#ffffff" stroke="#3d64a6"/>
+    <text x="1008.5" y="258" text-anchor="middle" font-size="13" fill="#1d3d6b">深度研究</text>
+  </g>
+  <line x1="540" y1="290" x2="1060" y2="290" stroke="#b9c6dc"/>
+  <text x="800" y="312" text-anchor="middle" font-size="13" fill="#2c4a78">流式渲染 · 中途取消 · 追加输入 · 断线续传</text>
+
+  <!-- ===== Corridors between kernel and subsystems ===== -->
+  <path class="edge" marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)" d="M620,330 L620,353 L280,353 L280,375"/>
+  <text x="450" y="347" class="lineLbl" text-anchor="middle">建索引 / 检索证据</text>
+
+  <path class="edge" marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)" d="M800,330 L800,375"/>
+  <text x="812" y="356" class="lineLbl">上下文构造 / 生效窗口</text>
+
+  <path class="edge" marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)" d="M980,330 L980,353 L1320,353 L1320,375"/>
+  <text x="1150" y="347" class="lineLbl" text-anchor="middle">写入 / 召回记忆</text>
+
+  <!-- ===== Column 1: Indexing ===== -->
+  <rect x="40" y="375" width="480" height="405" rx="14" fill="#faf7ff" stroke="#8a6fd1" stroke-width="1.6" stroke-dasharray="7,5"/>
+  <text x="70" y="405" class="colTitle" fill="#5b3fa0">① 索引子系统</text>
+  <text x="70" y="424" class="colSub" fill="#7a6aa8">教师讲义 → 结构化知识库（按知识库独立选型）</text>
+
+  <rect x="70" y="443" width="420" height="55" rx="10" fill="#ffffff" stroke="#8a6fd1"/>
+  <text x="280" y="474" class="boxTitle" fill="#3a2a66">标题层级栈驱动的结构化切分</text>
+
+  <path class="edge" marker-end="url(#arrowEnd)" d="M280,498 L280,518"/>
+
+  <rect x="70" y="520" width="420" height="55" rx="10" fill="#ffffff" stroke="#8a6fd1"/>
+  <text x="280" y="542" class="boxTitle" fill="#3a2a66">拼接上下文摘要</text>
+  <text x="280" y="559" class="boxSub" fill="#7a6aa8">缓解切分带来的语境损失</text>
+
+  <path class="edge" marker-end="url(#arrowEnd)" d="M280,575 L280,596"/>
+
+  <!-- KG cylinder -->
+  <g stroke="#8a6fd1" fill="#f1ecfb">
+    <ellipse cx="185" cy="610" rx="95" ry="12"/>
+    <rect x="90" y="610" width="190" height="88" fill="#f1ecfb" stroke="none"/>
+    <line x1="90" y1="610" x2="90" y2="698" />
+    <line x1="280" y1="610" x2="280" y2="698" />
+    <ellipse cx="185" cy="698" rx="95" ry="12"/>
+    <path d="M90,610 A95,12 0 0 0 280,610" fill="none"/>
+  </g>
+  <text x="185" y="655" text-anchor="middle" font-size="13" font-weight="700" fill="#3a2a66">知识图谱后端</text>
+  <text x="185" y="674" text-anchor="middle" font-size="10.5" fill="#7a6aa8">结构化关系检索</text>
+
+  <!-- Vector cylinder -->
+  <g stroke="#8a6fd1" fill="#f1ecfb">
+    <ellipse cx="405" cy="610" rx="95" ry="12"/>
+    <rect x="310" y="610" width="190" height="88" fill="#f1ecfb" stroke="none"/>
+    <line x1="310" y1="610" x2="310" y2="698" />
+    <line x1="500" y1="610" x2="500" y2="698" />
+    <ellipse cx="405" cy="698" rx="95" ry="12"/>
+    <path d="M310,610 A95,12 0 0 0 500,610" fill="none"/>
+  </g>
+  <text x="405" y="655" text-anchor="middle" font-size="13" font-weight="700" fill="#3a2a66">向量索引后端</text>
+  <text x="405" y="674" text-anchor="middle" font-size="10.5" fill="#7a6aa8">语义相似检索</text>
+
+  <text x="280" y="730" text-anchor="middle" font-size="12.5" fill="#5b3fa0" font-weight="600">按知识库独立选型 · 二者互不绑定</text>
+
+  <!-- ===== Column 2: Context Governance ===== -->
+  <rect x="560" y="375" width="480" height="295" rx="14" fill="#f2fbf5" stroke="#3fa07a" stroke-width="1.6" stroke-dasharray="7,5"/>
+  <text x="590" y="405" class="colTitle" fill="#1f7a52">② 上下文治理</text>
+  <text x="590" y="424" class="colSub" fill="#4a9a76">跨请求稳定性分层 + 轮内优先级驱逐</text>
+
+  <rect x="590" y="443" width="420" height="55" rx="10" fill="#ffffff" stroke="#3fa07a"/>
+  <text x="800" y="465" class="boxTitle" fill="#155c3c">提示词分层：按跨请求稳定性排序</text>
+  <text x="800" y="482" class="boxSub" fill="#4a9a76">system / 工具定义 / 会话历史 / 当前输入</text>
+
+  <path class="edge" marker-end="url(#arrowEnd)" d="M800,498 L800,516"/>
+
+  <rect x="590" y="518" width="420" height="27" fill="#dff3e8" stroke="#3fa07a"/>
+  <text x="800" y="536" text-anchor="middle" font-size="13" font-weight="700" fill="#1f7a52">有效上下文窗口构造</text>
+  <rect x="590" y="545" width="420" height="80" fill="#ffffff" stroke="#3fa07a"/>
+
+  <rect x="602" y="556" width="192" height="58" rx="8" fill="#f4fdf8" stroke="#3fa07a"/>
+  <text x="698" y="578" class="boxTitle" fill="#155c3c">轮前规划</text>
+  <text x="698" y="594" class="boxSub" fill="#4a9a76">按预算裁剪历史 / 记忆</text>
+
+  <rect x="806" y="556" width="192" height="58" rx="8" fill="#f4fdf8" stroke="#3fa07a"/>
+  <text x="902" y="578" class="boxTitle" fill="#155c3c">轮内优先级驱逐</text>
+  <text x="902" y="594" class="boxSub" fill="#4a9a76">超预算按优先级淘汰</text>
+
+  <!-- ===== Column 3: Memory ===== -->
+  <rect x="1080" y="375" width="480" height="405" rx="14" fill="#fffaee" stroke="#c99a3b" stroke-width="1.6" stroke-dasharray="7,5"/>
+  <text x="1110" y="405" class="colTitle" fill="#8a6a1a">③ 记忆子系统（按学生个性化）</text>
+
+  <line x1="1092" y1="443" x2="1092" y2="732" class="edge" marker-end="url(#arrowEnd)"/>
+  <text x="1082" y="590" font-size="11" fill="#8a6a1a" text-anchor="middle" transform="rotate(-90 1082 590)">遗忘边界：快 → 慢</text>
+
+  <line x1="1538" y1="443" x2="1538" y2="732" class="edge" marker-end="url(#arrowEnd)"/>
+  <text x="1548" y="590" font-size="11" fill="#8a6a1a" text-anchor="middle" transform="rotate(-90 1548 590)">更新代价：低 → 高</text>
+
+  <rect x="1110" y="443" width="420" height="82" rx="10" fill="#ffffff" stroke="#c99a3b"/>
+  <text x="1170" y="470" font-size="14" font-weight="700" fill="#7a5c14">短期记忆</text>
+  <text x="1170" y="490" font-size="12" fill="#8a6a1a">滑动窗口 · 会话内即时上下文</text>
+  <text x="1170" y="508" font-size="10.5" fill="#a4842f">遗忘快 · 更新代价低</text>
+
+  <rect x="1110" y="537" width="420" height="82" rx="10" fill="#ffffff" stroke="#c99a3b"/>
+  <text x="1170" y="564" font-size="14" font-weight="700" fill="#7a5c14">中期记忆</text>
+  <text x="1170" y="584" font-size="12" fill="#8a6a1a">增量结构化压缩 · 跨会话摘要</text>
+  <text x="1170" y="602" font-size="10.5" fill="#a4842f">遗忘居中 · 更新代价居中</text>
+
+  <rect x="1110" y="631" width="420" height="82" rx="10" fill="#ffffff" stroke="#c99a3b"/>
+  <text x="1170" y="658" font-size="14" font-weight="700" fill="#7a5c14">长期记忆</text>
+  <text x="1170" y="678" font-size="12" fill="#8a6a1a">后台批量沉淀 · 稳定画像 / 知识</text>
+  <text x="1170" y="696" font-size="10.5" fill="#a4842f">遗忘慢 · 更新代价高</text>
+
+  <text x="1320" y="738" text-anchor="middle" font-size="12.5" fill="#8a6a1a" font-weight="600">三层协同，保障短 / 中 / 长期记忆稳定性</text>
+
+  <!-- ===== Footer: deployment ===== -->
+  <path class="edgeSoft" marker-end="url(#arrowEnd)" d="M280,780 L280,813"/>
+  <path class="edgeSoft" marker-end="url(#arrowEnd)" d="M800,670 L800,813"/>
+  <path class="edgeSoft" marker-end="url(#arrowEnd)" d="M1320,780 L1320,813"/>
+
+  <rect x="60" y="815" width="1480" height="90" rx="16" fill="#eef3fc" stroke="#2c3e50" stroke-width="1.6"/>
+  <use href="#capIcon" x="90" y="843" width="34" height="34" fill="#2c3e50"/>
+  <text x="800" y="865" text-anchor="middle" font-size="18" font-weight="700" fill="#14335c">《电路分析基础实验》课程</text>
+</svg>

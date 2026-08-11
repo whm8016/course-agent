@@ -6,16 +6,21 @@
 join——比 LightRAG+ES 的双系统对齐（双写 md5(content)）更简单。
 
 两路结果交项目 ``hybrid_retriever.retrieve`` 做 RRF 融合（``retrieval_config`` 的算法），
-course_id 用 metadata filter 隔离。rerank 暂不外挂（与项目 ablation_runner 现状一致，
-``rerank_fn=None`` TODO 适配 gte-rerank-v2）：PG dense 不像 LightRAG naive 自带 rerank，
-但 RRF 融合已是稳健的排序，rerank 作为可选增强留接入点。
+course_id 用 metadata filter 隔离。rerank 通过 ``core.rag.rerank.build_rerank_fn`` 注入
+（DashScope qwen3-rerank）：``RERANK__ENABLED=false``（默认）或无 ``EMBEDDING__API_KEY`` 时
+返回 None、行为与无精排一致；开启后对 RRF 融合结果做 Cross-Encoder 精排（rerank_top_n
+跟随调用方 top_k）。精排失败由 hybrid_retriever 降级回融合结果。
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import Any
 
+from sqlalchemy import text as sa_text
+
+from core.rag.llamaindex.pg_store import PG_TABLE_NAME, TEXT_SEARCH_CONFIG
 from core.rag.retriever.base import Retriever
 from core.rag.types import ChunkMeta, RetrievalResult
 
@@ -26,52 +31,78 @@ def _nodes_to_docs(result: Any) -> list[dict]:
     """VectorStoreQueryResult.nodes → hybrid_retriever 期望的 dict 列表。
 
     每项含 chunk_id/node 内容/score/file_path，chunk_id 用 node_id（dense 与 sparse 同源，
-    RRF 融合的 join key）。
+    RRF 融合的 join key）。注意：PGVectorStore 返回的 nodes 是纯 TextNode（无 score 字段），
+    余弦相似度单独放在 result.similarities（与 nodes 按下标一一对应），不能从 node 上取。
     """
     docs: list[dict] = []
-    for n in result.nodes or []:
+    similarities = result.similarities or []
+    for i, n in enumerate(result.nodes or []):
         content = n.get_content() if hasattr(n, "get_content") else getattr(n, "text", "")
         if not content:
             continue
+        score = similarities[i] if i < len(similarities) else 0.0
         docs.append(
             {
                 "chunk_id": getattr(n, "node_id", "") or "",
                 "content": content,
-                "score": float(getattr(n, "score", None) or 0.0),
+                "score": float(score or 0.0),
                 "file_path": (getattr(n, "metadata", None) or {}).get("file_path", ""),
             }
         )
     return docs
 
 
+# sparse 路 SQL（常量：表名/配置名都是模块级常量，SQL 文本固定，避免每次 bm25_search 重构 sa_text）。
+# 绕开库 SPARSE（base.py:956 to_tsquery 对中文不分词）：zhparser 分词查询取 lexeme，| 连接成 OR
+# tsquery -> 召回含任一查询词的 chunk（ts_rank 排序，rerank 兜底）。文档侧 text_search_tsv 由
+# alembic 030 改 TEXT_SEARCH_CONFIG 配置，与查询同源 -> token 对齐。
+_BM25_SQL = sa_text(f"""
+    WITH q AS (
+        SELECT to_tsquery('{TEXT_SEARCH_CONFIG}', string_agg(lexeme, ' | ')) AS q
+        FROM unnest(to_tsvector('{TEXT_SEARCH_CONFIG}', :q)) AS t(lexeme)
+    )
+    SELECT d.node_id, d.text,
+           d.metadata_ ->> 'file_path' AS file_path,
+           ts_rank(d.text_search_tsv, q.q) AS rank
+    FROM data_{PG_TABLE_NAME} d, q
+    WHERE d.metadata_ @> :cid
+      AND d.text_search_tsv @@ q.q
+    ORDER BY rank DESC
+    LIMIT :k
+""")
+
+
 class _PgSparseStore:
-    """适配 ``hybrid_retriever`` 的 es_store 接口：``bm25_search`` 实际调 PG SPARSE。
+    """适配 ``hybrid_retriever`` 的 es_store 接口：``bm25_search`` 走 PG tsvector 全文。
 
     duck-type ``ESChunkStore``：只需实现 ``async bm25_search(query, course_id, top_k)``。
-    hybrid_retriever 把它当 BM25 路；这里把请求转成 PGVectorStore 的 tsvector 全文检索。
-    SPARSE 路失败（如未建 tsvector）安全降级返回 []，hybrid_retriever 据此跳过该路，
-    整条流水线退化为纯 dense，不报错。
+    hybrid_retriever 把它当 BM25 路。**不调库的 SPARSE 模式**（llama-index base.py:956 用
+    to_tsquery 且其预处理 ``re.sub(r'\\W+',' ',q)`` 对中文不分词，整串一个 token -> 0 命中），
+    改为直接 SQL（``_BM25_SQL``）：用 zhparser 把查询分词取 lexeme，``|`` 连接成 OR tsquery，
+    ``ts_rank`` 排序。文档侧 ``text_search_tsv`` 与查询同用 ``TEXT_SEARCH_CONFIG`` 配置，token
+    对齐。失败（如未装 zhparser/未建列）安全降级返回 []，hybrid_retriever 据此跳过该路，退化纯 dense。
     """
 
-    def __init__(self, vector_store: Any) -> None:
-        self._vs = vector_store
-
     async def bm25_search(self, query: str, course_id: str, top_k: int = 50) -> list[dict]:
-        from core.rag.llamaindex.pg_store import course_filter  # noqa: PLC0415
-        from llama_index.core.vector_stores.types import (  # noqa: PLC0415
-            VectorStoreQuery,
-            VectorStoreQueryMode,
-        )
+        from core.db.database import engine  # noqa: PLC0415  函数内 import 保测试隔离
 
+        if not query or not query.strip():
+            return []
         try:
-            q = VectorStoreQuery(
-                query_str=query,
-                similarity_top_k=top_k,
-                mode=VectorStoreQueryMode.SPARSE,
-                filters=course_filter(course_id),
-            )
-            result = await self._vs.aquery(q)
-            return _nodes_to_docs(result)
+            async with engine.begin() as conn:
+                rows = await conn.execute(
+                    _BM25_SQL,
+                    {"q": query, "cid": json.dumps({"course_id": course_id}), "k": top_k},
+                )
+            return [
+                {
+                    "chunk_id": r.node_id,
+                    "content": r.text,
+                    "score": float(r.rank),
+                    "file_path": r.file_path or "",
+                }
+                for r in rows
+            ]
         except Exception as exc:
             logger.warning(
                 "PG SPARSE 查询失败（降级跳过 sparse 路）course=%s: %s", course_id, exc
@@ -89,17 +120,21 @@ class LlamaIndexRetriever(Retriever):
 
     async def _fuse(self, course_id: str, query: str, top_k: int) -> list[dict]:
         """dense(DEFAULT) + sparse(SPARSE) → hybrid_retriever RRF 融合，返回 list[dict]。"""
+        from dataclasses import replace
+
         from core.rag.hybrid_retriever import retrieve as hybrid_retrieve  # noqa: PLC0415
         from core.rag.llamaindex.pg_store import (  # noqa: PLC0415
             course_filter,
             get_embed_model,
             get_vector_store,
         )
+        from core.rag.rerank import build_rerank_fn  # noqa: PLC0415
         from core.rag.retrieval_config import DEFAULT_CONFIG  # noqa: PLC0415
         from llama_index.core.vector_stores.types import (  # noqa: PLC0415
             VectorStoreQuery,
             VectorStoreQueryMode,
         )
+        from settings import get_settings  # noqa: PLC0415
 
         ok, reason = await self.is_available()
         if not ok:
@@ -122,15 +157,27 @@ class LlamaIndexRetriever(Retriever):
             result = await vs.aquery(q)
             return _nodes_to_docs(result)
 
-        sparse_store = _PgSparseStore(vs)
+        sparse_store = _PgSparseStore()
+
+        # 精排注入：无 key 或 RERANK__ENABLED=false（默认）时 build_rerank_fn() 返回 None，
+        # rerank_enabled 置 False（行为与改动前一致，hybrid_retriever 据此跳过精排）。
+        # rerank_top_n 跟随调用方 top_k——DEFAULT_CONFIG.rerank_top_n 硬编码 5，调用方传
+        # top_k=10 时不应被砍到 5。
+        rerank_fn = build_rerank_fn()
+        cfg = replace(
+            DEFAULT_CONFIG,
+            rerank_enabled=rerank_fn is not None,
+            rerank_top_n=top_k,
+            min_rerank_score=get_settings().rerank.min_score,
+        )
 
         results = await hybrid_retrieve(
             query,
             course_id,
-            DEFAULT_CONFIG,
+            cfg,
             es_store=sparse_store,
             dense_search_fn=_dense,
-            rerank_fn=None,  # TODO: 适配 gte-rerank-v2 作 rerank_fn（同 ablation_runner）
+            rerank_fn=rerank_fn,
         )
         return results or []
 

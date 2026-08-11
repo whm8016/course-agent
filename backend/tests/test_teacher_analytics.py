@@ -44,16 +44,16 @@ async def test_student_stats_quiz_scoped_to_course(client, admin_headers, course
 
         # 本课程：1 对 1 错
         db.add(NotebookEntry(
-            user_id=stu_id, session_id=s_in.id, question_id="in_q1",
+            user_id=stu_id, course_id=course_id, session_id=s_in.id, question_id="in_q1",
             question="本课对", is_correct=True, user_answer="y", correct_answer="y",
         ))
         db.add(NotebookEntry(
-            user_id=stu_id, session_id=s_in.id, question_id="in_q2",
+            user_id=stu_id, course_id=course_id, session_id=s_in.id, question_id="in_q2",
             question="本课错", is_correct=False, user_answer="x", correct_answer="y",
         ))
         # 他课程：又答对 1 题（旧 bug 会把它也算进本课程）
         db.add(NotebookEntry(
-            user_id=stu_id, session_id=s_out.id, question_id="out_q1",
+            user_id=stu_id, course_id=s_out.course_id, session_id=s_out.id, question_id="out_q1",
             question="他课对", is_correct=True, user_answer="y", correct_answer="y",
         ))
         await db.commit()
@@ -69,3 +69,36 @@ async def test_student_stats_quiz_scoped_to_course(client, admin_headers, course
     assert me["total_questions"] == 2, me
     assert me["correct_count"] == 1, me
     assert me["accuracy_rate"] == 0.5, me
+
+
+@pytest.mark.asyncio
+async def test_overview_message_count_scoped_by_course_id(client, admin_headers, course_with_code):
+    """P1-step2：analytics/overview 按 Message.course_id 过滤（免 JOIN Session），
+    只计本课程消息，他课程消息不计入。"""
+    from core.db.database import AsyncSessionLocal, Enrollment, Message, Session, User
+
+    course_id = course_with_code["course_id"]
+    async with AsyncSessionLocal() as db:
+        stu = User(username=f"ov_{os.urandom(3).hex()}", password_hash="x")
+        db.add(stu)
+        await db.flush()
+        db.add(Enrollment(student_id=stu.id, course_id=course_id))
+        s_in = Session(id=f"in_{os.urandom(2).hex()}", course_id=course_id, user_id=stu.id)
+        s_out = Session(
+            id=f"out_{os.urandom(2).hex()}",
+            course_id=f"other_{os.urandom(2).hex()}",
+            user_id=stu.id,
+        )
+        db.add_all([s_in, s_out])
+        await db.flush()
+        # 本课程 2 条 user 消息；他课程 1 条（不应计入 total_messages）
+        db.add(Message(session_id=s_in.id, course_id=course_id, role="user", content="a"))
+        db.add(Message(session_id=s_in.id, course_id=course_id, role="user", content="b"))
+        db.add(Message(session_id=s_out.id, course_id=s_out.course_id, role="user", content="c"))
+        await db.commit()
+
+    r = await client.get(
+        f"/api/teacher/courses/{course_id}/analytics/overview", headers=admin_headers,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["total_messages"] == 2  # 只计本课程

@@ -20,13 +20,15 @@ from api.kb_indexing import get_or_create_build, trigger_kb_indexing
 from settings import get_settings
 KB_STORE_DIR = get_settings().paths.kb_store_dir
 MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
-from core.db.cache import course_access_invalidate, faq_top
+from core.analytics.faq import frequent_questions_merged
+from core.db.cache import course_access_invalidate
 from core.db.limiter import limiter
 from core.codes import ensure_unique_join_code
 from core.db.database import (
-    CourseSchedule, Enrollment, Grade, KBFile, KnowledgeBase, Message,
+    CourseDailyRollup, CourseSchedule, Enrollment, Grade, KBFile, KnowledgeBase, Message,
     NotebookEntry, Session, User, get_db,
 )
+from core.memory.graph_memory import filter_graph_by_course
 from core.rag.ingestion import IndexingControl
 
 logger = logging.getLogger(__name__)
@@ -512,38 +514,52 @@ async def analytics_overview(
 
     total_messages = (await db.execute(
         select(func.count()).select_from(Message)
-        .join(Session, Message.session_id == Session.id)
-        .where(Session.course_id == course_id, Message.role == "user")
+        .where(Message.course_id == course_id, Message.role == "user")
     )).scalar_one()
 
-    today_questions = (await db.execute(
-        select(func.count()).select_from(Message)
-        .join(Session, Message.session_id == Session.id)
-        .where(Session.course_id == course_id, Message.role == "user",
-               Message.created_at >= today_ts)
-    )).scalar_one()
-
-    today_active = (await db.execute(
-        select(func.count(func.distinct(Session.user_id)))
-        .where(Session.course_id == course_id, Session.updated_at >= today_ts)
-    )).scalar_one()
-
-    # 7-day daily trend
-    recent_msgs = (await db.execute(
-        select(Message.created_at)
-        .join(Session, Message.session_id == Session.id)
-        .where(Session.course_id == course_id, Message.role == "user",
-               Message.created_at >= week_ago_ts)
-    )).scalars().all()
-
-    buckets: dict[str, int] = {}
-    for i in range(7):
-        d = datetime.date.today() - datetime.timedelta(days=6 - i)
-        buckets[d.isoformat()] = 0
-    for ts in recent_msgs:
-        d = datetime.date.fromtimestamp(ts).isoformat()
-        if d in buckets:
-            buckets[d] += 1
+    # P0-c：今日活跃/提问 + 7 天趋势优先读 course_daily_rollup（cron 每小时算 7 天，事件口径）；
+    # 今日行缺失/过期（>6h，cron 未跑，如 fresh 部署）则降级现算（消息/会话口径），保 day-1 即正确。
+    now_utc = datetime.datetime.now(datetime.timezone.utc)
+    day_dates = [now_utc.date() - datetime.timedelta(days=6 - i) for i in range(7)]  # 老->新(UTC)
+    days_ymd = [d.strftime("%Y%m%d") for d in day_dates]
+    rollup_rows = {r.day: r for r in (await db.execute(
+        select(CourseDailyRollup).where(
+            CourseDailyRollup.course_id == course_id,
+            CourseDailyRollup.day.in_(days_ymd),
+        )
+    )).scalars().all()}
+    today_row = rollup_rows.get(days_ymd[-1])
+    if today_row and (time.time() - (today_row.updated_at or 0)) <= 6 * 3600:
+        today_questions = today_row.questions or 0
+        today_active = today_row.active_students or 0
+        daily_trend = [
+            {"date": d.isoformat(),
+             "count": (rollup_rows[d.strftime("%Y%m%d")].questions or 0)
+             if d.strftime("%Y%m%d") in rollup_rows else 0}
+            for d in day_dates
+        ]
+    else:
+        # 降级现算（rollup 冷启动期，保口径与 P1 前一致）
+        today_questions = (await db.execute(
+            select(func.count()).select_from(Message)
+            .where(Message.course_id == course_id, Message.role == "user",
+                   Message.created_at >= today_ts)
+        )).scalar_one()
+        today_active = (await db.execute(
+            select(func.count(func.distinct(Session.user_id)))
+            .where(Session.course_id == course_id, Session.updated_at >= today_ts)
+        )).scalar_one()
+        recent_msgs = (await db.execute(
+            select(Message.created_at)
+            .where(Message.course_id == course_id, Message.role == "user",
+                   Message.created_at >= week_ago_ts)
+        )).scalars().all()
+        buckets: dict[str, int] = {d.isoformat(): 0 for d in day_dates}
+        for ts in recent_msgs:
+            md = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).date().isoformat()
+            if md in buckets:
+                buckets[md] += 1
+        daily_trend = [{"date": d, "count": c} for d, c in buckets.items()]
 
     return {
         "total_students": total_students,
@@ -551,8 +567,37 @@ async def analytics_overview(
         "total_messages": total_messages,
         "today_questions": today_questions,
         "today_active_students": today_active,
-        "daily_trend": [{"date": d, "count": c} for d, c in buckets.items()],
+        "daily_trend": daily_trend,
     }
+
+
+@router.get("/courses/{course_id}/analytics/usage")
+async def analytics_usage(
+    course_id: str,
+    start: str | None = Query(None, description="起始日 YYYYMMDD（含），缺省取近 30 天"),
+    end: str | None = Query(None, description="结束日 YYYYMMDD（含），缺省取今日"),
+    group_by: str = Query("user", description="分组维度，逗号分隔：day|user|model"),
+    limit: int = Query(50, ge=1, le=500),
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """课程 LLM 用量（只读 llm_usage_daily）：按维度分组求和、按 cost 降序。
+
+    经 _get_owned_kb 做归属校验（非本人课程 403），与其它 analytics 端点同隔离方式。
+    group_by 默认 user（course 维度对本接口恒等于本课程，故默认不取；query_usage 白名单兜底）。
+    """
+    await _get_owned_kb(db, course_id, teacher)
+    from datetime import datetime, timedelta, timezone
+
+    from core.analytics.token_usage import query_usage
+
+    now = datetime.now(timezone.utc)
+    end_day = (end or now.strftime("%Y%m%d"))[:8]
+    start_day = (start or (now - timedelta(days=30)).strftime("%Y%m%d"))[:8]
+    dims = [d.strip() for d in group_by.split(",") if d.strip()] or ["user"]
+    return await query_usage(
+        db, start=start_day, end=end_day, group_by=dims, course_id=course_id, limit=limit
+    )
 
 
 @router.get("/courses/{course_id}/analytics/frequent-questions")
@@ -562,52 +607,12 @@ async def analytics_frequent_questions(
     teacher: dict = Depends(get_current_teacher),
     db: AsyncSession = Depends(get_db),
 ):
-    """Top-N most asked questions (Redis FAQ + SQL fallback)."""
+    """Top-N most asked questions (Redis FAQ + SQL fallback).
+
+    口径与 admin /faq 一致：共用 frequent_questions_merged（Redis 优先 + SQL 兜底）。
+    """
     await _get_owned_kb(db, course_id, teacher)
-
-    redis_items = await faq_top(course_id, top_n)
-
-    # SQL complement: recent user messages grouped by content prefix
-    thirty_days_ago = time.time() - 86400 * 30
-    # PG 严格模式要求 SELECT 与 GROUP BY 用同一表达式；func.left(...,80) 写两遍会被
-    # asyncpg 编译成两个独立 bindparam（$1 vs $6），PG 无法证明相等 → GroupingError。
-    # 提取为同一表达式对象，让 SQLAlchemy 复用同一个 bindparam。
-    _content_prefix = func.left(Message.content, 80)
-    sql_rows = (await db.execute(
-        select(
-            _content_prefix.label("q"),
-            func.count().label("cnt"),
-            func.max(Message.created_at).label("last_ts"),
-        )
-        .join(Session, Message.session_id == Session.id)
-        .where(
-            Session.course_id == course_id,
-            Message.role == "user",
-            Message.created_at >= thirty_days_ago,
-            func.length(Message.content) > 4,
-        )
-        .group_by(_content_prefix)
-        .having(func.count() >= 2)
-        .order_by(func.count().desc())
-        .limit(top_n)
-    )).all()
-
-    # Merge: Redis items take priority, SQL fills gaps
-    seen = {item["question"].strip().lower()[:80] for item in redis_items}
-    merged = [
-        {"question": item["question"], "count": item["count"], "last_asked": None}
-        for item in redis_items
-    ]
-    for row in sql_rows:
-        key = row.q.strip().lower()[:80]
-        if key not in seen:
-            merged.append({"question": row.q, "count": row.cnt, "last_asked": row.last_ts})
-            seen.add(key)
-        if len(merged) >= top_n:
-            break
-
-    merged.sort(key=lambda x: -x["count"])
-    return {"questions": merged[:top_n]}
+    return {"questions": await frequent_questions_merged(db, course_id, top_n)}
 
 
 @router.get("/courses/{course_id}/analytics/student-chats")
@@ -793,8 +798,7 @@ async def analytics_student_stats(
         select(NotebookEntry.user_id,
                func.count(NotebookEntry.id).label("total"),
                func.sum(func.cast(NotebookEntry.is_correct, Integer)).label("correct"))
-        .join(Session, NotebookEntry.session_id == Session.id)
-        .where(Session.course_id == course_id, NotebookEntry.user_id.in_(student_ids))
+        .where(NotebookEntry.course_id == course_id, NotebookEntry.user_id.in_(student_ids))
         .group_by(NotebookEntry.user_id)
     )).all()
     quiz_map: dict[str, dict] = {r.user_id: {"total": r.total, "correct": r.correct or 0} for r in quiz_rows}
@@ -802,7 +806,10 @@ async def analytics_student_stats(
     # 6. Build per-student summaries
     student_summaries = []
     for r in enroll_rows:
-        kn_cnt, err_cnt, hr_cnt = _parse_graph_counts(r.knowledge_graph, r.error_graph)
+        kn_cnt, err_cnt, hr_cnt = _parse_graph_counts(
+            filter_graph_by_course(r.knowledge_graph, course_id),
+            filter_graph_by_course(r.error_graph, course_id),
+        )
         q = quiz_map.get(r.student_id, {"total": 0, "correct": 0})
         acc = q["correct"] / q["total"] if q["total"] > 0 else 0.5
         risk_score = 0.5 * (hr_cnt / max(kn_cnt, 1)) + 0.5 * (1 - acc)
@@ -918,44 +925,42 @@ async def analytics_student_detail(
         .where(Session.course_id == course_id, Session.user_id == student_id, Message.role == "user")
     )).scalar_one()
 
-    # Quiz stats for this course (via session)
-    course_session_ids = (await db.execute(
-        select(Session.id).where(Session.course_id == course_id, Session.user_id == student_id)
+    # Quiz stats for this course (P1：直接按 course_id + user_id 过滤，免 session_ids 预查+IN)
+    quiz_stats = (await db.execute(
+        select(func.count(NotebookEntry.id).label("total"),
+               func.sum(func.cast(NotebookEntry.is_correct, Integer)).label("correct"))
+        .where(NotebookEntry.course_id == course_id, NotebookEntry.user_id == student_id)
+    )).one()
+    questions_total = quiz_stats.total or 0
+    questions_correct = quiz_stats.correct or 0
+
+    recent = (await db.execute(
+        select(NotebookEntry)
+        .where(NotebookEntry.course_id == course_id, NotebookEntry.user_id == student_id)
+        .order_by(NotebookEntry.created_at.desc())
+        .limit(10)
     )).scalars().all()
-
-    questions_total = 0
-    questions_correct = 0
-    recent_questions: list[dict] = []
-    if course_session_ids:
-        quiz_stats = (await db.execute(
-            select(func.count(NotebookEntry.id).label("total"),
-                   func.sum(func.cast(NotebookEntry.is_correct, Integer)).label("correct"))
-            .where(NotebookEntry.session_id.in_(course_session_ids))
-        )).one()
-        questions_total = quiz_stats.total or 0
-        questions_correct = quiz_stats.correct or 0
-
-        recent = (await db.execute(
-            select(NotebookEntry)
-            .where(NotebookEntry.session_id.in_(course_session_ids))
-            .order_by(NotebookEntry.created_at.desc())
-            .limit(10)
-        )).scalars().all()
-        recent_questions = [
-            {
-                "question": q.question[:200],
-                "is_correct": q.is_correct,
-                "difficulty": q.difficulty,
-                "created_at": q.created_at,
-            }
-            for q in recent
-        ]
+    recent_questions = [
+        {
+            "question": q.question[:200],
+            "is_correct": q.is_correct,
+            "difficulty": q.difficulty,
+            "created_at": q.created_at,
+        }
+        for q in recent
+    ]
 
     accuracy_rate = questions_correct / questions_total if questions_total > 0 else None
 
     # Graph data
-    kg = user.knowledge_graph if isinstance(user.knowledge_graph, dict) else {"nodes": [], "edges": []}
-    eg = user.error_graph if isinstance(user.error_graph, dict) else {"nodes": [], "edges": []}
+    kg = filter_graph_by_course(
+        user.knowledge_graph if isinstance(user.knowledge_graph, dict) else {"nodes": [], "edges": []},
+        course_id,
+    )
+    eg = filter_graph_by_course(
+        user.error_graph if isinstance(user.error_graph, dict) else {"nodes": [], "edges": []},
+        course_id,
+    )
 
     return {
         "student": {

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import logging
 import re
 from dataclasses import replace
@@ -41,6 +42,7 @@ from core.pipeline_common import (
     with_common_prompt,
 )
 from core.prompt_loader import load_prompt_dict
+from core.research import checkpoint
 from core.research.citation_manager import CitationManager
 from core.research.data_structures import (
     DEFAULT_QUEUE_MAX_LENGTH,
@@ -81,6 +83,16 @@ _BLOCK_MIN_KNOWLEDGE_CHARS = 50
 _OBSERVER_MIN_SOURCES = 2          # 块来源少于此数视为证据不足，补检索
 _OBSERVER_MAX_REFILL_BLOCKS = 8    # safety：一次最多补这么多块，防队列异常膨胀
 _OBSERVER_DEFAULT = False          # 默认关，行为零变化；经 context.metadata["research_observer"] 开
+
+# 阶段顺序（checkpoint resume 用）：ckpt.phase = 最后完成的阶段，据此算出可跳过的阶段集合。
+_PHASE_ORDER = ("rephrase", "decompose", "researching", "reporting")
+
+
+def _phases_done(last_completed_phase: str) -> set[str]:
+    """返回 last_completed_phase 及其之前的所有阶段（即可跳过的）。未知 phase → 空集（全跑）。"""
+    if last_completed_phase not in _PHASE_ORDER:
+        return set()
+    return set(_PHASE_ORDER[: _PHASE_ORDER.index(last_completed_phase) + 1])
 
 
 def _parse_sub_topics(text: str, topic: str, num_subtopics: int) -> list[dict[str, str]]:
@@ -231,7 +243,6 @@ class ResearchPipeline:
         stream: StreamBus,
     ) -> dict[str, Any]:
         started = datetime.now()
-        research_id = f"research_{started.strftime('%Y%m%d_%H%M%S')}"
         cfg = load_prompt_dict(_PROMPT_PATH)
         topic = (topic or "").strip() or context.user_message.strip()
         # 解析对话供应商 runtime + 通用上下文层（四条 pipeline 共享步骤，pipeline_common）
@@ -241,46 +252,170 @@ class ResearchPipeline:
         # Observer 汇总质量门开关（默认关）：开则 _drive_queue 后对来源不足的块补检索一轮。
         # 经 context.metadata["research_observer"] 控制（消融实验 on/off 对比用）。
         self._observer_gate = bool(context.metadata.get("research_observer", _OBSERVER_DEFAULT))
-        log_flow("research.pipeline.start", research_id=research_id, topic=topic[:120])
+
+        # ── resume：按 resume_research_id 从 checkpoint 恢复（worker 重启后续跑）─────────
+        # ckpt.phase=最后完成的阶段 → done_phases 跳过；被中断阶段整段重放（接受其内部 LLM/检索
+        # 成本重付一次，与 LangGraph「node 从头重跑」同语义）。checkpoint 读写 best-effort，不阻塞研究。
+        resume_id = str(context.metadata.get("resume_research_id") or "")
+        ckpt = await checkpoint.load(resume_id) if resume_id else None
+        saved_state: dict[str, Any] = {}
+        if ckpt and ckpt.state_json:
+            try:
+                saved_state = json.loads(ckpt.state_json)
+            except Exception:
+                saved_state = {}
+        research_id = ckpt.research_id if ckpt else f"research_{started.strftime('%Y%m%d_%H%M%S')}"
+        done_phases = _phases_done(ckpt.phase) if ckpt else set()
+        _ckpt_kw = {"user_id": str(context.user_id or ""), "course_id": str(context.course_id or "")}
+        log_flow("research.pipeline.start", research_id=research_id, topic=topic[:120],
+                 resumed=bool(ckpt), resume_from=(ckpt.phase if ckpt else None))
+        # 提前下发 research_id（前端保存，供断线重连用 resume_research_id 续跑）
+        await stream.emit({"type": "stage_start", "stage": "init",
+                           "research_id": research_id, "source": _SOURCE})
+
+        # ask_user 暂停钩子：loop 在 emit ask_user_card 前调用它，把 awaiting_user + 卡片写库，
+        # 供 worker 重启后重连恢复同一份卡片（见 _execute_rag/loop 的 on_ask_user_pause 调用点）。
+        # 仅 rephrase 挂 ask_user，故 phase 固定 rephrase。
+        async def _on_ask_user_pause(card: dict[str, Any]) -> None:
+            await checkpoint.save_phase(
+                research_id, topic=topic, phase="rephrase", status="awaiting_user",
+                pending_question=card or {}, **_ckpt_kw,
+            )
+
+        context.metadata["on_ask_user_pause"] = _on_ask_user_pause
 
         # ── Phase 1: rephrase ────────────────────────────────────────────
-        _t_phase = datetime.now()
-        async with stream.stage("rephrase", source=_SOURCE):
-            refined_topic = await self._rephrase(
-                topic=topic, context=context, stream=stream, cfg=cfg
+        # awaiting_user 分支按 phase 专属：rephrase 的 ask_user 卡（phase=rephrase）在此恢复；
+        # 大纲确认卡（phase=decompose，见 Phase 2 后的大纲确认块）有自己的恢复分支，不在此处理。
+        if (
+            ckpt and ckpt.status == "awaiting_user" and ckpt.pending_question_json
+            and ckpt.phase == "rephrase"
+            and callable(context.metadata.get("wait_for_user_reply"))
+        ):
+            # 上次在 rephrase 的 ask_user 暂停期间崩溃：重发同一份卡片、等重连后的回复，把回复当作
+            # refined_topic（避免重跑 rephrase 再问一遍）。无 waiter 时走下面的正常重跑分支。
+            # 该判断必须在「"rephrase" in done_phases」之前——awaiting_user 时 phase 可能已是 rephrase。
+            try:
+                _card = json.loads(ckpt.pending_question_json)
+            except Exception:
+                _card = {}
+            await stream.emit({"type": "ask_user_card", **_card})
+            _reply = await context.metadata["wait_for_user_reply"]()
+            refined_topic = (_reply.get("text") if _reply else "") or (ckpt.topic or "") or topic
+            await checkpoint.save_phase(
+                research_id, topic=refined_topic, phase="rephrase",
+                state={"refined_topic": refined_topic}, status="running",
+                pending_question={}, **_ckpt_kw,
             )
-        log_flow("research.stage.rephrase",
-                 elapsed_ms=int((datetime.now() - _t_phase).total_seconds() * 1000),
-                 refined_topic=refined_topic[:80])
+            done_phases = done_phases | {"rephrase"}
+        elif "rephrase" in done_phases:
+            refined_topic = saved_state.get("refined_topic") or topic
+        else:
+            _t_phase = datetime.now()
+            async with stream.stage("rephrase", source=_SOURCE):
+                refined_topic = await self._rephrase(
+                    topic=topic, context=context, stream=stream, cfg=cfg
+                )
+            log_flow("research.stage.rephrase",
+                     elapsed_ms=int((datetime.now() - _t_phase).total_seconds() * 1000),
+                     refined_topic=refined_topic[:80])
+            await checkpoint.save_phase(
+                research_id, topic=refined_topic, phase="rephrase",
+                state={"refined_topic": refined_topic}, **_ckpt_kw,
+            )
 
         # ── Phase 2: decompose ───────────────────────────────────────────
-        _t_phase = datetime.now()
-        async with stream.stage("decompose", source=_SOURCE):
-            sub_topics = await self._decompose(
-                topic=refined_topic, context=context, stream=stream, cfg=cfg
+        decompose_ran = False  # 本轮是否真的跑了 decompose（大纲确认块据此决定是否出卡片）
+        if "decompose" in done_phases:
+            sub_topics = saved_state.get("sub_topics") or []
+        else:
+            decompose_ran = True
+            _t_phase = datetime.now()
+            async with stream.stage("decompose", source=_SOURCE):
+                sub_topics = await self._decompose(
+                    topic=refined_topic, context=context, stream=stream, cfg=cfg
+                )
+            log_flow("research.stage.decompose",
+                     elapsed_ms=int((datetime.now() - _t_phase).total_seconds() * 1000),
+                     sub_topics=len(sub_topics))
+            await checkpoint.save_phase(
+                research_id, topic=refined_topic, phase="decompose",
+                state={"refined_topic": refined_topic, "sub_topics": sub_topics}, **_ckpt_kw,
             )
-        log_flow("research.stage.decompose",
-                 elapsed_ms=int((datetime.now() - _t_phase).total_seconds() * 1000),
-                 sub_topics=len(sub_topics))
+
+        # ── 大纲确认（deeptutor 式：decompose 后暂停，用户过目/编辑子主题再执行 research）──
+        # 仅 WS 入口（有 wait_for_user_reply）且开关开时暂停；HTTP/无 waiter / 开关关 → 跳过直接执行。
+        # 镜像上方 Phase 1 的 rephrase awaiting_user 恢复模式；用 phase=decompose 区分两类 awaiting_user。
+        _waiter = context.metadata.get("wait_for_user_reply")
+        _outline_gate = (
+            get_settings().research.outline_confirm_enabled and callable(_waiter)
+        )
+        _is_outline_resume = (
+            ckpt is not None
+            and ckpt.status == "awaiting_user"
+            and ckpt.phase == "decompose"
+        )
+        # 出卡片 iff：本轮 fresh decompose 刚跑完，或 resume 命中「上次卡在大纲确认」。
+        # 已确认过（phase=decompose,status=running）或崩在更后阶段 → 两者皆 False，跳过不重复出卡。
+        if _outline_gate and (decompose_ran or _is_outline_resume):
+            _card = {"topic": refined_topic, "sub_topics": sub_topics}
+            # 落 awaiting_user checkpoint：worker 重启/断线重连可恢复同一份大纲卡
+            await checkpoint.save_phase(
+                research_id, topic=refined_topic, phase="decompose",
+                status="awaiting_user",
+                state={"refined_topic": refined_topic, "sub_topics": sub_topics},
+                pending_question=_card, **_ckpt_kw,
+            )
+            await stream.emit({
+                "type": "outline_card", "topic": _card["topic"],
+                "sub_topics": _card["sub_topics"], "source": _SOURCE,
+            })
+            _reply = await _waiter()  # 共享 waiter；超时见 settings.research.clarify_wait_timeout_s
+            _confirmed = (_reply or {}).get("outline")
+            # 用学生编辑后的大纲覆盖（过滤 title 为空的项）；全空则保持原 sub_topics
+            _edited = [
+                {
+                    "title": str(_i.get("title", "")).strip(),
+                    "overview": str(_i.get("overview", "")).strip(),
+                }
+                for _i in (_confirmed if isinstance(_confirmed, list) else [])
+                if isinstance(_i, dict) and str(_i.get("title", "")).strip()
+            ]
+            if _edited:
+                sub_topics = _edited
+            await checkpoint.save_phase(
+                research_id, topic=refined_topic, phase="decompose",
+                state={"refined_topic": refined_topic, "sub_topics": sub_topics},
+                status="running", pending_question={}, **_ckpt_kw,
+            )
+            log_flow("research.outline.confirmed",
+                     research_id=research_id, sub_topics=len(sub_topics))
 
         # ── Phase 3: research（动态队列 + 并行）──────────────────────────
-        queue = DynamicTopicQueue(research_id, max_length=self.queue_max_length)
-        for sub in sub_topics:
-            if queue.is_full():
-                break
-            # 简单去重：与已有块过于相似的跳过
-            if queue.find_similar(sub["title"]) is not None:
-                continue
-            queue.add_block(sub["title"], sub["overview"])
-
-        _t_phase = datetime.now()
-        async with stream.stage("researching", source=_SOURCE):
-            await self._drive_queue(
-                queue=queue, topic=refined_topic, context=context, stream=stream, cfg=cfg
-            )
-        log_flow("research.stage.researching",
-                 elapsed_ms=int((datetime.now() - _t_phase).total_seconds() * 1000),
-                 blocks=queue.statistics().get("total", 0))
+        if "researching" in done_phases and isinstance(saved_state.get("queue"), dict):
+            queue = DynamicTopicQueue.from_dict(saved_state["queue"])  # 恢复已完成/部分完成的队列
+        else:
+            queue = DynamicTopicQueue(research_id, max_length=self.queue_max_length)
+            for sub in sub_topics:
+                if queue.is_full():
+                    break
+                # 简单去重：与已有块过于相似的跳过
+                if queue.find_similar(sub["title"]) is not None:
+                    continue
+                queue.add_block(sub["title"], sub["overview"])
+        if "researching" not in done_phases:
+            _t_phase = datetime.now()
+            async with stream.stage("researching", source=_SOURCE):
+                await self._drive_queue(
+                    queue=queue, topic=refined_topic, context=context, stream=stream, cfg=cfg
+                )
+            log_flow("research.stage.researching",
+                     elapsed_ms=int((datetime.now() - _t_phase).total_seconds() * 1000),
+                     blocks=queue.statistics().get("total", 0))
+        await checkpoint.save_phase(
+            research_id, topic=refined_topic, phase="researching",
+            state={"refined_topic": refined_topic, "queue": queue.to_dict()}, **_ckpt_kw,
+        )
 
         # ── Observer 汇总质量门（可选，默认关）：来源不足的块补检索一轮 ──
         if self._observer_gate:
@@ -315,7 +450,12 @@ class ResearchPipeline:
 
         elapsed_ms = int((datetime.now() - started).total_seconds() * 1000)
         log_flow("research.pipeline.complete", research_id=research_id,
-                 elapsed_ms=elapsed_ms, report_chars=len(report))
+                 elapsed_ms=elapsed_ms, report_chars=len(report), resumed=bool(ckpt))
+        await checkpoint.save_phase(
+            research_id, phase="reporting", status="done",
+            state={"refined_topic": refined_topic, "queue": queue.to_dict()}, **_ckpt_kw,
+        )
+        await checkpoint.clear(research_id)  # done：清理 checkpoint（保留也行，这里清）
         stats = queue.statistics()
         return {
             "research_id": research_id,

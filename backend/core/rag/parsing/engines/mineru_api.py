@@ -12,8 +12,11 @@
 from __future__ import annotations
 
 import io
+import json
 import logging
+import shutil
 import ssl
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -21,6 +24,7 @@ from typing import Any, Callable, Optional
 
 import httpx
 
+from core.rag.parsing import cache
 from core.rag.parsing.signature import ParserSignature
 from core.rag.parsing.types import ParserError
 from settings import get_settings
@@ -74,6 +78,7 @@ class MinerUApiEngine:
             "enable_table": bool(cfg.enable_table),
             "poll_interval": cfg.poll_interval,
             "poll_timeout": cfg.poll_timeout,
+            "max_file_pages": cfg.max_file_pages,
             "max_file_mb": cfg.max_file_mb,
         }
 
@@ -106,7 +111,13 @@ class MinerUApiEngine:
         config: dict[str, Any],
         on_output: Optional[Callable[[str], None]] = None,
     ) -> None:
-        """四步流程解析 PDF，产物写 workdir（full.md + content_list.json + images/）。"""
+        """解析 PDF，产物写 workdir（full.md + content_list.json + images/）。
+
+        页数超 ``config["max_file_pages"]``（默认 200）时自动**分片**：按页切成若干 ≤ 上限的
+        子 PDF，逐片走四步流程，再按页序合并 markdown / content_list（页码偏移）/ images。
+        上游（缓存键=原文件字节 hash、service、ingestion）只见一个完整 ParsedDocument——
+        分片是引擎内部实现细节。加密/损坏读不出页数 → 整文件直递（让 MinerU 自己拒）。
+        """
         pdf_path = Path(source_path)
         if not pdf_path.is_file():
             raise MinerUError(f"PDF 文件不存在: {pdf_path}")
@@ -116,36 +127,63 @@ class MinerUApiEngine:
                 f"文件 {pdf_path.name} {size_mb:.1f}MB 超过 MinerU 上限 {config['max_file_mb']}MB"
             )
 
-        base_url = str(config["api_base_url"]).rstrip("/")
-        headers = {"Authorization": f"Bearer {config['api_token']}", "Accept": "application/json"}
+        threshold = int(config.get("max_file_pages") or 0)
+        page_count = _count_pages(pdf_path) if threshold > 0 else None
+        if threshold > 0 and page_count and page_count > threshold:
+            _parse_split(pdf_path, workdir, config, on_output, threshold, page_count)
+        else:
+            _parse_one(pdf_path, workdir, config, on_output)
 
-        def report(msg: str) -> None:
-            if on_output:
-                try:
-                    on_output(msg)
-                except Exception:
-                    logger.debug("on_output 回调失败", exc_info=True)
 
-        with httpx.Client(base_url=base_url, headers=headers) as client:
-            report(f"MinerU: 申请上传槽 {pdf_path.name}（{size_mb:.1f}MB）")
-            batch_id, upload_url = _request_upload(client, pdf_path, config)
-            report(f"MinerU: 上传 {pdf_path.name}")
-            _upload_file(pdf_path, upload_url)
-            report("MinerU: 等待解析（轮询）")
-            zip_url = _poll_for_zip(
-                client,
-                batch_id,
-                pdf_path.name,
-                poll_interval=config["poll_interval"],
-                timeout=config["poll_timeout"],
-                on_progress=on_output,
-            )
-            report("MinerU: 下载结果")
-            archive = _download(zip_url)
+def _emit(on_output: Optional[Callable[[str], None]], msg: str) -> None:
+    """best-effort 进度回调；回调自身抛异常不阻断解析。"""
+    if on_output:
+        try:
+            on_output(msg)
+        except Exception:
+            logger.debug("on_output 回调失败", exc_info=True)
 
-        report("MinerU: 解包")
-        _extract_archive(archive, workdir)
-        logger.info("MinerU 解析完成: %s → %s", pdf_path.name, workdir)
+
+def _parse_one(
+    pdf_path: Path,
+    workdir: Path,
+    config: dict[str, Any],
+    on_output: Optional[Callable[[str], None]] = None,
+    *,
+    label: str = "",
+) -> None:
+    """单片 PDF 的四步流程（申请上传槽→上传→轮询→下载解包），产物写 workdir。
+
+    ``label`` 非空时前缀到所有进度消息（分片场景标注「分片 i/n」）。整文件常态路径
+    ``label=""`` —— 行为与改造前逐行一致（纯抽取自原 ``parse`` 主体）。
+    """
+    size_mb = pdf_path.stat().st_size / (1024 * 1024)
+
+    def report(msg: str) -> None:
+        _emit(on_output, f"{label}{msg}" if label else msg)
+
+    base_url = str(config["api_base_url"]).rstrip("/")
+    headers = {"Authorization": f"Bearer {config['api_token']}", "Accept": "application/json"}
+    with httpx.Client(base_url=base_url, headers=headers) as client:
+        report(f"MinerU: 申请上传槽 {pdf_path.name}（{size_mb:.1f}MB）")
+        batch_id, upload_url = _request_upload(client, pdf_path, config)
+        report(f"MinerU: 上传 {pdf_path.name}")
+        _upload_file(pdf_path, upload_url)
+        report("MinerU: 等待解析（轮询）")
+        zip_url = _poll_for_zip(
+            client,
+            batch_id,
+            pdf_path.name,
+            poll_interval=config["poll_interval"],
+            timeout=config["poll_timeout"],
+            on_progress=report,
+        )
+        report("MinerU: 下载结果")
+        archive = _download(zip_url)
+
+    report("MinerU: 解包")
+    _extract_archive(archive, workdir)
+    logger.info("MinerU 解析完成: %s → %s", pdf_path.name, workdir)
 
 
 # ── 四步流程 ──────────────────────────────────────────────────────────────────
@@ -353,6 +391,125 @@ def _extract_archive(archive_bytes: bytes, target_dir: Path) -> None:
                     out.write(src.read())
     except zipfile.BadZipFile as exc:
         raise MinerUError(f"MinerU 返回无效 zip: {exc}") from exc
+
+
+# ── 分片（页数超上限）──────────────────────────────────────────────────────────
+
+
+def _count_pages(pdf_path: Path) -> Optional[int]:
+    """读 PDF 页数（fitz）。fitz 未装 / 打不开 / 加密 → 返回 None（整文件直递不拆）。
+
+    数页是为了决定是否分片；读不出页数就无法安全拆，降级为整文件提交，把超限判断
+    交给 MinerU（错误信息原样透传给用户）。
+    """
+    try:
+        import fitz  # noqa: PLC0415
+    except ImportError:
+        logger.debug("PyMuPDF 未装，无法按页数分片，整文件提交")
+        return None
+    try:
+        doc = fitz.open(pdf_path)
+    except Exception as exc:  # 损坏 / 非 PDF
+        logger.warning("读取 %s 页数失败（%s），整文件提交不拆", pdf_path.name, exc)
+        return None
+    try:
+        if doc.is_encrypted and not doc.authenticate(""):
+            logger.warning("%s 加密无法读页数，整文件提交不拆", pdf_path.name)
+            return None
+        return doc.page_count
+    finally:
+        doc.close()
+
+
+def _split_pdf(
+    source: Path, threshold: int, page_count: int
+) -> tuple[list[tuple[Path, int, int]], Path]:
+    """按 ``threshold`` 页等切（不重叠），返回 ([(part_path, start, end), ...], 临时目录)。
+
+    start/end 是原文件 0 基页码、end exclusive（子 PDF 覆盖原页 [start, end)）。子 PDF 写
+    临时目录，调用方解析合并后负责清理。用 fitz ``insert_pdf``——比 pypdf 更能扛非标准/
+    扫描件 PDF（pypdf 切含目录的 PDF 有 #1322 体积膨胀问题）。
+    """
+    import fitz  # noqa: PLC0415
+
+    src = fitz.open(source)
+    tmp_dir = Path(tempfile.mkdtemp(prefix="mineru_split_"))
+    parts: list[tuple[Path, int, int]] = []
+    n_parts = (page_count + threshold - 1) // threshold
+    try:
+        start = 0
+        while start < page_count:
+            end = min(start + threshold, page_count)
+            out = fitz.open()
+            out.insert_pdf(src, from_page=start, to_page=end - 1)  # to_page inclusive
+            part_path = tmp_dir / f"part_{len(parts) + 1}of{n_parts}.pdf"
+            out.save(part_path)
+            out.close()
+            parts.append((part_path, start, end))
+            start = end
+        return parts, tmp_dir
+    finally:
+        src.close()
+
+
+def _parse_split(
+    pdf_path: Path,
+    workdir: Path,
+    config: dict[str, Any],
+    on_output: Optional[Callable[[str], None]],
+    threshold: int,
+    page_count: int,
+) -> None:
+    """超页数 PDF：切 → 逐片解析 → 合并 → 清临时。
+
+    合并三件事：markdown 按页序拼接；content_list 各 block 的 ``page_idx``/``page`` 加该片
+    起始偏移还原全局页码（否则第 2 片页码从 0 重算，markdown 分节页码回填会错）；images
+    按内容哈希命名，跨片同名幂等覆盖不冲突。任一片失败即抛异常（fail-fast 单引擎哲学），
+    service 的 ``cleanup_failed`` 清整个 workdir。
+    """
+    parts, tmp_dir = _split_pdf(pdf_path, threshold, page_count)
+    n = len(parts)
+    part_workdirs = [workdir / f"_part{i + 1}" for i in range(n)]
+    _emit(
+        on_output,
+        f"MinerU: {pdf_path.name} {page_count} 页超 {threshold} 上限，拆 {n} 片顺序解析",
+    )
+    markdowns: list[str] = []
+    all_blocks: list[dict[str, Any]] = []
+    image_dirs: list[Path] = []
+    try:
+        for i, (part_path, start, end) in enumerate(parts):
+            label = f"分片 {i + 1}/{n}（第 {start + 1}-{end} 页） "
+            part_workdirs[i].mkdir(parents=True, exist_ok=True)  # _parse_one 不建 workdir（同 service.reserve 契约）
+            _parse_one(part_path, part_workdirs[i], config, on_output, label=label)
+            md, blocks, asset_dir = cache.load_ir(part_workdirs[i])
+            markdowns.append(md or "")
+            for blk in blocks or []:
+                # 子 PDF 的 page_idx 是该片局部 0 基页码 → 加该片起始偏移还原全局页码
+                blk["page_idx"] = int(blk.get("page_idx") or 0) + start
+                blk["page"] = int(blk.get("page") or 0) + start
+            all_blocks.extend(blocks or [])
+            if asset_dir and asset_dir.is_dir():
+                image_dirs.append(asset_dir)
+
+        # 合并产物写 workdir（full.md / content_list.json 是 load_ir 优先名，下游自然命中）
+        (workdir / "full.md").write_text(
+            "\n\n".join(m for m in markdowns if m), encoding="utf-8"
+        )
+        (workdir / "content_list.json").write_text(
+            json.dumps(all_blocks, ensure_ascii=False), encoding="utf-8"
+        )
+        merged_images = workdir / "images"
+        for asset_dir in image_dirs:
+            for img in asset_dir.iterdir():
+                if img.is_file():
+                    merged_images.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(img, merged_images / img.name)
+        logger.info("MinerU 分片合并完成: %s（%d 片）→ %s", pdf_path.name, n, workdir)
+    finally:
+        for pwd in part_workdirs:
+            shutil.rmtree(pwd, ignore_errors=True)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 __all__ = ["MinerUApiEngine", "MinerUError"]

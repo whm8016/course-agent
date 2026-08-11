@@ -233,6 +233,34 @@ def record_rag_result(
     )
 
 
+def record_context_trim(
+    *,
+    stage: str,
+    coordinator_enabled: bool,
+    iteration: int,
+    dropped_tool_results: int = 0,
+    masked_turns: int = 0,
+    dropped_messages: int = 0,
+    summary_added: bool = False,
+) -> None:
+    """记录一次轮内上下文裁剪（evict_tool_results / context_policy.apply）。
+
+    轮内裁剪没有天然对应的 LLM/tool run，此前完全不可观测——LangSmith 只能看到裁剪
+    *之后* 发给模型的 messages，看不到这一步删了什么。挂在当前 turn run 下为子 run。
+    """
+    _record(
+        name=f"context.trim.{stage}",
+        run_type="chain",
+        inputs={"coordinator_enabled": coordinator_enabled, "iteration": iteration},
+        outputs={
+            "dropped_tool_results": dropped_tool_results,
+            "masked_turns": masked_turns,
+            "dropped_messages": dropped_messages,
+            "summary_added": summary_added,
+        },
+    )
+
+
 __all__ = [
     "is_tracing_enabled",
     "safe_traceable",
@@ -240,4 +268,5 @@ __all__ = [
     "wrap_openai_client",
     "record_tool_result",
     "record_rag_result",
+    "record_context_trim",
 ]

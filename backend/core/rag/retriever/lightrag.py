@@ -511,23 +511,6 @@ class LightRAGRetriever(Retriever):
             await _release_instance(course_id)
 
 
-# ── 向后兼容函数（deprecated，将从 lightrag_engine.py 迁移）────────────────────────
-
-async def query_with_lightrag(
-    course_id: str,
-    message: str,
-    history: list[dict] | None = None,
-    mode: str | None = None,
-) -> dict[str, Any]:
-    """向后兼容：使用 LightRAG 查询。
-
-    Deprecated: 请使用 get_retriever("lightrag").query() 代替。
-    """
-    retriever = LightRAGRetriever()
-    return await retriever.query(course_id, message, history, mode)
-
-
 __all__ = [
     "LightRAGRetriever",
-    "query_with_lightrag",
 ]

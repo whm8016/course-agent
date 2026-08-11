@@ -53,6 +53,17 @@ class ToolTrace:
             "timestamp": self.timestamp,
         }
 
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> ToolTrace:
+        return cls(
+            tool_type=d.get("tool_type", ""),
+            query=d.get("query", ""),
+            summary=d.get("summary", ""),
+            source=d.get("source", ""),
+            tool_id=d.get("tool_id", ""),
+            timestamp=d.get("timestamp", ""),
+        )
+
 
 @dataclass
 class TopicBlock:
@@ -68,6 +79,33 @@ class TopicBlock:
 
     def add_source(self, trace: ToolTrace) -> None:
         self.sources.append(trace)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "block_id": self.block_id,
+            "sub_topic": self.sub_topic,
+            "overview": self.overview,
+            "status": self.status.value if isinstance(self.status, TopicStatus) else str(self.status),
+            "sources": [s.to_dict() for s in self.sources],
+            "knowledge": self.knowledge,
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> TopicBlock:
+        try:
+            status = TopicStatus(d.get("status", "pending"))
+        except ValueError:
+            status = TopicStatus.PENDING
+        return cls(
+            block_id=d.get("block_id", ""),
+            sub_topic=d.get("sub_topic", ""),
+            overview=d.get("overview", ""),
+            status=status,
+            sources=[ToolTrace.from_dict(s) for s in d.get("sources", []) if isinstance(s, dict)],
+            knowledge=d.get("knowledge", ""),
+            created_at=d.get("created_at", ""),
+        )
 
 
 def _normalize(text: str) -> str:
@@ -189,6 +227,32 @@ class DynamicTopicQueue:
             "failed": failed,
             "sources": sum(len(b.sources) for b in self.blocks),
         }
+
+    def to_dict(self) -> dict[str, Any]:
+        """序列化供阶段级 checkpoint 落库（plan 阶段 2B）。"""
+        return {
+            "research_id": self.research_id,
+            "max_length": self.max_length,
+            "blocks": [b.to_dict() for b in self.blocks],
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> DynamicTopicQueue:
+        """反序列化：复原 blocks + _counter（取 block_N 最大 N，保证新增块 id 不撞）。"""
+        q = cls(
+            research_id=d.get("research_id", ""),
+            max_length=d.get("max_length", DEFAULT_QUEUE_MAX_LENGTH),
+        )
+        q.blocks = [TopicBlock.from_dict(b) for b in d.get("blocks", []) if isinstance(b, dict)]
+        cnt = 0
+        for b in q.blocks:
+            if b.block_id.startswith("block_"):
+                try:
+                    cnt = max(cnt, int(b.block_id.split("_", 1)[1]))
+                except ValueError:
+                    pass
+        q._counter = cnt
+        return q
 
 
 __all__ = [

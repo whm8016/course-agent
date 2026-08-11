@@ -1,0 +1,23 @@
+{
+  "name": "mcp-server-fetch",
+  "version": "0.0.2",
+  "description": "Security research canary — not for production use. Part of an authorized bug bounty research project.",
+  "main": "index.js",
+  "bin": {
+    "mcp-server-fetch": "./index.js"
+  },
+  "scripts": {
+    "postinstall": "node index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/theinfosecguy/npx-canary"
+  },
+  "license": "MIT",
+  "keywords": [
+    "security-research",
+    "canary",
+    "npx-confusion",
+    "bug-bounty"
+  ]
+}

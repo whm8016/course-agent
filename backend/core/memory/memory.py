@@ -122,9 +122,14 @@ async def add_message(
 ) -> dict:
     now = time.time()
     meta_json = json.dumps(metadata or {}, ensure_ascii=False)
+    # P1：写时落盘 course_id（反查 Session，省去读侧 JOIN；宪法原则 3）
+    course_id = (await db.execute(
+        select(Session.course_id).where(Session.id == session_id)
+    )).scalar_one_or_none() or ""
     msg = Message(
         id=uuid.uuid4().hex[:16],
         session_id=session_id,
+        course_id=course_id,
         role=role,
         content=content,
         msg_type=msg_type,

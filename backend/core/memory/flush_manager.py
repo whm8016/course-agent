@@ -133,12 +133,12 @@ async def _flush_turns(user_id: str, course_id: str, turns: list[dict]) -> bool:
     # 2. 调用 mem0.add()（内部 1 次 LLM 提取）—— 关键持久化
     mem0_ok = True
     try:
-        from core.memory.mem0_client import get_memory
+        from core.memory.mem0_client import get_memory, normalize_results
 
         m = get_memory()
         result = await m.add(messages, user_id=user_id, metadata={"course_id": course_id})
         if result:
-            items = result if isinstance(result, list) else result.get("results", [])
+            items = normalize_results(result)
             logger.info(
                 "[flush_manager] mem0.add complete user=%s stored=%d",
                 user_id, len(items) if items else 0
@@ -219,21 +219,20 @@ async def _scan_all_keys(r: aioredis.Redis, match: str, count: int = 200) -> lis
     return all_keys
 
 
-async def _flush_one(
-    r: aioredis.Redis,
-    key: str,
-    turns: list[dict],
-    meta: dict,
-) -> bool:
-    """带 per-key 互斥锁的安全 flush。
+async def _flush_one(r: aioredis.Redis, key: str) -> int:
+    """带 per-key 互斥锁的安全 flush（读 + flush + 裁剪全在锁内）。
 
-    H-7 + M-13 的核心修复点。流程（顺序至关重要）：
+    H-7 + M-13 + P1 数据丢失/重复 flush 修复。流程（顺序至关重要）：
       1. SET NX 抢 per-key 锁（拿不到说明别的 worker 正在 flush，跳过避免重复落盘）
-      2. flush 成功后才删 Redis key（原代码先删后写，flush 失败即永久丢数据）
-      3. finally 释放锁（防崩溃残留：锁带 TTL，崩溃也会自动过期）
+      2. 锁内读 lrange + meta：修复原"锁外读快照"两个后果--(a) flush 期间新 RPUSH 的
+         turn 被 delete 连带删（丢数据）；(b) A 释放锁后 B 持旧快照重新抢锁二次 flush
+         （重复 mem0 + 双倍 LLM）。
+      3. flush 成功后 LTRIM 只裁已 flush 的前 N 条，保留 flush 期间新 RPUSH 进来的 turn；
+         list 裁空则 Redis 自动删 key，并清 :ts/:meta（与旧"全删"语义对齐）。
+      4. finally 释放锁（防崩溃残留：锁带 TTL）
 
     Returns:
-        True = 已 flush（或数据已被本 worker 处理）；False = 抢锁失败被跳过。
+        实际 flush 的 turn 数（0 = 抢锁失败被跳过 / 无数据 / 关键写失败保留重试）。
     """
     lock_key = f"{key}{_LOCK_SUFFIX}"
 
@@ -241,24 +240,35 @@ async def _flush_one(
     got_lock = await r.set(lock_key, "1", ex=_LOCK_TTL, nx=True)
     if not got_lock:
         logger.info("[flush_manager] flush_one SKIP key=%s reason=locked-by-other", key)
-        return False
+        return 0
 
     try:
-        # 2. 先 flush 成功，再删 key（H-7：flush 失败则保留 key 等下次重试）
+        # 2. 锁内读快照：此时别的 worker 无法 flush 同一 key，新 turn 仍可 RPUSH 但不影响本快照
+        turns_raw = await r.lrange(key, 0, -1)
+        turns = [json.loads(t) for t in turns_raw]
+        if not turns:
+            return 0  # 已被别的 worker flush 完
+
+        meta_str = await r.get(f"{key}{_META_SUFFIX}")
+        meta = json.loads(meta_str or "{}")
+
         ok = await _flush_turns(meta.get("user_id", ""), meta.get("course_id", ""), turns)
         if not ok:
             # Phase 1 止血：关键写（mem0）失败 → 保留 key 等下次 cron 重试，绝不删 key 丢数据。
-            # 区别于「_flush_turns 抛异常」路径：这里是 mem0 内部失败被捕获、显式返回 False。
+            # 区别于「_flush_turns 抛异常」路径：这里是 mem0 内部失败被捕获、显式返回 0。
             logger.warning(
                 "[flush_manager] flush_one KEEP key=%s reason=critical-write-failed-will-retry", key
             )
-            return False
+            return 0
 
-        # flush 成功后才删除数据 key（含 :ts 和 :meta），数据安全落盘
-        await r.delete(key, f"{key}{_TS_SUFFIX}", f"{key}{_META_SUFFIX}")
-        return True
+        # 3. flush 成功：只裁已 flush 的前 N 条，保留 flush 期间新 RPUSH 的 turn（治数据丢失）
+        await r.ltrim(key, len(turns), -1)
+        # list 裁空（无新 turn）则清 :ts/:meta 收尾；仍有新 turn 则保留（:ts 已被新 turn 更新）
+        if await r.llen(key) == 0:
+            await r.delete(f"{key}{_TS_SUFFIX}", f"{key}{_META_SUFFIX}")
+        return len(turns)
     finally:
-        # 3. 释放锁（best-effort；锁有 TTL 兜底，删失败也不致死锁）
+        # 4. 释放锁（best-effort；锁有 TTL 兜底，删失败也不致死锁）
         try:
             await r.delete(lock_key)
         except Exception as e:
@@ -298,22 +308,14 @@ async def scan_and_flush(r: aioredis.Redis, max_turns: int, idle_timeout: float)
             idle = now - ts
 
             if length >= max_turns or idle >= idle_timeout:
-                # 获取所有对话数据
-                turns_raw = await r.lrange(key, 0, -1)
-                turns = [json.loads(t) for t in turns_raw]
-
-                # 获取元数据
-                meta_str = await r.get(f"{key}{_META_SUFFIX}")
-                meta = json.loads(meta_str or "{}")
-
-                # 安全 flush（带 per-key 锁 + 先写后删）
-                done = await _flush_one(r, key, turns, meta)
-                if done:
+                # 安全 flush（锁内读 + flush + LTRIM，新 turn 不丢、不重复 flush）
+                flushed = await _flush_one(r, key)
+                if flushed:
                     flushed_count += 1
 
                 logger.info(
-                    "[flush_manager] cron flush key=%s turns=%d idle=%.1fs done=%s",
-                    key, len(turns), idle, done
+                    "[flush_manager] cron flush key=%s flushed_turns=%d idle=%.1fs ok=%s",
+                    key, flushed, idle, bool(flushed)
                 )
 
         except Exception as e:
@@ -344,15 +346,9 @@ async def flush_all_pending(r: aioredis.Redis) -> int:
     flushed_count = 0
     for key in data_keys:
         try:
-            turns_raw = await r.lrange(key, 0, -1)
-            turns = [json.loads(t) for t in turns_raw]
-
-            meta_str = await r.get(f"{key}{_META_SUFFIX}")
-            meta = json.loads(meta_str or "{}")
-
-            # 复用安全 flush（H-7 先写后删 + M-13 per-key 锁）
-            done = await _flush_one(r, key, turns, meta)
-            if done:
+            # 复用安全 flush（锁内读 + flush + LTRIM）
+            flushed = await _flush_one(r, key)
+            if flushed:
                 flushed_count += 1
 
         except Exception as e:
@@ -427,13 +423,8 @@ class MemoryFlushManager:
 
         for key in data_keys:
             try:
-                turns_raw = await r.lrange(key, 0, -1)
-                turns = [json.loads(t) for t in turns_raw]
-                meta_str = await r.get(f"{key}{_META_SUFFIX}")
-                meta = json.loads(meta_str or "{}")
-
-                # 复用安全 flush（H-7 先写后删 + M-13 per-key 锁）
-                await _flush_one(r, key, turns, meta)
+                # 复用安全 flush（锁内读 + flush + LTRIM）
+                await _flush_one(r, key)
             except Exception as e:
                 logger.warning("[flush_manager] flush_user key=%s error=%s", key, e)
 

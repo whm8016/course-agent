@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+
+from settings import get_settings
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +33,11 @@ if TYPE_CHECKING:
     from core.context import UnifiedContext
 
 logger = logging.getLogger(__name__)
+
+# T2 动态层（memory/mastery/summary）集体预算 = soft_trigger // 此除数（模块常量，非配置项）。
+# 旧实现用 mecw×target_pct×tier2_pct 百分比链（已随上下文管理重构移除）；新双阈值无百分比，
+# 改用 compute_budgets 的 soft_trigger 派生。10 ≈ 旧 qwen-plus 量级（soft_trigger 64k/10=6.4k vs 旧 5.9k）。
+_T2_BUDGET_DIVISOR = 10
 
 
 @dataclass(frozen=True)
@@ -163,11 +170,34 @@ async def build_common_context_layers(
             mastery_context = ""
 
     metadata = ctx.metadata or {}
+    memory_context = ctx.memory_context or ""
+    # Phase 2：coordinator_enabled 时对 T2 动态层（memory/mastery/summary）集体预算裁剪，低优先级
+    # 先裁（memory->mastery->summary，summary 不可重建最后裁）。默认关=各层走原 per-slice cap。
+    if get_settings().context_budget.coordinator_enabled:
+        from core.agentic.context_budget import cap_dynamic_slices
+        from core.agentic.context_window import compute_budgets
+        # T2 动态层集体裁剪：超预算时按优先级（低->高）整段丢弃最低优先级切片，直到回到预算内。
+        # 预算受同一 soft_trigger 驱动（与 enforce 级联同阈值），非旧百分比链。
+        _soft_trigger, _ = compute_budgets(get_settings().llm.text_model)
+        _t2_budget = max(1, _soft_trigger // _T2_BUDGET_DIVISOR)
+        _capped = cap_dynamic_slices(
+            {
+                "memory_context": memory_context,
+                "mastery_context": mastery_context,
+                "session_summary": session_summary,
+            },
+            _t2_budget,
+            frozenset(),
+            ["memory_context", "mastery_context", "session_summary"],
+        )
+        memory_context = _capped["memory_context"]
+        mastery_context = _capped["mastery_context"]
+        session_summary = _capped["session_summary"]
     return CommonContextLayers(
         course_prompt=course_prompt,
         bot_persona=(metadata.get("bot_persona") or "").strip(),
         always_skills=always_skills,
-        memory_context=ctx.memory_context or "",
+        memory_context=memory_context,
         mastery_context=mastery_context,
         session_summary=session_summary,
         now_text=now_text,

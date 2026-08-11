@@ -18,7 +18,6 @@ filters 做 AND 过滤，避免 A 课程聊天产生的记忆串到 B 课程（I
 方留空 course_id，保持跨课程全局检索）。
 
 增强特性（通过配置开关）：
-  - 时间衰减评分：recency_decay_lambda 参数让新记忆得分更高
   - 矛盾检测清理：基于文本相似度规则检测矛盾记忆
   - add 门槛过滤：跳过无意义短消息减少 token 开销
 """
@@ -124,6 +123,17 @@ def get_memory():
     return _memory
 
 
+def normalize_results(resp) -> list:
+    """mem0 的 get_all/search 返回可能是 ``{"results":[...]}`` 或 ``[...]``，统一成 list。
+
+    core 层（tools.py / build_memory_context / has_any）统一用本函数；api/memory.py 的
+    ``_results`` 与本函数同义（api 层保留原样，避免改动范围外代码）。
+    """
+    if isinstance(resp, dict):
+        return resp.get("results", []) or []
+    return resp or []
+
+
 async def add_turn(user_id: str, user_message: str, assistant_message: str, course_id: str = "") -> None:
     """每轮对话后提取记忆（EventBus / worker 调用）。
 
@@ -157,7 +167,7 @@ async def add_turn(user_id: str, user_message: str, assistant_message: str, cour
     )
     # mem0 add 返回可能是 list 或 dict，记录提取/存储的结果
     if result:
-        items = result if isinstance(result, list) else result.get("results", [])
+        items = normalize_results(result)
         logger.info(
             "[mem0] add_turn COMPLETE user_id=%s stored_count=%d items=%s",
             user_id, len(items) if items else 0,
@@ -176,7 +186,6 @@ async def build_memory_context(
     串到 B 课程的对话里；留空则退化为跨课程全局检索（IM 机器人等无课程概念场景用）。
 
     增强特性（通过配置开关）：
-    - 时间衰减评分：新记忆得分更高（recency_decay_lambda）
     - 矛盾检测清理：基于文本相似度规则检测并排除矛盾记忆
     """
     if not user_id or not (query_text or "").strip():
@@ -186,40 +195,31 @@ async def build_memory_context(
         m = get_memory()
         settings = _get_settings()
 
-        # 时间衰减参数（从配置读取）
-        decay_lambda = 0.0
-        if settings.mem0.time_decay_enabled:
-            decay_lambda = settings.mem0.time_decay_lambda
-
         logger.info(
-            "[mem0] build_memory_context SEARCH user_id=%s query=%s top_k=%d decay_lambda=%.4f",
-            user_id, query_text[:100], top_k, decay_lambda
+            "[mem0] build_memory_context SEARCH user_id=%s query=%s top_k=%d",
+            user_id, query_text[:100], top_k
         )
         # P0-C：search_threshold 过滤低相关记忆（默认 0=不过滤=行为不变）。mem0 V3 原生
         # 支持 threshold 关键字，但当前部署版本兼容性未实测（Docker 起不来）——故 >0 时
         # 才尝试传 threshold，mem0 不接受则 TypeError 自适应降级（不阻塞检索）。
-        # recency_decay_lambda 真实生效验证同样待 Docker。
         threshold = settings.mem0.search_threshold
         search_filters: dict = {"user_id": user_id}
         if course_id:
             search_filters["course_id"] = course_id
-        base_kwargs: dict = {
-            "filters": search_filters,
-            "top_k": top_k,
-            "recency_decay_lambda": decay_lambda,
-        }
         try:
             if threshold > 0:
-                results = await m.search(query_text, **base_kwargs, threshold=threshold)
+                results = await m.search(
+                    query_text, filters=search_filters, top_k=top_k, threshold=threshold
+                )
             else:
-                results = await m.search(query_text, **base_kwargs)
+                results = await m.search(query_text, filters=search_filters, top_k=top_k)
         except TypeError:
-            # mem0 版本不接受 threshold/recency_decay_lambda 等关键字 → 降级最小参数重试
+            # mem0 版本不接受 threshold 关键字 → 降级最小参数重试
             logger.warning(
-                "[mem0] search 不接受 threshold 等关键字，降级为最小参数重试", exc_info=True
+                "[mem0] search 不接受 threshold 关键字，降级为最小参数重试", exc_info=True
             )
             results = await m.search(query_text, filters=search_filters, top_k=top_k)
-        results = results.get("results", []) if isinstance(results, dict) else (results or [])
+        results = normalize_results(results)
     except Exception as exc:
         logger.warning("[mem0] build_memory_context SEARCH_FAILED user_id=%s error=%s", user_id, exc)
         return ""
@@ -353,7 +353,7 @@ async def has_any(user_id: str, course_id: str = "") -> bool:
         if course_id:
             filters["course_id"] = course_id
         results = await m.get_all(filters=filters, top_k=1)
-        items = results.get("results", []) if isinstance(results, dict) else (results or [])
+        items = normalize_results(results)
         has = bool(items)
         logger.debug("[mem0] has_any user_id=%s has_memory=%s", user_id, has)
         return has

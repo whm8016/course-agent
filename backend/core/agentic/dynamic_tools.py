@@ -100,10 +100,13 @@ def resolve(
     # read_skill（skills_manifest 非空时）
     if context.skills_manifest:
         base.append(_registry.get("read_skill").schema)
-    # write_memory / read_memory 工具已移除（plan 第三批-4 清死代码）：原分支挂载的 schema 在
-    # registry 从未注册（_registry.get 恒 None → if 守卫恒不进入），是未接线的半成品死代码；
-    # 配套的 read executor mem0_client.get_all_text 与 has_memory 元数据已同步删除。如需恢复
-    # agent 记忆读写能力，须先在 register_builtins 补 schema + executor 再在此挂载。
+    # always-on 内置工具（如记忆读写）：无视 enabled_tools 追加，使 SSE/WS/bot 三条 chat
+    # 入口都不必各自合并（入口点只管客户端选的工具，核心能力由注册表声明）。去重保序。
+    _seen_names = {s["function"]["name"] for s in base}
+    for _entry in _registry.always_on_entries():
+        if _entry.name not in _seen_names:
+            base.append(_entry.schema)
+            _seen_names.add(_entry.name)
 
     # deferred MCP 工具（渐进式揭示）
     token = None

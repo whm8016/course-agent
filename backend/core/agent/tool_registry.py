@@ -50,7 +50,8 @@ async def _execute_rag(course_id: str, query: str, **kwargs) -> ToolResult:
     """调用课程知识库检索，按 用户mode + Agent strategy + 已就绪后端 路由，返回 ToolResult。
 
     mode（用户每请求选，经 tool_dispatch 注入 kwarg）：
-      - mix/naive/local/global：手动选 LightRAG 原生模式（要求 lightrag 已就绪），优先级最高。
+      - llamaindex_pg：手动选 pgvector，强制走 pg 向量（要求 pg 已就绪），优先级最高。
+      - mix/naive/local/global：手动选 LightRAG 原生模式（要求 lightrag 已就绪）。
       - auto（默认）：strategy==relationship 且 lightrag 就绪 → LightRAG 图增强（多跳）；
         否则优先 pgvector 向量（普通/事实），再退 LightRAG naive。
     strategy（LLM 按 rag.yaml 自选）：fact | relationship。与 mode 正交，仅 auto 下生效。
@@ -67,7 +68,18 @@ async def _execute_rag(course_id: str, query: str, **kwargs) -> ToolResult:
         strategy = str(kwargs.get("strategy") or "fact").strip().lower()
         top_k = kwargs.get("top_k", 5)
 
-        if mode in ("mix", "naive", "local", "global"):
+        if mode == "llamaindex_pg":
+            # 用户显式选 pgvector：强制走 pg 向量，要求 pg 已就绪（不看 strategy，优先级最高）
+            if "llamaindex_pg" not in ready:
+                return ToolResult(
+                    content="（该课程未构建 pgvector 索引，无法使用此检索模式。）",
+                    success=False,
+                )
+            retriever = get_retriever("llamaindex_pg")
+            content = await retriever.retrieve_context(
+                course_id=course_id, query=query, top_k=top_k
+            )
+        elif mode in ("mix", "naive", "local", "global"):
             # 用户手动选 LightRAG 模式：要求 lightrag 已就绪，优先级最高（不看 strategy）
             if "lightrag" not in ready:
                 return ToolResult(
@@ -150,9 +162,11 @@ async def _load_user_search_override(user_id: str) -> dict | None:
             ).scalar_one_or_none()
             if row is None:
                 return None
+            from utils.crypto import decrypt_secret_or_plain
             return {
                 "provider": row.provider or "",
-                "api_key": row.api_key or "",
+                # 1.5：api_key 加密落库，读出时解密（兼容 legacy 明文：解密失败回退原值）
+                "api_key": decrypt_secret_or_plain(row.api_key or ""),
                 "base_url": row.base_url or "",
                 "max_results": row.max_results or 0,
                 "proxy": row.proxy or "",

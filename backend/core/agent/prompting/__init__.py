@@ -134,6 +134,19 @@ def build_tool_hint_text(
         if rendered:
             blocks.append(rendered)
 
+    # always-on 内置工具（如记忆读写）：与 ``resolve()`` 的 always-on schema 追加对齐，
+    # 无视 ``names`` 追加其 hint，保证「schema 挂上了、prompt 也提到了」不脱节。去重保序。
+    # 不包 try/except--与 resolve() 同款直调（get_tool_registry 恒返回单例；import 真出问题
+    # resolve 会先崩）；静默吞异常会让 hint 消失且无日志，违背「degrade+log / fail-fast」。
+    from core.agent.registry import get_tool_registry
+    for _entry in get_tool_registry().always_on_entries():
+        if _entry.name in seen:
+            continue
+        rendered = _render_one(_entry.name, load_prompt_hints(_entry.name, language))
+        if rendered:
+            blocks.append(rendered)
+            seen.add(_entry.name)
+
     if not blocks:
         return ""
     return "## 可用工具\n\n" + "\n".join(blocks)

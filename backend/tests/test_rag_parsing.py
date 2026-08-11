@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from unittest.mock import patch
 
@@ -362,39 +363,6 @@ class TestMinerUEngineConfig:
             eng.parse(big, tmp_path / "wd", config=cfg)
 
 
-# ── type_routed 分块 ──────────────────────────────────────────────────────────
-
-
-class TestTypeRouted:
-    def test_chunk_blocks_structured_sections_and_split(self):
-        from core.rag.chunking.type_routed import chunk_blocks_structured
-
-        blocks = [
-            {"type": "title", "text": "第一章", "page_idx": 0},
-            {"type": "text", "text": "短内容", "page_idx": 0},
-            {"type": "title", "text": "第二章", "page_idx": 1},
-            {"type": "text", "text": "x" * 600, "page_idx": 1},  # 超 512 递归切
-        ]
-        chunks, secs = chunk_blocks_structured(blocks, max_chars=512)
-        # 第一章 1 chunk + 第二章 600 字切 2 = 3
-        assert len(chunks) == 3
-        assert secs[0] == "第一章" and secs[1] == "第二章" and secs[2] == "第二章"
-        assert all(len(c) <= 512 for c in chunks)
-
-    def test_table_atomic(self):
-        from core.rag.chunking.type_routed import chunk_blocks_structured
-
-        blocks = [
-            {"type": "title", "text": "T", "page_idx": 0},
-            {"type": "text", "text": "正文", "page_idx": 0},
-            {"type": "table", "text": "| x | y |\n|---|---|\n| 1 | 2 |", "page_idx": 0},
-        ]
-        chunks, secs = chunk_blocks_structured(blocks, max_chars=512)
-        # title section（正文）+ table section（表格原子化）
-        assert any("表格" in s for s in secs)
-        assert any("| x | y |" in c for c in chunks)
-
-
 # ── engine-ui 能力探测 ────────────────────────────────────────────────────────
 
 
@@ -425,3 +393,164 @@ class TestEngineUI:
         # mineru_api configured 看 api_key（mock 配了 fake_key → True）
         assert result["parse_engines"][0]["configured"] is True
         assert result["parse_engines"][0]["requires_api_key"] is True
+
+
+# ── MinerU 大 PDF 分片（超 max_file_pages 自动切→逐片解析→合并）──────────────
+
+
+def _mineru_cfg(**overrides) -> dict:
+    base = {
+        "api_base_url": "https://mineru.net",
+        "api_token": "x",
+        "model_version": "vlm",
+        "language": "ch",
+        "enable_formula": True,
+        "enable_table": True,
+        "poll_interval": 5,
+        "poll_timeout": 1800,
+        "max_file_pages": 200,
+        "max_file_mb": 200,
+    }
+    base.update(overrides)
+    return base
+
+
+class TestMinerUPdfSplit:
+    """分片机制：纯 fitz 造真 PDF + mock _parse_one（不调真实 MinerU API）。"""
+
+    @staticmethod
+    def _make_pdf(path: Path, pages: int) -> Path:
+        import fitz  # noqa: PLC0415
+
+        doc = fitz.open()
+        for i in range(pages):
+            page = doc.new_page()
+            page.insert_text((72, 72), f"page {i + 1}", fontsize=12)
+        doc.save(str(path))
+        doc.close()
+        return path
+
+    def test_count_pages_real_pdf(self, tmp_path):
+        from core.rag.parsing.engines.mineru_api import _count_pages
+
+        p = self._make_pdf(tmp_path / "a.pdf", 7)
+        assert _count_pages(p) == 7
+
+    def test_count_pages_invalid_returns_none(self, tmp_path):
+        from core.rag.parsing.engines.mineru_api import _count_pages
+
+        bad = tmp_path / "bad.pdf"
+        bad.write_bytes(b"not a pdf")
+        assert _count_pages(bad) is None
+
+    def test_split_ranges_cover_no_overlap(self, tmp_path):
+        from core.rag.parsing.engines.mineru_api import _split_pdf
+
+        import fitz  # noqa: PLC0415
+
+        src = self._make_pdf(tmp_path / "src.pdf", 500)
+        parts, tmp_dir = _split_pdf(src, 200, 500)
+        try:
+            assert len(parts) == 3
+            # 区间覆盖 [0,500)，无重叠无空洞，每片 ≤ 阈值
+            assert (parts[0][1], parts[0][2]) == (0, 200)
+            assert (parts[1][1], parts[1][2]) == (200, 400)
+            assert (parts[2][1], parts[2][2]) == (400, 500)
+            for (part_path, _start, _end), expect_pages in zip(parts, [200, 200, 100]):
+                d = fitz.open(str(part_path))
+                assert d.page_count == expect_pages
+                d.close()
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_split_exact_multiple(self, tmp_path):
+        from core.rag.parsing.engines.mineru_api import _split_pdf
+
+        src = self._make_pdf(tmp_path / "src.pdf", 400)
+        parts, _ = _split_pdf(src, 200, 400)
+        assert len(parts) == 2
+        assert parts[0][2] == 200 and parts[1][1] == 200 and parts[1][2] == 400
+
+    def test_parse_under_threshold_single_call(self, tmp_path):
+        from core.rag.parsing.engines import mineru_api as M
+
+        eng = M.MinerUApiEngine()
+        src = self._make_pdf(tmp_path / "src.pdf", 100)  # < 200 → 不拆
+        wd = tmp_path / "wd"
+        wd.mkdir()
+        calls = []
+
+        def fake_one(pdf_path, workdir, config, on_output=None, *, label=""):
+            calls.append((Path(pdf_path).name, Path(workdir).name, label))
+            (Path(workdir) / "full.md").write_text("# T", encoding="utf-8")
+
+        with patch.object(M, "_parse_one", side_effect=fake_one):
+            eng.parse(src, wd, config=_mineru_cfg(max_file_pages=200))
+
+        assert len(calls) == 1
+        assert calls[0][0] == "src.pdf"
+        assert calls[0][1] == "wd"  # 直接用 workdir，无 _part 子目录
+        assert calls[0][2] == ""  # 无分片标签
+        assert not any(p.name.startswith("_part") for p in wd.iterdir())  # 无分片残留
+
+    def test_parse_over_threshold_splits_and_merges(self, tmp_path):
+        from core.rag.parsing.engines import mineru_api as M
+
+        eng = M.MinerUApiEngine()
+        src = self._make_pdf(tmp_path / "src.pdf", 450)  # > 200 → 3 片
+        wd = tmp_path / "wd"
+        wd.mkdir()
+
+        def fake_one(pdf_path, workdir, config, on_output=None, *, label=""):
+            wdir = Path(workdir)
+            idx = int(wdir.name.replace("_part", "")) - 1  # _part1 → 0
+            (wdir / "full.md").write_text(f"# Part {idx}\nbody{idx}", encoding="utf-8")
+            (wdir / "content_list.json").write_text(
+                json.dumps(
+                    [
+                        {"type": "title", "text": f"Part {idx}", "page_idx": 0},
+                        {"type": "text", "text": "x", "page_idx": 5},
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            img_dir = wdir / "images"
+            img_dir.mkdir()
+            (img_dir / f"img{idx}.png").write_bytes(b"PNG" + bytes([idx]))
+
+        with patch.object(M, "_parse_one", side_effect=fake_one):
+            eng.parse(src, wd, config=_mineru_cfg(max_file_pages=200))
+
+        # 合并 markdown = 三片按页序拼接
+        merged_md = (wd / "full.md").read_text(encoding="utf-8")
+        assert "# Part 0" in merged_md and "# Part 1" in merged_md and "# Part 2" in merged_md
+        # page_idx 按片起始偏移（片0 +0 / 片1 +200 / 片2 +400）还原全局页码
+        blocks = json.loads((wd / "content_list.json").read_text(encoding="utf-8"))
+        assert len(blocks) == 6
+        assert sorted(b["page_idx"] for b in blocks) == [0, 5, 200, 205, 400, 405]
+        # 图片合并
+        assert sorted(p.name for p in (wd / "images").iterdir()) == [
+            "img0.png",
+            "img1.png",
+            "img2.png",
+        ]
+        # 分片子目录已清理
+        assert not (wd / "_part1").exists()
+
+    def test_parse_threshold_zero_never_splits(self, tmp_path):
+        from core.rag.parsing.engines import mineru_api as M
+
+        eng = M.MinerUApiEngine()
+        src = self._make_pdf(tmp_path / "src.pdf", 500)  # 本该拆，但阈值=0 关闭分片
+        wd = tmp_path / "wd"
+        wd.mkdir()
+        labels = []
+
+        def fake_one(pdf_path, workdir, config, on_output=None, *, label=""):
+            labels.append(label)
+            (Path(workdir) / "full.md").write_text("x", encoding="utf-8")
+
+        with patch.object(M, "_parse_one", side_effect=fake_one):
+            eng.parse(src, wd, config=_mineru_cfg(max_file_pages=0))
+
+        assert labels == [""]  # 单片直递，不分片

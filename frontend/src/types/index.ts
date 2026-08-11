@@ -47,6 +47,7 @@ export interface AgentMetadata {
   retrieve_mode?: string
   retrieve_strategy?: string
   hallucination?: HallucinationInfo
+  usage?: MessageUsage
 }
 
 export interface SSEEvent {
@@ -94,8 +95,18 @@ export interface Message {
     stopped?: boolean
     stage?: string
     call_state?: string
+    usage?: MessageUsage
     timestamp?: number
   }
+}
+
+// 本轮 token 用量（done 事件 metadata.usage 透传，学生端气泡底部小字）。
+// cost_usd 仅 expose_cost_to_student 开启时存在；token 数始终可见。
+export interface MessageUsage {
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cost_usd?: number
 }
 
 export interface Session {
@@ -123,8 +134,6 @@ export interface User {
   display_name: string
   role?: 'student' | 'teacher' | 'admin'
   is_admin?: boolean
-  summary_memory?: string
-  profile_memory?: string
 }
 
 export interface AuthResponse {

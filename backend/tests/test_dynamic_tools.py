@@ -39,7 +39,7 @@ def test_resolve_no_skill_no_mcp():
     ctx = UnifiedContext(enabled_tools=["rag"])
     schemas, token = resolve(ctx)
     names = {s["function"]["name"] for s in (schemas or [])}
-    assert names == {"rag"}
+    assert names == {"rag", "read_memory", "write_memory"}  # read_memory/write_memory 为 always_on
     assert token is None
 
 
@@ -79,7 +79,7 @@ def test_resolve_load_appends_to_bound_list(monkeypatch, tmp_path):
         schemas, token = resolve(ctx)
         loader = current_deferred_loader()
         names = {s["function"]["name"] for s in schemas}
-        assert names == {"load_tools"}  # 初始只有 load_tools
+        assert names == {"load_tools", "read_memory", "write_memory"}  # always_on + load_tools
         # 模型调 load_tools → loader 把 calc schema append 到绑定的 schemas
         loader.load(["mcp_math_calc"])
         names_after = {s["function"]["name"] for s in schemas}

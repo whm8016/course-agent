@@ -51,9 +51,9 @@ _INTERFERING_ENV = [
     "CHUNKING__SIZE", "CHUNKING__OVERLAP", "CHUNKING__TOP_K",
     "CHUNKING__INGEST_SIZE", "CHUNKING__INGEST_OVERLAP",
     # LightRAG
-    "LIGHTRAG__TOP_K", "LIGHTRAG__QUERY_MODE", "LIGHTRAG__ENABLED",
+    "LIGHTRAG__TOP_K", "LIGHTRAG__QUERY_MODE", "LIGHTRAG__ENABLED", "LIGHTRAG__LRU_CAPACITY",
     # Mem0 / Summary
-    "MEM0__TIME_DECAY_ENABLED", "SUMMARY__WINDOW_SIZE",
+    "MEM0__CONFLICT_DETECT_ENABLED", "SUMMARY__WINDOW_SIZE",
     # Paths（.env 可能显式设相对路径，需清理才能测默认值）
     "PATHS__UPLOAD_DIR", "PATHS__KNOWLEDGE_DIR", "PATHS__DB_PATH",
     "PATHS__QUESTION_LOG_DIR", "PATHS__LIGHTRAG_WORKDIR",
@@ -95,7 +95,7 @@ def test_defaults_instantiate(monkeypatch):
     assert s.embedding.model == "text-embedding-v3"
     assert s.lightrag.top_k == 6
     assert s.chunking.size == 500
-    assert s.mem0.time_decay_enabled is False
+    assert s.mem0.conflict_detect_enabled is True
     assert s.summary.window_size == 5
 
 
@@ -130,9 +130,9 @@ def test_allowed_origins_wildcard(monkeypatch):
 
 
 def test_truthy_bool_parsing(monkeypatch):
-    assert _fresh(monkeypatch, MEM0__TIME_DECAY_ENABLED="true").mem0.time_decay_enabled is True
-    assert _fresh(monkeypatch, MEM0__TIME_DECAY_ENABLED="yes").mem0.time_decay_enabled is True
-    assert _fresh(monkeypatch, MEM0__TIME_DECAY_ENABLED="0").mem0.time_decay_enabled is False
+    assert _fresh(monkeypatch, MEM0__CONFLICT_DETECT_ENABLED="true").mem0.conflict_detect_enabled is True
+    assert _fresh(monkeypatch, MEM0__CONFLICT_DETECT_ENABLED="yes").mem0.conflict_detect_enabled is True
+    assert _fresh(monkeypatch, MEM0__CONFLICT_DETECT_ENABLED="0").mem0.conflict_detect_enabled is False
 
 
 # ── catalog 覆盖（_apply_catalog）─────────────────────────────────────────────
@@ -287,8 +287,28 @@ def test_lightrag_compute_methods(monkeypatch):
     assert s.lightrag.chunk_top_k_value() == 5
     mt = s.lightrag.max_tokens_config()
     assert set(mt.keys()) == {"total", "entity", "relation"}
-    # LRU 缩放：lru_capacity(10) // backend_workers(4) = 2
-    assert s.lightrag_lru_capacity_scaled == 2
+    # per-worker 容量：PG 后端不再整除，= lru_capacity（默认 6）。DB__URL 被清 → 默认 postgres。
+    assert s.lightrag_lru_capacity_per_worker == 6
+
+
+def test_lightrag_lru_capacity_per_worker_branches(monkeypatch):
+    """PG 不整除 / 非 PG 保留旧整除口径（防 OOM）两分支。"""
+    # PG 后端：per-worker = lru_capacity（不整除）
+    s_pg = _fresh(monkeypatch)  # DB__URL 被清 → 默认 postgresql+asyncpg://...
+    assert s_pg.db.url.get_secret_value().startswith("postgres")
+    assert s_pg.lightrag_lru_capacity_per_worker == 6
+    # 显式放大容量也直接透传（不整除）
+    s_pg_big = _fresh(monkeypatch, LIGHTRAG__LRU_CAPACITY="20")
+    assert s_pg_big.lightrag_lru_capacity_per_worker == 20
+
+    # 非 PG（默认内存后端，单实例数百 MB）：保留 //workers 整除防 OOM。6 // 4 = 1 → 下限 2
+    s_sqlite = _fresh(monkeypatch, DB__URL="sqlite+aiosqlite:///:memory:")
+    assert s_sqlite.lightrag_lru_capacity_per_worker == 2
+    # 12 // 4 = 3（超过下限，取整除结果）
+    s_sqlite_big = _fresh(
+        monkeypatch, DB__URL="sqlite+aiosqlite:///:memory:", LIGHTRAG__LRU_CAPACITY="12",
+    )
+    assert s_sqlite_big.lightrag_lru_capacity_per_worker == 3
 
 
 # ── 全字段注入冒烟（防 R1：静默回落默认）──────────────────────────────────────
@@ -312,7 +332,7 @@ def test_full_env_injection_smoke(monkeypatch):
         "LIGHTRAG__QUERY_MODE": "hybrid",
         "CHUNKING__SIZE": "600",
         "CHUNKING__TOP_K": "8",
-        "MEM0__TIME_DECAY_ENABLED": "true",
+        "MEM0__CONFLICT_DETECT_ENABLED": "false",
         "SUMMARY__WINDOW_SIZE": "7",
         "MAX_UPLOAD_MB": "25",
     }
@@ -333,7 +353,7 @@ def test_full_env_injection_smoke(monkeypatch):
     assert s.lightrag.query_mode == "hybrid"
     assert s.chunking.size == 600
     assert s.chunking.top_k == 8
-    assert s.mem0.time_decay_enabled is True
+    assert s.mem0.conflict_detect_enabled is False
     assert s.summary.window_size == 7
     assert s.max_upload_mb == 25
 

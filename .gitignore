@@ -57,6 +57,12 @@ conversation-*.txt
 **/_tmp*
 **/test_full_output.txt
 **/backend_syntax_scan.txt
+# rerank 调试输出 / 论文截图提取 / 临时调试脚本（不提交）
+backend/rerank_debug*.txt
+backend/scripts/debug_*.py
+react_paper_images/
+# 第三方 npm 包压缩文件（本地依赖，不提交）
+*.tgz
 
 # --- Frontend (monorepo root) ---
 frontend/node_modules/
@@ -80,6 +86,7 @@ _preview_resumes.py
 gen_budget_doc.py
 blisubs.py
 pdf_extract.txt
+rerank_debug*.txt
 *_preview.png
 backend/subs/
 subtitles/
@@ -90,8 +97,14 @@ subtitles/
 # 评测缓存与带时间戳的评测报告（每次本地跑出来的产物）
 backend/scripts/eval_rag/cache/
 backend/scripts/eval_rag/results/*_20[0-9][0-9][0-9][0-9][0-9][0-9]_*
+# 评测结果产物（跑出来的 detail/summary/分析，不提交；datasets 语料保留）
+backend/scripts/eval_turn_budget/results/
+backend/scripts/eval_l2_summary/results/
 # 临时抓取文件 / agent 会话 dump 日志
 .tmp_*
 20[0-9][0-9]-[0-9][0-9]-[0-9][0-9]-*-agent.txt
 # Cursor 编辑器本地配置（与 .idea/ 同理）
 .cursor/
+# Claude Code 本地状态（临时 worktree + 个人本地配置），不提交
+.claude/worktrees/
+.claude/settings.local.json

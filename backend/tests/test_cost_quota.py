@@ -36,6 +36,13 @@ class _FakeRedis:
         self.calls.append(f"get:{key}")
         return self.store.get(key)
 
+    async def set(self, key, value, ex=None, nx=False):
+        self.calls.append(f"set:{key}:{value}:nx={nx}")
+        if nx and key in self.store:
+            return False
+        self.store[key] = value
+        return True
+
 
 class _BoomRedis:
     async def incrbyfloat(self, *a, **k):
@@ -221,3 +228,49 @@ async def test_loop_accrue_gated_by_enabled(monkeypatch):
     assert len(c_on) == 1       # 开 → 恰好一次 accrue（单 loop）
     # accrue 调用参数：(user_id, course_id, loop_cost)
     assert c_on[0][0] == "qu" and c_on[0][1] == "qc"
+
+
+# ---------------------------------------------------------------------------
+# P4：reconcile_quota_from_db（Redis 失联后从 DB 回填当日配额键）
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_reconcile_backfills_missing_keys_from_db(monkeypatch, client):
+    """reconcile 从 llm_usage_daily 回填当日缺失的 Redis 配额键（SETNX 不覆盖已有），
+    配额关->短路。防 Redis 丢数据后 check_quota 读到 0 静默放行超预算用户。"""
+    from datetime import datetime, timezone
+
+    from core.db import cache
+    from core.db.database import AsyncSessionLocal, LlmUsageDaily
+    from core.quota.cost_quota import _day_key, reconcile_quota_from_db
+    from settings import get_settings
+
+    monkeypatch.setattr(get_settings().cost_quota, "enabled", True)
+    day = datetime.now(timezone.utc).strftime("%Y%m%d")
+    async with AsyncSessionLocal() as db:
+        db.add(LlmUsageDaily(day=day, user_id="u_a", course_id="c_a", model="m", cost_usd=0.5, call_count=1))
+        db.add(LlmUsageDaily(day=day, user_id="u_b", course_id="c_b", model="m", cost_usd=0.7, call_count=1))
+        await db.commit()
+
+    fake = _FakeRedis()
+    # 预置 u_a 的 key 已存在（模拟 Redis 正常累积）-> 不应被覆盖
+    fake.store[_day_key("u_a", "c_a")] = "0.9"
+    monkeypatch.setattr(cache, "_get_pool", lambda: fake)
+
+    n = await reconcile_quota_from_db()
+    assert n == 1  # u_a 已存在不回填；u_b 缺失被回填
+    assert fake.store[_day_key("u_a", "c_a")] == "0.9"  # 未被覆盖
+    assert float(fake.store[_day_key("u_b", "c_b")]) == pytest.approx(0.7, abs=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_short_circuits_when_disabled(monkeypatch):
+    """配额关（enabled=False）-> reconcile 不碰 DB/Redis，返回 0。"""
+    from core.db import cache
+    from core.quota.cost_quota import reconcile_quota_from_db
+    from settings import get_settings
+
+    monkeypatch.setattr(get_settings().cost_quota, "enabled", False)
+    fake = _FakeRedis()
+    monkeypatch.setattr(cache, "_get_pool", lambda: fake)
+    assert await reconcile_quota_from_db() == 0
+    assert fake.calls == []

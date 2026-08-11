@@ -225,8 +225,8 @@ async def test_m28_resume_skips_image_ingest(monkeypatch):
     )
 
     # parse_files 返回空 chunks（让函数走"解析结果为空"早返回，避开文本摄入）
-    monkeypatch.setattr(ingestion_mod, "parse_files", lambda fps: ([], [], {}))
-    monkeypatch.setattr(ingestion_mod, "_persist_lightrag_ingest_chunks", lambda *a, **k: None)
+    monkeypatch.setattr(ingestion_mod, "parse_files", lambda fps: ([], [], {}, []))
+    monkeypatch.setattr(ingestion_mod, "persist_ingest_chunks", lambda *a, **k: None)
 
     # patch image_extractor 在模块内的延迟导入：让 ImportError 触发也会被吞，但我们要
     # 验证 resume 时连 import 都不发生——用 sys.modules 注入一个会记录调用的伪模块

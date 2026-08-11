@@ -164,6 +164,27 @@ LIGHTRAG_IN_USE = _metric(
 
 
 # --------------------------------------------------------------------------
+# 磁盘水位 + 存储 GC（运维观测：派生数据体积、整卷水位、GC 回收量）
+# DISK_USED_BYTES：整卷水位（main.py _sample_resource_gauges 每 5s 写一次 shutil.disk_usage）。
+#   multiprocess_mode='liveall'：多 worker 各采一次，Prometheus 取 max（同一卷，值应一致）。
+# STORAGE_GC_DELETED_BYTES：GC 累计回收字节数（run_gc 每次跑完 inc 总回收量）。
+# --------------------------------------------------------------------------
+
+DISK_USED_BYTES = _metric(
+    Gauge,
+    "ca_disk_used_bytes",
+    "Disk volume usage in bytes (whole mounted volume)",
+    labelnames=["target"],
+    multiprocess_mode="liveall",
+)
+STORAGE_GC_DELETED_BYTES = _metric(
+    Counter,
+    "ca_storage_gc_deleted_bytes_total",
+    "Total bytes reclaimed by storage GC (offline cron + admin trigger)",
+)
+
+
+# --------------------------------------------------------------------------
 # Convenience helpers
 # --------------------------------------------------------------------------
 

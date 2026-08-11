@@ -6,7 +6,14 @@
 默认引擎 ``mineru_api``（托管 API，云端不装 torch）。换引擎改 ``settings.parsing.engine``
 一个配置项（registry 统一契约）。
 """
+from core.rag.parsing.markdown_sections import markdown_to_sections, resolve_image_refs
 from core.rag.parsing.service import parse_document
 from core.rag.parsing.types import ParsedDocument, ParserError
 
-__all__ = ["parse_document", "ParsedDocument", "ParserError"]
+__all__ = [
+    "parse_document",
+    "ParsedDocument",
+    "ParserError",
+    "markdown_to_sections",
+    "resolve_image_refs",
+]

@@ -8,6 +8,7 @@ from collections.abc import AsyncGenerator
 from enum import Enum
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Column,
     Float,
@@ -81,12 +82,10 @@ class User(Base):
     username = Column(String(32), unique=True, nullable=False)
     password_hash = Column(String(256), nullable=False)
     display_name = Column(String(64), nullable=False, default="")
-    summary_memory = Column(Text, nullable=False, default="")
-    profile_memory = Column(Text, nullable=False, default="{}")
-    scope_memory = Column(Text, nullable=False, default="")
-    preferences_memory = Column(Text, nullable=False, default="")
     knowledge_graph = Column(JSON, nullable=False, default=lambda: {"nodes": [], "edges": []})
     error_graph = Column(JSON, nullable=False, default=lambda: {"nodes": [], "edges": []})
+    # OCC 版本号：graph_memory 整列 rewrite 的并发保护（条件 UPDATE + 冲突重试，宪法原则 5）
+    graph_version = Column(Integer, nullable=False, default=0, server_default="0")
     role = Column(String(16), nullable=False, default="student")
     is_admin = Column(Boolean, nullable=False, default=False)
     created_at = Column(Float, nullable=False, default=time.time)
@@ -126,6 +125,8 @@ class Message(Base):
 
     id = Column(String(32), primary_key=True, default=lambda: _short_uuid(16))
     session_id = Column(String(32), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
+    # P1：写时落盘 course_id，课程级查询免 JOIN Session（宪法原则 3）
+    course_id = Column(String(64), nullable=False, default="")
     role = Column(String(16), nullable=False)
     content = Column(Text, nullable=False, default="")
     msg_type = Column(String(16), nullable=False, default="text")
@@ -136,6 +137,7 @@ class Message(Base):
 
     __table_args__ = (
         Index("idx_messages_session", "session_id", "created_at"),
+        Index("idx_messages_course", "course_id", "created_at"),
     )
 
 
@@ -149,16 +151,7 @@ class KnowledgeBase(Base):
     icon = Column(String(32), nullable=False, default="📘")
     system_prompt = Column(Text, nullable=False, default="")
     sort_order = Column(Integer, nullable=False, default=0)
-    # status: pending | indexing | ready | error
-    status = Column(String(32), nullable=False, default="pending")
     file_count = Column(Integer, nullable=False, default=0)
-    error_msg = Column(Text, nullable=False, default="")
-    # 索引进度相关字段
-    progress = Column(Integer, nullable=False, default=0)          # 0‑100
-    progress_msg = Column(Text, nullable=False, default="")        # 当前步骤描述
-    chunks_done = Column(Integer, nullable=False, default=0)       # 已处理 chunk 数
-    chunks_total = Column(Integer, nullable=False, default=0)      # 总 chunk 数
-    token_estimate = Column(Integer, nullable=False, default=0)    # 估算 token 消耗
     created_at = Column(Float, nullable=False, default=time.time)
     updated_at = Column(Float, nullable=False, default=time.time)
     is_visible = Column(Boolean, nullable=False, default=True)
@@ -230,7 +223,9 @@ class KbBuild(Base):
 def aggregate_build_status(builds: list[KbBuild]) -> str:
     """多后端 kb_builds → 单一展示状态（KB 列表徽标 / _kb_to_course.kb_status 用）。
 
-    优先级：indexing（有在建）> error > paused > ready（至少一个可用）> pending。
+    优先级：indexing（有在建）> error > paused > ready（至少一个真有 chunks 的可用后端）> pending。
+    ready 需 status==ready 且 chunks_total>0——与 _kb_to_course.ready_backends / 检索层
+    _get_ready_backends 同口径，防空索引（0 chunk）被误判就绪导致徽章绿而按钮却禁用。
     """
     if not builds:
         return "pending"
@@ -238,7 +233,7 @@ def aggregate_build_status(builds: list[KbBuild]) -> str:
     for s in ("indexing", "error", "paused"):
         if s in statuses:
             return s
-    if "ready" in statuses:
+    if any(b.status == "ready" and (b.chunks_total or 0) > 0 for b in builds):
         return "ready"
     return "pending"
 
@@ -263,6 +258,8 @@ class NotebookEntry(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    # P1：写时落盘 course_id，课程级查询免 JOIN Session（宪法原则 3；修 teacher.py:779 跨课 bug）
+    course_id = Column(String(64), nullable=False, default="")
     session_id = Column(String(32), nullable=False, default="")
     session_title = Column(String(256), nullable=False, default="")
     question_id = Column(String(64), nullable=False, default="")
@@ -282,6 +279,7 @@ class NotebookEntry(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "session_id", "question_id", name="uq_notebook_entry_natural"),
         Index("idx_notebook_entries_user", "user_id", "updated_at"),
+        Index("idx_notebook_entries_course", "course_id", "user_id"),
     )
 
 
@@ -584,6 +582,197 @@ class KnowledgeMastery(Base):
     )
 
 
+class LearningEvent(Base):
+    """学情事件层（L0）：actor-verb-object 三元组 + 时间戳 + 上下文。
+
+    借鉴 xAPI（actor/verb/object + timestamp + context）结构，但**不实现完整规范**
+    （无 LRS / IRI 词表 / JSON-LD——无跨系统互操作需求）。承接三类信号：
+    - ``asked``：学生提问（对话 turn 完成，供 course_faq 语义聚类）
+    - ``answered``：学生答题（quiz 作答，供 rollup 正确率/掌握度）
+    - ``feedback``：用户反馈（点赞点踩，Phase 4）
+    读模型层（rollup / course_faq）由 ARQ cron 从本表增量聚合，展示层只读 rollup，
+    不再每次现算（学情分析四模块设计 §目标架构）。事件只追加、不修改（append-only 事实）。
+    """
+
+    __tablename__ = "learning_events"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    actor_user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    course_id = Column(String(64), nullable=False, default="")
+    verb = Column(String(32), nullable=False)  # asked | answered | feedback
+    object_id = Column(String(128), nullable=False, default="")  # question_id / turn_id / 反馈目标
+    object_text = Column(Text, nullable=False, default="")  # 问题文本(供FAQ聚类)/答题内容/反馈内容
+    session_id = Column(String(32), nullable=False, default="")
+    metadata_ = Column("metadata", JSON, nullable=True)  # verb 专属：is_correct/difficulty/mode/tools_used/score
+    created_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        # FAQ 聚类 cron：按课程取 asked 事件的时间窗口
+        Index("idx_events_course_verb_time", "course_id", "verb", "created_at"),
+        # 学生 rollup cron：按 (学生, 课程) 取事件时间窗口
+        Index("idx_events_actor_course_time", "actor_user_id", "course_id", "created_at"),
+    )
+
+
+class CourseDailyRollup(Base):
+    """学情读模型（L1）：每 (课程, 日) 一行的活跃度聚合，供活跃趋势/概览只读。
+
+    ARQ cron 从 learning_events 删后重算（幂等，同 llm_usage_daily 口径）。day 用
+    "YYYYMMDD" UTC，字典序==日期序。展示层只读本表，不扫事件明细。
+    """
+
+    __tablename__ = "course_daily_rollup"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    course_id = Column(String(64), nullable=False)
+    day = Column(String(8), nullable=False)                    # "YYYYMMDD" UTC
+    active_students = Column(Integer, nullable=False, default=0)   # 当日有事件的去重学生数
+    questions = Column(Integer, nullable=False, default=0)     # verb='asked' 计数
+    answers = Column(Integer, nullable=False, default=0)       # verb='answered' 计数
+    updated_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        UniqueConstraint("course_id", "day", name="uq_course_daily_rollup"),
+        Index("idx_course_daily_rollup_day", "day"),
+    )
+
+
+class StudentCourseRollup(Base):
+    """学情读模型（L1）：每 (学生, 课程) 一行的累计聚合，供教师学情统计/仪表盘只读。
+
+    ARQ cron 从 Session/Message/NotebookEntry 删后重算（幂等）。mastery_avg/risk 等
+    Phase 4 BKT 落地后填，此前为 NULL 占位（读侧遇 NULL 回退旧公式，避免空窗）。
+    """
+
+    __tablename__ = "student_course_rollup"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    course_id = Column(String(64), nullable=False)
+    sessions = Column(Integer, nullable=False, default=0)
+    messages = Column(Integer, nullable=False, default=0)
+    quiz_total = Column(Integer, nullable=False, default=0)
+    quiz_correct = Column(Integer, nullable=False, default=0)
+    last_active_at = Column(Float, nullable=True)
+    mastery_avg = Column(Float, nullable=True)   # Phase 4 BKT
+    risk = Column(Float, nullable=True)          # Phase 4 BKT
+    updated_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "course_id", name="uq_student_course_rollup"),
+        Index("idx_student_course_rollup_course", "course_id"),
+    )
+
+
+class CourseFaq(Base):
+    """高频问题读模型（L1）：语义聚类簇。
+
+    ARQ cron 从 learning_events(verb=asked) 用 embedding + 阈值贪心聚类，删后重算
+    （幂等）。取代 P1-c 的 Redis 精确匹配（"这题怎么算"/"这个怎么算" 永远不合）。
+    embedding 存 JSON（非 pgvector）--SQLite 测试可跑、Python 算 cosine（避 func.left 同款
+    PG 专有坑）。学情分析四模块设计 §模块一 p2-faq-cluster。
+    """
+
+    __tablename__ = "course_faq"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    course_id = Column(String(64), nullable=False, index=True)
+    question = Column(Text, nullable=False, default="")   # 簇代表问题（种子提问原文）
+    count = Column(Integer, nullable=False, default=0)    # 簇内提问次数
+    embedding = Column(JSON, nullable=True)               # 簇代表 embedding（list[float]）
+    last_asked_at = Column(Float, nullable=True)
+    updated_at = Column(Float, nullable=False, default=time.time)
+
+
+class ResearchCheckpoint(Base):
+    """深度研究阶段级 checkpoint（plan 阶段 2B）：worker 重启后按 resume_research_id 重放。
+
+    每个 research_id 一行。phase=最后到达的阶段；state_json 存阶段产物（refined_topic /
+    sub_topics / DynamicTopicQueue.to_dict），被中断阶段整段重放（接受该阶段内部 LLM/检索成本
+    重付一次，与 LangGraph「node 从头重跑」同语义）。进 ask_user 暂停前写 status=awaiting_user +
+    pending_question_json（问题卡片 payload），重连后据此恢复同一份卡片。best-effort：读写失败
+    只记日志，绝不阻塞正在跑的研究（见 core/research/checkpoint.py）。
+    """
+
+    __tablename__ = "research_checkpoints"
+
+    research_id = Column(String(64), primary_key=True)
+    user_id = Column(String(32), nullable=False, default="")
+    course_id = Column(String(64), nullable=False, default="")
+    topic = Column(Text, nullable=False, default="")
+    phase = Column(String(32), nullable=False, default="")  # rephrase/decompose/researching/reporting
+    state_json = Column(Text, nullable=False, default="")   # 阶段产物 JSON（含 queue.to_dict）
+    pending_question_json = Column(Text, nullable=False, default="")  # ask_user 卡片 payload
+    # status: running | awaiting_user | done | error
+    status = Column(String(32), nullable=False, default="running")
+    updated_at = Column(Float, nullable=False, default=time.time)
+
+
+class LlmUsageRecord(Base):
+    """LLM 用量明细（append-only 账单行）：每个 run_agent_loop 一行。
+
+    设计要点：
+    - **无 FK，纯字符串列**：账单类数据须抗级联删除（删用户不能删旧账），故 user_id/course_id
+      不挂外键，同 research_checkpoints（022）。CourseUser 删了历史账仍可查。
+    - **cost_usd 落库即定档**：按当时 model_pricing.json 价目表快照，日后改价目表不篡改历史账
+      （对齐 Langfuse token-and-cost-tracking：成本在摄取时算好存，不在查询时重算）。
+    - **mode + rounds**：cost-of-pass 分析用（arXiv:2504.13359）。只记总 token 记不出「quiz 一次
+      多少钱 / research 是否轮次失控」这类降本决策；mode 区分 chat/quiz/deep_solve/deep_research。
+    - cache_read_tokens 是 input_tokens 的子集（OTel GenAI 语义），不重复累加，仅用于算命中率。
+    """
+
+    __tablename__ = "llm_usage_records"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String(32), nullable=False, default="")
+    course_id = Column(String(64), nullable=False, default="")
+    session_id = Column(String(32), nullable=False, default="")
+    turn_id = Column(String(64), nullable=False, default="")
+    mode = Column(String(32), nullable=False, default="")   # chat/quiz/deep_solve/deep_research
+    model = Column(String(128), nullable=False, default="")
+    input_tokens = Column(Integer, nullable=False, default=0)          # 含 cache_read（OTel：子集不重复加）
+    output_tokens = Column(Integer, nullable=False, default=0)
+    cache_read_tokens = Column(Integer, nullable=False, default=0)
+    cost_usd = Column(Float, nullable=False, default=0.0)              # 摄取时价目表快照
+    rounds = Column(Integer, nullable=False, default=0)                # cost-of-pass 分析用
+    created_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        # 按人/按课的时间窗口扫描 + rollup 增量扫描 + 保留期清理
+        Index("idx_usage_user_time", "user_id", "created_at"),
+        Index("idx_usage_course_time", "course_id", "created_at"),
+        Index("idx_usage_created", "created_at"),
+    )
+
+
+class LlmUsageDaily(Base):
+    """LLM 用量日汇总（读模型）：ARQ cron 从明细删后重算，展示层只读本表不扫明细。
+
+    唯一键 (day, user_id, course_id, model)：rollup 用「删今日+昨日聚合行后重插」天然幂等，
+    避免维护 PG/SQLite 双方言 ON CONFLICT 语法。day 用 "YYYYMMDD" UTC，与 cost_quota._day_key
+    同口径。BigInteger：日聚合跨人多课，防 Integer 溢出。
+    """
+
+    __tablename__ = "llm_usage_daily"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    day = Column(String(8), nullable=False)                  # "YYYYMMDD" UTC
+    user_id = Column(String(32), nullable=False, default="")
+    course_id = Column(String(64), nullable=False, default="")
+    model = Column(String(128), nullable=False, default="")
+    input_tokens = Column(BigInteger, nullable=False, default=0)
+    output_tokens = Column(BigInteger, nullable=False, default=0)
+    cache_read_tokens = Column(BigInteger, nullable=False, default=0)
+    cost_usd = Column(Float, nullable=False, default=0.0)
+    call_count = Column(Integer, nullable=False, default=0)  # 明细行数 = loop 次数
+    updated_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        UniqueConstraint("day", "user_id", "course_id", "model", name="uq_usage_daily"),
+        Index("idx_usage_daily_day", "day"),
+    )
+
+
 async def _ensure_column(conn, table_name: str, column_name: str, ddl: str):
     """Add a column only if it does not already exist (dialect-aware)."""
     dialect = conn.dialect.name
@@ -654,32 +843,8 @@ async def init_db():
         await _ensure_column(
             conn,
             "users",
-            "summary_memory",
-            "ALTER TABLE users ADD COLUMN summary_memory TEXT NOT NULL DEFAULT ''",
-        )
-        await _ensure_column(
-            conn,
-            "users",
-            "profile_memory",
-            "ALTER TABLE users ADD COLUMN profile_memory TEXT NOT NULL DEFAULT '{}'",
-        )
-        await _ensure_column(
-            conn,
-            "users",
             "is_admin",
             "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE",
-        )
-        await _ensure_column(
-            conn,
-            "users",
-            "scope_memory",
-            "ALTER TABLE users ADD COLUMN scope_memory TEXT NOT NULL DEFAULT ''",
-        )
-        await _ensure_column(
-            conn,
-            "users",
-            "preferences_memory",
-            "ALTER TABLE users ADD COLUMN preferences_memory TEXT NOT NULL DEFAULT ''",
         )
         await _ensure_column(
             conn,
@@ -693,36 +858,11 @@ async def init_db():
             "error_graph",
             "ALTER TABLE users ADD COLUMN error_graph JSON NOT NULL DEFAULT '{\"nodes\":[],\"edges\":[]}'",
         )
-        # 知识库进度字段（向已有表追加）
         await _ensure_column(
             conn,
-            "knowledge_bases",
-            "progress",
-            "ALTER TABLE knowledge_bases ADD COLUMN progress INTEGER NOT NULL DEFAULT 0",
-        )
-        await _ensure_column(
-            conn,
-            "knowledge_bases",
-            "progress_msg",
-            "ALTER TABLE knowledge_bases ADD COLUMN progress_msg TEXT NOT NULL DEFAULT ''",
-        )
-        await _ensure_column(
-            conn,
-            "knowledge_bases",
-            "chunks_done",
-            "ALTER TABLE knowledge_bases ADD COLUMN chunks_done INTEGER NOT NULL DEFAULT 0",
-        )
-        await _ensure_column(
-            conn,
-            "knowledge_bases",
-            "chunks_total",
-            "ALTER TABLE knowledge_bases ADD COLUMN chunks_total INTEGER NOT NULL DEFAULT 0",
-        )
-        await _ensure_column(
-            conn,
-            "knowledge_bases",
-            "token_estimate",
-            "ALTER TABLE knowledge_bases ADD COLUMN token_estimate INTEGER NOT NULL DEFAULT 0",
+            "users",
+            "graph_version",
+            "ALTER TABLE users ADD COLUMN graph_version INTEGER NOT NULL DEFAULT 0",
         )
         await _ensure_column(
             conn,
@@ -813,7 +953,6 @@ async def _seed_builtin_courses() -> None:
                     icon=course.get("icon", "📘"),
                     system_prompt=course.get("system_prompt", ""),
                     sort_order=order,
-                    status="pending",
                 ))
 
 

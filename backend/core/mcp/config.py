@@ -40,6 +40,8 @@ class MCPServerConfig(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
     # behaviour
     tool_timeout: int = Field(default=30, ge=1, le=600)
+    # 首次连接（握手 + list_tools）超时秒数；远端/冷启动 server 可调大。原 manager 写死 15s。
+    connect_timeout: int = Field(default=15, ge=1, le=120)
     enabled_tools: list[str] = Field(default_factory=lambda: ["*"])
     enabled: bool = True
 

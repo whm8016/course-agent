@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { authHeaders } from '../../services/auth'
+import type { UsageSummary } from '../../services/api'
 import type { User } from '../../types'
 import JoinCodeShareSection from './JoinCodeShareSection'
 import KbDetailPanel from './KbDetailPanel'
+import UsagePanel from './UsagePanel'
 import { STATUS_LABEL, STATUS_COLOR, formatTime } from './kbUtils'
 import type { KB } from './KbDetailPanel'
 
@@ -53,11 +55,15 @@ interface TeacherApplication {
 }
 
 export default function AdminPage({ user, onBack }: Props) {
-  const [tab, setTab] = useState<'kb' | 'applications' | 'users' | 'invites' | 'faq'>('kb')
+  const [tab, setTab] = useState<'kb' | 'applications' | 'users' | 'invites' | 'faq' | 'usage'>('kb')
   const [faqCourseId, setFaqCourseId] = useState('')
   const [faqItems, setFaqItems] = useState<{ question: string; count: number; course_id?: string; course_name?: string }[]>([])
   const [faqThreshold, setFaqThreshold] = useState(3)
   const [faqLoading, setFaqLoading] = useState(false)
+  // LLM 用量（llm_usage_daily 聚合表）。groupDim 选维度，loadUsage 拉取汇总。
+  const [usage, setUsage] = useState<UsageSummary | null>(null)
+  const [usageDim, setUsageDim] = useState<'course' | 'user' | 'model' | 'day'>('course')
+  const [usageLoading, setUsageLoading] = useState(false)
 
   const loadFaq = async (courseId?: string) => {
     setFaqLoading(true)
@@ -70,6 +76,18 @@ export default function AdminPage({ user, onBack }: Props) {
       setError(e instanceof Error ? e.message : '加载失败')
     } finally {
       setFaqLoading(false)
+    }
+  }
+  const loadUsage = async (dim: 'course' | 'user' | 'model' | 'day') => {
+    setUsageLoading(true)
+    try {
+      const data = await apiFetch(`/admin/usage/summary?group_by=${dim}&limit=50`) as UsageSummary
+      setUsage(data)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '加载用量失败')
+      setUsage(null)
+    } finally {
+      setUsageLoading(false)
     }
   }
   const [kbs, setKbs] = useState<KB[]>([])
@@ -206,6 +224,11 @@ export default function AdminPage({ user, onBack }: Props) {
     if (tab === 'invites') void loadInviteCodes()
   }, [tab])
 
+  // 用量看板：切到该 Tab 或切换分组维度（course/user/model/day）都重载
+  useEffect(() => {
+    if (tab === 'usage') void loadUsage(usageDim)
+  }, [tab, usageDim])
+
   // 申请列表同时依赖 tab 与筛选状态：切到该 Tab 或切换 pending/approved/rejected 都重载
   useEffect(() => {
     if (tab === 'applications') void loadApplications()
@@ -311,7 +334,7 @@ export default function AdminPage({ user, onBack }: Props) {
           <p className="text-xs text-muted mt-0.5">{user.display_name}</p>
         </div>
         <nav className="flex md:flex-col md:flex-1 p-2 md:p-3 gap-1 md:space-y-1 overflow-x-auto">
-          {(['kb', 'applications', 'users', 'invites', 'faq'] as const).map(t => (
+          {(['kb', 'applications', 'users', 'invites', 'faq', 'usage'] as const).map(t => (
             <button
               key={t}
               onClick={() => {
@@ -324,7 +347,7 @@ export default function AdminPage({ user, onBack }: Props) {
                   : 'text-ink-soft hover:bg-canvas'
               }`}
             >
-              {t === 'kb' ? '知识库管理' : t === 'applications' ? '教师申请' : t === 'users' ? '用户管理' : t === 'invites' ? '教师邀请码' : '高频问题'}
+              {t === 'kb' ? '知识库管理' : t === 'applications' ? '教师申请' : t === 'users' ? '用户管理' : t === 'invites' ? '教师邀请码' : t === 'faq' ? '高频问题' : 'LLM 用量'}
             </button>
           ))}
           <button
@@ -709,6 +732,45 @@ export default function AdminPage({ user, onBack }: Props) {
                   </tbody>
                 </table>
               </div>
+            )}
+          </div>
+        ) : tab === 'usage' ? (
+          <div className="flex-1 overflow-y-auto p-6">
+            {error && (
+              <div className="mb-4 p-3 bg-danger-bg text-danger-fg text-sm rounded-[var(--radius)] flex justify-between">
+                <span>{error}</span>
+                <button onClick={() => setError('')} className="ml-2">✕</button>
+              </div>
+            )}
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <h2 className="text-lg font-semibold text-ink">
+                LLM 用量
+                <span className="text-xs text-muted ml-2 font-normal">
+                  （近 30 天{usage?.latest_day ? ` · 数据截至 ${usage.latest_day}` : ''}，每小时聚合一次）
+                </span>
+              </h2>
+              <div className="flex gap-1 bg-surface-2 rounded-[var(--radius)] p-1">
+                {(['course', 'user', 'model', 'day'] as const).map(d => (
+                  <button
+                    key={d}
+                    onClick={() => setUsageDim(d)}
+                    className={`px-3 py-1 rounded-md text-xs transition ${
+                      usageDim === d ? 'bg-surface text-ink font-medium shadow-sm' : 'text-ink-soft hover:text-ink'
+                    }`}
+                  >
+                    {d === 'course' ? '按课程' : d === 'user' ? '按用户' : d === 'model' ? '按模型' : '按天'}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {usageLoading ? (
+              <p className="text-sm text-muted">加载中...</p>
+            ) : !usage || usage.rows.length === 0 ? (
+              <p className="text-sm text-muted text-center mt-16">
+                暂无用量数据（学生对话后自动统计，每小时聚合一次）
+              </p>
+            ) : (
+              <UsagePanel usage={usage} dim={usageDim} />
             )}
           </div>
         ) : null}

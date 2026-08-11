@@ -13,6 +13,9 @@ from core.db.database import KnowledgeBase, KbBuild, aggregate_build_status
 
 
 def _b(status: str, backend: str = "lightrag", **kw) -> KbBuild:
+    # 默认 chunks_total=1：aggregate_build_status 的 ready 要求 chunks>0（防空库误判就绪）。
+    # 需要空库场景（如 0-chunk ready）显式传 chunks_total=0。
+    kw.setdefault("chunks_total", 1)
     return KbBuild(backend=backend, status=status, **kw)
 
 
@@ -27,6 +30,12 @@ def test_aggregate_build_status_priority():
     # 两后端都 ready（双索引就绪）
     assert aggregate_build_status(
         [_b("ready", "lightrag"), _b("ready", "llamaindex_pg")]
+    ) == "ready"
+    # ready 但 chunks_total=0（空索引）→ 不算就绪，落 pending（防空库绿徽章骗用户）
+    assert aggregate_build_status([_b("ready", chunks_total=0)]) == "pending"
+    # 一后端 0-chunk ready、另一后端有 chunks ready → 仍有可用后端 → ready
+    assert aggregate_build_status(
+        [_b("ready", "lightrag", chunks_total=0), _b("ready", "llamaindex_pg", chunks_total=80)]
     ) == "ready"
 
 
@@ -112,5 +121,55 @@ async def test_get_or_create_build_idempotent():
                 assert b3.id != b1_id
                 assert b3.backend == "llamaindex_pg"
                 assert b1.backend == "lightrag"
+    finally:
+        await close_db()
+
+
+async def test_run_indexing_pg_empty_chunks_marks_error(monkeypatch):
+    """0-chunk（解析全失败）的 pg 索引 → build 落 error 且 error_msg 含真实原因，不误判 ready。
+
+    回归根因：MinerU 拒 200+ 页 PDF → parse_files 返 0 chunk → indexer 返 skipped →
+    旧逻辑把 skipped 当 ready（绿徽章骗用户、按钮却禁用）。现 skipped/0-chunk 判 error。
+    """
+    from api.admin import _run_indexing_llamaindex_pg
+    from api.kb_indexing import get_build, get_or_create_build
+    from core.db.database import AsyncSessionLocal, KnowledgeBase, close_db, init_db
+    from core.rag.types import IndexResult
+
+    cid = f"c_empty_{__import__('os').urandom(3).hex()}"
+    await init_db()
+    try:
+        async with AsyncSessionLocal() as db:
+            async with db.begin():
+                kb = KnowledgeBase(course_id=cid, name="t")
+                db.add(kb)
+                await db.flush()
+                kb_id = kb.id
+                build = await get_or_create_build(db, kb_id, "llamaindex_pg")
+                build.status = "indexing"  # _apply_final 只在 indexing 时回写终态
+
+        # mock get_indexer：index() 返 skipped + 0 chunk + 透传真实原因（来自 parse_errors）
+        class _FakeIndexer:
+            async def index(self, *args, **kwargs):
+                return IndexResult(
+                    course_id=cid,
+                    files_indexed=1,
+                    chunks_created=0,
+                    status="skipped",
+                    error="MinerU 解析失败: number of pages exceeds limit (200 pages)",
+                )
+
+            async def delete(self, course_id):
+                return True
+
+        monkeypatch.setattr("core.rag.get_indexer", lambda name: _FakeIndexer())
+
+        await _run_indexing_llamaindex_pg(kb_id, cid, ["/data/x.pdf"], 0, "llamaindex_pg")
+
+        async with AsyncSessionLocal() as db:
+            b = await get_build(db, kb_id, "llamaindex_pg")
+            assert b.status == "error"
+            assert "exceeds limit" in b.error_msg  # 真实原因写进 error_msg
+            assert (b.chunks_total or 0) == 0
     finally:
         await close_db()

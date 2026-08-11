@@ -1,6 +1,6 @@
 """LightRAG Rerank 适配器。
 
-封装 LightRAG 内置的 ali_rerank（DashScope gte-rerank-v2），提供符合
+封装 LightRAG 内置的 ali_rerank（DashScope qwen3-rerank），提供符合
 LightRAG rerank_model_func 签名的可调用对象。
 
 签名（来自 lightrag/api/lightrag_server.py server_rerank_func）：
@@ -19,8 +19,10 @@ from settings import get_settings
 logger = logging.getLogger(__name__)
 
 # DashScope rerank 专用（检索阶段，非索引）；默认复用 EMBEDDING__API_KEY（同属 DashScope）
+# 默认模型 qwen3-rerank：gte-rerank-v2 已于 2026-05-30 下线（阿里云 Reranking API 迁移公告），
+# env LIGHTRAG_RERANK_MODEL 可覆盖。
 RERANK_API_KEY = get_settings().embedding.api_key.get_secret_value()
-RERANK_MODEL = os.getenv("LIGHTRAG_RERANK_MODEL", "gte-rerank-v2").strip() or "gte-rerank-v2"
+RERANK_MODEL = os.getenv("LIGHTRAG_RERANK_MODEL", "qwen3-rerank").strip() or "qwen3-rerank"
 
 
 def build_rerank_func() -> Any | None:
@@ -28,7 +30,7 @@ def build_rerank_func() -> Any | None:
 
     读取：
         RERANK_API_KEY（settings.embedding.api_key，即 EMBEDDING__API_KEY）
-        LIGHTRAG_RERANK_MODEL  可选 env，默认 gte-rerank-v2
+        LIGHTRAG_RERANK_MODEL  可选 env，默认 qwen3-rerank（gte-rerank-v2 已下线）
 
     Returns:
         符合 LightRAG rerank_model_func 签名的协程函数，或 None（未配置）

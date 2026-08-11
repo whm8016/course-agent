@@ -49,9 +49,18 @@ def _make_redis(store: dict) -> SimpleNamespace:
     async def _llen(k):
         return len(store.get(k, []))
 
+    async def _ltrim(k, start, stop):
+        data = list(store.get(k, []))
+        if stop == -1:
+            stop = len(data) - 1
+        store[k] = data[start:stop + 1]
+        if not store[k]:  # Redis 删空 list key
+            del store[k]
+
     return SimpleNamespace(scan=AsyncMock(side_effect=_scan), set=AsyncMock(side_effect=_set),
                            get=AsyncMock(side_effect=_get), delete=AsyncMock(side_effect=_delete),
-                           lrange=AsyncMock(side_effect=_lrange), llen=AsyncMock(side_effect=_llen))
+                           lrange=AsyncMock(side_effect=_lrange), llen=AsyncMock(side_effect=_llen),
+                           ltrim=AsyncMock(side_effect=_ltrim))
 
 
 def _match(pattern: str, key: str) -> bool:
@@ -106,3 +115,31 @@ async def test_flush_success_deletes_redis_key(buffer_store):
     assert data_key not in buffer_store
     assert f"{data_key}:ts" not in buffer_store
     assert f"{data_key}:meta" not in buffer_store
+
+
+async def test_flush_preserves_turns_enqueued_during_flush(buffer_store):
+    """P1 数据丢失修复：flush 期间新 enqueue 的 turn 不被连带删除。
+
+    原代码锁外 lrange 读快照，flush 后 ``delete(key)`` 把 flush 期间 RPUSH 的新 turn 一起
+    删 -> 永久丢数据（单 worker 也会发生）。修复后锁内读快照、LTRIM 只裁已 flush 前缀，
+    新 turn 保留待下次 flush。
+    """
+    r = _make_redis(buffer_store)
+    data_key = "mem_flush:u1:s1"
+    new_turn = '{"u": "q2", "a": "a2"}'
+
+    async def _flush_and_enqueue(*a, **kw):  # noqa: ARG001
+        # 模拟 flush 期间用户又发一轮 -> RPUSH 进 list
+        buffer_store[data_key].append(new_turn)
+        return True
+
+    with patch.object(flush_manager, "_flush_turns", AsyncMock(side_effect=_flush_and_enqueue)):
+        flushed = await flush_manager._flush_one(r, data_key)
+
+    assert flushed == 3  # 快照是初始 3 轮
+    # 关键：flush 期间新增的 turn 保留在 list（旧 delete 会连同删掉 -> 丢数据）
+    assert buffer_store[data_key] == [new_turn], \
+        "flush 期间新 enqueue 的 turn 被连带删除 -> 数据丢失回归"
+    # list 非空 -> :ts/:meta 保留
+    assert f"{data_key}:ts" in buffer_store
+    assert f"{data_key}:meta" in buffer_store

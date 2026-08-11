@@ -28,6 +28,14 @@ def _make_lockable_redis(store: dict, lock_state: dict):
     async def _llen(k):
         return len(store.get(k, []))
 
+    async def _ltrim(k, start, stop):
+        data = list(store.get(k, []))
+        if stop == -1:
+            stop = len(data) - 1
+        store[k] = data[start:stop + 1]
+        if not store[k]:  # Redis 删空 list key
+            del store[k]
+
     async def _get(k):
         return store.get(k)
 
@@ -61,6 +69,7 @@ def _make_lockable_redis(store: dict, lock_state: dict):
         scan=AsyncMock(side_effect=_scan), set=AsyncMock(side_effect=_set),
         get=AsyncMock(side_effect=_get), delete=AsyncMock(side_effect=_delete),
         lrange=AsyncMock(side_effect=_lrange), llen=AsyncMock(side_effect=_llen),
+        ltrim=AsyncMock(side_effect=_ltrim),
     )
 
 
@@ -84,12 +93,10 @@ async def test_second_concurrent_flush_skipped_by_lock():
         await asyncio.sleep(0.05)
 
     with patch.object(flush_manager, "_flush_turns", AsyncMock(side_effect=_slow_flush)):
-        # 两个 worker 同时 flush 同一 key
-        meta = {"user_id": "u1", "course_id": "c1"}
-        turns = [{"u": "q", "a": "ans"}] * 3
+        # 两个 worker 同时 flush 同一 key（_flush_one 锁内自读 turns/meta）
         await asyncio.gather(
-            flush_manager._flush_one(r, key, turns, meta),
-            flush_manager._flush_one(r, key, turns, meta),
+            flush_manager._flush_one(r, key),
+            flush_manager._flush_one(r, key),
         )
 
     # 关键断言：_flush_turns 只应被调用一次（第二个被锁挡住）
@@ -114,18 +121,14 @@ async def test_lock_released_after_flush_so_next_can_acquire():
     # Phase 1：_flush_turns 真实调用会触 mem0（测试环境无 mem0 模块 → 返回 False），
     # 但本用例只验「锁释放后可再次抢锁」，故隔离 _flush_turns 为成功（True）。
     with patch.object(flush_manager, "_flush_turns", AsyncMock(return_value=True)):
-        done1 = await flush_manager._flush_one(
-            r, key, [{"u": "q", "a": "ans"}], {"user_id": "u1", "course_id": "c1"}
-        )
-        assert done1 is True
+        done1 = await flush_manager._flush_one(r, key)
+        assert done1 == 1
 
-        # 第一次 flush 已删 key 且释放锁；重新塞回数据模拟"又有新对话进来"
+        # 第一次 flush 已裁空 key 且释放锁；重新塞回数据模拟"又有新对话进来"
         store[key] = ['{"u": "q2", "a": "a2"}']
         store[f"{key}:ts"] = "0"
         store[f"{key}:meta"] = '{"user_id": "u1", "course_id": "c1"}'
 
-        done2 = await flush_manager._flush_one(
-            r, key, [{"u": "q2", "a": "a2"}], {"user_id": "u1", "course_id": "c1"}
-        )
-        assert done2 is True, "锁已释放，第二次应能正常抢锁 flush（不能被残留锁永久阻塞）"
+        done2 = await flush_manager._flush_one(r, key)
+        assert done2 == 1, "锁已释放，第二次应能正常抢锁 flush（不能被残留锁永久阻塞）"
         assert f"{key}:lock" not in lock_state

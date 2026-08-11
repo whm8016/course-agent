@@ -24,33 +24,48 @@ def file_paths_to_llama_documents(
     file_paths: list[str],
     *,
     log: Optional[logging.Logger] = None,
-) -> tuple[list[Document], FileClassification]:
+) -> tuple[list[Document], FileClassification, list[str]]:
     """
     将文件路径列表转为 LlamaIndex Document（供 LightRAG 摄入流水线使用）。
+
+    返回第 3 个元素 parse_errors：逐文件解析失败原因（如「x.pdf: MinerU 解析失败: 超过 200 页上限」），
+    供索引层在 0 chunk 时写进 kb_builds.error_msg，避免空索引被误判 ready 时毫无错误线索。
     """
     lg = log or logger
     classification = FileTypeRouter.classify_files(file_paths)
     documents: list[Document] = []
+    parse_errors: list[str] = []
 
     _parsing_engine = get_settings().parsing.engine
     pdf_backend = get_settings().pdf.backend
+    drop_references = get_settings().parsing.drop_references
     for file_path_str in classification.parser_files:
         file_path = Path(file_path_str).resolve()
         if _parsing_engine:
-            # 解析层（MinerU 托管 API 等）：parse_document → ParsedDocument.to_sections()
-            # opt-in：settings.parsing.engine 非空才走；失败即跳过该文件不降级（plan 单引擎哲学）
+            # 解析层（MinerU 托管 API 等）：parse_document → markdown → sections
+            # opt-in：settings.parsing.engine 非空才走；失败即跳过该文件不降级（单引擎哲学）。
+            # 走 DeepTutor 式 markdown 路线（MarkdownNodeParser 按标题分节），不再用
+            # blocks_to_sections——MinerU 标题是 type=text+text_level，后者分不出节。
             try:
-                from core.rag.parsing import ParserError, parse_document
+                from core.rag.parsing import (
+                    ParserError,
+                    markdown_to_sections,
+                    parse_document,
+                    resolve_image_refs,
+                )
 
                 parsed = parse_document(file_path, engine=_parsing_engine)
-                sections = parsed.to_sections()
+                markdown = resolve_image_refs(parsed.markdown, parsed.asset_dir)
+                sections = markdown_to_sections(
+                    markdown, blocks=parsed.blocks, drop_refs=drop_references
+                )
                 eng_name = parsed.engine or _parsing_engine
-                content_list = parsed.blocks  # 供 type_routed 策略按结构分块
             except ParserError as exc:
                 lg.error(
                     "解析失败（跳过该文件）%s（引擎 %s）: %s",
                     file_path.name, _parsing_engine, exc,
                 )
+                parse_errors.append(f"{file_path.name}: {exc}")
                 continue
         else:
             # 原 file_routing（docling/mupdf），settings.parsing.engine 空时行为零变化
@@ -58,7 +73,6 @@ def file_paths_to_llama_documents(
                 str(file_path), backend=pdf_backend
             )
             eng_name = pdf_backend
-            content_list = None
         if sections:
             for sec in sections:
                 documents.append(
@@ -69,14 +83,7 @@ def file_paths_to_llama_documents(
                             "file_path": str(file_path),
                             "section": sec["title"],
                             "page": sec["page"],
-                            "content_list": content_list,
                         },
-                        # content_list 是整份 PDF 的 MinerU block JSON（可能几万 token），
-                        # 只供 type_routed 策略读取，不该算进 embedding/LLM 的元数据长度——
-                        # 否则 sentence_splitter 策略下 SentenceSplitter.split_text_metadata_aware
-                        # 会把它计入 metadata_len，超过 chunk_size 直接抛 ValueError。
-                        excluded_embed_metadata_keys=["content_list"],
-                        excluded_llm_metadata_keys=["content_list"],
                     )
                 )
             lg.info("Loaded: %s → %d sections（引擎 %s）", file_path.name, len(sections), eng_name)
@@ -144,4 +151,4 @@ def file_paths_to_llama_documents(
     for file_path_str in classification.unsupported:
         lg.warning("Skipped unsupported file: %s", Path(file_path_str).name)
 
-    return documents, classification
+    return documents, classification, parse_errors

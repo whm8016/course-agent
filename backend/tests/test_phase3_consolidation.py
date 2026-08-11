@@ -100,6 +100,50 @@ async def test_claim_pending_course_scoped(db):
     assert len(claimed) == 1 and claimed[0].course_id == "c1"
 
 
+async def test_claim_pending_returns_only_returning_rows_under_race(db):
+    """并发修复回归：返回集 = UPDATE RETURNING 命中的行，而非 SELECT 快照。
+
+    SQLite in-memory 单连接（StaticPool）无法真并发，故拦截 UPDATE 语句伪造 RETURNING
+    只命中 t1（模拟 t2 在 SELECT 后、UPDATE 前被别的 worker 抢走、status='pending' 不再
+    命中）。修复前 ``return rows`` 会返回 SELECT 快照 [t1,t2]；修复后只返回 RETURNING
+    命中的 [t1]。
+    """
+    from core.db.database import AsyncSessionLocal, MemoryEpisode
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.dml import Update
+    from unittest.mock import MagicMock
+
+    await _seed([
+        MemoryEpisode(user_id="u1", course_id="c1", session_id="s1", turn_id="t1",
+                      user_msg="q1", assistant_msg="a1", status="pending"),
+        MemoryEpisode(user_id="u1", course_id="c1", session_id="s1", turn_id="t2",
+                      user_msg="q2", assistant_msg="a2", status="pending"),
+    ])
+    async with AsyncSessionLocal() as s:
+        all_rows = (await s.execute(
+            select(MemoryEpisode).where(MemoryEpisode.user_id == "u1")
+        )).scalars().all()
+    t1_id = next(r.id for r in all_rows if r.turn_id == "t1")
+
+    real_execute = AsyncSession.execute
+
+    async def fake_execute(self, stmt, *a, **kw):
+        if isinstance(stmt, Update):
+            # 伪造 RETURNING 只命中 t1（t2 被并发抢走）
+            result = MagicMock()
+            result.scalars.return_value.all.return_value = [t1_id]
+            return result
+        return await real_execute(self, stmt, *a, **kw)
+
+    with patch.object(AsyncSession, "execute", fake_execute):
+        async with AsyncSessionLocal() as s:
+            claimed = await consolidation.claim_pending(s, "u1", "c1")
+
+    assert sorted(ep.turn_id for ep in claimed) == ["t1"], \
+        "应只返回 RETURNING 命中的 t1，而非 SELECT 快照 [t1,t2]"
+
+
 # ── consolidate（DB + mocked mem0）──────────────────────────────────────────
 
 

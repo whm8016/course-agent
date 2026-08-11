@@ -89,28 +89,6 @@ def _faq_hash(question: str) -> str:
     return hashlib.md5(question.strip().lower().encode()).hexdigest()[:16]
 
 
-async def faq_record(course_id: str, question: str) -> int:
-    """记录一次提问，返回该问题累计被问次数（失败返回 0）。"""
-    try:
-        key = f"faq:count:{course_id}"
-        member = question.strip()
-        count = await _get_pool().zincrby(key, 1, member)
-        return int(count)
-    except Exception:
-        logger.debug("faq_record failed course=%s", course_id, exc_info=True)
-        return 0
-
-
-async def faq_top(course_id: str, n: int = 20) -> list[dict]:
-    """返回 Top-N 高频问题，格式 [{'question': ..., 'count': ...}]。"""
-    try:
-        pairs = await _get_pool().zrevrange(f"faq:count:{course_id}", 0, n - 1, withscores=True)
-        return [{"question": q, "count": int(s)} for q, s in pairs]
-    except Exception:
-        logger.debug("faq_top failed course=%s", course_id, exc_info=True)
-        return []
-
-
 async def faq_answer_get(course_id: str, question: str) -> str | None:
     """获取高频问题的缓存答案（无则返回 None）。"""
     try:

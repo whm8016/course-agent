@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { BarChart3, TrendingUp, AlertTriangle, Users } from 'lucide-react'
 import { authHeaders } from '../../services/auth'
 import type { User } from '../../types'
@@ -130,17 +130,22 @@ export default function StudentStatsPage({ user, onBack }: Props) {
   useEffect(() => { void loadCourses() }, [loadCourses])
 
   // ── Load stats when course changes ───────────────────────────────────────
+  // 请求代次：快速切课程时慢响应会覆盖新状态，只采纳最新一次。
+  const statsReqRef = useRef(0)
   const loadStats = useCallback(async (courseId: string) => {
+    const myToken = ++statsReqRef.current
     setLoading(true)
     setError('')
     setStats(null)
     try {
       const data = await apiFetch(`/teacher/courses/${courseId}/analytics/student-stats`) as CourseStats
+      if (myToken !== statsReqRef.current) return // 被更新的请求取代
       setStats(data)
     } catch (e) {
+      if (myToken !== statsReqRef.current) return
       setError(e instanceof Error ? e.message : '加载统计数据失败')
     } finally {
-      setLoading(false)
+      if (myToken === statsReqRef.current) setLoading(false)
     }
   }, [])
 

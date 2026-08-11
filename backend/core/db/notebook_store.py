@@ -8,7 +8,7 @@ from sqlalchemy import and_, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.db.database import NotebookCategory, NotebookEntry, NotebookEntryCategory
+from core.db.database import NotebookCategory, NotebookEntry, NotebookEntryCategory, Session as SessionModel
 
 
 def _entry_to_dict(
@@ -19,6 +19,7 @@ def _entry_to_dict(
     opts = row.options if row.options is not None else {}
     return {
         "id": row.id,
+        "course_id": row.course_id,
         "session_id": row.session_id,
         "session_title": row.session_title,
         "question_id": row.question_id,
@@ -54,8 +55,13 @@ async def upsert_notebook_entry(
     res = await db.execute(q)
     existing = res.scalar_one_or_none()
     now = time.time()
+    # P1：写时落盘 course_id（反查 Session，省去读侧 JOIN；宪法原则 3）
+    course_id = (await db.execute(
+        select(SessionModel.course_id).where(SessionModel.id == session_id)
+    )).scalar_one_or_none() or ""
 
     fields = {
+        "course_id": course_id,
         "session_title": str(payload.get("session_title", "")),
         "question": str(payload.get("question", "")),
         "question_type": str(payload.get("question_type", "")),

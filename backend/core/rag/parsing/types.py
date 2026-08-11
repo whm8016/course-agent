@@ -24,7 +24,8 @@ class ParsedDocument:
 
     ``markdown`` 永远存在（所有引擎的最低公约数）；``blocks`` 是 MinerU ``content_list``
     形状的富结构（每块 type 为 text/title/table/equation/image、带 page_idx/text_level），
-    为第三期按类型路由分块提供输入。``blocks`` 为 None 时消费者退化为切 markdown。
+    供 markdown 分节（``markdown_to_sections``）按标题回填页码等结构化用途。``blocks`` 为 None
+    时消费者退化为切 markdown。
     """
 
     markdown: str
@@ -42,8 +43,7 @@ class ParsedDocument:
     def to_sections(self) -> list[dict]:
         """blocks → sections（对齐 file_routing ``extract_pdf_sections``）。
 
-        委托模块函数 ``blocks_to_sections``——与 ``chunking.type_routed`` 共用同一分组逻辑，
-        避免 IR 转换与分块两处各写一份 blocks→sections。
+        委托模块函数 ``blocks_to_sections``（解析层通用 blocks→sections 分组逻辑）。
         """
         return blocks_to_sections(self.blocks, self.markdown)
 
@@ -58,7 +58,6 @@ def blocks_to_sections(
     无 blocks 时退化为单 section（markdown_fallback 整篇）。title 块开新 section，
     table 块原子化为独立 section，其他（text/equation/caption/list）累积进当前 section。
     平移自 file_routing ``_extract_pdf_sections_docling`` 的分组逻辑。
-    ``ParsedDocument.to_sections`` 与 ``chunking.type_routed`` 共用本函数。
     """
     if not blocks:
         md = markdown_fallback.strip()

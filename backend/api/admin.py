@@ -37,7 +37,7 @@ from core.db.database import (
     aggregate_build_status,
     get_db,
 )
-from core.db.cache import faq_top
+from core.analytics.faq import frequent_questions_merged
 from core.rag.ingestion import (
     IndexingAborted,
     IndexingControl,
@@ -249,8 +249,18 @@ async def _run_indexing(
             control=control,
         )
         logger.info("索引完成 kb_id=%s summary=%s", kb_id, summary)
-        final_status = "ready"
-        final_err = ""
+        # 只有真正产出 chunks 的索引才算 ready；0 chunk（解析全失败/空文档）→ error，
+        # 把真实原因（summary.parse_errors 透传自 parse_files，如「MinerU 解析失败: 超过 200 页上限」）
+        # 写进 error_msg，避免空索引被误判 ready、绿徽章骗用户而按钮却禁用。
+        if summary.get("chunks", 0) > 0:
+            final_status = "ready"
+            final_err = ""
+        else:
+            final_status = "error"
+            final_err = (
+                "；".join(summary.get("parse_errors") or [])
+                or "索引产出 0 个文本块（解析失败或文件为空），详见日志"
+            )
     except IndexingAborted as e:
         abort_action = e.action
         abort_chunks_done = e.chunks_done
@@ -365,13 +375,16 @@ async def _run_indexing_llamaindex_pg(
             course_id, file_paths, resume_from_chunk=resume_from_chunk
         )
         # IndexResult.status: success | skipped | error
-        if result.status in ("success", "skipped"):
+        # 只有真正产出 chunks 的 success 才算 ready；skipped(0块)/error/success但0块 → error，
+        # 把真实原因（result.error 透传自 parse_errors，如「MinerU 解析失败: 超过 200 页上限」）
+        # 写进 error_msg，避免空索引被误判 ready、绿徽章骗用户而按钮却禁用。
+        if result.status == "success" and result.chunks_created > 0:
             final_status = "ready"
             final_err = ""
             chunks_created = result.chunks_created
         else:
             final_status = "error"
-            final_err = result.error or "索引失败"
+            final_err = result.error or "索引产出 0 个文本块（解析失败或文件为空）"
     except asyncio.CancelledError:
         # ARQ worker 超时/OOM/重启会取消任务；不兜底则 status 永久卡 indexing
         logger.warning("llamaindex_pg 索引任务被取消 kb_id=%s course=%s", kb_id, course_id)
@@ -1076,12 +1089,13 @@ async def get_faq(
 ):
     """返回各课程 Top-N 高频问题列表（按次数降序）。
     - course_id 为空时，查询所有已知课程并合并返回。
+    - Redis 命中优先，SQL 兜底（近 30 天重复提问 ≥2 次），与 teacher 端同口径。
     """
     if top_n < 1 or top_n > 100:
         top_n = 20
 
     if course_id:
-        items = await faq_top(course_id, top_n)
+        items = await frequent_questions_merged(db, course_id, top_n)
         return {"course_id": course_id, "threshold": FAQ_CACHE_THRESHOLD, "questions": items}
 
     # 遍历所有课程
@@ -1089,9 +1103,114 @@ async def get_faq(
     courses = kb_result.all()
     all_items: list[dict] = []
     for cid, cname in courses:
-        items = await faq_top(cid, top_n)
-        for item in items:
+        for item in await frequent_questions_merged(db, cid, top_n):
             all_items.append({"course_id": cid, "course_name": cname, **item})
     # 按 count 降序排列后取 top_n
     all_items.sort(key=lambda x: x["count"], reverse=True)
     return {"course_id": None, "threshold": FAQ_CACHE_THRESHOLD, "questions": all_items[:top_n]}
+
+
+@router.get("/usage/summary")
+async def llm_usage_summary(
+    start: str | None = Query(None, description="起始日 YYYYMMDD（含），缺省取近 30 天"),
+    end: str | None = Query(None, description="结束日 YYYYMMDD（含），缺省取今日"),
+    group_by: str = Query("course", description="分组维度，逗号分隔：day|user|course|model"),
+    limit: int = Query(50, ge=1, le=500),
+    _: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """LLM 用量汇总（只读 llm_usage_daily 聚合表）：按维度分组求和、按 cost 降序。
+
+    start/end 为 "YYYYMMDD" 日串（含闭区间）；group_by 逗号分隔取 day|user|course|model（默认
+    course）。数据由 cron 每小时 :11 重算今日+昨日，统计滞后 ≤1 小时。Prometheus Counter 无法按
+    user_id 展开（label 基数爆炸），故「按人/按课查账」走本表而非 /metrics。
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from core.analytics.token_usage import query_usage
+
+    now = datetime.now(timezone.utc)
+    end_day = (end or now.strftime("%Y%m%d"))[:8]
+    start_day = (start or (now - timedelta(days=30)).strftime("%Y%m%d"))[:8]
+    dims = [d.strip() for d in group_by.split(",") if d.strip()] or ["course"]
+    return await query_usage(
+        db, start=start_day, end=end_day, group_by=dims, limit=limit
+    )
+
+
+# ── 磁盘派生数据 GC（offline，对标 Bazel 磁盘缓存 GC）──────────────────────────
+
+@router.get("/storage/usage")
+async def storage_usage_endpoint(
+    _: dict = Depends(get_current_admin),
+):
+    """磁盘用量报告：逐项目录体积 + 整卷水位（只读，供运维观测/告警）。"""
+    from core.storage.gc import storage_usage
+    return storage_usage()
+
+
+@router.post("/storage/gc")
+async def storage_gc_endpoint(
+    dry_run: bool = Query(True),  # 默认 dry-run：只报不删，放开前先核对报告
+    _: dict = Depends(get_current_admin),
+):
+    """触发磁盘 GC。``dry_run=true``（默认）只报不删；放开需显式传 ``dry_run=false``。
+
+    治理 parse_cache / lightrag_store(ingest_chunks) / uploads 三处只写不删的派生数据；
+    kb_store/raw 只统计不清理。安全护栏（根路径校验 / mtime 宽限 / 跳过持锁课程）见
+    core.storage.gc 模块 docstring。
+    """
+    from core.storage.gc import run_gc
+    report = await run_gc(dry_run=dry_run)
+    logger.info(
+        "admin 触发 storage GC dry_run=%s freed_gib=%s disk_used_pct=%s",
+        dry_run, report.get("total_freed_gib"), report.get("disk_used_pct"),
+    )
+    return report
+
+
+@router.post("/context-window/probe")
+async def reprobe_context_window(
+    _: dict = Depends(get_current_admin),
+):
+    """手动重探当前 active profile 的模型上下文窗口（切 catalog profile 后调用）。
+
+    强制重探（无视缓存 TTL）text+fast 模型，写回 ``data/context_window_cache.json``，并返回每模型
+    的解析来源（``probe`` / ``table`` / ``heuristic`` / ``explicit``）与实际窗口值，让运维确认
+    当前用的是哪一级。探测 best-effort：供应商 ``/models`` 未暴露窗口或不可达时 source 退回
+    ``table``/``heuristic``（属正常降级，非错误）。
+
+    注：热路径 ``resolve_effective_window`` 用 ``settings.llm.base_url``（进程启动时的 active
+    profile）作缓存键。本端点读 catalog 当前 active profile 探测并报告--若启动后热切了 profile，
+    探测结果要等下次重启才被热路径采用（见 context_window.resolve_effective_window_with_source）。
+    """
+    from core.llm.catalog import (
+        active_profile_id_cached,
+        get_profile_cached,
+        profile_fast_model,
+        profile_text_model,
+    )
+    from core.agentic.context_window import resolve_effective_window_with_source
+    from core.agentic.window_probe import warmup_probe
+
+    pid = await active_profile_id_cached()
+    prof = await get_profile_cached(pid) or {}
+    s = get_settings()
+    base_url = (prof.get("base_url") or "").strip() or s.llm.base_url
+    api_key = (prof.get("api_key") or "").strip() or s.llm.api_key.get_secret_value()
+    models = [profile_text_model(prof), profile_fast_model(prof)]
+
+    # force 重探 + 写缓存（best-effort，单模型失败不影响其余）
+    await warmup_probe(models, base_url=base_url, api_key=api_key, force=True)
+
+    # 解析每模型当前生效来源/值（用 profile base_url 对齐刚写入的探测缓存键）
+    report: list[dict] = []
+    seen: set[str] = set()
+    for m in models:
+        if not m or m in seen:
+            continue
+        seen.add(m)
+        value, source = resolve_effective_window_with_source(m, base_url=base_url)
+        report.append({"model": m, "source": source, "value": value})
+    logger.info("admin 触发 context-window probe profile=%s models=%d", pid, len(report))
+    return {"profile_id": pid, "base_url": base_url, "models": report}

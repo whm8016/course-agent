@@ -244,14 +244,35 @@ class ChatPipeline:
         )
         system_prompt = assemble_system_prompt(**prompt_kwargs)
 
+        # cache_control：算 T1 稳定前缀字符偏移存入 metadata，loop._build_messages 据此在 T1/T2
+        # 边界把 system 拆成两条消息、适配器给 T1 放 ephemeral 断点命中≈0.1x 成本。取 prompt_kwargs
+        # 前 7 段（与 assemble_system_prompt 的 T1 段同序同空段过滤），用字符偏移精确切齐拼装字符串。
+        from core.agentic.context_budget import system_t1_chars
+        context.metadata["_system_t1_chars"] = system_t1_chars(
+            list(prompt_kwargs.values())[:7]
+        )
+
         log_flow("chat.prompt_assembled",
                  parts=sum(1 for v in prompt_kwargs.values() if v),
                  system_prompt_chars=len(system_prompt),
                  tools_count=len(tool_schemas) if tool_schemas else 0,
                  skills_manifest=bool(context.skills_manifest),
                  elapsed_ms=int((time.perf_counter() - _t0) * 1000))
-        # system prompt 总预算护栏：超阈值打 WARNING 并记录各段字符数分解（降序），定位膨胀层。
-        if len(system_prompt) > _SYSTEM_PROMPT_WARN_CHARS:
+        # system prompt 预算护栏：token_accounting_enabled 时按 token 口径告警 + 逐切片分解
+        # （比字符口径准，定位膨胀层）；否则保留旧字符口径。只告警不截断--system prompt 静默
+        # 截断会破坏 prefix cache 且难排查。Phase 2 协调器接管后此处改走 T2 集体裁剪。
+        _cb = get_settings().context_budget
+        if _cb.token_accounting_enabled:
+            from core.agentic.context_budget import token_count_slices
+            _slice_tokens = token_count_slices(prompt_kwargs)
+            _total_t = sum(_slice_tokens.values())
+            if _total_t > _cb.system_prompt_warn_tokens:
+                _seg = sorted(_slice_tokens.items(), key=lambda x: -x[1])
+                logger.warning(
+                    "system_prompt 超预算阈值 %d > %d tokens；各段 token(降序): %s",
+                    _total_t, _cb.system_prompt_warn_tokens, _seg,
+                )
+        elif len(system_prompt) > _SYSTEM_PROMPT_WARN_CHARS:
             seg = sorted(
                 ((k, len(v or "")) for k, v in prompt_kwargs.items() if v),
                 key=lambda x: -x[1],

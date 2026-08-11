@@ -1,6 +1,10 @@
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    # 自建镜像：pgvector/pgvector:pg16 + 编译 zhparser（中文分词扩展）。
+    # simple 配置对中文不分词，sparse 路整句一个 token 0 命中；zhparser 让 tsvector 按词切。
+    # 词典走 mmap 共享 OS page cache，per-connection 内存趋近 0，适配 4GB 部署。见 postgres/Dockerfile。
+    build:
+      context: ./postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
@@ -105,6 +109,38 @@ services:
     # 但 ENV 不创建目录）。缺目录会让多进程模式下指标构造 FileNotFoundError（eval 注释已记录
     # 同坑）→ 模块体中途失败被驱逐 → ARQ 重试二次 import 撞 Duplicated timeseries。
     command: ["sh", "-c", "mkdir -p /dev/shm/prometheus_multiproc && rm -rf /dev/shm/prometheus_multiproc/* && exec .venv/bin/python -m arq worker.WorkerSettings"]
+
+  # ── MCP gateway sidecar ────────────────────────────────────────────────
+  # 把 stdio 类 MCP server（modelscope-mcp-server / mcp-server-fetch）收敛成一份
+  # SSE 服务。backend 的 4 个 gunicorn worker 全部以 HTTP 客户端接入这一个 gateway，
+  # 替换原先"每 worker 各起一份 uvx 子进程"（4N 份常驻 → 每个 server 仅 1 份，省内存）。
+  # deepwiki 不走 gateway（用官方远程 https://mcp.deepwiki.com/mcp，免认证无子进程）。
+  # 详见 backend/docs/ARCHITECTURE.md「MCP gateway sidecar」节。
+  mcp-gateway:
+    build:
+      context: ./mcp-gateway
+      dockerfile: Dockerfile
+      args:
+        UV_INDEX_URL: "${UV_INDEX_URL:-}"
+    restart: unless-stopped
+    environment:
+      # modelscope-mcp-server 直连 ModelScope API 的 token；mcp-proxy --pass-environment
+      # 透传给 stdio 子进程。空则该 server 工具调用时报鉴权错，不影响 gateway 本身与其余 server。
+      MODELSCOPE_API_TOKEN: "${MODELSCOPE_API_TOKEN:-}"
+      UV_OFFLINE: "1"            # 运行时兜底：构建期已预装，任何意外拉包快速失败而非卡到超时
+      PYTHONDONTWRITEBYTECODE: "1"
+      HOME: /tmp                 # 引导子进程缓存写 tmpfs（不挂业务卷，靠容器隔离 + mem_limit 兜底）
+    ports:
+      - "127.0.0.1:8096:8096"    # 宿主机 DeepTutor 等本地客户端接入；仅本机回环，不对外网开放
+    mem_limit: 1g                # 第三方代码资源上限
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 8096), 2).close()"]
+      interval: 15s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
 
   # ── 评测专用服务（非生产运行时）──────────────────────────────────────────
   # pyproject 把 inspect-ai/ragas 隔离在 eval 组（注释明确"不污染生产环境"），

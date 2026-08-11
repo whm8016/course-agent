@@ -74,8 +74,14 @@ def _openai_usage_chunk(*, input_tokens: int, output_tokens: int, cache_read: in
     )
 
 
-def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
-    """将 OpenAI function calling schema 转换为 Anthropic tool schema。"""
+def _convert_tools(
+    tools: list[dict[str, Any]] | None, *, cache_control: bool = False
+) -> list[dict[str, Any]] | None:
+    """将 OpenAI function calling schema 转换为 Anthropic tool schema。
+
+    cache_control=True 时给最后一个工具加 ephemeral 断点——工具 schema 是 T1 静态锚点
+    （同会话逐字一致），缓存命中≈0.1x 成本。对标 Anthropic Prompt Caching（断点放 tools→system→messages）。
+    """
     if not tools:
         return None
     result = []
@@ -88,13 +94,20 @@ def _convert_tools(tools: list[dict[str, Any]] | None) -> list[dict[str, Any]] |
                 "input_schema": fn.get("parameters", {"type": "object", "properties": {}}),
             }
         )
+    if cache_control and result:
+        result[-1]["cache_control"] = {"type": "ephemeral"}
     return result
 
 
-def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+def _convert_messages(
+    messages: list[dict[str, Any]], *, cache_control: bool = False
+) -> tuple[Any, list[dict[str, Any]]]:
     """拆分 system prompt，将 OpenAI messages 转换为 Anthropic 格式。
 
-    返回 (system_prompt, anthropic_messages)。
+    返回 (system, anthropic_messages)。system 在 cache_control=False 时为 str（逐字同旧行为）；
+    cache_control=True 时为 text block 列表，并在首个 block（T1 稳定前缀）放 ephemeral 断点——
+    _build_messages 已在 T1/T2 边界把 system 拆成两条消息，这里收集后给第一条加断点，T2/KB-seed
+    等易变后缀不缓存。Anthropic system 参数两种形态都接受。
     """
     system_parts: list[str] = []
     converted: list[dict[str, Any]] = []
@@ -156,6 +169,15 @@ def _convert_messages(messages: list[dict[str, Any]]) -> tuple[str, list[dict[st
         else:
             converted.append({"role": role, "content": content or ""})
 
+    if cache_control and system_parts:
+        # 首个 system block（T1 稳定前缀）放 cache 断点；其余（T2 易变层 / KB-seed）不缓存。
+        blocks: list[dict[str, Any]] = []
+        for i, part in enumerate(system_parts):
+            block = {"type": "text", "text": part}
+            if i == 0:
+                block["cache_control"] = {"type": "ephemeral"}
+            blocks.append(block)
+        return blocks, converted
     return "\n\n".join(system_parts), converted
 
 
@@ -235,8 +257,12 @@ class AnthropicAdapter:
         )
         kwargs.pop("stream_options", None)
 
-        system, ant_messages = _convert_messages(messages)
-        ant_tools = _convert_tools(tools_openai)
+        # cache_control（CONTEXT_BUDGET__CACHE_CONTROL_ENABLED）：开则给 system T1 前缀 + 末工具
+        # 加 ephemeral 断点，命中≈0.1x 成本；默认关→system 为裸字符串，逐字节同旧行为。
+        from settings import get_settings
+        _cc = bool(get_settings().context_budget.cache_control_enabled)
+        system, ant_messages = _convert_messages(messages, cache_control=_cc)
+        ant_tools = _convert_tools(tools_openai, cache_control=_cc)
 
         create_kwargs: dict[str, Any] = {
             "model": model,

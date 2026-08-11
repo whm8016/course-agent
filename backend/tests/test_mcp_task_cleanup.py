@@ -203,6 +203,10 @@ def test_run_server_finally_cleans_on_cancel(monkeypatch):
     import mcp
 
     class _FakeSession:
+        # ClientSession(read, write) 由 manager 传两个参数构造，_FakeSession 须接收。
+        def __init__(self, *args, **kwargs):
+            pass
+
         async def __aenter__(self):
             return self
 

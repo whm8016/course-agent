@@ -7,7 +7,6 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
 from api.courses import check_course_access
@@ -18,7 +17,7 @@ from api.upload import (
 )
 from core.attachment import Attachment
 from core.context import UnifiedContext
-from core.db.database import get_db
+from core.db.database import session_scope
 from core.db.limiter import limiter
 from core.agent.mode_normalize import normalize_mode
 from core.observability import log_flow
@@ -42,7 +41,7 @@ class ChatRequest(BaseModel):
     attachments: list[Attachment] = Field(default_factory=list, description="附件列表（图片，支持多图）")
     tools: list[str] = Field(default_factory=list, description="启用的工具，如 ['rag', 'web_search']")
     model_profile_id: str | None = Field(default=None, description="本次对话使用的 LLM 供应商 profile id（对标 ：用户下拉选中；不传走默认/active）")
-    rag_mode: str = Field(default="auto", description="检索模式：auto（默认，按 strategy 自动路由 lightrag 图谱/pgvector 向量）/ mix/naive/local（手动选 LightRAG 原生模式，需课程已建 lightrag）")
+    rag_mode: str = Field(default="auto", description="检索模式：auto（默认，按 strategy 自动路由）/ mix/naive/local（手动选 LightRAG 原生模式，需 lightrag）/ llamaindex_pg（强制走 pgvector 向量，需 pg 已建）/ global（LightRAG 全局）")
 
 
 @router.post("/chat")
@@ -51,7 +50,6 @@ async def chat(
     request: Request,
     body: ChatRequest,
     user: dict = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
     course_id: str = body.course_id or "general"
     message: str = body.message
@@ -59,9 +57,9 @@ async def chat(
     session_id: str | None = body.session_id
     mode: str = normalize_mode(body.chat_mode)
 
-    # rag_mode 白名单：auto（默认，自动路由）+ LightRAG 原生模式；非法/空值回退 auto
+    # rag_mode 白名单：auto（默认，自动路由）+ LightRAG 原生模式 + 显式 pgvector；非法/空值回退 auto
     rag_mode = (body.rag_mode or "").strip().lower()
-    if rag_mode not in {"auto", "mix", "naive", "local", "global"}:
+    if rag_mode not in {"auto", "mix", "naive", "local", "global", "llamaindex_pg"}:
         rag_mode = "auto"
 
     # 附件解析 + 图片限流 + 物化（归属校验 + 读 base64），统一在 api.upload
@@ -70,7 +68,11 @@ async def chat(
     materialize_attachments(attachments, user)
     image_count = sum(1 for a in attachments if a.is_image())
 
-    await check_course_access(db, course_id, user)
+    # M-42：SSE/长流端点不用 Depends(get_db)——它会把 session 挂到整个流式输出结束才
+    # 关闭，多并发打满连接池。改用 session_scope() 在流前片段内开闭，查完即归还连接，
+    # event_generator 流式阶段不持有任何 DB 连接。
+    async with session_scope() as db:
+        await check_course_access(db, course_id, user)
 
     if len(message) > MAX_MESSAGE_LENGTH:
         message = message[:MAX_MESSAGE_LENGTH]
@@ -90,13 +92,16 @@ async def chat(
         user["id"], _has_memory, len(_mem_ctx)
     )
 
-    # 读 Session Summary（L2）：早期对话摘要
+    # 读 Session Summary（L2）：早期对话摘要。传 user_id 做归属过滤，防越权读他人摘要。
     _session_summary = ""
     if session_id:
         try:
             from core.memory.session_summary import get_summary_manager
             summary_mgr = get_summary_manager()
-            _session_summary = await summary_mgr.get_summary(db, session_id)
+            async with session_scope() as db:
+                _session_summary = await summary_mgr.get_summary(
+                    db, session_id, user_id=str(user["id"])
+                )
             if _session_summary:
                 logger.info(
                     "[chat] L2 summary loaded user_id=%s session=%s summary_len=%d",
@@ -105,6 +110,8 @@ async def chat(
         except Exception as e:
             logger.warning("[chat] L2 summary load failed: %s", e)
 
+    # 记忆读写工具的挂载由 resolve() 统一处理（always_on 注册标记），无需在此合并；
+    # 这样 SSE/WS/bot 三条 chat 入口行为一致，前端 tools 透传即可。
     ctx = UnifiedContext(
         course_id=course_id,
         user_id=str(user["id"]),

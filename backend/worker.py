@@ -318,6 +318,138 @@ async def cron_consolidate_memory(ctx) -> None:
         logger.warning("[worker] cron_consolidate_memory error: %s", exc, exc_info=True)
 
 
+async def cron_storage_gc(ctx) -> None:
+    """每日 04:17 磁盘派生数据 GC（parse_cache / lightrag_store ingest_chunks / uploads）。
+
+    对标 Bazel 磁盘缓存 GC：服务空闲期 offline GC（详见 core.storage.gc 模块 docstring）。
+    ARQ worker 单容器天然单例，不需选主。cron 是自动放开的真删（dry_run=False）——放开前
+    先用 admin POST /api/admin/storage/gc?dry_run=true 核对报告。全兜异常：GC 失败只记日志，
+    绝不影响索引主路径（GC 与索引互不依赖，且 ingest_chunks 清理跳过持 dlock 的课程）。
+    """
+    import time
+    t0 = time.perf_counter()
+    logger.info("[worker] cron_storage_gc start")
+    try:
+        from core.storage.gc import run_gc
+        report = await run_gc(dry_run=False)
+        logger.info(
+            "[worker] cron_storage_gc complete freed_gib=%.3f disk_used_pct=%.1f elapsed_ms=%d",
+            report.get("total_freed_gib", 0.0),
+            report.get("disk_used_pct", -1.0),
+            int((time.perf_counter() - t0) * 1000),
+        )
+    except Exception as exc:
+        logger.warning("[worker] cron_storage_gc error: %s", exc, exc_info=True)
+
+
+async def cron_rollup_usage(ctx) -> None:
+    """每小时第 11 分钟：重算今日+昨日 LLM 用量日汇总 + 清过期明细。
+
+    重算两天覆盖跨日边界的滞后写入（UTC 0 点前后产生的明细落库时机与自然日错位）。整删整插
+    天然幂等（详见 core.analytics.token_usage.rollup_daily）。purge 按 detail_retention_days
+    清过期明细；日汇总永久保留作账单历史。全兜异常：失败只记日志，绝不影响对话主链路（写库本就
+    best-effort）。统计滞后 ≤1 小时，admin 看板可标「数据截至 HH:00」。ARQ 单容器天然单例。
+    """
+    import time
+
+    from settings import get_settings
+
+    from core.analytics.token_usage import (
+        _today_yesterday,
+        purge_old_records,
+        rollup_daily,
+    )
+
+    cfg = get_settings().usage_tracking
+    if not cfg.enabled:
+        return  # 总开关关：loop 不写明细，rollup 无数据可聚合，短路省 DB 往返
+    t0 = time.perf_counter()
+    days = _today_yesterday()
+    logger.info("[worker] cron_rollup_usage start days=%s", days)
+    try:
+        inserted = await rollup_daily(days)
+        purged = await purge_old_records(cfg.detail_retention_days)
+        logger.info(
+            "[worker] cron_rollup_usage complete days=%s inserted=%d purged=%d elapsed_ms=%d",
+            days, inserted, purged,
+            int((time.perf_counter() - t0) * 1000),
+        )
+    except Exception as exc:
+        logger.warning("[worker] cron_rollup_usage error: %s", exc, exc_info=True)
+
+
+async def cron_rollup_learning(ctx) -> None:
+    """学情读模型重算（学情分析四模块设计 §第二期）：course_daily（近 7 天滚动）+
+    student_course（近 2 天活跃课程）。删后重算，幂等。
+
+    course_daily 从 learning_events 聚合（7 天窗口覆盖展示层趋势 + 首次回填历史）；
+    student_course 从 Session/Message/NotebookEntry 重算。展示层（教师学情统计/仪表盘）
+    只读这两张表，不再每次现算。
+    """
+    import time as _time
+    from core.analytics.learning_rollup import (
+        DAILY_ROLLUP_WINDOW_DAYS,
+        recent_active_course_ids,
+        recent_days,
+        rollup_course_daily,
+        rollup_student_course,
+    )
+
+    days = recent_days(DAILY_ROLLUP_WINDOW_DAYS)
+    since = _time.time() - 2 * 86400
+    try:
+        courses = await recent_active_course_ids(since)
+        daily_inserted = await rollup_course_daily(days)
+        student_inserted = await rollup_student_course(courses)
+        logger.info(
+            "[worker] cron_rollup_learning days=%s active_courses=%d daily_rows=%d student_rows=%d",
+            days, len(courses), daily_inserted, student_inserted,
+        )
+    except Exception as exc:
+        logger.warning("[worker] cron_rollup_learning error: %s", exc, exc_info=True)
+
+
+async def cron_cluster_faqs(ctx) -> None:
+    """高频问题语义聚类（学情分析四模块设计 §模块一 p2-c）：对近 2 天活跃课程，从
+    learning_events(verb=asked) embedding 聚类落 course_faq。删后重算，幂等。
+
+    embedding 调用较重，独立于 rollup cron（:37 vs :23）隔离，故障互不影响。best-effort。
+    """
+    import time as _time
+    from core.analytics.faq_cluster import cluster_course_faqs
+    from core.analytics.learning_rollup import recent_active_course_ids
+
+    since = _time.time() - 2 * 86400
+    try:
+        courses = await recent_active_course_ids(since)
+        total_clusters = 0
+        for cid in courses:
+            total_clusters += await cluster_course_faqs(cid)
+        logger.info(
+            "[worker] cron_cluster_faqs courses=%d clusters=%d", len(courses), total_clusters
+        )
+    except Exception as exc:
+        logger.warning("[worker] cron_cluster_faqs error: %s", exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
+# Worker 生命周期：关停时停止 idle reaper（若本进程因索引任务懒启动过它）
+# ---------------------------------------------------------------------------
+
+async def _on_shutdown(ctx) -> None:
+    """worker 关停：best-effort 停止 LightRAG idle reaper。
+
+    reaper 是 _get_instance 懒启动的后台 task（见 instance_pool._ensure_reaper）；
+    纯索引 worker 一次只跑一门课，索引结束 15 分钟后被它回收。关停时取消该 task，
+    避免进程退出时留下 pending task 警告。未启动过则 no-op。
+    """
+    try:
+        from core.rag.lightrag.instance_pool import stop_idle_reaper
+        await stop_idle_reaper()
+    except Exception:
+        logger.warning("[worker] stop_idle_reaper failed", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # WorkerSettings
 # ---------------------------------------------------------------------------
@@ -346,6 +478,7 @@ class WorkerSettings:
     keep_result = 300    # 任务结果保留 5 分钟
     max_tries = _ARQ_MAX_TRIES  # 失败自动重试：网络抖动/OOM/瞬时 DB 锁的容错（含首次）
     retry_jobs = True           # 显式开启重试（默认即 True，声明便于阅读；幂等性见 _ARQ_MAX_TRIES 注释）
+    on_shutdown = _on_shutdown  # 关停时停止 LightRAG idle reaper（懒启动过的进程才有事做）
 
     # Mem0 批量刷新 cron：降级为 5min（Phase 2 后 Redis buffer 不再被喂，主路径已是
     # episodic + consolidate_memory；保留以排干 Phase 2 之前的残留 buffer）。
@@ -354,4 +487,14 @@ class WorkerSettings:
         cron(cron_flush_memory, minute=set(range(0, 60, 5))),
         # 5min episodic safety net：捞长期 pending + 超时 processing 孤儿 → enqueue consolidate
         cron(cron_consolidate_memory, minute=set(range(0, 60, 5))),
+        # 每日 04:17 磁盘派生数据 GC（低峰期；分钟取质数避免与其他 cron 惊群）。
+        # ARQ 单容器天然单例，不需选主；函数无需进 functions（Worker 自动注册 cron func）。
+        cron(cron_storage_gc, hour={4}, minute={17}),
+        # 每小时 :11 重算今日+昨日 LLM 用量日汇总 + 清过期明细（统计滞后 ≤1 小时）。
+        cron(cron_rollup_usage, minute={11}),
+        # 每小时 :23 重算学情读模型（course_daily 今日+昨日；student_course 近 2 天活跃课程）。
+        # 教师学情统计/仪表盘只读 rollup，统计滞后 ≤1 小时。
+        cron(cron_rollup_learning, minute={23}),
+        # 每小时 :37 高频问题语义聚类（embedding 较重，独立于 rollup 隔离）。
+        cron(cron_cluster_faqs, minute={37}),
     ]

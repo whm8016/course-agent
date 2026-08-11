@@ -55,6 +55,9 @@ class StreamEventType(str, Enum):
     # ask_user 暂停时 loop emit 的问题卡片事件。补枚举前的同款坑：from_dict 把未知 type
     # 降级成 token（见上方 QUIZ_QUESTION 注释），前端永远收不到 ask_user_card。补上才透传。
     ASK_USER_CARD = "ask_user_card"
+    # 深度研究 decompose 后的大纲确认卡片（用户过目/编辑子主题再执行 research）。
+    # 同款坑：不补枚举则 from_dict 把 outline_card 降级成 token，前端收不到。补上才透传。
+    OUTLINE_CARD = "outline_card"
 
 
 @dataclass

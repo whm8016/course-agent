@@ -1,11 +1,12 @@
-"""第二批上下文预算治理回归测试。
+"""上下文预算策略回归测试（token 口径）。
 
 覆盖：
-- cap_tool_result：头尾保留/短串不动/<=0 不限
-- mask_old_observations：8 轮 20k 字 → 最近 3 轮 tool 原文完整、更早掩码、总量落预算内
+- cap_tool_result：头尾保留/短串不动/<=0 不限（char 口径，单条结果截断，未变）
+- mask_old_observations：token 口径软阈值触发、最近 3 轮 tool 原文完整、更早掩码
 - mask 不动 assistant/system
-- apply（settings 开启）：端到端掩码生效
-- skill_service.load_for_context：5+1 个大 always skill → 裁到预算内、personal 优先保留
+- apply（settings 开启）：端到端掩码生效（soft_trigger 由 compute_budgets 算出）
+- skill_service.load_for_context：5+1 个大 always skill -> 裁到预算内、personal 优先保留
+- apply_arm 评测四臂（contextvar 覆盖层，对照 arXiv:2508.21433）+ contextvar 切换
 """
 from __future__ import annotations
 
@@ -13,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from core.agentic import context_policy as cp
 from core.agentic.context_policy import (
     _MASK_MARKER,
     apply,
@@ -89,7 +91,7 @@ def test_cap_truncates_last_paragraph_at_sentence():
 
 
 # ---------------------------------------------------------------------------
-# mask_old_observations
+# mask_old_observations（token 口径）
 # ---------------------------------------------------------------------------
 
 def _mk_rounds(n: int, content_len: int = 20000) -> list[dict]:
@@ -108,22 +110,21 @@ def _mk_rounds(n: int, content_len: int = 20000) -> list[dict]:
 
 
 def test_mask_keeps_recent_3_rounds_full():
+    # "X"*20000 ≈ 2500 token；8 轮 ≈ 20000 token。soft_trigger=7500（≈3 轮）触发掩码。
     msgs = _mk_rounds(8)
-    masked = mask_old_observations(msgs, keep_recent_turns=3, budget_chars=80_000)
+    masked = mask_old_observations(msgs, keep_recent_turns=3, soft_trigger=7500)
     by_id = {m["tool_call_id"]: m for m in msgs if m["role"] == "tool"}
     # 最近 3 轮（c5/c6/c7）tool 原文完整
     for i in (5, 6, 7):
         assert by_id[f"c{i}"]["content"] == "X" * 20000
     # 最早轮被掩码
     assert by_id["c0"]["content"] == _MASK_MARKER
-    # 总字符降到预算内
-    assert sum(len(str(m.get("content", ""))) for m in msgs) <= 80_000
     assert masked >= 1
 
 
 def test_mask_noop_under_budget():
-    msgs = _mk_rounds(3, content_len=100)  # 总量远小于预算
-    masked = mask_old_observations(msgs, keep_recent_turns=3, budget_chars=80_000)
+    msgs = _mk_rounds(3, content_len=100)  # 总量远小于软阈值
+    masked = mask_old_observations(msgs, keep_recent_turns=3, soft_trigger=80000)
     assert masked == 0
     # 没有任何 tool 被掩码
     assert all(m["content"] == "X" * 100 for m in msgs if m["role"] == "tool")
@@ -132,7 +133,7 @@ def test_mask_noop_under_budget():
 def test_mask_preserves_assistant_and_system():
     msgs = _mk_rounds(8)
     msgs.insert(0, {"role": "system", "content": "系统提示不应被掩码"})
-    mask_old_observations(msgs, keep_recent_turns=3, budget_chars=80_000)
+    mask_old_observations(msgs, keep_recent_turns=3, soft_trigger=1)
     # system 与最终答案 assistant 不受影响
     assert msgs[0]["content"] == "系统提示不应被掩码"
     assert msgs[-1]["content"] == "最终答案"
@@ -144,7 +145,7 @@ def test_mask_preserves_assistant_and_system():
 def test_mask_keep_zero_masks_all_tools():
     """M=0：所有工具轮掩码，但最终答案 assistant 不受影响（mask 只动 tool）。"""
     msgs = _mk_rounds(4, content_len=10000)
-    masked = mask_old_observations(msgs, keep_recent_turns=0, budget_chars=1)
+    masked = mask_old_observations(msgs, keep_recent_turns=0, soft_trigger=1)
     tools = [m for m in msgs if m["role"] == "tool"]
     assert all(t["content"] == _MASK_MARKER for t in tools)
     assert msgs[-1]["content"] == "最终答案"
@@ -152,7 +153,7 @@ def test_mask_keep_zero_masks_all_tools():
 
 
 # ---------------------------------------------------------------------------
-# apply（settings 开启时端到端）
+# apply（settings 开启时端到端，soft_trigger 由 compute_budgets 算出）
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
@@ -161,8 +162,9 @@ async def test_apply_masks_when_enabled(monkeypatch):
     cfg = get_settings().context_policy
     monkeypatch.setattr(cfg, "enabled", True)
     monkeypatch.setattr(cfg, "summary_enabled", False)
-    monkeypatch.setattr(cfg, "budget_chars", 80_000)
     monkeypatch.setattr(cfg, "keep_recent_turns", 3)
+    # 控制 soft_trigger（apply 内部调 compute_budgets）：5000 token，8 轮(20000)超 -> 触发掩码
+    monkeypatch.setattr(cp, "compute_budgets", lambda m: (5000, 10000))
 
     msgs = _mk_rounds(8)
     await apply(msgs, "deepseek-v4-pro")
@@ -177,6 +179,7 @@ async def test_apply_noop_when_under_budget(monkeypatch):
     cfg = get_settings().context_policy
     monkeypatch.setattr(cfg, "enabled", True)
     monkeypatch.setattr(cfg, "summary_enabled", False)
+    monkeypatch.setattr(cp, "compute_budgets", lambda m: (100000, 200000))  # 软阈值巨大
 
     msgs = _mk_rounds(2, content_len=100)
     await apply(msgs, "deepseek-v4-pro")
@@ -194,10 +197,10 @@ def _write_skill(root: Path, name: str, body: str) -> None:
 
 
 def test_load_for_context_budget_truncation(tmp_path):
-    """5 个 course + 1 个 personal，单个 ~1.8k 字、合计超预算 → 从尾部裁 course，personal 优先保留。
+    """5 个 course + 1 个 personal，单个 ~1.8k 字、合计超预算 -> 从尾部裁 course，personal 优先保留。
 
     单个 skill 必须 < _ALWAYS_MAX_CHARS，否则裁剪守卫 len(parts)>1 会停在只剩 1 个高优先级
-    skill（仍超预算但无法再裁）——那是正确行为，但测不到「pop 多个低优先级」的路径。
+    skill（仍超预算但无法再裁）--那是正确行为，但测不到「pop 多个低优先级」的路径。
     """
     body = "规则条目行\n" * 300  # ~1.8k 字（单个 < 预算 8000，合计超）
     # personal 高优先级
@@ -236,8 +239,15 @@ def test_load_for_context_no_budget_pressure(tmp_path):
 # ---------------------------------------------------------------------------
 # apply_arm 评测四臂（contextvar 覆盖层，对照 arXiv:2508.21433）+ contextvar 切换
 # ---------------------------------------------------------------------------
+
+@pytest.fixture
+def small_soft_trigger(monkeypatch):
+    """统一把 compute_budgets 软阈值压到 5000 token，让 _mk_rounds(5)(≈12500) 稳定超阈值。"""
+    monkeypatch.setattr(cp, "compute_budgets", lambda m: (5000, 10000))
+
+
 @pytest.mark.asyncio
-async def test_apply_arm_raw_does_nothing():
+async def test_apply_arm_raw_does_nothing(small_soft_trigger):
     """raw：完全不裁（论文真基线）。"""
     msgs = _mk_rounds(5)
     before = [m["content"] for m in msgs if m["role"] == "tool"]
@@ -248,7 +258,7 @@ async def test_apply_arm_raw_does_nothing():
 
 
 @pytest.mark.asyncio
-async def test_apply_arm_masking_masks():
+async def test_apply_arm_masking_masks(small_soft_trigger):
     msgs = _mk_rounds(5)
     extra = await apply_arm(msgs, "fake-model", "masking")
     assert extra == 0
@@ -257,10 +267,8 @@ async def test_apply_arm_masking_masks():
 
 
 @pytest.mark.asyncio
-async def test_apply_arm_summary_only(monkeypatch):
+async def test_apply_arm_summary_only(monkeypatch, small_soft_trigger):
     """summary_only：窗口外每一轮 tool 结果各摘一次（H2 关键臂）。mock 压缩 LLM。"""
-    from core.agentic import context_policy as cp
-
     async def fake_summarize(text, model):
         return "摘要"
     monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
@@ -274,10 +282,8 @@ async def test_apply_arm_summary_only(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_apply_arm_hybrid_under_threshold_no_summary(monkeypatch):
+async def test_apply_arm_hybrid_under_threshold_no_summary(monkeypatch, small_soft_trigger):
     """被掩码轮数 < summary_threshold(默认 4) 时不触发摘要。"""
-    from core.agentic import context_policy as cp
-
     called = []
 
     async def fake_summarize(text, model):
@@ -285,21 +291,19 @@ async def test_apply_arm_hybrid_under_threshold_no_summary(monkeypatch):
         return "摘要"
     monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
 
-    extra = await apply_arm(_mk_rounds(5), "fake-model", "hybrid")  # 掩码 1 轮 < 4
+    extra = await apply_arm(_mk_rounds(5), "fake-model", "hybrid")  # 掩码 2 轮 < 4
     assert extra == 0
     assert called == []
 
 
 @pytest.mark.asyncio
-async def test_apply_arm_hybrid_over_threshold(monkeypatch):
+async def test_apply_arm_hybrid_over_threshold(monkeypatch, small_soft_trigger):
     """被掩码轮数 >= 阈值时触发一次整体摘要。"""
-    from core.agentic import context_policy as cp
-
     async def fake_summarize(text, model):
         return "摘要"
     monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
 
-    msgs = _mk_rounds(8)  # 掩码 4 轮 >= 4
+    msgs = _mk_rounds(8)  # 掩码 5 轮 >= 4
     extra = await apply_arm(msgs, "fake-model", "hybrid")
     assert extra == 1
     assert any("[早期工具结果摘要]" in str(m["content"])
@@ -308,6 +312,7 @@ async def test_apply_arm_hybrid_over_threshold(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_apply_arm_unknown_arm_defaults_raw():
+    """未知臂按 raw 处理。"""
     extra = await apply_arm(_mk_rounds(3, content_len=10), "fake-model", "bogus")
     assert extra == 0
 
@@ -319,3 +324,31 @@ def test_contextvar_set_current_reset():
     assert current_arm() == "masking"
     reset_arm(token)
     assert current_arm() is None
+
+
+# ---------------------------------------------------------------------------
+# 反应式兜底：_is_context_length_error（loop.py）
+# ---------------------------------------------------------------------------
+
+def test_is_context_length_error_detects_size_errors():
+    """context-length 关键词与 413 状态码被识别；普通错误不误判。"""
+    from core.agentic.loop import _is_context_length_error
+
+    class _Err(Exception):
+        pass
+
+    # 关键词命中
+    assert _is_context_length_error(_Err("This model's maximum context length is 8192 tokens"))
+    assert _is_context_length_error(_Err("input length exceeds the limit"))
+    # 413 状态码
+    e413 = _Err("Request Entity Too Large")
+    e413.status_code = 413
+    assert _is_context_length_error(e413)
+    # reliability 包装：__cause__ 链上命中
+    wrapped = _Err("LLM call failed after 3 attempts")
+    wrapped.__cause__ = _Err("messages too long")
+    assert _is_context_length_error(wrapped)
+    # 非尺寸错误不误判
+    e400 = _Err("Invalid tool schema")
+    e400.status_code = 400
+    assert not _is_context_length_error(e400)

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any
 
 from settings import get_settings
 KNOWLEDGE_DIR = get_settings().paths.knowledge_dir
@@ -30,10 +29,21 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_source_dir(course_id: str, source_dir: str | None = None) -> Path:
-    """解析源目录路径。"""
+    """解析源目录路径。
+
+    source_dir 非空时必须解析到课程知识目录 ``KNOWLEDGE_DIR / course_id`` 之内（防
+    服务端任意文件读：客户端传绝对路径或 ``../`` 逃逸会把任意目录文件灌进课程 KB，
+    之后经 RAG 检索泄露）。传外部路径 -> ValueError。默认取课程目录。
+    """
+    base = (Path(KNOWLEDGE_DIR) / course_id).resolve()
     if source_dir:
-        return Path(source_dir).expanduser().resolve()
-    return (Path(KNOWLEDGE_DIR) / course_id).resolve()
+        resolved = Path(source_dir).expanduser().resolve()
+        try:
+            resolved.relative_to(base)
+        except ValueError:
+            raise ValueError(f"source_dir 必须在课程目录内: {base}")
+        return resolved
+    return base
 
 
 def _collect_course_docs(source_dir: Path, course_id: str) -> tuple[list[str], list[str], list[str]]:
@@ -207,28 +217,6 @@ class LightRAGIndexer(Indexer):
         return is_lightrag_available()
 
 
-# ── 向后兼容函数────────────────────────────────────
-
-async def index_course_with_lightrag(
-    course_id: str,
-    force: bool = False,
-    source_dir: str | None = None,
-) -> dict[str, Any]:
-    """向后兼容：使用 LightRAG 索引课程。
-
-    Deprecated: 请使用 get_indexer("lightrag").index() 代替。
-    """
-    indexer = LightRAGIndexer()
-    result = await indexer.index(course_id, [], force=force, source_dir=source_dir)
-    return {
-        "indexed_docs": result.chunks_created,
-        "indexed_files": result.files_indexed,
-        "skipped": result.status == "skipped",
-        "reason": result.error,
-    }
-
-
 __all__ = [
     "LightRAGIndexer",
-    "index_course_with_lightrag",
 ]

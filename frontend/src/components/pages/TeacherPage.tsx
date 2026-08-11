@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { authHeaders } from '../../services/auth'
+import type { UsageSummary } from '../../services/api'
 import type { User } from '../../types'
 import JoinCodeShareSection from './JoinCodeShareSection'
 import KbDetailPanel from './KbDetailPanel'
+import UsagePanel from './UsagePanel'
 import { STATUS_LABEL, STATUS_COLOR } from './kbUtils'
 import type { KB } from './KbDetailPanel'
 
@@ -66,7 +68,7 @@ export default function TeacherPage({ user, onBack }: Props) {
   const [courses, setCourses] = useState<KB[]>([])
   const [selectedKB, setSelectedKB] = useState<KB | null>(null)
   const [students, setStudents] = useState<Student[]>([])
-  const [loadingCourses, setLoadingCourses] = useState(false)
+  const [loadingCourses, setLoadingCourses] = useState(true)
   const [loadingStudents, setLoadingStudents] = useState(false)
   const [generatingCode, setGeneratingCode] = useState(false)
   const [indexSubmitting, setIndexSubmitting] = useState<string | null>(null)
@@ -76,6 +78,8 @@ export default function TeacherPage({ user, onBack }: Props) {
 
   // Analytics state
   const [overview, setOverview] = useState<OverviewData | null>(null)
+  const [usage, setUsage] = useState<UsageSummary | null>(null)
+  const [usageDim, setUsageDim] = useState<'user' | 'model' | 'day'>('user')
   const [freqQuestions, setFreqQuestions] = useState<FreqQuestion[]>([])
   const [expandedQ, setExpandedQ] = useState<number | null>(null)
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([])
@@ -96,7 +100,6 @@ export default function TeacherPage({ user, onBack }: Props) {
   // ── 加载课程列表 ─────────────────────────────────────────────────────────────
 
   const loadCourses = async () => {
-    setLoadingCourses(true)
     try {
       const list = await apiFetch('/teacher/courses') as KB[]
       setCourses(list)
@@ -162,11 +165,14 @@ export default function TeacherPage({ user, onBack }: Props) {
     setChatFilterStudent('')
     setViewingMessages(null)
     setExpandedQ(null)
+    setUsage(null)
+    setUsageDim('user')
     void loadKBDetail(c.course_id)
     void loadStudents(c.course_id)
     void loadOverview(c.course_id)
     void loadFreqQuestions(c.course_id)
     void loadChatSessions(c.course_id)
+    void loadUsage(c.course_id, 'user')
   }
 
   const loadStudents = async (courseId: string) => {
@@ -195,6 +201,13 @@ export default function TeacherPage({ user, onBack }: Props) {
       const data = await apiFetch(`/teacher/courses/${courseId}/analytics/frequent-questions`) as { questions: FreqQuestion[] }
       setFreqQuestions(data.questions ?? [])
     } catch { setFreqQuestions([]) }
+  }
+
+  const loadUsage = async (courseId: string, dim: 'user' | 'model' | 'day') => {
+    try {
+      const data = await apiFetch(`/teacher/courses/${courseId}/analytics/usage?group_by=${dim}&limit=50`) as UsageSummary
+      setUsage(data)
+    } catch { setUsage(null) }
   }
 
   const loadChatSessions = async (courseId: string, studentId?: string, page = 1) => {
@@ -369,7 +382,7 @@ export default function TeacherPage({ user, onBack }: Props) {
   // ── 渲染 ──────────────────────────────────────────────────────────────────────
 
   return (
-    <div className="min-h-screen bg-canvas flex flex-col">
+    <div className="h-screen bg-canvas flex flex-col">
       {/* Header */}
       <header className="bg-surface border-b border-line px-4 md:px-6 py-3 md:py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -502,6 +515,41 @@ export default function TeacherPage({ user, onBack }: Props) {
                   )}
                 </section>
               )}
+
+              {/* ── 课程用量 ────────────────────────────────────────────── */}
+              <section className="bg-surface rounded-[var(--radius-lg)] border border-line p-6">
+                <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+                  <h3 className="font-semibold text-ink flex items-center gap-2">
+                    <span></span> 课程用量
+                    <span className="text-xs text-muted font-normal">
+                      （近 30 天{usage?.latest_day ? ` · 截至 ${usage.latest_day}` : ''}）
+                    </span>
+                  </h3>
+                  <div className="flex gap-1 bg-surface-2 rounded-[var(--radius)] p-1">
+                    {(['user', 'model', 'day'] as const).map(d => (
+                      <button
+                        key={d}
+                        onClick={() => {
+                          setUsageDim(d)
+                          if (selectedKB) void loadUsage(selectedKB.course_id, d)
+                        }}
+                        className={`px-3 py-1 rounded-md text-xs transition ${
+                          usageDim === d ? 'bg-surface text-ink font-medium shadow-sm' : 'text-ink-soft hover:text-ink'
+                        }`}
+                      >
+                        {d === 'user' ? '按学生' : d === 'model' ? '按模型' : '按天'}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {!usage || usage.rows.length === 0 ? (
+                  <p className="text-sm text-muted text-center py-8">
+                    暂无用量数据（学生对话后自动统计，每小时聚合一次）
+                  </p>
+                ) : (
+                  <UsagePanel usage={usage} dim={usageDim} />
+                )}
+              </section>
 
               {/* ── 高频问题 ──────────────────────────────────────────────── */}
               {freqQuestions.length > 0 && (

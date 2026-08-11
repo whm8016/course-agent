@@ -38,6 +38,7 @@ async def run_ablation(
     """
     from core.rag.hybrid_retriever import retrieve as hybrid_retrieve
     from core.rag.es_client import get_es_store
+    from core.rag.rerank import build_rerank_fn
     from core.rag import get_retriever
 
     retriever = get_retriever("lightrag")
@@ -50,6 +51,11 @@ async def run_ablation(
     k = top_k if top_k is not None else config.EVAL_TOP_K
     # partial 把 course_id 绑定为 dense_search 第一参，剩 (query, k) 适配 hybrid_retrieve 签名
     dense_fn = partial(retriever.dense_search, course_id)
+
+    # 精排：force=True 无视生产 RERANK__ENABLED 开关，只看 api_key——否则默认关时
+    # hybrid_rrf+rerank 与 hybrid_no_rerank 两组跑出来一样，消融无意义。是否真正调用
+    # 由各 cfg.rerank_enabled 决定（hybrid_retriever 逐配置 gate）。
+    rerank_fn = build_rerank_fn(force=True)
 
     all_results: dict[str, list[dict]] = {}
     for cfg_name, cfg in configs.items():
@@ -68,7 +74,7 @@ async def run_ablation(
                     question, course_id, cfg,
                     es_store=es_store,
                     dense_search_fn=dense_fn,
-                    rerank_fn=None,  # TODO: 适配 gte-rerank-v2 作 rerank_fn 后开启
+                    rerank_fn=rerank_fn,
                 )
                 contexts = [d.get("content", "") for d in (docs or [])[:k] if d.get("content")]
             except Exception as e:

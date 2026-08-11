@@ -70,7 +70,7 @@ export default function JoinCodeShareSection({ kb, onReset, resetting }: Props) 
               )}
             </div>
             <p className="text-xs text-muted">
-              学生可通过 ① 输入课程码 ② 点击分享链接 ③ 扫描二维码 三种方式加入。
+              
               {onReset && '重置后旧码立即失效。'}
             </p>
           </div>

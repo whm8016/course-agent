@@ -1,7 +1,7 @@
 """P0-C：mem0 build_memory_context 的 search_threshold 传递 + TypeError 自适应降级。
 
 不连真实 PG/mem0：mock get_memory 返回假 AsyncMemory，验证 threshold 透传、默认 0 不传、
-mem0 不支持 threshold 时降级重试不阻塞。recency_decay_lambda/threshold 真实生效待 Docker。
+mem0 不支持 threshold 时降级重试不阻塞。
 """
 from __future__ import annotations
 
@@ -14,10 +14,9 @@ from settings import get_settings
 
 
 def _mem_settings(monkeypatch, **overrides):
-    """配置 mem0 settings：默认关冲突检测（简化测试），可覆盖 search_threshold/time_decay。"""
+    """配置 mem0 settings：默认关冲突检测（简化测试），可覆盖 search_threshold。"""
     cfg = get_settings().mem0
     monkeypatch.setattr(cfg, "conflict_detect_enabled", False)
-    monkeypatch.setattr(cfg, "time_decay_enabled", overrides.get("time_decay_enabled", False))
     monkeypatch.setattr(cfg, "search_threshold", overrides.get("search_threshold", 0.0))
     return cfg
 

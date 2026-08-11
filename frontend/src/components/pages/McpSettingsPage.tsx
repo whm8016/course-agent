@@ -29,6 +29,7 @@ const EMPTY_CONFIG: McpServerConfig = {
   url: '',
   headers: {},
   tool_timeout: 30,
+  connect_timeout: 15,
   enabled_tools: ['*'],
   enabled: true,
 }
@@ -461,6 +462,17 @@ function McpAdminView({ onBack }: { onBack: () => void }) {
                 value={draft.tool_timeout}
                 onChange={(e) =>
                   setDraft({ ...draft, tool_timeout: Number(e.target.value) || 30 })
+                }
+                className="w-32 rounded-[var(--radius)] border border-line px-3 py-2 text-sm focus:outline-none focus:border-ink"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-ink-soft mb-1">连接超时（秒）</label>
+              <input
+                type="number"
+                value={draft.connect_timeout}
+                onChange={(e) =>
+                  setDraft({ ...draft, connect_timeout: Number(e.target.value) || 15 })
                 }
                 className="w-32 rounded-[var(--radius)] border border-line px-3 py-2 text-sm focus:outline-none focus:border-ink"
               />

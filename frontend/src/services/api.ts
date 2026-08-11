@@ -295,6 +295,24 @@ export async function chatStream(
         break
       }
     }
+    // 收尾冲刷：服务端若未以空行结尾，最后一个事件（多为 done/metadata）会残留在 buffer，
+    // 读循环结束不再解析 -> 最后的 done / usage 尾包丢失。此处补解析一次。
+    if (buffer.trim()) {
+      const tailJson = buffer
+        .split('\n')
+        .map((line) => line.trimEnd())
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n')
+      if (tailJson) {
+        try {
+          onEvent?.(JSON.parse(tailJson) as SSEEvent)
+        } catch {
+          // skip malformed tail
+        }
+      }
+      buffer = ''
+    }
   } catch (err) {
     if (isAbortError(err) || signal?.aborted) {
       aborted = true
@@ -392,6 +410,31 @@ export interface DashboardData {
   frequent_errors: GraphNode[]
   knowledge_node_count: number
   error_node_count: number
+}
+
+// LLM 用量汇总（llm_usage_daily 聚合表只读）。rows 的维度键随 group_by 变化（day/user/course/model）。
+export interface UsageRow {
+  day?: string
+  user?: string
+  course?: string
+  model?: string
+  input_tokens: number
+  output_tokens: number
+  cache_read_tokens: number
+  cost_usd: number
+  call_count: number
+}
+
+export interface UsageSummary {
+  total: {
+    input_tokens: number
+    output_tokens: number
+    cache_read_tokens: number
+    cost_usd: number
+    call_count: number
+  }
+  rows: UsageRow[]
+  latest_day: string | null
 }
 
 export async function fetchDashboard(): Promise<DashboardData> {
@@ -553,6 +596,7 @@ export interface McpServerConfig {
   url: string
   headers: Record<string, string>
   tool_timeout: number
+  connect_timeout: number
   enabled_tools: string[]
   enabled: boolean
 }

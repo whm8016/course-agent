@@ -66,7 +66,7 @@ def _split_oversize(text: str, max_chars: int) -> list[str]:
 
     overlap = max(1, max_chars // 10)
     nodes = SentenceSplitter(
-        chunk_size=max_chars, chunk_overlap=overlap
+        chunk_size=max_chars, chunk_overlap=overlap, tokenizer=lambda t: t,
     ).get_nodes_from_documents([LlamaDocument(text=text)])
     out = [n.get_content().strip() for n in nodes if n.get_content().strip()]
     return out or [text.strip()]

@@ -60,10 +60,13 @@ async def reset_importance(user_id: str, course_id: str) -> None:
 
 
 async def claim_pending(db, user_id: str, course_id: str, *, limit: int = _CLAIM_LIMIT) -> list:
-    """原子领取 pending episodes → 标 processing（条件 UPDATE 保证并发安全）。
+    """原子领取 pending episodes → 标 processing（条件 UPDATE + RETURNING 实际命中行）。
 
-    两步：SELECT pending → UPDATE ... WHERE status='pending'。并发跑的另一份在 UPDATE 时
-    这些行已非 pending，rowcount=0，什么也领不到（不会重复巩固）。
+    SELECT 候选 → UPDATE ... WHERE id IN 候选 AND status='pending' RETURNING id。
+    返回**真正被本次 UPDATE 命中的行**（RETURNING 结果），而非 SELECT 快照——治并发
+    重复巩固：两 worker 同 SELECT 同一批候选时，先 commit 者把 status 翻成 processing，
+    后者 UPDATE 的 status='pending' 条件不再命中（Postgres 取行锁后重查 WHERE），
+    RETURNING 空 → 后者返回 []，不会重复喂 mem0（双倍 LLM 成本 + 重复事实）。
     """
     from core.db.database import MemoryEpisode
     from sqlalchemy import select, update
@@ -86,13 +89,20 @@ async def claim_pending(db, user_id: str, course_id: str, *, limit: int = _CLAIM
     )
     if not rows:
         return []
-    await db.execute(
+    result = await db.execute(
         update(MemoryEpisode)
-        .where(MemoryEpisode.id.in_([r.id for r in rows]), MemoryEpisode.status == "pending")
+        .where(
+            MemoryEpisode.id.in_([r.id for r in rows]),
+            MemoryEpisode.status == "pending",
+        )
         .values(status="processing")
+        .returning(MemoryEpisode.id)
+        .execution_options(synchronize_session=False)
     )
+    claimed_ids = set(result.scalars().all())
     await db.commit()
-    return rows
+    # 只返回真正被本次 UPDATE 命中的行（候选中被并发抢走的剔除），治并发重复巩固
+    return [r for r in rows if r.id in claimed_ids]
 
 
 async def _promote_segment(user_id: str, course_id: str, episodes: list) -> None:
@@ -159,7 +169,7 @@ async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
                     course_id, ep.user_msg, ep.assistant_msg
                 )
                 if extracted:
-                    await graph_memory.merge_and_save_graphs(db, user_id, extracted)
+                    await graph_memory.merge_and_save_graphs(db, user_id, extracted, course_id)
                     await mastery.append_mastery(
                         db, user_id, course_id, extracted.get("knowledge_points") or [], ep.id
                     )

@@ -113,4 +113,18 @@ def decrypt_secret(token: str) -> str:
         return ""
 
 
-__all__ = ["encrypt_secret", "decrypt_secret"]
+def decrypt_secret_or_plain(token: str) -> str:
+    """解密 Fernet token；解密失败且原值非空则原样返回（兼容 legacy 明文落库）。
+
+    供 UserSearchConfig 等从明文迁移到加密落库的场景：旧明文行 decrypt 返回空串，
+    回退原值（即明文本身）；新加密行正常解密。用户下次 PUT 即会被加密落库，平滑迁移、
+    无需数据回填脚本。注意：master key 变更导致的真失败也会回退成密文串（key 已失），
+    属不可避免，非本函数引入。
+    """
+    if not token:
+        return ""
+    dec = decrypt_secret(token)
+    return dec if dec else token
+
+
+__all__ = ["encrypt_secret", "decrypt_secret", "decrypt_secret_or_plain"]

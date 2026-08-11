@@ -27,7 +27,8 @@ WS /api/run/{capability_name}
     {"type": "cancel_turn"}
 
   向 ask_user 工具投递用户回复：
-    {"type": "submit_user_reply", "content": "是的，继续"}
+    {"type": "submit_user_reply", "text": "...", "answers": [...]}              # ask_user
+    {"type": "submit_user_reply", "outline": [{"title": "...", "overview": "..."}]}  # 深度研究大纲确认
 
   心跳：
     {"type": "ping"}  →  Server 回复 {"type": "pong"}
@@ -161,6 +162,26 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
             await websocket.close()
             return
 
+    # ---- 6.5 读 Session Summary（L2）：与 SSE（api/chat.py）对齐，补 WS 链路缺口 ----
+    # WS payload 可带 session_id（顶层或 metadata）；quiz/research 等无会话场景不传则
+    # 不注入 L2（行为不变）。best-effort：加载失败不阻塞 turn。
+    session_id: str = str(payload.get("session_id") or metadata.get("session_id") or "")
+    _session_summary = ""
+    if session_id:
+        try:
+            from core.memory.session_summary import get_summary_manager
+            async with AsyncSessionLocal() as db:
+                _session_summary = await get_summary_manager().get_summary(
+                    db, session_id, user_id=str(user["id"])
+                )
+            if _session_summary:
+                logger.info(
+                    "[ws.run] L2 summary loaded user_id=%s session=%s len=%d",
+                    user["id"], session_id, len(_session_summary),
+                )
+        except Exception as e:
+            logger.warning("[ws.run] L2 summary load failed: %s", e)
+
     # ---- 7. 构造 UnifiedContext ----
     metadata.setdefault("question", question)
     # 物化本地附件（归属校验 + 读 base64），供 pipeline 两阶段视觉 / loop 注入
@@ -168,6 +189,7 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
     context = UnifiedContext(
         course_id=course_id,
         user_id=str(user["id"]),
+        session_id=session_id,
         user_message=question,
         conversation_history=history,
         mode=capability_name,
@@ -175,6 +197,7 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
         language=language,
         metadata=metadata,
         attachments=attachments,
+        session_summary=_session_summary,  # L2
     )
 
     # ---- 8. 通过 TurnRuntimeManager 启动 turn ----
@@ -217,6 +240,7 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
                     turn_id,
                     text=msg.get("text"),
                     answers=msg.get("answers"),
+                    outline=msg.get("outline"),
                     user_id=str(user["id"]),
                 )
                 log_flow("ws.run.submit_reply", turn_id=turn_id, accepted=accepted)

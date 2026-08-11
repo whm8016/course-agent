@@ -60,11 +60,11 @@ def _safe_basename(filename: str) -> str:
 
 
 def _upload_owner(filename: str) -> str | None:
-    """Filename format: {user_id}_{uuid}.ext"""
-    base = _safe_basename(filename)
-    if "_" not in base:
-        return None
-    return base.split("_", 1)[0]
+    """Filename format: {user_id}_{uuid}.ext（解析复用 core.storage.naming 单一事实源）。"""
+    from core.storage.naming import parse_upload_owner_id
+
+    base = _safe_basename(filename)  # 路径遍历防护（用户输入）
+    return parse_upload_owner_id(base)
 
 
 def assert_upload_owner(filename: str, user: dict) -> None:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -47,9 +48,21 @@ def is_ready(workdir: Optional[Path]) -> bool:
 
 
 def lookup(cache_root: Path, source_hash: str, sig_hash: str) -> Optional[Path]:
-    """命中返回 ready 目录，否则 None。"""
+    """命中返回 ready 目录，否则 None。
+
+    命中时刷新目录 mtime（对标 Bazel commit 7a774ff：缓存读命中更新 recency），否则按
+    mtime LRU 裁剪的磁盘 GC（storage.gc.sweep_by_size_lru）会误删仍在用的热缓存。用
+    ``os.utime`` 而非 ``Path.touch()``——后者对目录会因 ``O_WRONLY|O_CREAT`` 打开抛
+    IsADirectoryError。best-effort：touch 失败（权限/只读挂载等）不影响命中返回。
+    """
     target = signature_dir(cache_root, source_hash, sig_hash)
-    return target if is_ready(target) else None
+    if not is_ready(target):
+        return None
+    try:
+        os.utime(target, None)
+    except OSError:
+        pass
+    return target
 
 
 def reserve(cache_root: Path, source_hash: str, sig_hash: str) -> Path:
@@ -95,17 +108,26 @@ def load_ir(workdir: Path) -> tuple[str, Optional[list[dict]], Optional[Path]]:
             logger.warning("读取 markdown 失败 %s: %s", md_files[0], exc)
 
     blocks: Optional[list[dict]] = None
-    json_files = sorted(workdir.glob("*content_list*.json"))
+    # 显式排除 *_content_list_v2.json：v2 是 list[list[dict]]（按页分组的嵌套结构），
+    # 误选会让 blocks 非空但形状错误（downstream blocks_to_sections 拿到内层 list 当 dict 用 →
+    # sections 全空）。只要 v1（content_list.json，list[dict]）存在就优先它。
+    json_files = sorted(
+        (p for p in workdir.glob("*content_list*.json") if "_v2" not in p.stem),
+        key=lambda p: (p.name != "content_list.json", p.name),
+    )
     if json_files:
         try:
             loaded = json.loads(json_files[0].read_text(encoding="utf-8"))
-            if isinstance(loaded, list):
+            # 形状守卫（engine-agnostic）：blocks 契约是 list[dict]；v2 是 list[list[dict]]，
+            # 首元素是 list 而非 dict → 拒绝（即使文件名过滤漏网也不误读成错形状）。
+            if isinstance(loaded, list) and (not loaded or isinstance(loaded[0], dict)):
                 blocks = loaded
         except (OSError, json.JSONDecodeError) as exc:
             logger.warning("读取 content_list 失败 %s: %s", json_files[0], exc)
 
     images_dir = workdir / "images"
-    asset_dir = images_dir if images_dir.is_dir() else None
+    # 绝对路径：markdown 里的图片引用是相对 images/xxx，消费者用 asset_dir / 相对名拼接定位文件
+    asset_dir = images_dir.resolve() if images_dir.is_dir() else None
 
     return markdown, blocks, asset_dir
 

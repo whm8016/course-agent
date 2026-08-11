@@ -94,6 +94,22 @@ async def upsert_single_entry(
     entry = await nb.find_notebook_entry(db, uid, payload.session_id, payload.question_id)
     if entry is None:
         raise HTTPException(status_code=500, detail="Upsert failed")
+    # P0-a：学生提交作答（user_answer 非空）→ 落一条 verb=answered 学情事件（L0，best-effort）。
+    # 补全事件层（asked/answered/feedback 三类），喂 course_daily_rollup.answers；为 P1 把 quiz
+    # 口径从 NotebookEntry 改为 learning_events 铺路。复用请求 db 提交（避免 SQLite 单连接另开会话
+    # 死锁）；course_id 取自刚 upsert 的 entry（P1 已写时落盘，无需另查 Session）。
+    if payload.user_answer.strip():
+        from core.analytics.events import record_learning_event
+        await record_learning_event(
+            user_id=uid,
+            course_id=entry.get("course_id", ""),
+            verb="answered",
+            object_id=payload.question_id,
+            object_text=payload.question[:1000],
+            session_id=payload.session_id,
+            metadata={"is_correct": payload.is_correct, "difficulty": payload.difficulty},
+            db=db,
+        )
     return entry
 
 

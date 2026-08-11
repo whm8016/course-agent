@@ -14,10 +14,14 @@ class RetrievalConfig:
     """每个实例代表一组消融实验配置。查询时可实时切换。"""
 
     # --- 召回路径 ---
+    # 20/20：接上精排后召回深度按精排 token 成本（按 doc 计费）重新定档。20+20 融合后最多
+    # 40 条，RRF 做 40→精排候选池的粗筛，精排再做 →top_k 的精筛。旧 50/50 是为「无精排、
+    # RRF 直接出结果」设计的，精排在场时深召回的边际收益被 token 成本吃掉（见 rerank.py）。
+    # 旋钮可调：消融掉点时先扫回 30/30 或 50/50 再评估，而非直接付 60k token 成本。
     bm25_enabled: bool = True
-    bm25_top_k: int = 50
+    bm25_top_k: int = 20
     dense_enabled: bool = True
-    dense_top_k: int = 50
+    dense_top_k: int = 20
 
     # --- 融合 ---
     fusion_method: str = "rrf"  # "rrf" | "linear"
@@ -27,6 +31,9 @@ class RetrievalConfig:
     # --- 精排 ---
     rerank_enabled: bool = True
     rerank_top_n: int = 5
+    # 精排后相关性阈值（仅在 rerank_enabled 且拿到 rerank_score 时生效）。0.0=不过滤。
+    # 与 settings.rerank.min_score 同口径（qwen3-rerank relevance_score），两后端共用。
+    min_rerank_score: float = 0.0
 
     # --- 标识 ---
     name: str = ""
@@ -41,6 +48,8 @@ class RetrievalConfig:
             parts.append(self.fusion_method)
         if self.rerank_enabled:
             parts.append("rerank")
+            if self.min_rerank_score > 0:
+                parts.append(f"gate{self.min_rerank_score:g}")
         return self.name or "+".join(parts) or "empty"
 
 
@@ -78,7 +87,10 @@ def reciprocal_rank_fusion(*ranked_lists, k: int = 60) -> list[dict]:
             if doc_id not in docs:
                 docs[doc_id] = item
     sorted_ids = sorted(scores, key=scores.get, reverse=True)
-    return [docs[did] for did in sorted_ids if did in docs]
+    # 写回 fused_score 到 dict 副本——返回原对象的话其 score 仍是 dense/sparse 的原始分，
+    # 融合分数在系统里任何地方都取不到（调试/可观测看到的会是假分数）。副本避免污染上游
+    # ranked_lists 里的 dict（它们就是 dense/sparse 各自列表里的对象，原地写会糊掉阶段边界）。
+    return [{**docs[did], "fused_score": scores[did]} for did in sorted_ids if did in docs]
 
 
 def linear_fusion(*ranked_lists, alpha: float = 0.5) -> list[dict]:
@@ -111,7 +123,7 @@ def linear_fusion(*ranked_lists, alpha: float = 0.5) -> list[dict]:
             if doc_id not in docs:
                 docs[doc_id] = it
     sorted_ids = sorted(agg, key=agg.get, reverse=True)
-    return [docs[did] for did in sorted_ids if did in docs]
+    return [{**docs[did], "fused_score": agg[did]} for did in sorted_ids if did in docs]
 
 
 __all__ = [

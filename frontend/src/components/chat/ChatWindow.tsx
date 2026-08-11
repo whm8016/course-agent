@@ -5,6 +5,7 @@ import {
 } from 'lucide-react'
 import MessageBubble from './MessageBubble'
 import AskUserCard, { type AskUserQuestion } from './AskUserCard'
+import OutlineCard, { type OutlineItem } from './OutlineCard'
 import ImageUpload, { type PendingFile } from './ImageUpload'
 import { isImage } from './fileUtils'
 import QuizConfigPanel from '../quiz/QuizConfigPanel'
@@ -14,11 +15,9 @@ import type { LlmProfileSelectable, UserProviderView } from '../../services/api'
 import {
   connectQuestionGenerate,
   connectDeepResearch,
-  type DeepResearchDepth,
-  type DeepResearchMode,
   type DeepResearchSource,
 } from '../../services/questionWs'
-import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode, HallucinationInfo, KBStatus, QuizQuestion, AttachmentInfo } from '../../types'
+import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode, HallucinationInfo, KBStatus, QuizQuestion, AttachmentInfo, MessageUsage } from '../../types'
 
 interface Props {
   courseId: string
@@ -27,8 +26,9 @@ interface Props {
   sessionMode?: ChatMode
   ragEnabled?: boolean
   kbStatus?: KBStatus | null
-  /** 该课程已就绪的索引后端（'lightrag' | 'llamaindex_pg'）。仅 lightrag 就绪时显示
-   *  手动检索模式选择器；pg-only 课程只走 auto（默认），不显示选择器。 */
+  /** 该课程已就绪的索引后端（'lightrag' | 'llamaindex_pg'）。lightrag 就绪时显示检索
+   *  模式选择器（双后端时先选后端，再选 lightrag 子模式 向量/实体/混合）；pg-only 课程
+   *  不显示选择器，恒发 llamaindex_pg 强制走 pgvector。 */
   indexBackends?: string[]
   onSessionCreated: (session: Session) => void
   onOpenSidebar?: () => void
@@ -198,6 +198,47 @@ function QuizStreamingBubble({ traces, questions, done, error }: QuizStreamingBu
   )
 }
 
+// 检索模式两级选择器：顶层后端（仅 showTop 时显示，即 lightrag+pg 都就绪）+ lightrag 子模式
+// （向量/实体/混合，仅 backend===lightrag 时显示）。桌面/移动复用，selectClassName 各自传入。
+function RagModeSelector({
+  backend, lightragMode, onBackend, onLightragMode, showTop, selectClassName,
+}: {
+  backend: 'lightrag' | 'llamaindex_pg'
+  lightragMode: 'mix' | 'naive' | 'local'
+  onBackend: (b: 'lightrag' | 'llamaindex_pg') => void
+  onLightragMode: (m: 'mix' | 'naive' | 'local') => void
+  showTop: boolean
+  selectClassName: string
+}) {
+  return (
+    <>
+      {showTop && (
+        <select
+          value={backend}
+          onChange={(e) => onBackend(e.target.value as 'lightrag' | 'llamaindex_pg')}
+          title="索引后端"
+          className={selectClassName}
+        >
+          <option value="lightrag">LightRAG</option>
+          <option value="llamaindex_pg">pgvector</option>
+        </select>
+      )}
+      {backend === 'lightrag' && (
+        <select
+          value={lightragMode}
+          onChange={(e) => onLightragMode(e.target.value as 'mix' | 'naive' | 'local')}
+          title="LightRAG 检索模式"
+          className={selectClassName}
+        >
+          <option value="mix">混合</option>
+          <option value="naive">向量</option>
+          <option value="local">实体</option>
+        </select>
+      )}
+    </>
+  )
+}
+
 export default function ChatWindow({
   courseId,
   courseName,
@@ -230,11 +271,21 @@ export default function ChatWindow({
     setUseKb(ragEnabled)
   }, [ragEnabled])
 
-  // 知识库检索模式：auto（默认，按问题类型自动路由 lightrag 图谱/pg 向量）/ mix/naive/local
-  // （手动选 LightRAG 原生模式，需课程已建 lightrag）。仅 chat 流式 rag 工具消费。
-  // pg-only 课程不显示选择器（永远 auto）。
+  // 知识库检索模式：两级选择——顶层后端（lightrag/pgvector，只列已就绪的）+ lightrag 子模式
+  // （向量/实体/混合）。pgvector 无子模式（恒为 dense+稀疏 RRF）。默认随就绪后端重算（见下
+  // effect）；ragModeToSend 随 /api/chat 发送。pg-only 课程不显示选择器（恒发 llamaindex_pg）。
   const hasLightrag = indexBackends.includes('lightrag')
-  const [ragMode, setRagMode] = useState<'auto' | 'mix' | 'naive' | 'local'>('auto')
+  const hasPg = indexBackends.includes('llamaindex_pg')
+  const [ragBackend, setRagBackend] = useState<'lightrag' | 'llamaindex_pg'>('llamaindex_pg')
+  const [ragLightragMode, setRagLightragMode] = useState<'mix' | 'naive' | 'local'>('mix')
+  // 默认后端随就绪情况重算：两者都有→pgvector；仅一个→那个。仅在就绪集合变化时重置，
+  // 同集合内尊重用户手动选择（镜像 useKb 的重置套路）。
+  useEffect(() => {
+    if (hasPg) setRagBackend('llamaindex_pg')
+    else if (hasLightrag) setRagBackend('lightrag')
+  }, [hasLightrag, hasPg])
+  // 派生发送值：pg→llamaindex_pg（强制走 pg）；lightrag→选中的子模式
+  const ragModeToSend = ragBackend === 'llamaindex_pg' ? 'llamaindex_pg' : ragLightragMode
 
   // 模型供应商（对标 DeepTutor：用户对话时可临时切换 provider/model）
   const [llmProfiles, setLlmProfiles] = useState<LlmProfileSelectable[]>([])
@@ -268,6 +319,8 @@ export default function ChatWindow({
   const researchCloseRef = useRef<(() => void) | null>(null)
   const quizSendRef = useRef<((msg: object) => void) | null>(null)
   const researchSendRef = useRef<((msg: object) => void) | null>(null)
+  // 当前研究的 research_id（后端在 stage_start "init" 提前下发）；断线重连时作 resume_research_id 续跑
+  const researchIdRef = useRef<string | null>(null)
   const capMenuRef = useRef<HTMLDivElement>(null)
   const capMenuMobileRef = useRef<HTMLDivElement>(null)
 
@@ -276,8 +329,8 @@ export default function ChatWindow({
   const [researchTraces, setResearchTraces] = useState<{ text: string; kind: 'status' | 'progress' | 'done' | 'error' }[]>([])
   const [researchError, setResearchError] = useState('')
   const [researchAskUser, setResearchAskUser] = useState<{ intro?: string; questions: AskUserQuestion[] } | null>(null)
-  const [researchMode, setResearchMode] = useState<DeepResearchMode>('report')
-  const [researchDepth, setResearchDepth] = useState<DeepResearchDepth>('standard')
+  // 深度研究大纲确认卡（decompose 后后端 awaiting_user 暂停时下发 outline_card 触发）
+  const [researchOutline, setResearchOutline] = useState<{ topic: string; sub_topics: OutlineItem[] } | null>(null)
 
   const chatMode: ChatMode = CAPABILITIES.find((c) => c.value === activeCap)?.chatMode ?? 'chat'
   const isQuizMode = activeCap === 'quiz'
@@ -571,6 +624,7 @@ export default function ChatWindow({
         language: 'zh',
         metadata: { count: quizConfig.count, requirement },
         attachments: attachments.length > 0 ? attachments : undefined,
+        tools: ['rag'],
       },
       {
         onOpen: () =>
@@ -626,6 +680,12 @@ export default function ChatWindow({
               metadata: { quiz: quizData },
             }
             update((prev) => [...prev, assistantMsg])
+            // 落库持久化（与研究模式 finishWithReport 一致）：否则切走会话再回来，
+            // fetchMessages 从库重拉时会因为这条题目消息从未存过而消失。
+            if (activeSessionId && collectedQuestions.length > 0) {
+              saveMessage(activeSessionId, 'user', userMsg.content, 'text').catch(() => {})
+              saveMessage(activeSessionId, 'assistant', '', 'text', { quiz: quizData }).catch(() => {})
+            }
             setQuizStreamQuestions([])
             setQuizTraces([])
             quizCloseRef.current?.()
@@ -726,71 +786,106 @@ export default function ChatWindow({
       }
     }
 
-    const { close, send } = connectDeepResearch(
-      {
-        course_id: courseId,
-        question: topic.trim(),
-        language: 'zh',
-        metadata: {
-          mode: researchMode,
-          depth: researchDepth,
-          sources: [...(useKb ? ['kb'] : []), ...(useWebSearch ? ['web'] : [])] as DeepResearchSource[],
+    // 终态统一清理流式 overlay（streaming/askUser/outline），done/error 两分支共用
+    const resetResearchOverlays = () => {
+      setResearchStreaming(false)
+      setResearchAskUser(null)
+      setResearchOutline(null)
+    }
+
+    // ask_user 暂停标志（断线重连判定）+ 重连防循环（至多一次）。本地 let 跨 connect() 共享。
+    let awaitingClarification = false
+    let reconnected = false
+    const connect = (resumeId?: string) => {
+      const { close, send } = connectDeepResearch(
+        {
+          course_id: courseId,
+          question: topic.trim(),
+          language: 'zh',
+          metadata: {
+            sources: [...(useKb ? ['kb'] : []), ...(useWebSearch ? ['web'] : [])] as DeepResearchSource[],
+            // 断线重连：带 resume_research_id，后端从 checkpoint 续跑（跳过已完成阶段 / 恢复 awaiting_user 卡片）
+            ...(resumeId ? { resume_research_id: resumeId } : {}),
+          },
+          attachments: attachments.length > 0 ? attachments : undefined,
         },
-        attachments: attachments.length > 0 ? attachments : undefined,
-      },
-      {
-        onOpen: () =>
-          setResearchTraces((prev) => [...prev, { text: '已连接，研究中…', kind: 'status' }]),
-        onMessage: (msg) => {
-          const t = msg.type
-          if (t === 'stage_start') {
+        {
+          onOpen: () =>
             setResearchTraces((prev) => [
               ...prev,
-              { text: stageLabel(String(msg.stage ?? '')) + '…', kind: 'progress' },
-            ])
-          } else if (t === 'thinking') {
-            const c = String(msg.content ?? '').trim()
-            if (c) setResearchTraces((prev) => [...prev, { text: c, kind: 'status' }])
-          } else if (t === 'token') {
-            reportContent += String(msg.content ?? '')
-          } else if (t === 'answer') {
-            const c = String(msg.content ?? '')
-            if (c) reportContent = c
-          } else if (t === 'result') {
-            const r = String(msg.report ?? '')
-            if (r) reportContent = r
-            finishWithReport()
-          } else if (t === 'ask_user_card') {
-            setResearchAskUser({
-              intro: msg.intro ? String(msg.intro) : undefined,
-              questions: (msg.questions as AskUserQuestion[]) ?? [],
+              { text: resumeId ? '重新连接中…' : '已连接，研究中…', kind: 'status' },
+            ]),
+          onMessage: (msg) => {
+            const t = msg.type
+            if (t === 'stage_start') {
+              if (msg.research_id) researchIdRef.current = String(msg.research_id) // 保存供断线重连
+              setResearchTraces((prev) => [
+                ...prev,
+                { text: stageLabel(String(msg.stage ?? '')) + '…', kind: 'progress' },
+              ])
+            } else if (t === 'thinking') {
+              const c = String(msg.content ?? '').trim()
+              if (c) setResearchTraces((prev) => [...prev, { text: c, kind: 'status' }])
+            } else if (t === 'token') {
+              reportContent += String(msg.content ?? '')
+            } else if (t === 'answer') {
+              const c = String(msg.content ?? '')
+              if (c) reportContent = c
+            } else if (t === 'result') {
+              const r = String(msg.report ?? '')
+              if (r) reportContent = r
+              awaitingClarification = false
+              finishWithReport()
+            } else if (t === 'ask_user_card') {
+              awaitingClarification = true
+              setResearchAskUser({
+                intro: msg.intro ? String(msg.intro) : undefined,
+                questions: (msg.questions as AskUserQuestion[]) ?? [],
+              })
+            } else if (t === 'outline_card') {
+              // 大纲确认：decompose 后后端暂停，等学生过目/编辑子主题。同样计入 awaitingClarification
+              // 以便断线时用 resume_research_id 重连（后端重发同一份 outline_card）。
+              awaitingClarification = true
+              setResearchOutline({
+                topic: String(msg.topic ?? ''),
+                sub_topics: (msg.sub_topics as OutlineItem[]) ?? [],
+              })
+            } else if (t === 'done') {
+              awaitingClarification = false
+              finishWithReport()
+              resetResearchOverlays()
+              researchCloseRef.current?.()
+            } else if (t === 'error') {
+              awaitingClarification = false
+              setResearchError(String(msg.message ?? msg.content ?? '研究失败，请重试'))
+              resetResearchOverlays()
+            }
+          },
+          onClose: () => {
+            // 等待澄清期间意外断开 + 已有 research_id + 未重连过 → 用 resume_research_id 重连一次续跑。
+            // 否则按意外关闭处理（仅在仍在 streaming 时报错，避免 done 后的正常关闭误报）。
+            if (!reconnected && awaitingClarification && researchIdRef.current) {
+              reconnected = true
+              setResearchTraces((prev) => [...prev, { text: '连接断开，正在从断点续跑…', kind: 'status' }])
+              connect(researchIdRef.current)
+              return
+            }
+            setResearchStreaming((v) => {
+              if (v) setResearchError('连接意外关闭')
+              return false
             })
-          } else if (t === 'done') {
-            finishWithReport()
+          },
+          onError: () => {
+            setResearchError('WebSocket 连接失败，请确认后端已启动')
             setResearchStreaming(false)
-            setResearchAskUser(null)
-            researchCloseRef.current?.()
-          } else if (t === 'error') {
-            setResearchError(String(msg.message ?? msg.content ?? '研究失败，请重试'))
-            setResearchStreaming(false)
-            setResearchAskUser(null)
-          }
+          },
         },
-        onClose: () => {
-          setResearchStreaming((v) => {
-            if (v) setResearchError('连接意外关闭')
-            return false
-          })
-        },
-        onError: () => {
-          setResearchError('WebSocket 连接失败，请确认后端已启动')
-          setResearchStreaming(false)
-        },
-      },
-    )
-    researchCloseRef.current = close
-    researchSendRef.current = send
-  }, [courseId, loading, researchStreaming, researchMode, researchDepth, useKb, useWebSearch, onSessionCreated, pendingFiles, uploadPendingAttachments])
+      )
+      researchCloseRef.current = close
+      researchSendRef.current = send
+    }
+    connect()
+  }, [courseId, loading, researchStreaming, useKb, useWebSearch, onSessionCreated, pendingFiles, uploadPendingAttachments])
 
   // ---------- 普通聊天 ----------
   const handleSend = useCallback(async () => {
@@ -874,6 +969,7 @@ export default function ChatWindow({
     let retrieveMode = ''
     let retrieveStrategy = ''
     let hallucination: HallucinationInfo | undefined
+    let usage: MessageUsage | undefined
 
     const streamResult = await chatStream(
       courseId,
@@ -1059,6 +1155,7 @@ export default function ChatWindow({
             retrieveMode = event.metadata?.retrieve_mode || ''
             retrieveStrategy = event.metadata?.retrieve_strategy || ''
             hallucination = event.metadata?.hallucination
+            usage = event.metadata?.usage
             break
           case 'error':
             // 后端 stream_bus 的 error 事件字段是 `message`（非 content）；两个都认，避免「出错了: undefined」
@@ -1073,7 +1170,7 @@ export default function ChatWindow({
       ],
       selectedProfileId || undefined,
       attachments.length > 0 ? attachments : undefined,
-      useKb ? ragMode : 'mix',
+      useKb ? ragModeToSend : 'mix',
     )
     abortControllerRef.current = null
 
@@ -1098,6 +1195,7 @@ export default function ChatWindow({
         retrieve_strategy: retrieveStrategy || undefined,
         hallucination,
         stopped: wasAborted || undefined,
+        usage,
       },
     }
     // @ts-expect-error attach thinking steps for rendering
@@ -1123,6 +1221,7 @@ export default function ChatWindow({
           retrieve_strategy: retrieveStrategy || undefined,
           hallucination,
           stopped: wasAborted || undefined,
+          usage,
         })
       } catch {
         // persistence is best-effort
@@ -1142,7 +1241,7 @@ export default function ChatWindow({
     onSessionCreated,
     chatMode,
     useKb,
-    ragMode,
+    ragModeToSend,
     selectedProfileId,
     isQuizMode,
     handleQuizStart,
@@ -1274,7 +1373,7 @@ export default function ChatWindow({
         )}
         {messages.map((msg, i) => (
           <MessageBubble
-            key={i}
+            key={`${sessionId ?? 'none'}-${i}`}
             message={msg}
             courseId={courseId}
             thinkingSteps={(msg as unknown as Record<string, unknown>)._thinkingSteps as Message[] | undefined}
@@ -1329,6 +1428,16 @@ export default function ChatWindow({
             onSubmit={(answers) => {
               researchSendRef.current?.({ type: 'submit_user_reply', text: '', answers })
               setResearchAskUser(null)
+            }}
+          />
+        )}
+        {researchOutline && (
+          <OutlineCard
+            topic={researchOutline.topic}
+            sub_topics={researchOutline.sub_topics}
+            onSubmit={(edited) => {
+              researchSendRef.current?.({ type: 'submit_user_reply', outline: edited })
+              setResearchOutline(null)
             }}
           />
         )}
@@ -1387,62 +1496,6 @@ export default function ChatWindow({
         {/* 出题配置面板（quiz 模式时展开） */}
         {isQuizMode && (
           <QuizConfigPanel value={quizConfig} onChange={setQuizConfig} />
-        )}
-
-        {/* 深度研究配置条（research 模式时展开） */}
-        {isResearchMode && (
-          <div className="flex flex-wrap gap-2 mb-2 px-1 py-2 rounded-[var(--radius)] bg-surface-2 border border-line text-xs">
-            <div className="flex items-center gap-1 flex-wrap">
-              <span className="text-muted shrink-0">模式</span>
-              {(
-                [
-                  { v: 'report', label: '研究报告' },
-                  { v: 'notes', label: '学习笔记' },
-                  { v: 'comparison', label: '对比分析' },
-                  { v: 'learning_path', label: '学习路径' },
-                ] as { v: DeepResearchMode; label: string }[]
-              ).map(({ v, label }) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => setResearchMode(v)}
-                  className={`px-2 py-0.5 rounded-full border transition ${
-                    researchMode === v
-                      ? 'border-ink bg-ink text-white font-medium'
-                      : 'border-line text-muted hover:border-ink-soft'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            <div className="w-px bg-line self-stretch hidden sm:block" />
-
-            <div className="flex items-center gap-1 flex-wrap">
-              <span className="text-muted shrink-0">深度</span>
-              {(
-                [
-                  { v: 'quick', label: '快速' },
-                  { v: 'standard', label: '标准' },
-                  { v: 'deep', label: '深入' },
-                ] as { v: DeepResearchDepth; label: string }[]
-              ).map(({ v, label }) => (
-                <button
-                  key={v}
-                  type="button"
-                  onClick={() => setResearchDepth(v)}
-                  className={`px-2 py-0.5 rounded-full border transition ${
-                    researchDepth === v
-                      ? 'border-ink bg-ink text-white font-medium'
-                      : 'border-line text-muted hover:border-ink-soft'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          </div>
         )}
 
         {/* 工具行 — 移动端独立成行 */}
@@ -1505,17 +1558,14 @@ export default function ChatWindow({
             <span className="text-[11px]">知识库</span>
           </button>
           {useKb && ragEnabled && hasLightrag && (
-            <select
-              value={ragMode}
-              onChange={(e) => setRagMode(e.target.value as 'auto' | 'mix' | 'naive' | 'local')}
-              title="知识库检索模式"
-              className="text-[11px] px-1.5 py-1.5 rounded-[var(--radius)] border border-line bg-surface text-ink-soft focus:outline-none focus:border-ink"
-            >
-              <option value="auto">自动</option>
-              <option value="mix">混合</option>
-              <option value="naive">向量</option>
-              <option value="local">实体</option>
-            </select>
+            <RagModeSelector
+              backend={ragBackend}
+              lightragMode={ragLightragMode}
+              onBackend={setRagBackend}
+              onLightragMode={setRagLightragMode}
+              showTop={hasLightrag && hasPg}
+              selectClassName="text-[11px] px-1.5 py-1.5 rounded-[var(--radius)] border border-line bg-surface text-ink-soft focus:outline-none focus:border-ink"
+            />
           )}
           <button
             type="button"
@@ -1593,17 +1643,14 @@ export default function ChatWindow({
             <span className="hidden sm:inline text-[11px]">知识库</span>
           </button>
           {useKb && ragEnabled && hasLightrag && (
-            <select
-              value={ragMode}
-              onChange={(e) => setRagMode(e.target.value as 'auto' | 'mix' | 'naive' | 'local')}
-              title="知识库检索模式"
-              className="hidden md:inline-block text-[11px] px-1.5 py-2 rounded-[var(--radius)] border border-line bg-surface text-ink-soft focus:outline-none focus:border-ink"
-            >
-              <option value="auto">自动</option>
-              <option value="mix">混合</option>
-              <option value="naive">向量</option>
-              <option value="local">实体</option>
-            </select>
+            <RagModeSelector
+              backend={ragBackend}
+              lightragMode={ragLightragMode}
+              onBackend={setRagBackend}
+              onLightragMode={setRagLightragMode}
+              showTop={hasLightrag && hasPg}
+              selectClassName="hidden md:inline-block text-[11px] px-1.5 py-2 rounded-[var(--radius)] border border-line bg-surface text-ink-soft focus:outline-none focus:border-ink"
+            />
           )}
           <button
             type="button"

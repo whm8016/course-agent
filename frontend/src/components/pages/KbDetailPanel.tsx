@@ -408,7 +408,7 @@ export default function KbDetailPanel({
           </svg>
           <span>
             <b className="text-ink">知识库索引：</b>
-            <b>AI 问答 / 出题 / 解题都依赖它</b>，必须摄入后 AI 才能引用课程内容。一门课可同时构建 LightRAG（知识图谱，多跳）与 pgvector（向量）两套，问答「自动」模式按问题类型选用。
+            <b>AI 问答 / 出题 / 解题都依赖它</b>，必须摄入后 AI 才能引用课程内容。
           </span>
         </div>
 

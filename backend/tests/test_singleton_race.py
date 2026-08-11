@@ -55,7 +55,11 @@ def _patch_managers(bot, cron, mcp, tutorbot=True):
 
 
 async def test_start_normal_path():
-    """正常路径：三个 manager 全部启动，置位 _singletons_started。"""
+    """正常路径：Bot/Cron 启动，置位 _singletons_started。
+
+    MCP 不在此处启动--它已移到 per-worker lifespan（每个 worker 各自 ensure_started，
+    否则非 leader worker 拿不到 MCP 工具）。MCP 启停见 test_lifespan_starts_and_stops_mcp_per_worker。
+    """
     import main as main_mod
 
     bot, cron, mcp = _mgr(), _mgr(), _mgr()
@@ -70,7 +74,6 @@ async def test_start_normal_path():
 
     bot.auto_start_bots.assert_awaited_once()
     cron.start.assert_awaited_once()
-    mcp.ensure_started.assert_awaited_once()
     assert main_mod._singletons_started is True
 
 
@@ -179,7 +182,10 @@ async def test_stop_idempotent_when_not_started():
 
 
 async def test_stop_tears_down_when_started():
-    """已启动时 stop 调用三个 manager 的停止方法并清位。"""
+    """已启动时 stop 调用 Bot/Cron 的停止方法并清位。
+
+    MCP 不在此处停止--其生命周期已独立于 leader，由 per-worker lifespan teardown 负责。
+    """
     import main as main_mod
 
     bot, cron, mcp = _mgr(), _mgr(), _mgr()
@@ -193,7 +199,40 @@ async def test_stop_tears_down_when_started():
         for p in patches:
             p.stop()
 
-    mcp.shutdown.assert_awaited_once()
     cron.stop.assert_awaited_once()
     bot.stop_all.assert_awaited_once()
     assert main_mod._singletons_started is False
+
+
+@pytest.mark.asyncio
+async def test_lifespan_starts_and_stops_mcp_per_worker():
+    """MCP 生命周期在 per-worker lifespan：进入调 ensure_started，退出调 shutdown。
+
+    MCP 从 leader-only 单例路径移出后（非 leader worker 也要用 MCP 工具），启停落到
+    lifespan。本测试防回归：把 MCP 挪回 start/stop_singleton_services 或漏接 ensure/shutdown。
+    """
+    import main as main_mod
+
+    mcp_mgr = AsyncMock()
+
+    async def _noop_coro():
+        return None
+
+    with patch("main.init_db", new=AsyncMock()), \
+         patch("main.get_arq_pool", new=AsyncMock(return_value=None)), \
+         patch("main.close_db", new=AsyncMock()), \
+         patch("main.close_arq_pool", new=AsyncMock()), \
+         patch("core.leader.try_become_leader", new=AsyncMock()), \
+         patch("core.leader.register_leader_callbacks"), \
+         patch("core.leader.shutdown_leader", new=AsyncMock()), \
+         patch("core.mcp.manager.get_mcp_manager", return_value=mcp_mgr), \
+         patch("main._mcp_reload_loop", new=_noop_coro), \
+         patch("main._sample_resource_gauges", new=_noop_coro), \
+         patch("main._warmup_context_window_probe", new=_noop_coro):
+        async with main_mod.lifespan(None):
+            # startup 完成：MCP 已 per-worker 启动，尚未 shutdown
+            mcp_mgr.ensure_started.assert_awaited_once()
+            mcp_mgr.shutdown.assert_not_awaited()
+
+    # teardown 完成：MCP 已关闭
+    mcp_mgr.shutdown.assert_awaited_once()

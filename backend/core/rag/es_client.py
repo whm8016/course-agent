@@ -94,9 +94,14 @@ class ESChunkStore:
         actions = [
             {
                 "_index": self._index_name,
-                "_id": c["chunk_id"],
+                # 1.4：_id 加 course_id 前缀。所有课程共用一个 ES 索引，裸 chunk_id（=内容
+                # md5）会让"同一段文字挂在两门课"命中同一 _id -> 后索引的课覆盖 _source.course_id，
+                # 先索引那门课的 BM25 检索（按 course_id 过滤）永久丢这个 chunk。
+                "_id": f"{course_id}:{c['chunk_id']}",
                 "_source": {
                     "content": c.get("content", ""),
+                    # _source.chunk_id 仍是裸内容哈希，作为与 LightRAG dense 路（md5(content)）
+                    # 的 RRF join key，bm25_search 读它而非 _id。
                     "chunk_id": c["chunk_id"],
                     "course_id": course_id,
                     "file_path": c.get("file_path", ""),
@@ -131,7 +136,8 @@ class ESChunkStore:
             )
             return [
                 {
-                    "chunk_id": hit["_id"],
+                    # 1.4：读 _source.chunk_id（裸内容哈希，RRF join key），不是带 course_id 前缀的 _id
+                    "chunk_id": hit["_source"].get("chunk_id", ""),
                     "content": hit["_source"].get("content", ""),
                     "score": float(hit.get("_score") or 0.0),
                     "file_path": hit["_source"].get("file_path", ""),

@@ -46,13 +46,12 @@ class UserProviderResponse(BaseModel):
     vision_model: str = ""
 
 
-@router.get("", response_model=UserProviderResponse)
-async def get_my_provider(user: dict = Depends(get_current_user)) -> UserProviderResponse:
-    """获取当前用户的 LLM provider 配置（api_key 脱敏）。"""
-    user_id = user.get("id")
-    if not user_id:
-        raise HTTPException(status_code=401, detail="未认证")
-    view = await get_provider_admin_view(user_id)
+def _masked_response(view: dict | None) -> UserProviderResponse:
+    """admin view -> 用户端脱敏视图（api_key 仅 *_set bool，不回传明文）。
+
+    GET / PUT 共用：PUT 原先回吐 admin view（含 decrypt 出的明文 key），每次保存都把
+    明文过一遍响应体/网关日志，抵消 GET 脱敏的意义。现统一走本函数脱敏。
+    """
     if not view:
         return UserProviderResponse()
     return UserProviderResponse(
@@ -68,6 +67,15 @@ async def get_my_provider(user: dict = Depends(get_current_user)) -> UserProvide
     )
 
 
+@router.get("", response_model=UserProviderResponse)
+async def get_my_provider(user: dict = Depends(get_current_user)) -> UserProviderResponse:
+    """获取当前用户的 LLM provider 配置（api_key 脱敏）。"""
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未认证")
+    return _masked_response(await get_provider_admin_view(user_id))
+
+
 @router.put("")
 async def upsert_my_provider(
     payload: UserProviderPayload, user: dict = Depends(get_current_user)
@@ -79,7 +87,8 @@ async def upsert_my_provider(
     saved = await upsert_provider(user_id, payload)
     clear_llm_client_cache()  # key 变更后强制重建 client 缓存
     logger.info("user %s upsert provider binding=%s", user_id, payload.binding)
-    return {"saved": True, "provider": saved}
+    # 1.5：返回脱敏视图（api_key_set），不回吐 admin view 的明文 key
+    return {"saved": True, "provider": _masked_response(saved).model_dump()}
 
 
 @router.delete("")
@@ -145,6 +154,16 @@ async def test_my_provider(
     user_id = user.get("id")
     if not user_id:
         raise HTTPException(status_code=401, detail="未认证")
+
+    # 1.6 SSRF：用户可达的探测端点，校验自定义 base_url 指向公网（拒内网/元数据地址）。
+    # base_url 留空走供应商默认（如 dashscope 官方），不校验。
+    from utils.url_guard import assert_public_http_url
+    for _bu in ((payload.base_url or "").strip(), (payload.vision_base_url or "").strip()):
+        if _bu:
+            try:
+                assert_public_http_url(_bu)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=f"base_url 不安全：{exc}")
 
     # ── 对话模型 ────────────────────────────────────────────────────────
     text_binding = (payload.binding or "").strip()

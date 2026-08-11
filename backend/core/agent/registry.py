@@ -34,6 +34,8 @@ class ToolEntry:
     schema: dict[str, Any]  # OpenAI function schema dict
     executor: ToolExecutor  # async (*, course_id, user_id, **kwargs) -> ToolResult
     deferred: bool = False  # MCP 工具默认 True（标记用，不影响 execute 路由）
+    always_on: bool = False  # 无条件挂载的工具（如记忆读写）：resolve/build_tool_hint_text
+    # 无论 enabled_tools 是否包含都追加，避免各入口点逐个合并遗漏（SSE/WS/bot 共用 resolve）
 
 
 class ToolRegistry:
@@ -80,6 +82,10 @@ class ToolRegistry:
 
     def deferred_entries(self) -> list[ToolEntry]:
         return [e for e in self._entries.values() if e.deferred]
+
+    def always_on_entries(self) -> list[ToolEntry]:
+        """无条件挂载的工具（always_on=True），供 resolve/build_tool_hint_text 追加。"""
+        return [e for e in self._entries.values() if e.always_on]
 
     # ── 执行（核心）─────────────────────────────────────────────────────
     async def execute(
@@ -133,6 +139,12 @@ def register_builtins(registry: ToolRegistry) -> None:
         execute_query_mistakes,
         execute_query_timetable,
     )
+    from core.memory.tools import (
+        READ_MEMORY_SCHEMA,
+        WRITE_MEMORY_SCHEMA,
+        execute_read_memory,
+        execute_write_memory,
+    )
 
     executor_by_name: dict[str, ToolExecutor] = {
         "rag": _execute_rag,
@@ -147,6 +159,8 @@ def register_builtins(registry: ToolRegistry) -> None:
         "query_timetable": execute_query_timetable,
         "query_grades": execute_query_grades,
         "query_mistakes": execute_query_mistakes,
+        "read_memory": execute_read_memory,
+        "write_memory": execute_write_memory,
     }
     schema_by_name: dict[str, dict[str, Any]] = {
         s["function"]["name"]: s for s in TOOLS_OPENAI_SCHEMA
@@ -157,13 +171,21 @@ def register_builtins(registry: ToolRegistry) -> None:
     schema_by_name["query_timetable"] = QUERY_TIMETABLE_SCHEMA
     schema_by_name["query_grades"] = QUERY_GRADES_SCHEMA
     schema_by_name["query_mistakes"] = QUERY_MISTAKES_SCHEMA
+    schema_by_name["read_memory"] = READ_MEMORY_SCHEMA
+    schema_by_name["write_memory"] = WRITE_MEMORY_SCHEMA
 
+    # 记忆读写工具无条件挂载（always_on）：resolve/build_tool_hint_text 会无视
+    # enabled_tools 追加它们，故 SSE/WS/bot 三条 chat 入口都不必各自合并。
+    _always_on = {"read_memory", "write_memory"}
     for name, executor in executor_by_name.items():
         schema = schema_by_name.get(name)
         if schema is None:
             logger.warning("register_builtins: missing schema for %s", name)
             continue
-        registry.register(ToolEntry(name=name, schema=schema, executor=executor, deferred=False))
+        registry.register(ToolEntry(
+            name=name, schema=schema, executor=executor,
+            deferred=False, always_on=name in _always_on,
+        ))
 
 
 _registry: ToolRegistry | None = None

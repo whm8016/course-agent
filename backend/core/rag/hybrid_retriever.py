@@ -83,6 +83,22 @@ async def retrieve(
             reranked = await rerank_fn(query, fused, top_n=config.rerank_top_n)
             if reranked:
                 fused = reranked
+                # 相关性阈值：只认 rerank_score（RRF/裸余弦/ts_rank 的绝对值无相关性含义，
+                # 在其上设阈值等于设随机数）。未被精排打分的 leftover/tail 无法验证相关性，
+                # 阈值开启时一并丢弃--与 LlamaIndex SimilarityPostprocessor 丢 score=None 同语义。
+                # 放在 try 内、fused=reranked 之后：精排 API 失败时走 except 降级回融合结果，
+                # 此时无 rerank_score，阈值不应把降级结果全杀（一次 API 抖动->全课程拒答不可接受）。
+                if config.min_rerank_score > 0:
+                    kept = [
+                        d for d in fused
+                        if float(d.get("rerank_score", -1.0)) >= config.min_rerank_score
+                    ]
+                    if len(kept) != len(fused):
+                        logger.info(
+                            "相关性阈值过滤 %d->%d 条（min_rerank_score=%.3f）",
+                            len(fused), len(kept), config.min_rerank_score,
+                        )
+                    fused = kept
         except Exception as exc:
             logger.warning("rerank 失败，返回融合结果（未精排）: %s", exc)
 

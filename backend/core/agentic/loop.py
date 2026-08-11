@@ -18,6 +18,7 @@ OpenAI 兼容 API 通过 tool_calls 字段（而非内容首行标签）来表�
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -53,27 +54,7 @@ _TOKEN_CHUNK_SIZE = 8  # 模拟流式输出时每个 token 事件携带的字符
 # ---------------------------------------------------------------------------
 # 内部辅助函数
 # ---------------------------------------------------------------------------
-def _snip_tool_results(messages: list[dict[str, Any]], budget_chars: int = 80_000) -> None:
-    """Loop 内裁切：当 messages 总字符数超限时，把最早的 role=tool 消息替换为占位符。
-
-    只裁 tool 消息，不动 user/assistant/system，避免丢失对话语义。
-    """
-    _MARKER = "[工具结果已折叠以节省上下文]"
-    total = sum(len(str(m.get("content", ""))) for m in messages)
-    if total <= budget_chars:
-        return
-    for msg in messages:
-        if total <= budget_chars:
-            break
-        if msg.get("role") != "tool":
-            continue
-        content = str(msg.get("content", ""))
-        if content == _MARKER:
-            continue
-        total -= len(content)
-        msg["content"] = _MARKER
-        total += len(_MARKER)
-def _build_messages(system_prompt: str, context: UnifiedContext, *, binding: str, extra_context: str = "") -> list[dict[str, Any]]:
+def _build_messages(system_prompt: str, context: UnifiedContext, *, binding: str, extra_context: str = "", doc_texts: str = "") -> list[dict[str, Any]]:
     """组装 system prompt + 历史对话 + 当前用户消息为 OpenAI messages 列表。
 
     图片处理三阶段（处于不同执行阶段，非平级可替换策略）：
@@ -85,26 +66,36 @@ def _build_messages(system_prompt: str, context: UnifiedContext, *, binding: str
     附件来源：context.attachments（多图）；旧 image_path 单图入口在 api 层已合并进 attachments。
     """
     messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    # cache_control（Anthropic）：把 system 在 T1/T2 边界拆成两条消息，适配器给第一条（T1 稳定
+    # 前缀）放 ephemeral 断点命中≈0.1x 成本。非 anthropic（dashscope/openai）保持单条消息，
+    # 逐字节同旧行为。T1 偏移由 chat_pipeline 经 system_t1_chars 算好存入 context.metadata
+    # （与 assemble_system_prompt 前 7 段同序同空段过滤）；用字符偏移精确切齐拼装字符串。
+    if get_settings().context_budget.cache_control_enabled and binding == "anthropic":
+        _t1 = int(context.metadata.get("_system_t1_chars") or 0)
+        if 0 < _t1 < len(system_prompt):
+            _t2 = system_prompt[_t1:].lstrip()
+            if _t2:
+                messages = [
+                    {"role": "system", "content": system_prompt[:_t1]},
+                    {"role": "system", "content": _t2},
+                ]
     for msg in (context.conversation_history or []):
         role = msg.get("role", "user")
         content = msg.get("content")
         if role in ("user", "assistant") and content:
             # content 可能是 str 或已注入图片的 list（多模态历史），原样透传
             messages.append({"role": role, "content": content})
+        elif role == "system" and content:
+            # 2.3：透传历史中的 system 消息（如 plan_turn carry-forward 前插的 session_summary）。
+            # 否则 turn_runtime 清 system 切片 + 这里又只搬 user/assistant，摘要既不在 system
+            # 也不在 history -> 长会话上下文净损失。位置：主 system 之后、user/assistant 之间。
+            messages.append({"role": "system", "content": content})
 
-    # 文档附件文字提取：FILE/PDF 类型按扩展名识别，转文本后拼入用户消息
+    # 文档附件文字提取已由 run_agent_loop 用 asyncio.to_thread 异步完成（doc_texts 传入），
+    # 避免在 async 路径同步直调 PDF/DOCX 解析阻塞本 worker 所有并发对话。
     user_message = context.user_message
-    doc_attachments = [a for a in (context.attachments or []) if not a.is_image() and a.base64]
-    if doc_attachments:
-        from utils.document_extractor import extract_documents_from_records
-        doc_texts, _ = extract_documents_from_records(
-            [a.model_dump() for a in doc_attachments]
-        )
-        # 文档文本已提取进 user_message，释放 base64 省内存（大文档 base64 ~1.33×）
-        for a in doc_attachments:
-            a.base64 = None
-        if doc_texts:
-            user_message = (user_message + "\n\n" + "\n\n".join(doc_texts)).strip()
+    if doc_texts:
+        user_message = (user_message + "\n\n" + doc_texts).strip()
 
     # extra_context（如 chat KB Seed 预检索证据）：非空时作为独立 system 消息紧贴 user 之前注入。
     # 不并入上方 system_prompt——后者段序是 prefix-cache 资产（见 chat_pipeline.assemble_system_prompt），
@@ -189,7 +180,29 @@ async def _one_round(
     # client（用户私有资源，平台不替它兜底，让真实错误冒给用户；也避免自配失败把全局
     # default 熔断器打 OPEN 误伤其他用户）。
     _circuit = None if llm_client is not None else _llm_circuit_breaker
-    stream = await _create_with_image_fallback(_client, kwargs, binding, model, circuit_breaker=_circuit)
+    # 反应式兜底：估算失误（tokenizer 差异/多模态/工具结果突增）导致 provider 拒 context-length 时，
+    # 紧急 L3 丢最旧 20% 消息组后重试；连续失败达 max_consecutive_failures 熔断（不再无限重试烧钱）。
+    # 对标 Claude Code Reactive Compact + MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES=3。
+    _max_cf = get_settings().context_budget.max_consecutive_failures
+    _ctx_len_failures = 0
+    while True:
+        try:
+            stream = await _create_with_image_fallback(_client, kwargs, binding, model, circuit_breaker=_circuit)
+            break
+        except Exception as _exc:
+            if not (_is_context_length_error(_exc) and _ctx_len_failures < _max_cf):
+                raise
+            _ctx_len_failures += 1
+            from core.agentic.context_budget import drop_oldest_turn_group
+            _dropped = drop_oldest_turn_group(messages)
+            log_flow("agent_loop.context_length_fallback",
+                     level=logging.WARNING,
+                     consecutive_failures=_ctx_len_failures,
+                     dropped_messages=_dropped)
+            if _dropped == 0:
+                # 无可丢消息仍报 context-length -> 真装不下，熔断抛出（不再重试）
+                raise
+            continue
     async for chunk in stream:
         # 成本采集：末尾 usage chunk（choices 为空）——OpenAI 末块 / Anthropic 适配器合成的等价块。
         # 必须在下方 `if not choices: continue` 之前取，否则空-choices 的 usage 块会被跳掉。
@@ -333,6 +346,37 @@ def _strip_dsml_tags(text: str) -> str:
     return text.strip()
 
 
+# context-length 错误消息关键词（provider 400/413 文案各异，按小写子串匹配）
+_CTX_LEN_KEYWORDS = (
+    "context length", "maximum context", "too long", "reduce the length",
+    "too many tokens", "input length", "exceeds the", "messages too",
+)
+
+
+def _is_context_length_error(exc: Exception) -> bool:
+    """判断异常是否是上下文超长错误（供反应式兜底决定是否紧急 L3 降级重试）。
+
+    reliability 层把不可重试错误包成 LLMRetryError，原错误挂在 __cause__；故沿因果链
+    （__cause__/__context__）查消息关键词与状态码 413。不用裸 400（太宽--schema 等其它
+    BadRequest 也走 400，会误触发 L3 丢消息）。对标 Claude Code Reactive Compact 触发条件。
+    """
+    cur: Exception | None = exc
+    seen: set[int] = set()
+    while cur is not None and id(cur) not in seen:
+        msg = str(cur).lower()
+        if any(kw in msg for kw in _CTX_LEN_KEYWORDS):
+            return True
+        _status = (
+            getattr(cur, "status_code", None)
+            or getattr(getattr(cur, "response", None), "status_code", None)
+        )
+        if _status == 413:  # Request Entity Too Large
+            return True
+        seen.add(id(cur))
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return False
+
+
 def _emit_as_tokens(text: str) -> list[dict[str, Any]]:
     """将文本切分为固定大小的 token 事件列表（模拟流式输出，内存操作极快）。"""
     return [
@@ -414,7 +458,22 @@ async def run_agent_loop(
     # temperature：None=不覆盖（保持 _one_round 默认 0.7，research/quiz/deep_solve 行为零变化）；
     # chat 传 0.3 收敛工具决策（对标 DeepTutor chat 0.2），减少「同一问题拆成多次检索」。
     _round_temp = 0.7 if temperature is None else temperature
-    messages = _build_messages(system_prompt, context, binding=eff_binding, extra_context=extra_context)
+    # 2.4：文档附件文字提取是同步 PDF/DOCX I/O，移出 sync 的 _build_messages 改 asyncio.to_thread，
+    # 否则在 async 路径直调会阻塞本 worker 所有并发对话。提取结果 + base64 释放都在此完成，
+    # _build_messages 只负责拼进 user_message（保持 sync，测试可直接同步调用）。
+    _doc_text_joined = ""
+    _doc_attachments = [a for a in (context.attachments or []) if not a.is_image() and a.base64]
+    if _doc_attachments:
+        from utils.document_extractor import extract_documents_from_records
+        _doc_texts, _ = await asyncio.to_thread(
+            extract_documents_from_records,
+            [a.model_dump() for a in _doc_attachments],
+        )
+        # 文档文本已提取，释放 base64 省内存（大文档 base64 ~1.33×）
+        for a in _doc_attachments:
+            a.base64 = None
+        _doc_text_joined = "\n\n".join(_doc_texts)
+    messages = _build_messages(system_prompt, context, binding=eff_binding, extra_context=extra_context, doc_texts=_doc_text_joined)
     tools_used: list[str] = []
     turn_usage = TokenUsage()  # 本 loop 累积 usage（成本采集汇总），done 时埋 cost Counter
     final_text = ""
@@ -452,6 +511,15 @@ async def run_agent_loop(
                         "content": "用户请求立即回答。请直接基于当前已掌握的信息（含上方工具/检索结果）"
                                    "给出最终答案；信息不足处简短说明，不要再调用工具。",
                     }]
+                    # 2.2：answer_now 也要跑上下文裁剪——多轮工具跑完、上下文最胖时点"立即回答"，
+                    # 原是唯一不裁剪的路径 -> 大概率直接 context length 400。先 enforce ans_messages
+                    # （与下方正常轮同口径：评测臂走 apply_arm，否则走级联 enforce）。
+                    _ans_arm = context_policy.current_arm()
+                    if _ans_arm is not None:
+                        await context_policy.apply_arm(ans_messages, model, _ans_arm)
+                    else:
+                        from core.agentic.context_budget import enforce as _cb_enforce_ans
+                        await _cb_enforce_ans(ans_messages, model, context.metadata.get("_budget_plan"))
                     # 传 tool_schemas + tool_choice="none"：明确"工具在但不准调"，走 DeepSeek
                     # 原生 FC 通道的"禁用"语义，从源头避免 tools=None 时模型吐 DSML 文本标签。
                     # （即使偶发退化，_one_round 内的 DSML 嗅探+strip 仍兜底。）
@@ -472,25 +540,62 @@ async def run_agent_loop(
         is_final_round = iteration == max_iterations - 1
         schemas = None if is_final_round else tool_schemas
         # 防止多轮工具调用后 messages 总量超模型 context window。
-        # contextvar 覆盖优先（评测 harness per-task 指定 raw/masking/summary_only/hybrid）；
-        # 未覆盖时回落 settings.context_policy.enabled（默认 False→旧 _snip_tool_results，零变化）。
+        # 两路收敛：contextvar 评测臂覆盖（raw/masking/summary_only/hybrid）-> 级联执行器。
+        # 级联 L1 清旧 tool 结果(免费)->L2 LLM 摘要->L3 丢最旧 20%；未超软阈值时 L1 noop（等价 raw）。
         arm = context_policy.current_arm()
+        _round_cleared = 0
+        _round_masked = 0
+        _round_dropped = 0
+        _round_summary = False
         if arm is not None:
             _extra = await context_policy.apply_arm(messages, model, arm)
             if _extra:
                 context.metadata["_cp_extra_llm_calls"] = (
                     context.metadata.get("_cp_extra_llm_calls", 0) + _extra
                 )
-        elif get_settings().context_policy.enabled:
-            await context_policy.apply(messages, model)
         else:
-            _snip_tool_results(messages)
+            # 级联执行器（取代旧 coordinator/policy/snip 三路互斥）
+            from core.agentic.context_budget import enforce as _cb_enforce
+            _report = await _cb_enforce(messages, model, context.metadata.get("_budget_plan"))
+            if _report.cleared_tool_results:
+                _round_cleared = _report.cleared_tool_results
+                context.metadata["_cb_cleared_tool_results"] = (
+                    context.metadata.get("_cb_cleared_tool_results", 0)
+                    + _report.cleared_tool_results
+                )
+            if _report.summary_added:
+                _round_summary = True
+                context.metadata["_cb_summary_added"] = (
+                    context.metadata.get("_cb_summary_added", 0) + 1
+                )
+            if _report.dropped_messages:
+                _round_dropped = _report.dropped_messages
+                context.metadata["_cb_dropped_messages"] = (
+                    context.metadata.get("_cb_dropped_messages", 0)
+                    + _report.dropped_messages
+                )
         # 本轮 reasoning 的 stage：首轮=分析问题(thinking)，工具后=整理证据(observing)。
         # 用 stage 区分，避免前端按 stage 分组时同 stage 多轮互相覆盖。
         reasoning_stage = "observing" if seen_tool_result else "thinking"
         log_flow("agent_loop.round", iteration=iteration,
                  is_final_round=is_final_round,
-                 tools_active=bool(schemas))
+                 tools_active=bool(schemas),
+                 cleared_tool_results=_round_cleared,
+                 masked_turns=_round_masked,
+                 dropped_messages=_round_dropped,
+                 summary_added=_round_summary)
+        if _round_cleared or _round_masked or _round_dropped or _round_summary:
+            # 之前这层裁剪完全不上报--LangSmith 只能看到裁完之后的 messages，看不到删了什么。
+            from core.observability.langsmith_trace import record_context_trim
+            record_context_trim(
+                stage="in_turn",
+                coordinator_enabled=get_settings().context_budget.coordinator_enabled,
+                iteration=iteration,
+                dropped_tool_results=_round_cleared,
+                masked_turns=_round_masked,
+                dropped_messages=_round_dropped,
+                summary_added=_round_summary,
+            )
 
         try:
             # 每轮都真流式：content 边收边透传（_one_round 内 _tool_call_seen 防工具轮串话）。
@@ -527,7 +632,10 @@ async def run_agent_loop(
             final_text = "（抱歉，AI 服务临时异常，请稍后重试。）"
             break
 
-        if result.has_tool_calls:
+        if result.has_tool_calls and not is_final_round:
+            # 2.1：最后一轮即便模型仍吐 tool_calls（部分供应商 tools=None 时也吐）也不再 dispatch，
+            # 否则白跑一轮工具 I/O 后循环耗尽 -> 用户拿到 M-4 兜底而非真答案。落入下方 else
+            # 用 result.content 收尾（空则 M-4 回退 last_nonempty_content）。
             tool_names = [tc.name for tc in result.tool_calls]
             log_flow("agent_loop.tool_calls", iteration=iteration,
                      tool_names=tool_names, count=len(tool_names))
@@ -575,6 +683,14 @@ async def run_agent_loop(
                     messages.extend(dispatch.tool_messages)
                     break
 
+                # 暂停钩子（research pipeline 注入）：落 awaiting_user checkpoint，供 worker 重启后
+                # 重连恢复同一份卡片。best-effort：回调失败不影响暂停主流程。
+                _on_pause = context.metadata.get("on_ask_user_pause")
+                if callable(_on_pause):
+                    try:
+                        await _on_pause(dispatch.pause_payload or {})
+                    except Exception:
+                        logger.debug("on_ask_user_pause 回调失败（best-effort）", exc_info=True)
                 await stream.emit({"type": "ask_user_card", **(dispatch.pause_payload or {})})
                 raw_reply = await waiter()
                 if raw_reply is None:
@@ -594,7 +710,7 @@ async def run_agent_loop(
                 messages.extend(dispatch.tool_messages)
 
         else:
-            # 无工具调用 → 本轮为最终答案轮
+            # 无工具调用，或最后一轮（2.1：is_final_round 时 tool_calls 不再 dispatch）→ 收尾作答
             final_text = result.content
             if result.content.strip():
                 last_nonempty_content = result.content
@@ -624,6 +740,22 @@ async def run_agent_loop(
     if get_settings().cost_quota.enabled:
         from core.quota.cost_quota import accrue_cost
         await accrue_cost(context.user_id, context.course_id, loop_cost)
+    # LLM 用量明细落库（账单级持久化）：Prometheus Counter 无法按 user_id 展开（label 基数
+    # 爆炸），Redis 配额键只留 2 天，故额外落 PG 明细供「按人/按课查」账单。写 loop 层（四
+    # pipeline 唯一 LLM 出口），一个 turn 一行；research 多 fork 子 loop 各记各的，聚合时 SUM 即可。
+    if get_settings().usage_tracking.enabled:
+        from core.analytics.token_usage import record_llm_usage
+        await record_llm_usage(
+            user_id=context.user_id,
+            course_id=context.course_id,
+            session_id=context.session_id,
+            turn_id=str(context.metadata.get("turn_id") or ""),
+            mode=context.mode or "chat",
+            model=model,
+            usage=turn_usage,
+            cost_usd=loop_cost,
+            rounds=iteration + 1,
+        )
     # 写 turn 共享 context.metadata，供 turn_runtime 汇总进 turn.complete 日志。chat/quiz/
     # deep_solve 单 loop 即全 turn；research 多 fork 子 loop 各写各的 fork 副本（不回传父
     # context），全 turn 成本以 Counter 聚合值为准（Counter 跨 loop 单调累加）。
@@ -651,6 +783,17 @@ async def run_agent_loop(
                 "tools_used": list(dict.fromkeys(tools_used)),  # 去重保序
                 "iterations": iteration + 1,
                 "answer_now": answer_now_triggered,  # 是否因"立即回答"提前收尾（前端区分/埋点）
+                # 本轮 token 用量（学生端气泡底部小字）。美元成本仅 expose_cost_to_student 开启时带。
+                "usage": {
+                    "input_tokens": turn_usage.input_tokens,
+                    "output_tokens": turn_usage.output_tokens,
+                    "cache_read_tokens": turn_usage.cache_read_tokens,
+                    **(
+                        {"cost_usd": loop_cost}
+                        if get_settings().usage_tracking.expose_cost_to_student
+                        else {}
+                    ),
+                },
             },
         })
 

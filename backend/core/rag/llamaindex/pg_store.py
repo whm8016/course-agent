@@ -33,6 +33,11 @@ logger = logging.getLogger(__name__)
 # delete（按 course_id 清行）复用，避免与 PGVectorStore 内部命名脱节。
 PG_TABLE_NAME = "kb_chunks"
 
+# tsvector 全文检索的分词配置名（zhparser 中文分词，alembic 030 建配置 + postgres/Dockerfile
+# 装扩展）。文档侧 text_search_tsv 列与查询侧 _PgSparseStore.bm25_search 必须同源--此常量是
+# 两者对齐的唯一真相源，改配置名只改这里（漂移会静默复发 sparse 0 召回）。
+TEXT_SEARCH_CONFIG = "chinese"
+
 # 进程内单例：建表 / 连接池 / embedding model 加载只付一次。web(gunicorn -wN) 与
 # ARQ worker 各自进程隔离，各持一份（PGVectorStore 本身无进程间共享语义）。
 _vector_store: Any = None
@@ -158,8 +163,9 @@ def get_vector_store() -> Any:
 
     ``checkfirst=True`` / ``IF NOT EXISTS`` 保证幂等；单 ARQ worker 首次建表 race 风险低。
     HNSW 参数 m=16 / ef_construction=64 来自 pgvector 实测（50M 向量以内无需专用向量库，
-    也是零新增服务的唯一选项）。``text_search_config='simple'``：中英混排语料不做词干化
-    （``'english'`` 会把中文当噪声丢掉）。
+    也是零新增服务的唯一选项）。``text_search_config='chinese'``：zhparser 按词切分中文
+    （见 alembic 030 + postgres/Dockerfile），simple 不分词会让整句压成一个 token、sparse
+    路 0 召回。查询侧 ``_PgSparseStore.bm25_search`` 用同配置 zhparser 分词 + OR，与文档侧同源。
     """
     global _vector_store
     if _vector_store is not None:
@@ -174,7 +180,7 @@ def get_vector_store() -> Any:
         table_name=PG_TABLE_NAME,
         embed_dim=emb.dim,
         hybrid_search=True,  # 建 text_search_tsv 列，SPARSE 模式才可用
-        text_search_config="simple",  # 中英混排不做词干化
+        text_search_config=TEXT_SEARCH_CONFIG,  # zhparser 中文分词（alembic 030 建配置）
         use_jsonb=True,  # metadata_ 用 JSONB，filter 走 @> 更快
         perform_setup=True,  # 自动建表 + HNSW（幂等，schema 跟着 llama-index 版本走）
         hnsw_kwargs={
@@ -224,6 +230,7 @@ def is_llamaindex_pg_available() -> tuple[bool, str]:
 
 __all__ = [
     "PG_TABLE_NAME",
+    "TEXT_SEARCH_CONFIG",
     "get_embed_model",
     "get_vector_store",
     "course_filter",

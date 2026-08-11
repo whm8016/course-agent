@@ -1,6 +1,7 @@
 """Chat API happy-path tests: mock TurnRuntimeManager, verify SSE response."""
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -46,3 +47,21 @@ async def test_chat_long_message_truncated(client: AsyncClient, admin_headers: d
             json={"course_id": "any", "message": long_msg},
         )
     assert r.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_chat_admits_explicit_pgvector_mode(client: AsyncClient, admin_headers: dict, caplog):
+    """白名单放行 rag_mode=llamaindex_pg（不回退 auto）：抓 http.chat.start 日志的 rag_mode 字段。
+
+    若白名单漏了 llamaindex_pg，会被回退成 auto，此处的 rag_mode 断言即失败。
+    """
+    caplog.set_level(logging.INFO, logger="flow")
+    with patch("api.chat.get_turn_runtime_manager", return_value=_make_mock_trm()):
+        await client.post(
+            "/api/chat",
+            headers=admin_headers,
+            json={"course_id": "any", "message": "hi", "rag_mode": "llamaindex_pg"},
+        )
+    starts = [r for r in caplog.records if getattr(r, "stage", "") == "http.chat.start"]
+    assert starts, "未捕获 http.chat.start 日志"
+    assert getattr(starts[0], "rag_mode", None) == "llamaindex_pg"

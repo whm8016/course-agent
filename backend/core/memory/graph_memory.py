@@ -168,13 +168,24 @@ def _clamp(value: Any, default: float) -> float:
         return default
 
 
+def _delta(v) -> float:
+    """delta 原值（可负），仅 float 转换不钳制--负 delta 表示退步 / risk 改善，钳掉会丢信号。
+
+    与 core.memory.mastery._delta 同语义；最终值由调用方 _clamp 夹到 [0,1]。
+    """
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _blend(old: Any, new: Any, default: float) -> float:
     a = _clamp(old, default)
     b = _clamp(new, a)
     return round((a + b) / 2, 3)
 
 
-def _merge_knowledge_graph(existing: dict, new_points: list[dict]) -> dict:
+def _merge_knowledge_graph(existing: dict, new_points: list[dict], course_id: str = "") -> dict:
     """将新提取的知识点合并进已有图谱。
 
     支持两种格式：
@@ -199,9 +210,11 @@ def _merge_knowledge_graph(existing: dict, new_points: list[dict]) -> dict:
         if nid in node_map:
             node = node_map[nid]
             if is_delta_update:
-                # delta 更新：增量调整 mastery/risk
-                mastery_delta = _clamp(point.get("mastery_delta"), 0)
-                risk_delta = _clamp(point.get("risk_delta"), 0)
+                # delta 更新：增量调整 mastery/risk。delta 可负（退步 / risk 改善），
+                # 用 _delta 保留负值（旧代码误用 _clamp 夹成 0 -> mastery 只升不降、
+                # risk 单调上升，仪表盘高风险点只增不减）；最终值仍 _clamp 到 [0,1]。
+                mastery_delta = _delta(point.get("mastery_delta"))
+                risk_delta = _delta(point.get("risk_delta"))
                 node["mastery"] = _clamp(node.get("mastery", 0.5) + mastery_delta, 0.5)
                 node["risk"] = _clamp(node.get("risk", 0.5) + risk_delta, 0.5)
                 logger.debug(
@@ -231,6 +244,7 @@ def _merge_knowledge_graph(existing: dict, new_points: list[dict]) -> dict:
                 "id": nid,
                 "type": "knowledge_point",
                 "label": label,
+                "course_id": course_id,
                 "risk": _clamp(point.get("risk"), 0.5) if not is_delta_update else _clamp(0.5 + point.get("risk_delta", 0), 0.5),
                 "mastery": _clamp(point.get("mastery"), 0.5) if not is_delta_update else _clamp(0.5 + point.get("mastery_delta", 0), 0.5),
                 "importance": _clamp(point.get("importance"), 0.5),
@@ -274,7 +288,7 @@ def _merge_knowledge_graph(existing: dict, new_points: list[dict]) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
-def _merge_error_graph(existing: dict, new_errors: list[dict]) -> dict:
+def _merge_error_graph(existing: dict, new_errors: list[dict], course_id: str = "") -> dict:
     """将新提取的错误模式合并进已有图谱。"""
     nodes: list[dict] = list(existing.get("nodes") or [])
     edges: list[dict] = list(existing.get("edges") or [])
@@ -305,6 +319,7 @@ def _merge_error_graph(existing: dict, new_errors: list[dict]) -> dict:
                 "id": nid,
                 "type": "error_pattern",
                 "label": label,
+                "course_id": course_id,
                 "severity": _clamp(error.get("severity"), 0.5),
                 "repeated": bool(error.get("repeated")),
                 "error_count": 1,
@@ -322,6 +337,25 @@ def _merge_error_graph(existing: dict, new_errors: list[dict]) -> dict:
             if edge not in edges:
                 edges.append(edge)
 
+    return {"nodes": nodes, "edges": edges}
+
+
+def filter_graph_by_course(graph: dict | None, course_id: str) -> dict:
+    """按 course_id 过滤图谱节点+边（教师 per-course 视图用，修跨课串数据）。
+
+    新节点在 _merge_* 时打了 course_id 标签；此处只留本课节点 + 两端都在本课的边。
+    无 course_id 的历史节点（打标前）一并保留，避免迁移期图谱空窗（未上线，存量少）。
+    """
+    g = graph or {}
+    nodes = [
+        n for n in (g.get("nodes") or [])
+        if n.get("course_id") == course_id or not n.get("course_id")
+    ]
+    keep_ids = {n["id"] for n in nodes}
+    edges = [
+        e for e in (g.get("edges") or [])
+        if e.get("source") in keep_ids and e.get("target") in keep_ids
+    ]
     return {"nodes": nodes, "edges": edges}
 
 
@@ -476,22 +510,65 @@ async def load_graphs(db: AsyncSession, user_id: str) -> tuple[dict, dict]:
 
 
 async def save_graphs(
-    db: AsyncSession, user_id: str, *, knowledge: dict | None = None, error: dict | None = None
-) -> None:
-    """保存图谱到 DB。"""
+    db: AsyncSession, user_id: str, *, knowledge: dict | None = None,
+    error: dict | None = None, expected_version: int | None = None,
+) -> bool:
+    """条件保存图谱（OCC）：带 graph_version=expected 守卫的 UPDATE，并发后写者命中 0 行。
+
+    返回是否写入成功（rowcount>0）。expected_version=None 时不带守卫（兼容只读路径，
+    但写路径应走 _occ_update 重试）。
+    """
     values: dict = {}
     if knowledge is not None:
         values["knowledge_graph"] = knowledge
     if error is not None:
         values["error_graph"] = error
-    if values:
-        await db.execute(update(User).where(User.id == user_id).values(**values))
+    if not values:
+        return True
+    values["graph_version"] = (expected_version or 0) + 1
+    stmt = update(User).where(User.id == user_id)
+    if expected_version is not None:
+        stmt = stmt.where(User.graph_version == expected_version)
+    result = await db.execute(stmt.values(**values))
+    ok = (result.rowcount or 0) > 0
+    if ok:
         logger.info(
             "[graph] save_graphs SAVED user_id=%s saved_kg=%s saved_eg=%s kg_nodes=%d eg_nodes=%d",
             user_id, knowledge is not None, error is not None,
             len(knowledge.get("nodes") or []) if knowledge else 0,
             len(error.get("nodes") or []) if error else 0
         )
+    return ok
+
+
+async def _load_with_version(db: AsyncSession, user_id: str) -> tuple[dict, dict, int]:
+    """读图谱 + graph_version（OCC 写路径用）。"""
+    row = (await db.execute(
+        select(User.knowledge_graph, User.error_graph, User.graph_version).where(User.id == user_id)
+    )).first()
+    if not row:
+        return {"nodes": [], "edges": []}, {"nodes": [], "edges": []}, 0
+    kg = row.knowledge_graph if isinstance(row.knowledge_graph, dict) else {"nodes": [], "edges": []}
+    eg = row.error_graph if isinstance(row.error_graph, dict) else {"nodes": [], "edges": []}
+    return kg, eg, int(row.graph_version or 0)
+
+
+async def _occ_update(
+    db: AsyncSession, user_id: str, modify, *, max_retries: int = 3
+) -> bool:
+    """OCC 包裹：load(带版本) -> modify(kg,eg)->(new_kg|None,new_eg|None) -> 条件 save；
+    版本冲突（并发他者先写）则重 load+modify+save，最多 max_retries 次。modify 须幂等
+    （merge 去重 / delete 已删即 no-op），保证重试安全。"""
+    for attempt in range(max_retries):
+        kg, eg, version = await _load_with_version(db, user_id)
+        new_kg, new_eg = modify(kg, eg)
+        if new_kg is None and new_eg is None:
+            return True  # 无改动
+        if await save_graphs(db, user_id, knowledge=new_kg, error=new_eg, expected_version=version):
+            return True
+        logger.info("[graph] OCC conflict retry user=%s attempt=%d", user_id, attempt + 1)
+    logger.warning("[graph] OCC exhausted retries user=%s", user_id)
+    return False
 
 
 async def update_graphs_from_conversation(
@@ -548,19 +625,17 @@ async def update_graphs_from_conversation(
         logger.info("[graph] update_graphs SKIP user_id=%s (no kp/err extracted)", user_id)
         return False
 
-    kg, eg = await load_graphs(db, user_id)
+    def _modify(kg, eg):
+        new_kg = _merge_knowledge_graph(kg, kp_list, course_id) if kp_list else None
+        new_eg = _merge_error_graph(eg, err_list, course_id) if err_list else None
+        return new_kg, new_eg
+
+    ok = await _occ_update(db, user_id, _modify)
     logger.info(
-        "[graph] update_graphs LOADED user_id=%s old_kg_nodes=%d old_eg_nodes=%d new_kp=%d new_err=%d",
-        user_id, len(kg.get("nodes") or []), len(eg.get("nodes") or []), len(kp_list), len(err_list)
+        "[graph] update_graphs DONE user_id=%s ok=%s new_kp=%d new_err=%d",
+        user_id, ok, len(kp_list), len(err_list)
     )
-    new_kg = _merge_knowledge_graph(kg, kp_list) if kp_list else kg
-    new_eg = _merge_error_graph(eg, err_list) if err_list else eg
-    await save_graphs(db, user_id, knowledge=new_kg, error=new_eg)
-    logger.info(
-        "[graph] update_graphs DONE user_id=%s new_kg_nodes=%d new_eg_nodes=%d",
-        user_id, len(new_kg.get("nodes") or []), len(new_eg.get("nodes") or [])
-    )
-    return True
+    return ok
 
 
 async def extract_knowledge(course_id: str, user_message: str, assistant_answer: str) -> dict[str, list] | None:
@@ -573,39 +648,45 @@ async def extract_knowledge(course_id: str, user_message: str, assistant_answer:
     return await _extract_from_conversation(course_id, user_message, assistant_answer)
 
 
-async def merge_and_save_graphs(db: AsyncSession, user_id: str, extracted: dict | None) -> bool:
+async def merge_and_save_graphs(db: AsyncSession, user_id: str, extracted: dict | None, course_id: str = "") -> bool:
     """公开：把提取结果合并进 users.knowledge_graph/error_graph 并保存（教师 dashboard 读）。
 
-    Phase 4 双写：consolidate job 调此维持 dashboard 数据新鲜。返回是否有更新。
+    Phase 4 双写：consolidate job 调此维持 dashboard 数据新鲜。course_id 给新节点打标
+    （修跨课串数据，教师 per-course 视图按课过滤）。返回是否有更新。
     """
     kp_list = (extracted or {}).get("knowledge_points") or []
     err_list = (extracted or {}).get("error_patterns") or []
     if not kp_list and not err_list:
         return False
-    kg, eg = await load_graphs(db, user_id)
-    new_kg = _merge_knowledge_graph(kg, kp_list) if kp_list else kg
-    new_eg = _merge_error_graph(eg, err_list) if err_list else eg
-    await save_graphs(db, user_id, knowledge=new_kg, error=new_eg)
+    def _modify(kg, eg):
+        new_kg = _merge_knowledge_graph(kg, kp_list, course_id) if kp_list else None
+        new_eg = _merge_error_graph(eg, err_list, course_id) if err_list else None
+        return new_kg, new_eg
+
+    ok = await _occ_update(db, user_id, _modify)
     await db.commit()
-    return True
+    return ok
 
 
 async def delete_graph_node(db: AsyncSession, user_id: str, node_id: str) -> dict:
     """删除图谱中指定节点及其相关边。"""
     logger.info("[graph] delete_graph_node START user_id=%s node_id=%s", user_id, node_id)
-    kg, eg = await load_graphs(db, user_id)
 
-    if node_id.startswith("kp:"):
-        before = len(kg["nodes"])
-        kg["nodes"] = [n for n in kg["nodes"] if n["id"] != node_id]
-        kg["edges"] = [e for e in kg["edges"] if e["source"] != node_id and e["target"] != node_id]
-        await save_graphs(db, user_id, knowledge=kg)
-        logger.info("[graph] delete_graph_node KP_DELETED user_id=%s node_id=%s removed_nodes=%d", user_id, node_id, before - len(kg["nodes"]))
-    elif node_id.startswith("err:"):
-        before = len(eg["nodes"])
-        eg["nodes"] = [n for n in eg["nodes"] if n["id"] != node_id]
-        eg["edges"] = [e for e in eg["edges"] if e["source"] != node_id and e["target"] != node_id]
-        await save_graphs(db, user_id, error=eg)
-        logger.info("[graph] delete_graph_node ERR_DELETED user_id=%s node_id=%s removed_nodes=%d", user_id, node_id, before - len(eg["nodes"]))
+    def _modify(kg, eg):
+        if node_id.startswith("kp:"):
+            return {
+                "nodes": [n for n in kg["nodes"] if n["id"] != node_id],
+                "edges": [e for e in kg["edges"] if e["source"] != node_id and e["target"] != node_id],
+            }, None
+        if node_id.startswith("err:"):
+            return None, {
+                "nodes": [n for n in eg["nodes"] if n["id"] != node_id],
+                "edges": [e for e in eg["edges"] if e["source"] != node_id and e["target"] != node_id],
+            }
+        return None, None
 
+    await _occ_update(db, user_id, _modify)
+    await db.commit()
+    kg, eg = await load_graphs(db, user_id)  # 返回最新图谱
+    logger.info("[graph] delete_graph_node DONE user_id=%s node_id=%s", user_id, node_id)
     return {"knowledge_graph": kg, "error_graph": eg}

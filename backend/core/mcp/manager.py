@@ -23,6 +23,8 @@ import asyncio
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 import logging
+import os
+from pathlib import Path
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -39,9 +41,22 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_CONNECT_TIMEOUT_S = 15
 # 值得恰好重试一次的瞬态传输错误（对标 nanobot）
 _TRANSIENT_ERRORS = (BrokenPipeError, ConnectionResetError)
+
+
+def _stdio_env(cfg: MCPServerConfig) -> dict[str, str] | None:
+    """stdio 子进程的 env：过滤空键，并把常见 uv/npx 安装目录 prepend 进 PATH。"""
+    env = {k: v for k, v in (cfg.env or {}).items() if k}
+    extra: list[Path] = [Path.home() / ".local" / "bin"]
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    if local_app:
+        extra.append(Path(local_app) / "Programs" / "uv")
+    prepend = os.pathsep.join(str(p) for p in extra if p.is_dir())
+    if prepend:
+        base = env.get("PATH") or os.environ.get("PATH", "")
+        env["PATH"] = f"{prepend}{os.pathsep}{base}" if base else prepend
+    return env or None
 
 
 def _unwrap_exception_group(exc: BaseException) -> str:
@@ -251,10 +266,15 @@ class MCPConnectionManager:
     async def _sync_to_config(self, config: MCPConfig) -> None:
         """diff 活动连接与 config；调用方持锁。"""
         desired = {name: cfg for name, cfg in config.servers.items() if cfg.enabled}
-        # 移除被删/禁用/变更的 server
+        # 移除被删/禁用/变更/卡在 error 的 server（后者在 gateway 恢复后需重连）
         for name in list(self._connections):
+            conn = self._connections[name]
             cfg = desired.get(name)
-            if cfg is None or cfg.connection_signature() != self._connections[name].signature:
+            if (
+                cfg is None
+                or cfg.connection_signature() != conn.signature
+                or conn.status == "error"
+            ):
                 await self._disconnect(self._connections.pop(name))
         # 并发连接新增/变更的 server
         pending = [
@@ -275,7 +295,7 @@ class MCPConnectionManager:
         ready: asyncio.Future = asyncio.get_running_loop().create_future()
         conn.task = asyncio.create_task(self._run_server(conn, ready), name=f"mcp-server-{name}")
         try:
-            await asyncio.wait_for(ready, timeout=_CONNECT_TIMEOUT_S)
+            await asyncio.wait_for(ready, timeout=cfg.connect_timeout)
             conn.status = "connected"
             conn.error = ""
             self._register_adapters(conn)
@@ -283,7 +303,7 @@ class MCPConnectionManager:
             log_flow("mcp.connect", server=name, tools=len(conn.adapters))
         except asyncio.TimeoutError:
             conn.status = "error"
-            conn.error = f"connect timed out after {_CONNECT_TIMEOUT_S}s"
+            conn.error = f"connect timed out after {cfg.connect_timeout}s"
             conn.shutdown.set()
             logger.error("MCP server %r: %s", name, conn.error)
         except Exception as exc:
@@ -380,7 +400,7 @@ class MCPConnectionManager:
             params = StdioServerParameters(
                 command=cfg.command,
                 args=list(cfg.args),
-                env=dict(cfg.env) or None,
+                env=_stdio_env(cfg),
                 cwd=cfg.cwd or None,
             )
             read, write = await stack.enter_async_context(stdio_client(params))
@@ -492,9 +512,7 @@ async def _http_probe_detail(cfg: MCPServerConfig) -> str:
         return f" [直连探测失败: {type(he).__name__}]"
 
 
-async def probe_server(
-    cfg: MCPServerConfig, *, timeout: int = _CONNECT_TIMEOUT_S
-) -> dict[str, Any]:
+async def probe_server(cfg: MCPServerConfig) -> dict[str, Any]:
     """设置页 Test 按钮用：一次性 connect + list_tools，不触碰活动 manager。"""
     from mcp import ClientSession
 
@@ -507,10 +525,10 @@ async def probe_server(
             return [{"name": t.name, "description": t.description or ""} for t in listing.tools]
 
     try:
-        tools = await asyncio.wait_for(_probe(), timeout=timeout)
+        tools = await asyncio.wait_for(_probe(), timeout=cfg.connect_timeout)
         return {"ok": True, "tools": tools, "error": ""}
     except asyncio.TimeoutError:
-        return {"ok": False, "tools": [], "error": f"connect timed out after {timeout}s"}
+        return {"ok": False, "tools": [], "error": f"connect timed out after {cfg.connect_timeout}s"}
     except Exception as exc:
         err = _unwrap_exception_group(exc)
         # http/sse transport：mcp 抛异常时流式 response 已关、body 丢失，补一次直连

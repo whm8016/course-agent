@@ -26,6 +26,12 @@ interface Props {
   isStreaming?: boolean
 }
 
+// 大数压缩成 1.2k，小数原样（气泡底部 token 小字用）
+function fmtTokens(n: number): string {
+  if (n >= 1000) return (n / 1000).toFixed(1) + 'k'
+  return String(n)
+}
+
 
 /**
  * 表格行内的公式含 | 会被 GFM 当作列分隔符，导致列错位 / 公式截断。
@@ -159,9 +165,15 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
 
         {message.content && (
           <div className="markdown-body text-sm leading-relaxed">
-            <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
-              {renderedContent}
-            </ReactMarkdown>
+            {isStreaming ? (
+              // 流式中渲纯文本：避免每个 token 都全量重跑 remark/rehype/KaTeX（O(n²) 体感卡顿）；
+              // done 后 isStreaming 变 false，下面 ReactMarkdown 一次性渲染最终格式。
+              <span className="whitespace-pre-wrap break-words">{message.content}</span>
+            ) : (
+              <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
+                {renderedContent}
+              </ReactMarkdown>
+            )}
           </div>
         )}
 
@@ -196,6 +208,18 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
             )}
           </div>
         )}
+        {message.metadata?.usage && (() => {
+          // 本轮 token 用量小字（输入/输出/缓存命中率；美元仅 expose_cost_to_student 开启时带）
+          const u = message.metadata!.usage!
+          const hit = u.input_tokens > 0 ? Math.round((u.cache_read_tokens / u.input_tokens) * 100) : null
+          return (
+            <div className="mt-1.5 text-[11px] text-muted/70">
+              输入 {fmtTokens(u.input_tokens)} · 输出 {fmtTokens(u.output_tokens)}
+              {hit !== null && <> · 缓存命中 {hit}%</>}
+              {u.cost_usd !== undefined && <> · ${u.cost_usd.toFixed(4)}</>}
+            </div>
+          )
+        })()}
       </div>
     </div>
   )

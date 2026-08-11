@@ -19,53 +19,41 @@ from core.observability import log_flow
 
 logger = logging.getLogger(__name__)
 
-# tiktoken 懒加载，import 失败则降级
-_encoding = None
-
-def _get_encoding():
-    global _encoding
-    if _encoding is not None:
-        return _encoding
-    try:
-        import tiktoken
-        _encoding = tiktoken.get_encoding("cl100k_base")
-    except Exception:
-        _encoding = False  # 标记为不可用
-    return _encoding
+# count_tokens / _get_encoding 已下沉到 core.agentic.context_window（治 core/agentic
+# 反向 import services 的层级违规）。此处 re-export 保向后兼容（test 等仍用
+# `from services.session.context_builder import count_tokens`）。
+from core.agentic.context_window import count_tokens  # noqa: E402,F401
 
 
-def count_tokens(text: str) -> int:
-    """tiktoken 精确计数，不可用时降级到 len // 4。"""
-    if not text:
-        return 0
-    enc = _get_encoding()
-    if enc:
-        return len(enc.encode(text))
-    return max(1, len(text) // 4)
-
-
-# 按模型名推断 context window → history 预算
-_MODEL_WINDOWS = {
-    "qwen-max": 32768,
-    "qwen-max-latest": 32768,
-    "qwen-plus": 131072,
-    "qwen-plus-latest": 131072,
-    "qwen-turbo": 131072,
-    "qwen-turbo-latest": 131072,
-    "qwen-long": 1_000_000,
-    "deepseek-chat": 65536,
-    "gpt-4o": 128000,
-    "gpt-4o-mini": 128000,
-}
+# 历史预算占有效窗口的比例（resolve_budget 委托 context_window 解析窗口后按此折算）。
+# 留作模块常量而非配置项：历史预算是「窗口的多少给历史」的工程默认，非用户可调旋钮。
 _HISTORY_BUDGET_RATIO = 0.20
-_DEFAULT_WINDOW = 32768
 _MIN_BUDGET = 2000
 
 
 def resolve_budget(model: str | None = None) -> int:
-    """按模型名推断 history token 预算。"""
-    window = _MODEL_WINDOWS.get(model or "", _DEFAULT_WINDOW)
+    """按模型有效窗口推断 history token 预算（= 有效窗口 × 20%，下限 _MIN_BUDGET）。
+
+    窗口解析委托 ``context_window.resolve_effective_window``（三级：显式配置 -> 模型名模式 ->
+    heuristic 兜底+告警）。默认路径（coordinator_enabled=False）仍走此函数裁历史，行为与旧实现
+    逐字节一致（已知模型窗口不变；未知模型改走 heuristic 但默认 max_tokens=8192 -> 32768=旧值，
+    仅多了告警）。
+    """
+    from core.agentic.context_window import resolve_effective_window
+
+    window = resolve_effective_window(model)
     return max(_MIN_BUDGET, int(window * _HISTORY_BUDGET_RATIO))
+
+
+def advertised_window(model: str | None = None) -> int:
+    """模型有效上下文窗口（token）。委托 ``context_window.resolve_effective_window`` 三级解析。
+
+    保留函数签名不破坏调用方；未知模型不再静默回落 32768，改走 heuristic 并告警（见
+    context_window.resolve_effective_window）。
+    """
+    from core.agentic.context_window import resolve_effective_window
+
+    return resolve_effective_window(model)
 
 
 class ContextBuilder:
