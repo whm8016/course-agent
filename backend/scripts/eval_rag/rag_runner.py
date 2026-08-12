@@ -97,6 +97,7 @@ async def _run_lightrag_query(
     *,
     top_k: int | None = None,
     production_parity: bool = False,  # deprecated：contexts 现已恒走生产路径，保留仅为向后兼容
+    retriever_backend: str = "lightrag",  # "lightrag"(默认) | "llamaindex_pg"(pgvector 线)
 ) -> dict[str, Any]:
     """对单条问题查询，返回 {answer, contexts, retrieve_ms, query_ms}。
 
@@ -113,9 +114,8 @@ async def _run_lightrag_query(
     del production_parity  # deprecated，不再分支
     from core.llm.llm import chat_complete
     from core.rag import get_retriever
-    from settings import get_settings
 
-    retriever = get_retriever("lightrag")
+    retriever = get_retriever(retriever_backend)
     k = top_k if top_k is not None else config.EVAL_TOP_K
 
     contexts: list[str] = []
@@ -127,11 +127,17 @@ async def _run_lightrag_query(
     # ---- 1. 取 contexts（生产检索路径，only_need_context=True，0 次 LightRAG 内部 LLM）----
     t0 = time.perf_counter()
     try:
-        if mode == "relationship":
+        if mode == "relationship" and retriever_backend == "lightrag":
             ctx_str = await retriever.graph_augmented_retrieve(
                 course_id=course_id, query=question, top_k=k
             )
-        else:  # fact（默认）
+        else:
+            # fact（默认）；或 pgvector 等无图谱后端的 relationship 降级为纯向量证据
+            if mode == "relationship":
+                logger.warning(
+                    "backend=%s 无 graph_augmented_retrieve，relationship 降级 retrieve_context(naive)",
+                    retriever_backend,
+                )
             ctx_str = await retriever.retrieve_context(
                 course_id=course_id, query=question, top_k=k, mode="naive"
             )
@@ -147,7 +153,7 @@ async def _run_lightrag_query(
         user_msg = f"【参考资料】\n{ctx_str}\n\n【问题】\n{question}"
         answer = await chat_complete(
             _RAG_SYSTEM, [], user_msg,
-            model=get_settings().llm.text_model,
+            model=config.EVAL_ANSWER_MODEL,  # 回答锁定 flash（用户要求 回答flash/阅卷pro）
             temperature=0.3,
             max_tokens=1024,
         )
@@ -174,10 +180,12 @@ async def run_single_query(
     *,
     top_k: int | None = None,
     production_parity: bool = False,
+    retriever_backend: str = "lightrag",
 ) -> dict[str, Any]:
     """对单条问题用指定模式查询，返回 {answer, contexts, retrieve_ms, query_ms}。"""
     return await _run_lightrag_query(
-        course_id, question, mode, top_k=top_k, production_parity=production_parity
+        course_id, question, mode, top_k=top_k,
+        production_parity=production_parity, retriever_backend=retriever_backend,
     )
 
 
@@ -192,6 +200,7 @@ async def run_all_modes(
     no_cache: bool = False,
     top_k: int | None = None,
     production_parity: bool = False,
+    retriever_backend: str = "lightrag",
 ) -> dict[str, list[dict]]:
     """对全部问题和全部模式运行查询，返回 {mode: [results]}。
 
@@ -221,6 +230,7 @@ async def run_all_modes(
                 result = await run_single_query(
                     course_id, qid, question, mode,
                     top_k=top_k, production_parity=production_parity,
+                    retriever_backend=retriever_backend,
                 )
             except Exception as e:
                 logger.error("[%s] %s 查询失败: %s", mode, qid, e)
