@@ -163,15 +163,9 @@ async def build_common_context_layers(
             from core.db.database import AsyncSessionLocal
             from core.memory.proactive import stitch_for_turn
 
-            embed_model = None
-            try:
-                from core.rag.llamaindex.pg_store import get_embed_model
-                embed_model = get_embed_model()
-            except Exception:
-                pass  # 无 embed_model → stitch fail-safe 不拼
             async with AsyncSessionLocal() as db:
                 brief = await stitch_for_turn(
-                    ctx.user_message, ctx.user_id, ctx.course_id, db, embed_model
+                    ctx.user_message, ctx.user_id, ctx.course_id, db
                 )
                 mastery_context = brief.text
         except Exception:

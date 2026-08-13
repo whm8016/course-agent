@@ -171,10 +171,7 @@ async def score_stitch_gate(db) -> tuple[int, int, list[str]]:
         matched = c["matched_topic"]
         closure = prereq_predecessors(matched) if matched else set()
         mastery = {
-            m["topic_id"]: {
-                "risk": m["risk"], "eff_risk": m["risk"],
-                "label": m["topic_id"], "observation_count": m["observation_count"],
-            }
+            m["topic_id"]: {"risk": m["risk"], "eff_risk": m["risk"]}
             for m in c["mastery"]
         }
         repeated = set(c["error_repeated"])

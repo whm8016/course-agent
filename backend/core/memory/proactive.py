@@ -89,23 +89,19 @@ def decide_stitch(
         return StitchBrief(False, None, "no_candidate", 0.0, 1.0)
 
     # 4. p_need：取前置缺口最高 eff_risk 与复发加成的较大者
+    def _eff(m: dict) -> float:
+        return m.get("eff_risk", m.get("risk", 0))
+
     p_need = 0.0
     evidence = None
     reason = ""
     if prereq_gaps:
         top_tid, top = prereq_gaps[0]
-        p_need = max(p_need, top.get("eff_risk", top.get("risk", 0)))
-        evidence = top_tid
-        reason = "prereq_gap"
+        p_need, evidence, reason = _eff(top), top_tid, "prereq_gap"
     if is_recurrence:
-        rec = RECURRENCE_PNEED_FLOOR
-        if matched_topic in mastery_map:
-            m = mastery_map[matched_topic]
-            rec = max(rec, m.get("eff_risk", m.get("risk", 0)))
+        rec = max(RECURRENCE_PNEED_FLOOR, _eff(mastery_map.get(matched_topic, {})))
         if rec > p_need:
-            p_need = rec
-            reason = "recurrence"
-            evidence = matched_topic
+            p_need, evidence, reason = rec, matched_topic, "recurrence"
 
     # 5. τ 闸：p_need >= τ 才拼
     tau = c_fa / (c_fa + p_need * c_fn)
@@ -116,38 +112,48 @@ def decide_stitch(
 
 
 async def stitch_for_turn(
-    query: str, user_id: str, course_id: str, db, embed_model=None
+    query: str, user_id: str, course_id: str, db
 ) -> StitchBrief:
     """运行时包装：算 S_t + 读 mastery/error + 调 decide_stitch。
 
-    matched_topic 经 embedding 最近邻；无 embedding（course_topic 未灌 embedding 或 embed_model
-    不可用）→ fail-safe 返回不拼，不阻塞回答。
+    embed_model 在内部解析（get_embed_model 单例，失败 fail-safe 不拼），调用方无需关心。
+    matched_topic 经 embedding 最近邻；无 embedding（course_topic 未灌 embedding 或不可用）
+    → fail-safe 返回不拼，不阻塞回答。
     """
-    from core.memory.course_topic_store import get_prereq_predecessors
+    from dataclasses import replace
+
+    from core.memory.course_topic_store import get_course_topic_map, get_prereq_predecessors
+
+    # 0. embed_model（单例；不可用 → 门控 fail-safe 不拼）
+    embed_model = None
+    try:
+        from core.rag.llamaindex.pg_store import get_embed_model
+        embed_model = get_embed_model()
+    except Exception:
+        pass
 
     # 1. S_t 问句最近邻
     matched_topic = await _match_topic(query, course_id, db, embed_model)
     if matched_topic is None:
         return StitchBrief(False, None, "unknown", 0.0, 1.0)
 
-    # 2. 前置闭包
+    # 2. 前置闭包 + label→topic_id 映射（各一次查询，下游复用免 N+1）
     closure = await get_prereq_predecessors(matched_topic, course_id, db)
+    topic_map = await get_course_topic_map(course_id, db)
 
-    # 3. mastery（只读 knowledge_mastery，id-align 对齐 topic_id）
-    mastery_map = await _read_mastery(user_id, course_id, db)
-
-    # 4. error repeated（label→topic_id 对齐）
-    error_repeated = await _read_error_repeated(user_id, course_id, db)
+    # 3/4. mastery + error repeated（topic_map 本地对齐，无逐行 DB 查询）
+    mastery_map = await _read_mastery(user_id, course_id, db, topic_map)
+    error_repeated = await _read_error_repeated(user_id, course_id, db, topic_map)
 
     # 5. 决策
     brief = decide_stitch(matched_topic, closure, mastery_map, error_repeated)
 
-    # 6. 应拼则填简报文本
+    # 6. 应拼则填简报文本（frozen dataclass 用 replace，免手工抄字段）
     if brief.should_stitch and brief.evidence_topic:
         ev = mastery_map.get(brief.evidence_topic, {})
         label = ev.get("label") or brief.evidence_topic
-        return StitchBrief(
-            brief.should_stitch, brief.evidence_topic, brief.reason, brief.p_need, brief.tau,
+        return replace(
+            brief,
             text=f"## 学情提示（跨会话，未问亦带）\n该生在「{label}」偏薄弱"
             f"（{ev.get('observation_count', '?')}次观测），本轮涉及其前置/相关内容，请留意诊断。",
         )
@@ -157,6 +163,7 @@ async def stitch_for_turn(
 async def _match_topic(query: str, course_id: str, db, embed_model) -> str | None:
     """S_t：query embedding vs course_topic.embedding 余弦最近邻；低于阈值 = unknown。"""
     from core.db.database import CourseTopic
+    from core.memory.course_topic_store import cosine
     from sqlalchemy import select
 
     if embed_model is None:
@@ -175,27 +182,24 @@ async def _match_topic(query: str, course_id: str, db, embed_model) -> str | Non
         logger.warning("[stitch] query embedding 失败（fail-safe 不拼）：%s", exc)
         return None
 
-    def _cos(a: list[float], b: list[float]) -> float:
-        if len(a) != len(b):
-            return 0.0
-        dot = sum(x * y for x, y in zip(a, b))
-        na = math.sqrt(sum(x * x for x in a))
-        nb = math.sqrt(sum(y * y for y in b))
-        return dot / (na * nb) if na and nb else 0.0
-
     best_tid, best_sim = max(
-        ((tid, _cos(q_emb, emb)) for tid, emb in candidates), key=lambda x: x[1]
+        ((tid, cosine(q_emb, emb)) for tid, emb in candidates), key=lambda x: x[1]
     )
     return best_tid if best_sim >= UNKNOWN_THRESHOLD else None
 
 
-async def _read_mastery(user_id: str, course_id: str, db) -> dict[str, dict]:
+async def _read_mastery(
+    user_id: str, course_id: str, db, topic_map: dict[str, str]
+) -> dict[str, dict]:
     """读 knowledge_mastery → {topic_id: {risk, eff_risk, label, observation_count}}。
 
-    id-align：行 kp_id 非 topic_id 时，用 label 经 course_topic_store.resolve_topic_id 兜底。
+    id-align：行 kp_id 非 topic_id 时，用 label 经 topic_map（label_norm→topic_id）本地兜底，
+    避免 N+1（topic_map 由 stitch_for_turn 一次取全传入）。衰减用 mastery._DECAY_LAMBDA_PER_DAY
+    单一常量，与 mastery.py 同源不漂移。
     """
     from core.db.database import KnowledgeMastery
-    from core.memory.course_topic_store import resolve_topic_id
+    from core.memory.course_topic_store import _norm_label
+    from core.memory.mastery import _DECAY_LAMBDA_PER_DAY
     from sqlalchemy import select
 
     rows = (
@@ -213,11 +217,11 @@ async def _read_mastery(user_id: str, course_id: str, db) -> dict[str, dict]:
     now = time.time()
     out: dict[str, dict] = {}
     for r in rows:
-        tid = r.kp_id or await resolve_topic_id(r.label, course_id, db)
+        tid = r.kp_id or topic_map.get(_norm_label(r.label))
         if not tid:
             continue
         age_days = max(0.0, (now - (r.last_observed_at or now)) / 86400.0)
-        eff_risk = (r.risk or 0) * math.exp(-0.01 * age_days)  # λ=0.01/天，与 mastery.py 同口径
+        eff_risk = (r.risk or 0) * math.exp(-_DECAY_LAMBDA_PER_DAY * age_days)
         out[tid] = {
             "risk": r.risk or 0,
             "eff_risk": eff_risk,
@@ -227,10 +231,12 @@ async def _read_mastery(user_id: str, course_id: str, db) -> dict[str, dict]:
     return out
 
 
-async def _read_error_repeated(user_id: str, course_id: str, db) -> set[str]:
-    """从 users.error_graph 读 repeated/error_count>1 的 topic，label→topic_id 对齐。"""
+async def _read_error_repeated(
+    user_id: str, course_id: str, db, topic_map: dict[str, str]
+) -> set[str]:
+    """从 users.error_graph 读 repeated/error_count>1 的 topic，label→topic_id 本地对齐。"""
     from core.db.database import User
-    from core.memory.course_topic_store import resolve_topic_id
+    from core.memory.course_topic_store import _norm_label
     from sqlalchemy import select
 
     row = (await db.execute(select(User.error_graph).where(User.id == user_id))).first()
@@ -240,7 +246,7 @@ async def _read_error_repeated(user_id: str, course_id: str, db) -> set[str]:
     out: set[str] = set()
     for n in eg.get("nodes") or []:
         if n.get("repeated") or (n.get("error_count") or 0) > 1:
-            tid = await resolve_topic_id(n.get("label") or "", course_id, db)
+            tid = topic_map.get(_norm_label(n.get("label") or ""))
             if tid:
                 out.add(tid)
     return out

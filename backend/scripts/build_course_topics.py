@@ -32,17 +32,6 @@ logger = logging.getLogger(__name__)
 JSON_DIR = Path("data/course_topics")
 
 
-def _safe_embed(embed_model, text: str) -> list[float] | None:
-    """同步包装 embedding；失败返回 None（不阻断灌种子，embedding 非决策层必需）。"""
-    if embed_model is None:
-        return None
-    try:
-        return embed_model._get_text_embedding(text)
-    except Exception as exc:
-        logger.warning("[course_topics] embedding 失败（置 NULL，门控降级）：%s", exc)
-        return None
-
-
 async def _aget_embed(embed_model, text: str) -> list[float] | None:
     if embed_model is None:
         return None
@@ -216,42 +205,29 @@ async def extract_topics_from_chunks(
 def merge_synonymous(topics: list[dict], sim_threshold: float = 0.88) -> list[dict]:
     """合并同义主题：label 字符串归一 + embedding 余弦相似度去重。
 
-    保留 order_idx 最小者，定义取较长者。纯函数、可单测。
+    保留 order_idx 最小者，定义取较长者。纯函数、可单测。归一化与余弦复用
+    course_topic_store（与门控读出侧同口径，避免漂移）。
     """
-    import math
-
-    def _norm(s: str) -> str:
-        return "".join(c for c in s.lower() if c.isalnum())
-
-    def _cos(a, b):
-        if not a or not b or len(a) != len(b):
-            return 0.0
-        dot = sum(x * y for x, y in zip(a, b))
-        na = math.sqrt(sum(x * x for x in a))
-        nb = math.sqrt(sum(y * y for y in b))
-        return dot / (na * nb) if na and nb else 0.0
+    from core.memory.course_topic_store import _norm_label, cosine
 
     merged: list[dict] = []
-    seen_norm: list[tuple[str, list[float]]] = []
+    seen: list[tuple[str, list[float]]] = []
     for t in sorted(topics, key=lambda x: x["order_idx"]):
-        n = _norm(t["label"])
+        n = _norm_label(t["label"])
         dup = None
-        for i, (sn, se) in enumerate(seen_norm):
-            if n == sn or (t["embedding"] and se and _cos(t["embedding"], se) >= sim_threshold):
+        for i, (sn, se) in enumerate(seen):
+            if n == sn or (t["embedding"] and se and cosine(t["embedding"], se) >= sim_threshold):
                 dup = i
                 break
         if dup is not None:
-            # 取较长定义
             if len(t["definition"]) > len(merged[dup]["definition"]):
                 merged[dup]["definition"] = t["definition"]
             continue
-        seen_norm.append((n, t["embedding"] or []))
+        seen.append((n, t["embedding"] or []))
         merged.append(t)
-    # 重排 order_idx + 定 topic_id（slug）
     for i, t in enumerate(merged):
         t["order_idx"] = i
-        slug = _norm(t["label"])[:32] or f"topic{i}"
-        t["topic_id"] = slug
+        t["topic_id"] = _norm_label(t["label"])[:32] or f"topic{i}"
     return merged
 
 

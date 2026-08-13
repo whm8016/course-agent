@@ -10,10 +10,30 @@ id-align：把 ``knowledge_mastery`` 的 label/kp_id 对齐到 ``course_topic.to
 """
 from __future__ import annotations
 
+import math
+
 
 def _norm_label(s: str) -> str:
-    """label 归一化：小写 + 去非字母数字（与 build_course_topics.merge_synonymous 同口径）。"""
+    """label 归一化：小写 + 去非字母数字。
+
+    灌入侧（build_course_topics）与门控读出侧（proactive）共用，保证 id-align 的 label→topic_id
+    映射在写入/读出两侧同口径——改这里即双侧同步，避免漂移。
+    """
     return "".join(c for c in (s or "").lower() if c.isalnum())
+
+
+def cosine(a: list[float], b: list[float]) -> float:
+    """JSON-stored embedding 的余弦相似度（Python 算，避 pgvector 的 SQLite 不兼容）。
+
+    集中供门控匹配（proactive._match_topic）与建库去重（build_course_topics.merge_synonymous）
+    复用，避免余弦算法在两侧各落一份。与 analytics.faq_cluster._cosine 同模式。
+    """
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(y * y for y in b))
+    return dot / (na * nb) if na and nb else 0.0
 
 
 async def get_course_topic_map(course_id: str, db) -> dict[str, str]:
@@ -44,25 +64,27 @@ async def resolve_topic_id(label: str, course_id: str, db) -> str | None:
 async def get_prereq_predecessors(topic_id: str, course_id: str, db) -> set[str]:
     """从 ``course_topic_edge`` 表递归回溯 topic_id 的全部（直接+间接）前置主题。
 
-    运行时版，与 ``stitch_cases.prereq_predecessors``（内存图版）同语义：沿 prerequisite 边
-    从 dst 回溯到 src，直到边界。门控用前置闭包去掉 matched 后 ∩ 高 risk 掌握度找未问的前置缺口。
+    一次拉全边内存 BFS（非每节点一次 round-trip），与 ``stitch_cases.prereq_predecessors``
+    （内存图版）同算法：沿 prerequisite 边从 dst 回溯到 src。门控用前置闭包去掉 matched 后
+    ∩ 高 risk 掌握度找未问的前置缺口。
     """
     from core.db.database import CourseTopicEdge
     from sqlalchemy import select
 
+    rows = (
+        await db.execute(
+            select(CourseTopicEdge.src_topic_id, CourseTopicEdge.dst_topic_id).where(
+                CourseTopicEdge.course_id == course_id
+            )
+        )
+    ).all()
+    adj: dict[str, list[str]] = {}
+    for src, dst in rows:
+        adj.setdefault(dst, []).append(src)
     preds: set[str] = set()
     frontier = [topic_id]
     while frontier:
-        cur = frontier.pop()
-        rows = (
-            await db.execute(
-                select(CourseTopicEdge.src_topic_id).where(
-                    CourseTopicEdge.course_id == course_id,
-                    CourseTopicEdge.dst_topic_id == cur,
-                )
-            )
-        ).scalars().all()
-        for src in rows:
+        for src in adj.get(frontier.pop(), []):
             if src not in preds:
                 preds.add(src)
                 frontier.append(src)
