@@ -25,7 +25,7 @@ def _norm_label(s: str) -> str:
 def cosine(a: list[float], b: list[float]) -> float:
     """JSON-stored embedding 的余弦相似度（Python 算，避 pgvector 的 SQLite 不兼容）。
 
-    集中供门控匹配（proactive._match_topic）与建库去重（build_course_topics.merge_synonymous）
+    集中供门控匹配（proactive._match_topic）与建库去重（course_topic_builder.merge_synonymous）
     复用，避免余弦算法在两侧各落一份。与 analytics.faq_cluster._cosine 同模式。
     """
     if not a or not b or len(a) != len(b):

@@ -16,7 +16,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from api.auth import get_current_teacher
 from api.admin import _kb_to_dict, _ALLOWED_EXT, _MAX_BYTES, _safe_upload_name
 from api.courses import invalidate_courses_cache
-from api.kb_indexing import get_or_create_build, trigger_kb_indexing
+from api.kb_indexing import (
+    get_or_create_build,
+    get_topic_graph_payload,
+    trigger_kb_indexing,
+    trigger_topic_graph_build,
+)
 from settings import get_settings
 KB_STORE_DIR = get_settings().paths.kb_store_dir
 MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
@@ -219,6 +224,34 @@ async def index_course(
     kb = await _get_owned_kb(db, course_id, teacher)
     backend = backend or kb.index_backend or "lightrag"
     return await trigger_kb_indexing(db, kb, course_id, backend, force, resume)
+
+
+@router.post("/courses/{course_id}/topic-graph")
+@limiter.limit("6/minute")
+async def build_topic_graph_route(
+    course_id: str,
+    request: Request,
+    force: bool = False,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """触发课程主题图构建（ARQ 后台任务）。公共逻辑见 api.kb_indexing.trigger_topic_graph_build。
+
+    依赖知识库已索引完成（抽取讲义切块）。force=true 删旧主题图重建。
+    """
+    kb = await _get_owned_kb(db, course_id, teacher)
+    return await trigger_topic_graph_build(db, kb, course_id, force)
+
+
+@router.get("/courses/{course_id}/topic-graph")
+async def get_topic_graph(
+    course_id: str,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """返回课程主题图（主题数、边数、主题/边列表），供教师核对与审计 verified_by。"""
+    await _get_owned_kb(db, course_id, teacher)
+    return await get_topic_graph_payload(db, course_id)
 
 
 # ── 学生管理（选课） ──────────────────────────────────────────────────────────
