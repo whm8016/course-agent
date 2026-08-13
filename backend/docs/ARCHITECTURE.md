@@ -530,8 +530,8 @@ Management API (`api/llm.py`, admin): CRUD profiles + `/probe` test connection +
 热路径(零LLM)                后台巩固(慢模型)                   读路径(每轮)
 CAPABILITY_COMPLETE ──► INSERT memory_episodes ──► consolidate_memory job ──► 注入 prompt
   (record_episode)        status=pending         segment→mem0.add         memory_context
-  + importance 累计        +importance阈值/quiz   →merge graph+append       mastery_context
-  超阈值→enqueue job       里程碑/cron兜底         mastery→procedural
+  + importance 累计        +importance阈值        →merge graph+append       mastery_context
+  超阈值→enqueue job       /cron兜底              mastery→procedural
 ```
 
 - **L2 会话摘要**（`session_summary.py`，存 `sessions.summary` 单列 JSON）：v2 格式 `{"v":2,"items":[{k,key,t,ts,n}]}`，7 类 kind（topic/fact/decision/open_question/next_step/intent/misconception）。LLM 只抽【新增】并输出 slot key + resolved，代码用 `max(ts)` 做单值槽（fact/next_step）冲突裁决 + salience（`kind_weight×exp(-Δt/half_life)×(1+ln n)`，token 预算+每类上限）淘汰--替旧「精确去重 + `combined[-5:]` 硬截断」，治 P0 矛盾条目并存与「丢最旧而非最没用」。`ts` 代码盖章（增量末条消息 created_at），不让 LLM 出时间戳（arXiv:2606.01435）。v1 五键 dict 自动升级、旧自由文本透传。锁/OCC/keyset 增量逻辑不变。注入点 `chat.py`(SSE)+`run.py`(WS) 经 `get_summary` 渲染。评测 `scripts/eval_l2_summary/`（knowledge_update 基线 0% -> 新管线 100%）。
@@ -540,7 +540,7 @@ CAPABILITY_COMPLETE ──► INSERT memory_episodes ──► consolidate_memor
 - **mastery**（`knowledge_mastery` 表，alembic 021）：知识点掌握度，**带 course_id**（修 `users.knowledge_graph` 跨课程污染）。`append_mastery`（`mastery.py`）追加观测不覆盖（blend mastery/risk + count++ + evidence_episode_ids）；读时 `get_mastery_context` 按 `last_observed_at` 做 `exp(-λ·age)` 软衰减（半衰期 ~69 天，不物理删除——反复性错误证据留存）。
 - **procedural**（personal SKILL.md）：巩固 job 攒够观测后生成学习画像草稿（`procedural.py`），写 personal 层，**不自动 always** + frontmatter `auto_generated:true` 待人工确认。
 
-**巩固 job**（`consolidation.py` + `worker.consolidate_memory`）：claim pending（条件 UPDATE 并发安全）→ 按 session 分组（对齐 SeCom segment 级）→ 每组 mem0.add 升格 + 单次抽取喂 graph(dashboard)+mastery → 成功标 done / mem0 失败回 pending 重试。触发：热路径 importance 累计 ≥ 阈值(`mem0.consolidation_importance_threshold=0.7`) 或 quiz 里程碑 → enqueue；`cron_consolidate_memory`(5min) safety net 兜底长期 pending + 超时 processing。老 `cron_flush_memory` 降级 5min 排干旧 Redis buffer。
+**巩固 job**（`consolidation.py` + `worker.consolidate_memory`）：claim pending（条件 UPDATE 并发安全）→ 按 session 分组（对齐 SeCom segment 级）→ 每组 mem0.add 升格 + 单次抽取喂 graph(dashboard)+mastery → 成功标 done / mem0 失败回 pending 重试。触发：热路径 importance 累计 ≥ 阈值(`mem0.consolidation_importance_threshold=0.7`) → enqueue；`cron_consolidate_memory`(5min) safety net 兜底长期 pending + 超时 processing。老 `cron_flush_memory` 降级 5min 排干旧 Redis buffer。
 
 **回流 prompt**（`pipeline_common.build_common_context_layers`）：mastery_context 紧跟 memory_context 之后（L2 用户级易变段，**不破 prefix cache 前缀**），四条 pipeline(chat/solve/research/quiz) 共享此入口都拿到掌握度。
 

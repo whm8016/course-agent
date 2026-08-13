@@ -1,6 +1,6 @@
 """L3 巩固：消费 episodic pending → 升格 semantic(mem0) → 标 done。
 
-事件驱动（Phase 3）：热路径 importance 累计超阈值 / quiz 里程碑 → enqueue consolidate_memory；
+事件驱动（Phase 3）：热路径 importance 累计超阈值 → enqueue consolidate_memory；
 5min cron safety net 兜底长期 pending + 超时 processing 孤儿（见 worker.cron_consolidate_memory）。
 
 分段策略：按 session_id 分组（同一会话的连续 turn 作为一个 mem0.add 批），比固定轮数更贴

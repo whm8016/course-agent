@@ -232,7 +232,7 @@ async def flush_all_pending_job(ctx) -> None:
 async def consolidate_memory(ctx, user_id: str, course_id: str = "") -> None:
     """消费某 user(+course) 的 episodic pending → mem0 语义层升格。
 
-    事件驱动触发（main.py _on_capability_complete）：importance 累计超阈值 / quiz 里程碑。
+    事件驱动触发（main.py _on_capability_complete）：importance 累计超阈值。
     幂等：mem0.add 内部去重，崩溃重试不产生重复事实。
     """
     import time

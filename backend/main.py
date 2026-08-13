@@ -88,7 +88,7 @@ async def _on_capability_complete(event) -> None:
     except Exception:
         logger.warning("EventBus: record_episode failed", exc_info=True)
 
-    # L3 巩固触发（Phase 3）：importance 累计超阈值 / quiz 里程碑 → enqueue consolidate_memory。
+    # L3 巩固触发（Phase 3）：importance 累计超阈值 → enqueue consolidate_memory。
     # 对齐 Generative Agents 的 reflection 累计触发；5min cron safety net 兜底（worker.py）。
     try:
         from core.memory import consolidation, episodic
@@ -103,7 +103,7 @@ async def _on_capability_complete(event) -> None:
         if score > 0:
             accumulated = await consolidation.add_importance(event.user_id, event.course_id, score)
             threshold = get_settings().mem0.consolidation_importance_threshold
-            if accumulated >= threshold or event.mode == "quiz":
+            if accumulated >= threshold:
                 pool = await get_arq_pool()
                 if pool is not None:
                     await pool.enqueue_job(
