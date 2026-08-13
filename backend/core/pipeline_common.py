@@ -129,7 +129,7 @@ async def resolve_profile_runtime(
 async def build_common_context_layers(
     ctx: "UnifiedContext", *, include_skills: bool = False
 ) -> CommonContextLayers:
-    """组装通用上下文层。各 pipeline 在 run() 开头调一次，多阶段复用同一份（避免每阶段重查 DB）。
+    """组装通用上下文层。各pipeline 在 run() 开头调一次，多阶段复用同一份（避免每阶段重查 DB）。
 
     include_skills=True 时急切注入 always-on skill 全文（仅 chat——它挂 read_skill 工具）。
     solve/research/quiz 传 False：它们不挂 read_skill，注入全文却无工具会让模型误以为有 skill 可读。
@@ -153,16 +153,27 @@ async def build_common_context_layers(
     )
     now_text = f"【当前时间】{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %A')}"
 
-    # L3 掌握度（薄弱点）：所有 pipeline 共享。ctx.mastery_context 预置则用之，否则从 DB 构建。
-    # 顺带修「只有 chat 注入记忆」的缺口——solve/research/quiz 也拿到掌握度，按需诊断反复性错误。
+    # L3 学情拼接门控（主创新）：ctx.mastery_context 预置则用之；否则过代价敏感门控
+    # （proactive.stitch_for_turn）决定是否把跨会话学情简报拼入本轮。门控不拼则
+    # mastery_context 为空——沉默即这轮不带跨会话预警，非系统没回。门控依赖 course_topic
+    # 表（问句→主题最近邻）；未建表的课程 fail-safe 不拼，不阻塞回答。
     mastery_context = ctx.mastery_context or ""
     if not mastery_context and ctx.user_id and ctx.course_id:
         try:
             from core.db.database import AsyncSessionLocal
-            from core.memory.mastery import get_mastery_context
+            from core.memory.proactive import stitch_for_turn
 
+            embed_model = None
+            try:
+                from core.rag.llamaindex.pg_store import get_embed_model
+                embed_model = get_embed_model()
+            except Exception:
+                pass  # 无 embed_model → stitch fail-safe 不拼
             async with AsyncSessionLocal() as db:
-                mastery_context = await get_mastery_context(db, ctx.user_id, ctx.course_id)
+                brief = await stitch_for_turn(
+                    ctx.user_message, ctx.user_id, ctx.course_id, db, embed_model
+                )
+                mastery_context = brief.text
         except Exception:
             logger.exception(
                 "build mastery context failed user=%s course=%s", ctx.user_id, ctx.course_id

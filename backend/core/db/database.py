@@ -582,6 +582,62 @@ class KnowledgeMastery(Base):
     )
 
 
+class CourseTopic(Base):
+    """课程结构层（配置/引用层，读多写少）：课程级主题 + 定义 + embedding，全班共享。
+
+    建库时一次性离线抽取（见建库脚本），运行时只读、零生成式调用。为学情拼接门控
+    （``core.memory.proactive.decide_stitch``）提供「问句→主题」最近邻坐标：学生问句
+    embedding 与本表 embedding 取最近邻，低于阈值 = unknown = 不拼。topic_id 同时作为
+    ``knowledge_mastery.kp_id`` 的对齐键（id-align），使门控只读 mastery 表即可回溯前置缺口。
+    embedding 存 JSON（非 pgvector）——与 course_faq 同口径，SQLite 测试可跑、Python 算 cosine。
+    新表：非生产库由 init_db 的 create_all 自动建；生产库走 alembic。
+    """
+
+    __tablename__ = "course_topic"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(16))
+    course_id = Column(String(64), nullable=False, default="")
+    topic_id = Column(String(64), nullable=False)  # 课程内主题标识，对齐 mastery.kp_id
+    label = Column(String(128), nullable=False, default="")
+    definition = Column(Text, nullable=False, default="")
+    source_section = Column(String(255), nullable=False, default="")  # 来源章节栈
+    order_idx = Column(Integer, nullable=False, default=0)  # 讲义顺序（抽前置边的候选约束）
+    embedding = Column(JSON, nullable=True)  # list[float]，问句最近邻用；JSON 非 pgvector
+
+    __table_args__ = (
+        UniqueConstraint("course_id", "topic_id", name="uq_course_topic"),
+        Index("idx_course_topic_course", "course_id"),
+    )
+
+
+class CourseTopicEdge(Base):
+    """课程结构层：主题间先修边（prerequisite 唯一事实源），全班共享。
+
+    建库时离线抽取：仅在「讲义顺序在前 + 同章或相邻章」候选对上判定，含糊或双向判定的
+    候选一律丢弃（Goel 协议，防 LLM 乱连边）。门控沿 prerequisite 边回溯前置闭包，找未掌握的
+    前置缺口。与 ``users.knowledge_graph`` 的区别：那是每生对话现编的图（仪表盘展示 +
+    error ``repeated`` 来源），本表是全班一致、可审计的课程结构。verified_by 标教师已核对。
+    """
+
+    __tablename__ = "course_topic_edge"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(16))
+    course_id = Column(String(64), nullable=False, default="")
+    src_topic_id = Column(String(64), nullable=False)  # 前置（学 dst 前应先掌握 src）
+    dst_topic_id = Column(String(64), nullable=False)
+    relation = Column(String(32), nullable=False, default="prerequisite")  # 当前仅 prerequisite
+    confidence = Column(Float, nullable=False, default=1.0)
+    verified_by = Column(String(64), nullable=True)  # 教师审计标记，NULL=未审
+
+    __table_args__ = (
+        UniqueConstraint(
+            "course_id", "src_topic_id", "dst_topic_id", "relation",
+            name="uq_course_topic_edge",
+        ),
+        Index("idx_course_topic_edge_dst", "course_id", "dst_topic_id"),  # 回溯前置按 dst 查
+    )
+
+
 class LearningEvent(Base):
     """学情事件层（L0）：actor-verb-object 三元组 + 时间戳 + 上下文。
 

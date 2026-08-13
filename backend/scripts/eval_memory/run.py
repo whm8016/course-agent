@@ -3,7 +3,7 @@
 Usage:
     python -m scripts.eval_memory.run
 
-跑三维 scorer（knowledge_update / abstention / decay）→ 过 config.GATES 门禁 → 落盘 summary。
+跑四维 scorer（knowledge_update / abstention / decay）→ 过 config.GATES 门禁 → 落盘 summary。
 门禁不达标 exit 1（exit 1 = 门禁不达标，非评测崩溃；与 eval_capabilities 一致）。
 
 自包含：强制 in-memory SQLite，不触碰真实数据，无需 LLM，可入 CI。
@@ -66,7 +66,7 @@ def main() -> None:
     out.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
 
     if summary["passed"]:
-        logger.info("[PASS] eval_memory 三维门禁全达标 → %s", out)
+        logger.info("[PASS] eval_memory 四维门禁全达标 → %s", out)
         sys.exit(0)
     else:
         logger.warning("[FAIL] eval_memory 门禁不达标：%s → %s", summary["failures"], out)

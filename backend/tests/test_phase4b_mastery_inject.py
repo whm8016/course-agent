@@ -36,16 +36,20 @@ def test_mastery_empty_is_filtered():
 
 
 async def test_build_layers_builds_mastery_from_db():
-    """有 user+course → 从 DB 构建 mastery（mock get_mastery_context）。"""
-    ctx = UnifiedContext(user_id="u1", course_id="c1")
+    """有 user+course → 经学情拼接门控构建 mastery（mock stitch_for_turn 返回应拼简报）。
+
+    门控（proactive.stitch_for_turn）替换了旧的无条件 get_mastery_context：build 调门控，
+    应拼则 mastery_context=brief.text，不拼则空。此处 mock 门控返回"应拼"验证回流。
+    """
+    from core.memory.proactive import StitchBrief
+
+    ctx = UnifiedContext(user_id="u1", course_id="c1", user_message="怎么求戴维南等效")
+    brief = StitchBrief(True, "kcl", "prereq_gap", 0.8, 0.29, text="## 学情提示\n该生KCL偏薄弱")
     with patch("core.llm.prompts.get_course_prompt", new=AsyncMock(return_value="")), \
-         patch(
-             "core.memory.mastery.get_mastery_context",
-             new=AsyncMock(return_value="## 掌握度\n- 导数偏薄弱"),
-         ) as gm:
+         patch("core.memory.proactive.stitch_for_turn", new=AsyncMock(return_value=brief)) as sf:
         layers = await build_common_context_layers(ctx)
-    assert layers.mastery_context == "## 掌握度\n- 导数偏薄弱"
-    gm.assert_awaited_once()
+    assert layers.mastery_context == "## 学情提示\n该生KCL偏薄弱"
+    sf.assert_awaited_once()
 
 
 async def test_build_layers_skips_mastery_without_user_or_course():

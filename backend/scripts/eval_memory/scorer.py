@@ -152,8 +152,43 @@ async def score_decay(db) -> tuple[int, int, list[str]]:
     return passed, total, details
 
 
+async def score_stitch_gate(db) -> tuple[int, int, list[str]]:
+    """拼接门控 When 决策正确性：decide_stitch 对 stitch_cases 全部 case 的 should 匹配 gold。
+
+    零 LLM（decide_stitch 纯函数 + stitch_cases 内存数据，无需 DB，但签名与其它 scorer 一致）。
+    正例（前置缺口/复发）该拼、负例（unknown/无关/已纠正/全低险/阶段错位）不该拼。
+    mastery 用 risk 作 eff_risk（case 为近期观测，衰减近似无）。
+    """
+    from core.memory.proactive import decide_stitch
+
+    from .stitch_cases import STITCH_CASES, prereq_predecessors
+
+    passed = 0
+    total = 0
+    details: list[str] = []
+    for c in STITCH_CASES:
+        total += 1
+        matched = c["matched_topic"]
+        closure = prereq_predecessors(matched) if matched else set()
+        mastery = {
+            m["topic_id"]: {
+                "risk": m["risk"], "eff_risk": m["risk"],
+                "label": m["topic_id"], "observation_count": m["observation_count"],
+            }
+            for m in c["mastery"]
+        }
+        repeated = set(c["error_repeated"])
+        brief = decide_stitch(matched, closure, mastery, repeated)
+        if brief.should_stitch == c["gold"]["stitch"]:
+            passed += 1
+        else:
+            details.append(f"{c['id']}: should={brief.should_stitch} gold={c['gold']['stitch']}")
+    return passed, total, details
+
+
 SCORERS = {
     "knowledge_update": score_knowledge_update,
     "abstention": score_abstention,
     "decay": score_decay,
+    "stitch_gate": score_stitch_gate,
 }
