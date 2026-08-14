@@ -157,8 +157,15 @@ async def build_common_context_layers(
     # （proactive.stitch_for_turn）决定是否把跨会话学情简报拼入本轮。门控不拼则
     # mastery_context 为空——沉默即这轮不带跨会话预警，非系统没回。门控依赖 course_topic
     # 表（问句→主题最近邻）；未建表的课程 fail-safe 不拼，不阻塞回答。
+    #
+    # 两路分工：第一路（memory_context，相似历史+表达偏好）在门控**之后**检索——
+    # brief.matched_topic 做 event 槽主题过滤、brief.evidence_topic 做门控证据去重
+    # （同一件事不在两路里说两遍）。web 入口不再预填 ctx.memory_context（预填非空
+    # 会跳过这里，限权对聊天是空改）；bot/单测仍可用非空预填，IM 无课程概念走旧行为。
     mastery_context = ctx.mastery_context or ""
-    if not mastery_context and ctx.user_id and ctx.course_id:
+    matched_topic: str | None = None
+    gate_evidence_topic: str | None = None
+    if ctx.user_id and ctx.course_id:
         try:
             from core.db.database import AsyncSessionLocal
             from core.memory.proactive import stitch_for_turn
@@ -167,15 +174,35 @@ async def build_common_context_layers(
                 brief = await stitch_for_turn(
                     ctx.user_message, ctx.user_id, ctx.course_id, db
                 )
-                mastery_context = brief.text
+                if not mastery_context:
+                    mastery_context = brief.text
+                matched_topic = brief.matched_topic
+                gate_evidence_topic = brief.evidence_topic if brief.should_stitch else None
         except Exception:
             logger.exception(
                 "build mastery context failed user=%s course=%s", ctx.user_id, ctx.course_id
             )
             mastery_context = ""
 
-    metadata = ctx.metadata or {}
+    # 第一路：mem0 双槽检索（预填非空则用之，单测/bot 走这条）。course_id 非空才
+    # 做主题过滤（IM 无课程概念时 matched_topic 为 None，保留全量注入）。
     memory_context = ctx.memory_context or ""
+    if not memory_context and ctx.user_id and (ctx.user_message or "").strip():
+        try:
+            from core.memory.mem0_client import build_memory_context
+
+            memory_context = await build_memory_context(
+                ctx.user_id, ctx.user_message, course_id=ctx.course_id,
+                matched_topic=matched_topic or "",
+                gate_evidence_topic=gate_evidence_topic,
+            )
+        except Exception:
+            logger.exception(
+                "build memory context failed user=%s course=%s", ctx.user_id, ctx.course_id
+            )
+            memory_context = ""
+
+    metadata = ctx.metadata or {}
     # Phase 2：coordinator_enabled 时对 T2 动态层（memory/mastery/summary）集体预算裁剪，低优先级
     # 先裁（memory->mastery->summary，summary 不可重建最后裁）。默认关=各层走原 per-slice cap。
     if get_settings().context_budget.coordinator_enabled:

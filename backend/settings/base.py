@@ -703,9 +703,9 @@ class Mem0Config(BaseModel):
     """Mem0 记忆：矛盾检测 / 跳过模式 / 批量刷新。"""
 
     # 检索相关性过滤阈值（P0-C）：mem0 V3 search 原生支持 threshold，>0 时过滤低相关噪声。
-    # 默认 0.0=不过滤=行为完全不变。当前部署 mem0 版本对 threshold 关键字的兼容性未实测
-    # （Docker 起不来），build_memory_context 已加 TypeError 自适应降级兜底。
-    search_threshold: float = 0.0
+    # 默认 0.45（读侧限权 r1：mem0 默认 0.1 太松，跨主题旧事漏进第一路）。TypeError
+    # 自适应降级兜底仍在（旧版本不接受 threshold 关键字）。
+    search_threshold: float = 0.45
     conflict_detect_enabled: TruthyBool = True
     conflict_similarity_threshold: float = 0.85
     conflict_min_days_gap: int = 7

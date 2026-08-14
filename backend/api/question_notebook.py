@@ -111,7 +111,8 @@ async def upsert_single_entry(
             db=db,
         )
         # 阶段F：判分观测入 mastery_observation（题面经 match_topics 映射主题，
-        # source=quiz——b_topic 题目难度的唯一合法证据来源）。best-effort，失败不阻塞答题主流程。
+        # source=quiz——全班难度估计权重最高的来源，b 由 cron 日频重折）。best-effort，
+        # 失败不阻塞答题主流程。
         try:
             from core.memory.quiz_observe import record_quiz_observation
             await record_quiz_observation(

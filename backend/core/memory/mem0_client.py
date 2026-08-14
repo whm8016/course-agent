@@ -39,6 +39,38 @@ def _get_settings():
     return get_settings()
 
 
+# persona 槽抽取指令（persona-v1）：mem0 add(infer=True) 的 per-call prompt。
+# mem0 2.0.10 的 custom_instr 只追加进 user prompt、system prompt 写死，所以白名单
+# 语义靠指令约束 + 抽出后 persona_postfilter 硬过滤兜底（模型仍可能越界）。
+# 版本号随指令变更递增——库里旧行无 persona_prompt_version 即词表时代的行。
+_PERSONA_INSTRUCTION = """[persona-v1] 从这段师生对话中抽取「该学生的稳定学习者事实」，供跨会话调整讲解方式。
+
+只抽以下类型：
+- 讲解/表达偏好（如：喜欢分步讲解、希望讲慢一点、偏好中文术语带英文注释）
+- 学习目标与考试节点（如：下周三实验考试、目标是期末 85 分）
+- 教材与器材/软件版本（如：用的是第 7 版教材、实验室用 Multisim 14）
+- 时间与设备约束（如：每天只能晚上学、手头没有示波器）
+- 学生明确要求记住的事
+
+硬性排除（一律不抽）：
+- 任何关于掌握程度或对错的结论（如「他不会欧姆定律」「欧姆定律薄弱」）
+- 本轮讨论的题目/知识点内容本身
+- 情绪状态、一次性事务请求、教师或助手说过的话
+
+输出简体中文。没有符合上述类型的事实时返回空列表。
+负例：学生问「能不能再讲一遍欧姆定律」→ 无可抽事实（这是讲解请求，不是偏好）。"""
+
+
+# 黑名单硬过滤的触发词：抽出文本含「掌握度结论」措辞即丢弃（提示词约束不住时兜底）
+_PERSONA_BLACKLIST = ("不会", "薄弱", "掌握", "没懂", "不懂", "薄弱点", "答错", "出错")
+
+# 读侧每槽上限（r1 限权）：persona ≤3 / event ≤2 / 每条 ≤80 字。抽取允许多抽（召回
+# 放宽），精度交给读侧限量——与门控「候选集由闭包锁死」同一思路。
+_PERSONA_MAX_ITEMS = 3
+_EVENT_MAX_ITEMS = 2
+_ITEM_MAX_CHARS = 80
+
+
 def should_skip_user_message(user_message: str) -> bool:
     """门控过滤：判断用户消息是否应被跳过（不写入记忆）。
 
@@ -130,6 +162,36 @@ def get_memory():
     return _memory
 
 
+async def persona_postfilter(user_id: str, course_id: str, add_resp) -> None:
+    """persona 抽取后的硬过滤（plan §8-2 的兜底）：黑名单只在提示词里，mem0 的
+    system prompt 覆盖不了，模型仍可能抽出「该生欧姆定律薄弱」写进人设槽。
+
+    对本次 add 返回的事实逐条检查：文本命中掌握度结论措辞（_PERSONA_BLACKLIST）
+    即物理删除并 warning（可观测，不静默）。删失败非致命——读侧 header 三禁令仍在。
+    """
+    try:
+        items = add_resp.get("results", []) if isinstance(add_resp, dict) else add_resp
+        if not items:
+            return
+        m = get_memory()
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            text = it.get("memory") or ""
+            if not text:
+                continue
+            if any(w in text for w in _PERSONA_BLACKLIST):
+                logger.warning(
+                    "[mem0] persona blacklisted (mastery-conclusion leaked), dropped: %s", text
+                )
+                try:
+                    await m.delete(it.get("id"))
+                except Exception:
+                    logger.warning("[mem0] persona blacklist delete failed id=%s", it.get("id"))
+    except Exception as exc:
+        logger.warning("[mem0] persona_postfilter failed (non-fatal): %s", exc)
+
+
 def normalize_results(resp) -> list:
     """mem0 的 get_all/search 返回可能是 ``{"results":[...]}`` 或 ``[...]``，统一成 list。
 
@@ -162,16 +224,22 @@ async def _search_slot(
 
 
 async def build_memory_context(
-    user_id: str, query_text: str, *, course_id: str = "", top_k: int = 5, max_chars: int = 1500
+    user_id: str, query_text: str, *, course_id: str = "", top_k: int = 5, max_chars: int = 1500,
+    matched_topic: str = "", gate_evidence_topic: str | None = None,
 ) -> str:
     """注入对话：按 persona/event 两槽检索该用户记忆，拼成两段文本。无相关则空串。
 
+    读侧限权（两路分工）：第一路（本函数）只答「本主题的历史与表达偏好」，跨主题
+    未问及缺口归第二路（proactive 门控）独占。限权靠数据流不靠模型自觉：
+    - 每槽独立上限：persona ≤3 条、event ≤2 条、每条 ≤80 字（合计仍受 max_chars 裁剪）
+    - matched_topic 非空时 event 槽只注入与本轮命中主题相同的事件（metadata.topic_ids）；
+      空串（IM 无课程概念）保留旧的全量注入行为
+    - gate_evidence_topic 非空（第二路本轮已开口）时，同主题 event 行被剔除——
+      同一件事（C2 复发场景）不在两路里说两遍
+    - header 三条禁令 + 事件段免责句（不得当掌握度结论/不得展开未问主题/无关时忽略）
+
     course_id 非空时按课程隔离检索，避免 A 课程聊天产生的记忆（如"正在学 XX 实验课"）
     串到 B 课程的对话里；留空则退化为跨课程全局检索（IM 机器人等无课程概念场景用）。
-
-    两槽口径（阶段2）：filters 带 kind=persona / kind=event 各检索一次——persona 是
-    跨概念稳定事实（偏好/目标），event 是主题连续段的学习事件。无 kind 的旧行不注入
-    （巩固路径已停 infer=True 写入，旧行不回灌、不删库）。
     """
     if not user_id or not (query_text or "").strip():
         logger.debug("[mem0] build_memory_context skipped: empty user_id or query")
@@ -203,8 +271,23 @@ async def build_memory_context(
     if settings.mem0.conflict_detect_enabled and len(results) >= 2:
         results = await _detect_and_clean_conflicts(user_id, results, settings)
 
-    persona_items = [r.get("memory") for r in persona if r.get("memory")]
-    event_items = [r.get("memory") for r in events if r.get("memory")]
+    # event 槽按主题结构过滤：只留本轮命中主题的事件（两路分工——跨主题历史交给
+    # 门控），再剔除门控本轮已开口的证据主题（同主题不说两遍）
+    if matched_topic:
+        events = [
+            r for r in events
+            if matched_topic in ((r.get("metadata") or {}).get("topic_ids") or [])
+        ]
+    if gate_evidence_topic:
+        events = [
+            r for r in events
+            if gate_evidence_topic not in ((r.get("metadata") or {}).get("topic_ids") or [])
+        ]
+
+    persona_items = [r.get("memory") for r in persona if r.get("memory")][:_PERSONA_MAX_ITEMS]
+    event_items = [r.get("memory") for r in events if r.get("memory")][:_EVENT_MAX_ITEMS]
+    persona_items = [t[:_ITEM_MAX_CHARS] for t in persona_items]
+    event_items = [t[:_ITEM_MAX_CHARS] for t in event_items]
     if not persona_items and not event_items:
         logger.info("[mem0] build_memory_context NO_RESULTS user_id=%s", user_id)
         return ""
@@ -213,7 +296,10 @@ async def build_memory_context(
     if persona_items:
         parts.append("## 学习画像\n" + "\n".join(f"- {t}" for t in persona_items))
     if event_items:
-        parts.append("## 相关学习事件\n" + "\n".join(f"- {t}" for t in event_items))
+        parts.append(
+            "## 相关学习事件（以下仅为历史互动记录，不代表当前掌握程度）\n"
+            + "\n".join(f"- {t}" for t in event_items)
+        )
     text = "\n".join(parts)
     if len(text) > max_chars:
         text = text[:max_chars].rstrip() + "..."
@@ -221,7 +307,13 @@ async def build_memory_context(
         "[mem0] build_memory_context FOUND user_id=%s persona=%d event=%d total_chars=%d",
         user_id, len(persona_items), len(event_items), len(text)
     )
-    return f"## 用户记忆（仅在直接相关时参考，不要硬塞进答案）\n{text}"
+    return (
+        "## 学生个人信息（跨会话，仅用于调整讲解方式）\n"
+        "- 只可用于决定讲解风格、称呼、进度与举例，不得作为该生掌握程度的结论\n"
+        "- 不得据此主动展开学生本轮未问的知识点（是否提醒薄弱点由「学情提示」段决定）\n"
+        "- 与本轮问题无关时忽略，不要在回答里复述这些信息\n"
+        f"{text}"
+    )
 
 
 async def _detect_and_clean_conflicts(user_id: str, results: list[dict], settings) -> list[dict]:

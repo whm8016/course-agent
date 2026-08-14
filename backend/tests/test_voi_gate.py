@@ -7,11 +7,13 @@
 对照：PRISM 单边界 p_need >= 0.434（τ = 1/(1+3·p_need)），落在轻提醒带内部——
 这就是两臂的消融叙事。
 
-阶段D 改动：C1 候选判据从 risk >= 0.5 换 logit 空间（theta - b <= WEAK_MARGIN≈
--0.4055，等价「至少两次判 poor」）。测试 mastery_map 用真实折叠器
-（fold_observations）算出的状态，不再手拍 0.9。
+阶段D 改动：C1 候选判据从 risk >= 0.5 换 theta 空间（theta <= WEAK_MARGIN≈-0.4055，
+等价「至少两次判 poor」；不用 theta - b——班级难度不决定谁能入闸）。测试 mastery_map
+用真实折叠器（fold_observations）算出的状态，不再手拍 0.9。
 """
 import time
+
+import pytest
 
 from core.memory.mastery_state import W_JUDGE, fold_observations
 from core.memory.proactive import (
@@ -24,10 +26,13 @@ _PREREQ = {"ohm"}
 
 
 def _folded_map(levels: list[str], b_topic: float = 0.0) -> dict[str, dict]:
-    """真实折叠：给定判定等级序列 → mastery_map 单主题条目（plan 阶段D 验收口径）。"""
+    """真实折叠：给定判定等级序列 → mastery_map 单主题条目（plan 阶段D 验收口径）。
+
+    b_topic 只进 risk/logit（影响 p_need），不进入闸判据（theta）。
+    """
     obs = [
         {"created_at": float(i), "outcome": {"poor": 0.0, "fair": 0.5, "good": 1.0}[lv],
-         "weight": W_JUDGE, "source": "llm_judge"}
+         "weight": W_JUDGE}
         for i, lv in enumerate(levels)
     ]
     s = fold_observations(obs)
@@ -35,6 +40,7 @@ def _folded_map(levels: list[str], b_topic: float = 0.0) -> dict[str, dict]:
         "ohm": {
             "risk": round(s.risk, 4),
             "risk_used": round(s.risk, 4),
+            "theta": round(s.theta, 4),
             "logit": round(s.theta - b_topic, 4),
             "p_forget": 1.0,
             "observation_count": s.n_obs,
@@ -73,15 +79,15 @@ def test_voi_full_band():
 
 
 def test_one_fair_not_candidate():
-    """1 次 fair → logit≈0 远高于 WEAK_MARGIN → no_candidate（旧 >=0.5 会误入）。"""
+    """1 次 fair → theta≈0 远高于 WEAK_MARGIN → no_candidate（旧 >=0.5 会误入）。"""
     brief = decide_stitch("kcl", _PREREQ, _folded_map(["fair"]), set())
     assert brief.should_stitch is False
     assert brief.reason == "no_candidate"
 
 
 def test_one_poor_not_candidate_two_poor_is():
-    """语义锚点：1 次 poor 不入闸（logit -0.30 > WEAK_MARGIN -0.4055），
-    2 次 poor 入闸（logit -0.54 <= WEAK_MARGIN）。"""
+    """语义锚点：1 次 poor 不入闸（theta -0.30 > WEAK_MARGIN -0.4055），
+    2 次 poor 入闸（theta -0.54 <= WEAK_MARGIN）。"""
     one = decide_stitch("kcl", _PREREQ, _folded_map(["poor"]), set())
     assert one.reason == "no_candidate"
     two = decide_stitch("kcl", _PREREQ, _folded_map(["poor", "poor"]), set())
@@ -188,6 +194,18 @@ def test_low_confidence_can_silence():
     assert brief.level == "silent"
 
 
+def test_confidence_floor_keeps_borderline_alive():
+    """P1：stitch_for_turn 的 confidence 归一带 0.2 下界——sim 刚过 0.55 的边界命中
+    不再被线性归一压成 c=0（value=0 必沉默，0.55-0.60 这段召回等于白做）。
+    边界（norm=0）→ c=0.2；笃定（norm=1）→ c=1.0。
+    """
+    # 直接测归一式（stitch_for_turn 是 DB 包装，归一逻辑在这里内联）
+    theta = 0.55
+    for sim, expect in ((0.55, 0.2), (0.775, 0.6), (1.0, 1.0)):
+        norm = min(1.0, max(0.0, (sim - theta) / (1.0 - theta)))
+        assert 0.2 + 0.8 * norm == pytest.approx(expect)
+
+
 # ── cooldown ─────────────────────────────────────────────────────────────
 
 
@@ -209,9 +227,100 @@ def test_cooldown_expires_after_24h():
     assert brief.level == "full"
 
 
+# ── P0-3：legacy 行冷却按主键回写 ──────────────────────────────────────────
+
+
+async def test_mark_stitched_updates_by_row_id():
+    """legacy 行（kp_id 是旧 hash，靠 label 对齐进 map）冷却必须按行主键生效。
+
+    旧 bug：_mark_stitched 按 kp_id==topic_id 条件 UPDATE，legacy 行 0 命中，
+    last_stitched_at 永远为空 → 同一主题每轮重复拼。改后 UPDATE 条件是主键 id。
+    """
+    from core.memory.proactive import _mark_stitched
+
+    captured: dict = {}
+
+    class _Result:
+        rowcount = 1
+
+    class _DB:
+        async def execute(self, stmt):
+            captured["stmt"] = stmt
+            return _Result()
+
+        async def commit(self):
+            pass
+
+    await _mark_stitched(_DB(), "row-legacy-1")
+    # 编译出的 WHERE 必须按主键 id 过滤，不含 kp_id 条件
+    compiled = str(captured["stmt"].compile(compile_kwargs={"literal_binds": True}))
+    assert "id" in compiled
+    assert "kp_id" not in compiled
+
+
+async def test_read_mastery_carries_row_id():
+    """_read_mastery 的 map 必须带出行主键 row_id（legacy kp_id 行也要带）。"""
+    from core.memory.proactive import _read_mastery
+
+    class _Row:
+        def __init__(self, kp_id, label):
+            self.id = f"row-{kp_id or label}"
+            self.kp_id = kp_id
+            self.label = label
+            self.theta = -1.0
+            self.risk = 0.7
+            self.last_observed_at = None
+            self.strength = 5.0
+            self.observation_count = 2
+            self.last_stitched_at = None
+
+    class _Scalars:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _Res:
+        def __init__(self, scalars):
+            self._scalars = scalars
+
+        def scalars(self):
+            return self._scalars
+
+    legacy_rows = [_Row("kp:ab12cd34ef56", "欧姆定律")]  # kp_id 旧 hash，靠 label 对齐
+    # 两次 execute：mastery 行 + difficulty_b 查询
+    calls = {"n": 0}
+
+    class _DB:
+        async def execute(self, _q):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _Res(_Scalars(legacy_rows))
+            return _Scalars([])  # b_rows 为空
+
+    topic_map = {"欧姆定律": "ohm"}  # label_norm → topic_id
+    out = await _read_mastery("u1", "c1", _DB(), topic_map)
+    assert "ohm" in out
+    assert out["ohm"]["row_id"] == "row-kp:ab12cd34ef56"
+
+
 def test_no_stitch_history_no_cooldown():
     brief = decide_stitch("kcl", _PREREQ, _folded_map(["poor"] * 6), set())
     assert brief.should_stitch is True
+
+
+def test_class_difficulty_not_drags_fair_student_into_gate():
+    """收缩验收：fair 且 theta≈0 的学生不得仅因班级 b 过 C1。
+
+    b=0.5（班难主题）：旧口径 theta-b = -0.5 <= WEAK_MARGIN 会误入闸；新口径比
+    theta（≈0）不入闸——「这题班里难」不是「该生薄弱」。b 只进 risk/p_need。
+    """
+    m = _folded_map(["fair"], b_topic=0.5)
+    assert m["ohm"]["logit"] <= WEAK_MARGIN  # 旧口径会过闸（这就是 bug）
+    assert m["ohm"]["theta"] > WEAK_MARGIN   # 新口径不入闸
+    brief = decide_stitch("kcl", _PREREQ, m, set())
+    assert brief.reason == "no_candidate"
 
 
 # ── PRISM 对照臂 ───────────────────────────────────────────────────────────

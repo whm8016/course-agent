@@ -28,13 +28,23 @@ def _draft_name(course_id: str) -> str:
     return f"{_DRAFT_NAME_PREFIX}{slug}"
 
 
-def build_draft_prompt(mastery_rows: list, course_id: str) -> str:
-    """纯函数：把掌握度薄弱点拼成 LLM 草稿生成 prompt。"""
+def build_draft_prompt(mastery_rows: list, course_id: str, risk_by_label: dict[str, float] | None = None) -> str:
+    """纯函数：把掌握度薄弱点拼成 LLM 草稿生成 prompt。
+
+    risk_by_label 非空时按派生口径（risk = 1 - sigmoid(theta - b_topic)，与门控
+    读侧同源）覆盖行上 risk——difficulty_b 变更后其他学生行上的旧 risk 陈旧，
+    派生口径永远吃到当前 b。
+    """
+    def _risk(r) -> float:
+        if risk_by_label is not None:
+            return risk_by_label.get(r.label, r.risk or 0)
+        return r.risk or 0
+
     weak = sorted(
-        [r for r in mastery_rows if (r.risk or 0) >= 0.5],
-        key=lambda r: -(r.risk or 0),
+        [r for r in mastery_rows if _risk(r) >= 0.5],
+        key=lambda r: -_risk(r),
     )[:10]
-    lines = [f"- {r.label}：风险{r.risk:.2f}（{r.observation_count}次观测）" for r in weak]
+    lines = [f"- {r.label}：风险{_risk(r):.2f}（{r.observation_count}次观测）" for r in weak]
     weak_text = "\n".join(lines) or "（暂无明显薄弱点）"
     return (
         f"你是学习分析助手。根据下面该学生在课程「{course_id}」的掌握度数据，总结其稳定的学习模式，"
@@ -48,12 +58,15 @@ def build_draft_prompt(mastery_rows: list, course_id: str) -> str:
     )
 
 
-async def generate_skill_draft(course_id: str, user_id: str, mastery_rows: list) -> str | None:
+async def generate_skill_draft(
+    course_id: str, user_id: str, mastery_rows: list,
+    risk_by_label: dict[str, float] | None = None,
+) -> str | None:
     """调 LLM 生成草稿正文（Markdown，无 frontmatter）。失败返回 None。"""
     from core.llm.llm import client as async_openai_client
     from settings import get_settings
 
-    prompt = build_draft_prompt(mastery_rows, course_id)
+    prompt = build_draft_prompt(mastery_rows, course_id, risk_by_label)
     try:
         resp = await async_openai_client.chat.completions.create(
             model=get_settings().llm.text_model,
@@ -125,7 +138,24 @@ async def maybe_generate_procedural(db, user_id: str, course_id: str) -> str | N
         .scalars()
         .all()
     )
-    body = await generate_skill_draft(course_id, user_id, rows)
+    # 薄弱判定按派生口径（theta - b_topic 实时折 risk），与门控读侧同源——行上的
+    # risk 列在 difficulty_b 变更后对其他学生是陈旧值（P1 陈旧行处理选派生不选重折）
+    from core.db.database import CourseTopic
+
+    b_map = {
+        r.topic_id: float(r.difficulty_b or 0.0) for r in (await db.execute(
+            select(CourseTopic.topic_id, CourseTopic.difficulty_b)
+            .where(CourseTopic.course_id == course_id)
+        )).all()
+    }
+    import math as _math
+
+    risk_by_label = {
+        r.label: 1.0 - 1.0 / (1.0 + _math.exp(-(r.theta or 0.0) + b_map.get(r.kp_id, 0.0)))
+        for r in rows
+        if r.label
+    }
+    body = await generate_skill_draft(course_id, user_id, rows, risk_by_label)
     if not body:
         return None
     return write_skill_draft(course_id, user_id, body)

@@ -263,3 +263,51 @@ async def test_no_topic_no_judge(db):
 
     assert result == {"claimed": 1, "promoted": 1}
     assert mock_judge.await_count == 0
+
+
+async def test_seg_topics_ranked_by_sim_not_alphabetical(db):
+    """段内可判主题按 sim 降序取前 3（P0-4）。
+
+    旧 bug：sorted({...})[:3] 是 topic_id 字典序取前三——4 个命中主题时字母序
+    最后（sim 最高）的那个被切掉，判定器只能看到无关主题。同主题多轮取最大 sim。
+    """
+    from core.db.database import AsyncSessionLocal, CourseTopic, MemoryEpisode
+
+    async with AsyncSessionLocal() as s:
+        for tid in ("zeta", "alpha", "beta", "gamma"):  # 字母序最后 = zeta，sim 最高
+            s.add(CourseTopic(course_id="c1", topic_id=tid, label=tid))
+        for i in range(4):
+            s.add(MemoryEpisode(
+                user_id="u1", course_id="c1", session_id="s1", turn_id=f"t{i}",
+                user_msg=f"问题{i}", assistant_msg="回答", status="pending",
+            ))
+        await s.commit()
+
+    # 单轮 4 命中：zeta sim 最高但字母序最后；另一轮 zeta sim 更低（验证取最大 sim）
+    hits_seq = [
+        [("alpha", 0.60), ("beta", 0.70), ("gamma", 0.80), ("zeta", 0.95)],
+        [("zeta", 0.58)],
+        [("alpha", 0.60), ("beta", 0.70), ("gamma", 0.80), ("zeta", 0.95)],
+        [("alpha", 0.60), ("beta", 0.70), ("gamma", 0.80), ("zeta", 0.99)],
+    ]
+    it = iter(hits_seq)
+
+    async def _fake_match(text, course_id, db, **kw):
+        return next(it)
+
+    seen_topics: list[list] = []
+
+    async def _fake_judge(dialog, topics):
+        seen_topics.append([t for t, _l, _d in topics])
+        return _mk_result()
+
+    with (
+        patch("core.memory.topic_match.match_topics", AsyncMock(side_effect=_fake_match)),
+        patch("core.memory.judge.judge_segment", AsyncMock(side_effect=_fake_judge)),
+        patch("core.memory.consolidation._promote_segment", AsyncMock()),
+    ):
+        await _run()
+
+    assert len(seen_topics) == 3  # 段按主话题（zeta）切成 3 段：[0,2]同题 / [1]低sim / [3]
+    # 字母序截断会选出 alpha/beta/gamma 切掉 zeta；按 sim 应是 zeta/gamma/beta
+    assert seen_topics[0] == ["zeta", "gamma", "beta"]

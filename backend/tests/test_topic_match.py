@@ -5,7 +5,7 @@ infer_signal 已退出掌握度主路径，降级为 Snorkel 口径的 labeling 
 数值（0.15 / 0.20 等即将失去意义，权重须由阶段 E 实测 precision 决定）。
 match_topics / rank_by_similarity 的用例在 test_consolidation_topic_match.py。
 """
-from core.memory.topic_match import extract_preferences, infer_signal
+from core.memory.topic_match import infer_signal
 
 
 # ── infer_signal（LF 召回口径：只看 evidence 命中） ─────────────────────────
@@ -44,14 +44,4 @@ def test_infer_signal_preference_not_mastery_signal():
     assert "preference" in s["signals"]
 
 
-# ── extract_preferences ─────────────────────────────────────────────────────
-
-
-def test_extract_preferences_grabs_sentence():
-    prefs = extract_preferences("前面讲得挺好。我喜欢分步讲解，一步步来")
-    assert len(prefs) == 1
-    assert "我喜欢分步讲解" in prefs[0]
-
-
-def test_extract_preferences_none():
-    assert extract_preferences("欧姆定律是什么") == []
+# ── extract_preferences 已删（persona 走 mem0 原生抽取，见 test_promote_two_slots）──

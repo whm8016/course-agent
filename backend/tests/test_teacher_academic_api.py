@@ -159,3 +159,63 @@ async def test_schedule_nonexistent_course_404(client, admin_headers):
         "/api/teacher/courses/no_such_course_xyz/schedule", headers=admin_headers
     )
     assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_topic_safety_weight_patch(client, admin_headers, course_with_code):
+    """P2：safety_weight 教师标注入口——门控 Task Risk 因子唯一合法写入路径。
+
+    PATCH 生效 + GET topic-graph 带出 + 未知主题 404。0 是合法值（永不预警）。
+    """
+    from core.db.database import AsyncSessionLocal, CourseTopic
+
+    course_id = course_with_code["course_id"]
+    async with AsyncSessionLocal() as db:
+        db.add(CourseTopic(course_id=course_id, topic_id="power_on", label="通电操作"))
+        await db.commit()
+
+    r = await client.patch(
+        f"/api/teacher/courses/{course_id}/topic-graph/topics/power_on/safety-weight",
+        headers=admin_headers,
+        json={"safety_weight": 3.0},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["safety_weight"] == 3.0
+
+    # GET topic-graph 带出（教师可见性）
+    r = await client.get(
+        f"/api/teacher/courses/{course_id}/topic-graph", headers=admin_headers
+    )
+    assert r.status_code == 200
+    topic = next(t for t in r.json()["topics"] if t["topic_id"] == "power_on")
+    assert topic["safety_weight"] == 3.0
+
+    # 0 是合法值（永不因它预警），不是 falsy 洗回 1.0
+    r = await client.patch(
+        f"/api/teacher/courses/{course_id}/topic-graph/topics/power_on/safety-weight",
+        headers=admin_headers,
+        json={"safety_weight": 0.0},
+    )
+    assert r.status_code == 200
+    assert r.json()["safety_weight"] == 0.0
+
+    # 未知主题 404
+    r = await client.patch(
+        f"/api/teacher/courses/{course_id}/topic-graph/topics/no_such/safety-weight",
+        headers=admin_headers,
+        json={"safety_weight": 1.0},
+    )
+    assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_topic_safety_weight_owner_forbidden(client, admin_headers, course_with_code):
+    """非 owner 教师 → 403（同其它教师写入口）。"""
+    course_id = course_with_code["course_id"]
+    other_teacher = await _make_teacher(client)
+    r = await client.patch(
+        f"/api/teacher/courses/{course_id}/topic-graph/topics/x/safety-weight",
+        headers=other_teacher,
+        json={"safety_weight": 2.0},
+    )
+    assert r.status_code == 403
