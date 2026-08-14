@@ -3,9 +3,9 @@
 事件驱动（Phase 3）：热路径 importance 累计超阈值 → enqueue consolidate_memory；
 5min cron safety net 兜底长期 pending + 超时 processing 孤儿（见 worker.cron_consolidate_memory）。
 
-分段策略：按 session_id 分组（同一会话的连续 turn 作为一个 mem0.add 批），比固定轮数更贴
-话题边界——SeCom（ICLR 2025）实测 segment 级优于 turn 级。真正的 LLM 话题聚类留作后续增强，
-session 分组是其零成本近似。
+写侧闭集化（零 LLM）：主题命中走 topic_match.match_topics（课程主题图 embedding 最近邻），
+行为信号走 infer_signal 关键词规则；仅 should_route_error_llm 判强错误信号时才调一次 LLM
+抽错题（且只取 error_patterns）。抽象已由建库期课程主题图提供，运行时不再生成式抽取。
 
 幂等性：mem0.add 内部做事实抽取/去重，重复巩固同一段不产生重复事实；故崩溃重试安全。
 """
@@ -134,6 +134,40 @@ async def _mark(db, ep_ids: list[str], status: str, *, consolidated: bool = Fals
     await db.commit()
 
 
+async def _closed_set_points(db, course_id: str, hits: list, signal: dict) -> list[dict]:
+    """闭集命中 → 仪表盘 knowledge 节点（entity_id=topic_id，id 永不漂移）。
+
+    教师看板读 users.knowledge_graph，节点改为闭集合成——不为看板另跑一遍开放抽取
+    （开放抽取每次抽出的 entity_id 不稳定，正是 kp_id 断链的成因）。label 查不到的跳过。
+    """
+    from core.db.database import CourseTopic
+    from sqlalchemy import select
+
+    tids = [tid for tid, _sim in hits]
+    if not tids:
+        return []
+    label_map = dict(
+        (
+            await db.execute(
+                select(CourseTopic.topic_id, CourseTopic.label).where(
+                    CourseTopic.course_id == course_id,
+                    CourseTopic.topic_id.in_(tids),
+                )
+            )
+        ).all()
+    )
+    return [
+        {
+            "entity_id": tid,
+            "label": label_map[tid],
+            "mastery_delta": signal.get("mastery_delta", 0.0),
+            "risk_delta": signal.get("risk_delta", 0.0),
+        }
+        for tid in tids
+        if label_map.get(tid)
+    ]
+
+
 async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
     """核心巩固流程（ARQ job 调用，便于单测）。
 
@@ -162,17 +196,45 @@ async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
             )
             retry_ids.extend(e.id for e in eps)
             continue
-        # 2. graph + mastery（派生层，单次抽取喂两者；失败非致命，不影响 done —— mem0 已成功）
+        # 2. graph + mastery（派生层）。写侧闭集化（零 LLM）：match_topics 定主题，
+        #    infer_signal 出行为 delta；仅强错误信号（should_route_error_llm）才调 LLM
+        #    抽错题（且只取 error_patterns，丢弃 knowledge_points——开放抽取的 entity_id
+        #    不稳定，正是 kp_id 断链的成因）。失败非致命，不影响 done —— mem0 已成功。
+        from core.memory.topic_match import (
+            infer_signal,
+            match_topics,
+            should_route_error_llm,
+        )
+
         for ep in eps:
             try:
-                extracted = await graph_memory.extract_knowledge(
-                    course_id, ep.user_msg, ep.assistant_msg
+                hits = await match_topics(
+                    f"{ep.user_msg}\n{ep.assistant_msg}", course_id, db
                 )
-                if extracted:
-                    await graph_memory.merge_and_save_graphs(db, user_id, extracted, course_id)
-                    await mastery.append_mastery(
-                        db, user_id, course_id, extracted.get("knowledge_points") or [], ep.id
+                # 重复提问提示：命中的主题此前已有 mastery 观测（本轮写入前）
+                repeat = await mastery.topic_repeat_hint(
+                    db, user_id, course_id, [tid for tid, _sim in hits]
+                )
+                signal = infer_signal(
+                    ep.user_msg, ep.assistant_msg,
+                    history_hint={"topic_repeat_count": repeat},
+                )
+                if hits:
+                    await mastery.append_mastery_from_topics(
+                        db, user_id, course_id, hits, signal, ep.id
                     )
+                    points = await _closed_set_points(db, course_id, hits, signal)
+                    if points:
+                        await graph_memory.merge_and_save_graphs(
+                            db, user_id, {"knowledge_points": points}, course_id
+                        )
+                if should_route_error_llm(signal):
+                    extracted = await graph_memory.extract_knowledge(
+                        course_id, ep.user_msg, ep.assistant_msg
+                    )
+                    err_only = {"error_patterns": (extracted or {}).get("error_patterns") or []}
+                    if err_only["error_patterns"]:
+                        await graph_memory.merge_and_save_graphs(db, user_id, err_only, course_id)
             except Exception as exc:
                 logger.warning(
                     "[consolidate] knowledge update failed user=%s ep=%s: %s",

@@ -113,25 +113,27 @@ async def test_get_mastery_context_lists_weak_points(db):
     assert len(ctx) <= 300
 
 
-# ── consolidate 双写（mem0 + graph + mastery 单次抽取）──────────────────────
+# ── consolidate 双写（mem0 升格 + 闭集 mastery；写侧闭集化后零 LLM）──────────
 
 
 async def test_consolidate_writes_mastery_and_marks_done(db):
-    """consolidate 成功：mem0 升格 + graph/mastery 双写 + episode 标 done。"""
-    from core.db.database import AsyncSessionLocal, KnowledgeMastery, MemoryEpisode
+    """consolidate 成功：mem0 升格 + 闭集 mastery 双写 + episode 标 done。
+
+    写侧闭集化（阶段1）：主题命中走 match_topics（mock 为 ent→导数不对，这里用
+    topic_id "deriv"），kp_id=topic_id 直写。"""
+    from core.db.database import AsyncSessionLocal, CourseTopic, KnowledgeMastery, MemoryEpisode
     from sqlalchemy import select
 
-    # seed pending episode
     async with AsyncSessionLocal() as s:
+        s.add(CourseTopic(course_id="c1", topic_id="deriv", label="导数"))
         s.add(MemoryEpisode(
             user_id="u1", course_id="c1", session_id="s1", turn_id="t1",
             user_msg="什么是导数", assistant_msg="变化率", status="pending",
         ))
         await s.commit()
 
-    extracted = {"knowledge_points": [{"label": "导数", "entity_id": "ent1", "mastery_delta": -0.1, "risk_delta": 0.2}], "error_patterns": []}
     with patch("core.memory.mem0_client.get_memory") as gm, \
-         patch("core.memory.graph_memory.extract_knowledge", AsyncMock(return_value=extracted)):
+         patch("core.memory.topic_match.match_topics", AsyncMock(return_value=[("deriv", 0.9)])):
         gm.return_value.add = AsyncMock(return_value={"results": []})
         from core.memory.consolidation import consolidate
         async with AsyncSessionLocal() as s:
@@ -142,4 +144,4 @@ async def test_consolidate_writes_mastery_and_marks_done(db):
         ep = (await s.execute(select(MemoryEpisode).where(MemoryEpisode.user_id == "u1"))).scalars().first()
         km = (await s.execute(select(KnowledgeMastery).where(KnowledgeMastery.user_id == "u1"))).scalars().all()
     assert ep.status == "done"  # mem0 成功 → done
-    assert len(km) == 1 and km[0].kp_id == "ent1"  # mastery 双写
+    assert len(km) == 1 and km[0].kp_id == "deriv"  # 闭集直写 kp_id=topic_id

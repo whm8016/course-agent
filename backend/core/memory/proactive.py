@@ -27,11 +27,14 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 # ---- 门控参数（可调，代价扫描在 eval-c 跑）----
+from core.memory.course_topic_store import TOPIC_MATCH_THRESHOLD as UNKNOWN_THRESHOLD  # noqa: F401
+# ↑ 阈值单源：读侧 unknown 判定与写侧 match_topics 命中过滤共用 course_topic_store
+#   的 TOPIC_MATCH_THRESHOLD，避免两处常量漂移出不同口径。
+
 RISK_THRESHOLD = 0.5          # mastery risk >= 此值视为薄弱（与 get_mastery_context 同口径）
 DEFAULT_C_FA = 1.0
 DEFAULT_C_FN = 3.0            # 漏报 3 倍代价（实验课损坏仪器风险 > 答非所问）
 RECURRENCE_PNEED_FLOOR = 0.7  # 复发（C2）固定需求下限
-UNKNOWN_THRESHOLD = 0.55      # S_t 最近邻余弦低于此 = unknown = 不拼
 
 
 @dataclass(frozen=True)

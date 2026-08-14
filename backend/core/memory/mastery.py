@@ -165,4 +165,113 @@ async def get_mastery_context(
     return text
 
 
-__all__ = ["append_mastery", "get_mastery_context"]
+async def topic_repeat_hint(db, user_id: str, course_id: str, topic_ids: list[str]) -> int:
+    """这些主题在该生已有 mastery 行的最大 observation_count（本轮写入前），无行则 0。
+
+    供 infer_signal 的 history_hint——同主题此前观测过 ≥1 次又来问 = 重复提问信号。
+    不查 learning_events（那要 join 解析，成本高且口径松）。
+    """
+    from core.db.database import KnowledgeMastery
+    from sqlalchemy import func, select
+
+    if not topic_ids:
+        return 0
+    val = (
+        await db.execute(
+            select(func.max(KnowledgeMastery.observation_count)).where(
+                KnowledgeMastery.user_id == user_id,
+                KnowledgeMastery.course_id == course_id,
+                KnowledgeMastery.kp_id.in_(topic_ids),
+            )
+        )
+    ).scalar()
+    return int(val or 0)
+
+
+async def append_mastery_from_topics(
+    db, user_id: str, course_id: str, hits: list[tuple[str, float]], signal: dict, episode_id: str
+) -> int:
+    """闭集口径写 mastery：kp_id = topic_id（禁止再哈希），label 从 CourseTopic 查。
+
+    与 append_mastery（LLM 开放抽取口径，历史兼容）的区别：id 由课程主题闭集给定，
+    与门控读侧（proactive._read_mastery 的 topic_id 集）天然对齐，无断链。查不到 label
+    的 hit（主题已删）跳过。affirm 信号 → strength += 1（MemoryBank spacing effect）。
+    无 delta 的中性命中也记一次观测（observation_count++，喂后续 repeat 判定）。
+    """
+    from core.db.database import CourseTopic, KnowledgeMastery
+    from sqlalchemy import select
+
+    if not hits:
+        return 0
+    tids = [tid for tid, _sim in hits]
+    label_map = dict(
+        (
+            await db.execute(
+                select(CourseTopic.topic_id, CourseTopic.label).where(
+                    CourseTopic.course_id == course_id,
+                    CourseTopic.topic_id.in_(tids),
+                )
+            )
+        ).all()
+    )
+
+    risk_delta = _delta(signal.get("risk_delta"))
+    mastery_delta = _delta(signal.get("mastery_delta"))
+    affirm = "affirm" in (signal.get("signals") or [])
+    now = time.time()
+    n = 0
+    for tid, _sim in hits:
+        label = label_map.get(tid)
+        if not label:
+            continue
+        row = (
+            (
+                await db.execute(
+                    select(KnowledgeMastery).where(
+                        KnowledgeMastery.user_id == user_id,
+                        KnowledgeMastery.course_id == course_id,
+                        KnowledgeMastery.kp_id == tid,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if row is not None:
+            row.mastery = _clamp(row.mastery + mastery_delta, 0.5)
+            row.risk = _clamp(row.risk + risk_delta, 0.5)
+            row.observation_count = (row.observation_count or 1) + 1
+            row.last_observed_at = now
+            if affirm:
+                row.strength = (row.strength or 5.0) + 1.0
+            ev = list(row.evidence_episode_ids or [])
+            if episode_id and episode_id not in ev:
+                ev.append(episode_id)
+            row.evidence_episode_ids = ev[-20:]
+        else:
+            db.add(
+                KnowledgeMastery(
+                    user_id=user_id,
+                    course_id=course_id,
+                    kp_id=tid,
+                    label=label,
+                    mastery=_clamp(0.5 + mastery_delta, 0.5),
+                    risk=_clamp(0.5 + risk_delta, 0.5),
+                    observation_count=1,
+                    first_observed_at=now,
+                    last_observed_at=now,
+                    evidence_episode_ids=[episode_id] if episode_id else [],
+                    strength=6.0 if affirm else 5.0,
+                )
+            )
+        n += 1
+    await db.commit()
+    return n
+
+
+__all__ = [
+    "append_mastery",
+    "append_mastery_from_topics",
+    "topic_repeat_hint",
+    "get_mastery_context",
+]
