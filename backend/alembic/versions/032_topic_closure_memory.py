@@ -2,7 +2,8 @@
 
 一次加齐（避免二次迁移）：
 - course_topic / course_topic_edge：模型早已有（create_all 自建），生产库此前无迁移——
-  本迁移补上。severity 一并建进表（Task Risk 因子，默认 1.0 = 行为与不加列一致）。
+  本迁移补上。Task Risk 因子列（现名 safety_weight，032 未进生产故直接以新名建；
+  原 severity 名与 error_patterns.severity 撞义已弃用）。
 - knowledge_mastery.strength：MemoryBank 遗忘强度 S（默认 5.0 天），门控 p_forget 用。
 - knowledge_mastery.last_stitched_at：VoI cooldown 键（user+course+topic 上次实际拼出时间）。
 - memory_episodes.topic_ids：巩固时 match_topics 命中的 topic_id 列表（段级回填）。
@@ -46,15 +47,10 @@ def upgrade() -> None:
             sa.Column("source_section", sa.String(255), nullable=False, server_default=""),
             sa.Column("order_idx", sa.Integer(), nullable=False, server_default="0"),
             sa.Column("embedding", sa.JSON(), nullable=True),
-            sa.Column("severity", sa.Float(), nullable=False, server_default="1.0"),
+            sa.Column("safety_weight", sa.Float(), nullable=False, server_default="1.0"),
             sa.UniqueConstraint("course_id", "topic_id", name="uq_course_topic"),
         )
         op.create_index("idx_course_topic_course", "course_topic", ["course_id"])
-    elif not _column_exists("course_topic", "severity"):
-        op.add_column(
-            "course_topic",
-            sa.Column("severity", sa.Float(), nullable=False, server_default="1.0"),
-        )
 
     if not _table_exists("course_topic_edge"):
         op.create_table(
