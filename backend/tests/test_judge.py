@@ -84,8 +84,10 @@ def test_error_patterns_closed_set_and_quote():
 class _FakeCompletions:
     def __init__(self, content):
         self._content = content
+        self.last_messages = None  # 记录最近一次调用的 messages，供 prompt 断言
 
     async def create(self, **kw):
+        self.last_messages = kw.get("messages")
         class _Msg:
             content = self._content
         class _Choice:
@@ -97,7 +99,8 @@ class _FakeCompletions:
 
 class _FakeClient:
     def __init__(self, content):
-        self.chat = type("Chat", (), {"completions": _FakeCompletions(content)})()
+        self.completions = _FakeCompletions(content)
+        self.chat = type("Chat", (), {"completions": self.completions})()
 
 
 @pytest.fixture
@@ -140,3 +143,35 @@ async def test_judge_segment_llm_failure_failsafe(monkeypatch):
 async def test_judge_segment_bad_json_failsafe(patch_llm):
     patch_llm("not json at all {{{")
     assert await judge_segment(_DIALOG, _TOPICS) is None
+
+
+async def test_judge_segment_prompt_truncates_teacher_text(patch_llm):
+    """教师回复只进前 100 字（token 收窄），学生原话全文保留。"""
+    long_teacher = "欧姆定律是 U=IR。" + "细节讲解" * 60  # >100 字，后段不进 prompt
+    mod = patch_llm(json.dumps({"judgements": [], "error_patterns": []}))
+    await judge_segment([(_DIALOG[0][0], long_teacher)], _TOPICS)
+    user_prompt = mod.client.completions.last_messages[1]["content"]
+    assert "欧姆定律我没看懂" in user_prompt          # 学生原话全文
+    assert "欧姆定律是 U=IR。" in user_prompt          # 教师前 100 字保留
+    assert long_teacher[100:] not in user_prompt      # 教师第 100 字后被截掉
+
+
+async def test_teacher_only_quote_dropped_as_bad_quote(patch_llm):
+    """只出现在教师回答第 100 字之后的话作 evidence_quote → 子串校验失败。"""
+    tail = "这句话只存在于教师回答的末尾部分" + "填充" * 40  # 落在 100 字截断之后
+    teacher = "欧姆定律是 U=IR，电压等于电流乘电阻。" + tail
+    patch_llm(json.dumps({
+        "judgements": [
+            # 教师被截掉的后文不在 segment_text 里 → 丢弃并计数
+            {"topic_id": "ohm", "level": "good", "confidence": 0.9,
+             "evidence_quote": tail},
+            # 学生原话正常通过
+            {"topic_id": "ohm", "level": "poor", "confidence": 0.9,
+             "evidence_quote": "欧姆定律我没看懂"},
+        ],
+        "error_patterns": [],
+    }))
+    r = await judge_segment([(_DIALOG[0][0], teacher)], _TOPICS)
+    assert r.dropped_bad_quote == 1
+    assert len(r.judgements) == 1
+    assert r.judgements[0].evidence_quote == "欧姆定律我没看懂"

@@ -1,0 +1,76 @@
+{
+  "course": "mycourse",
+  "model": "deepseek-v4-pro",
+  "n_segments": 8,
+  "n_pairs": 24,
+  "agreement": 0.7083,
+  "poor_coverage": 1.0,
+  "old_poor_pairs": 1,
+  "level_dist_old": {
+    "poor": 1,
+    "fair": 4,
+    "good": 2,
+    "abstain": 17,
+    "miss": 0
+  },
+  "level_dist_new": {
+    "poor": 1,
+    "fair": 4,
+    "good": 2,
+    "abstain": 17,
+    "miss": 0
+  },
+  "bad_quote_old": 0,
+  "bad_quote_new": 0,
+  "judge_none_old": 0,
+  "judge_none_new": 0,
+  "dialog_chars_old": 7242,
+  "dialog_chars_new": 295,
+  "char_reduction": 0.9593,
+  "disagree_pairs": [
+    {
+      "seg": 0,
+      "topic": "谐振参数的实验测定方法",
+      "old": "abstain",
+      "new": "poor"
+    },
+    {
+      "seg": 2,
+      "topic": "线性电阻元件的伏安特性",
+      "old": "fair",
+      "new": "good"
+    },
+    {
+      "seg": 5,
+      "topic": "实际电压源的伏安特性",
+      "old": "fair",
+      "new": "good"
+    },
+    {
+      "seg": 5,
+      "topic": "理想电压源的伏安特性",
+      "old": "fair",
+      "new": "good"
+    },
+    {
+      "seg": 5,
+      "topic": "戴维南定理",
+      "old": "abstain",
+      "new": "good"
+    },
+    {
+      "seg": 6,
+      "topic": "戴维南定理",
+      "old": "abstain",
+      "new": "fair"
+    },
+    {
+      "seg": 6,
+      "topic": "用戴维南定理求支路电流",
+      "old": "abstain",
+      "new": "fair"
+    }
+  ],
+  "decision": "FALLBACK_TRUNCATED_TEACHER",
+  "decision_rule": "agreement >= 0.85 且 poor_coverage >= 0.9 → 采纳只拼学生；否则回退教师截断版"
+}

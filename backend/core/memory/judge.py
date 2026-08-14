@@ -4,6 +4,10 @@
 unknown + confidence + 原文引用），数字由 mastery_state 的确定性 Elo 折叠算出。
 输出契约借 ParLD（AAAI 2026）的「闭集 KC + 序数等级 + 文本解释」；不借其四智能体链。
 
+prompt 口径（双臂实测定稿，见 scripts/eval_memory/run_judge_context_ab.py）：
+学生原话全文 + 教师回复每轮截断前 100 字——教师长讲解是 token 大头但全删会丢
+纠正类证据，截断保「不对，应该是…」开头的纠错句。
+
 三条硬约束（plan §3c）：
 1. topic_id 只能取自传入闭集（id 天然对齐，消除 hash 漂移），越界丢弃；
 2. unknown 是一等选项——判不出就弃权，不写观测（用弃权率换 precision，
@@ -25,9 +29,12 @@ logger = logging.getLogger(__name__)
 # 判定等级合法集
 LEVELS = ("poor", "fair", "good", "unknown")
 
-_JUDGE_SYSTEM_PROMPT = """你是学习分析判定器。下面是一个主题连续段的对话原文和该段命中的课程主题列表。
+# 教师回复每轮进 prompt 的截断长度（折中版：见 judge_segment docstring）
+_TEACHER_TRUNCATE_CHARS = 100
 
-对每个主题，只依据对话原文判定该生在此主题上的表现等级。输出严格 JSON（不要 markdown 围栏）：
+_JUDGE_SYSTEM_PROMPT = """你是学习分析判定器。下面给出一个主题连续段的对话（学生原话全文 + 教师回复每轮截断）和该段命中的课程主题列表。
+
+对每个主题，只依据对话判定该生在此主题上的表现等级。输出严格 JSON（不要 markdown 围栏）：
 {
   "judgements": [
     {"topic_id": "必须是主题列表中的 id", "level": "poor|fair|good|unknown",
@@ -40,7 +47,7 @@ _JUDGE_SYSTEM_PROMPT = """你是学习分析判定器。下面是一个主题连
 }
 
 等级定义：
-- poor：对话中有明确证据该生未掌握（答错、概念混淆、被纠正后仍错）
+- poor：对话中有明确证据该生未掌握（答错、概念混淆、被纠正后仍错、自述不懂）
 - fair：表现平平或证据含糊——无法确认掌握也无法确认未掌握
 - good：有明确证据已掌握（答对、正确应用、清晰复述）
 - unknown：该段没有涉及此主题的有效证据（含糊或双向证据一律弃权，宁弃勿猜）
@@ -136,7 +143,13 @@ async def judge_segment(
     segment_turns: list[tuple[str, str]],
     topics: list[tuple[str, str, str]],
 ) -> JudgeResult | None:
-    """一段一次 LLM 闭集序数判定。
+    """一段一次 LLM 闭集序数判定。学生原话全文 + 教师回复每轮截断前 100 字。
+
+    教师回复全量不进 prompt（省 token 大头），但完全去掉会丢「被纠正后仍错」
+    这类只有教师回应里才可见的证据——run_judge_context_ab 双臂实测（一致率
+    0.708 < 0.85），只拼学生的臂在学生只言片语的段上系统性激进误判（abstain→
+    poor/good）。折中：每轮教师回复只保留开头 100 字（纠正/答疑的关键句通常
+    在开头），既能看见「不对，应该是…」类证据，又砍掉长篇讲解的主体。
 
     Args:
         segment_turns: [(user_msg, assistant_msg)]，段内全部轮次原文。
@@ -152,13 +165,21 @@ async def judge_segment(
     lines = [
         f"- {tid}：{label}。{definition or ''}".strip() for tid, label, definition in topics
     ]
+    # 学生与教师口径一致：模型看得到什么就只能引用什么（segment_text），
+    # 截断口径与 dialog 完全相同，否则「引用被截掉的后文」会白白计入 bad_quote
     dialog = "\n".join(
-        f"学生: {u or ''}\n教师: {a or ''}" for u, a in segment_turns
+        f"学生: {u or ''}\n教师: {(a or '')[:_TEACHER_TRUNCATE_CHARS]}"
+        for u, a in segment_turns
     )
     prompt = (
         f"主题列表（只可从中选择）：\n{''.join(lines)}\n\n对话原文：\n{dialog}"
     )
-    segment_text = "\n".join(filter(None, (f"{u}\n{a}" for u, a in segment_turns)))
+    segment_text = "\n".join(
+        filter(
+            None,
+            (f"{u}\n{(a or '')[:_TEACHER_TRUNCATE_CHARS]}" for u, a in segment_turns),
+        )
+    )
 
     try:
         from core.llm.llm import client as async_openai_client
@@ -171,13 +192,22 @@ async def judge_segment(
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=800,
+            # 推理模型的 reasoning_content 与正文共享 max_tokens（实测该模型推理
+            # 可写到 1.4 万字：800/4000 均被吃完、finish=length 正文为空判定全挂，
+            # 8000 实测 finish=stop）；max_tokens 是上限非花费，判定正文本身很短
+            max_tokens=8000,
             stream=False,
         )
         raw = (resp.choices[0].message.content or "").strip()
         raw = re.sub(r"^```json\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
-        data = json.loads(raw)
+        # 尾逗号是 LLM JSON 输出最常见的语法错误（实测 [{"...":...},]} 直接解析失败）
+        raw = re.sub(r",\s*([}\]])", r"\1", raw)
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            logger.warning("[judge] JSON 解析失败，raw 前200字：%s", raw[:200])
+            return None
         if not isinstance(data, dict):
             return None
     except Exception as exc:
