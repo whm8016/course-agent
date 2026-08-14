@@ -33,9 +33,12 @@ logger = logging.getLogger(__name__)
 # 时，读侧若跟着降阈会把无关问句错认成主题，直接放大门控误报。两常量必须分开。
 UNKNOWN_THRESHOLD = 0.55
 
-# C1 入闸判据（plan §3e）：logit 空间 theta - b_topic <= WEAK_MARGIN。
+# C1 入闸判据（plan §3e，口径改 theta）：theta <= WEAK_MARGIN。
 # 语义锚点 =「同一主题至少 2 次判 poor」（Elo 折叠下 1 次 poor ≈ -0.30、2 次 ≈ -0.54，
 # 本值取 logit(0.4) ≈ -0.4055，恰等价 risk >= 0.6，便于换算成人能读的概率）。
+# 不比 theta - b：b 是班级难度，一旦非零，一个 fair、theta≈0 的学生会被班级难度
+# 直接拖过闸——把「该生薄弱」改写成「这题班里难」，与门控原意冲突。b 只进
+# risk = 1 - sigmoid(theta - b)（影响已入闸候选的 p_need 排序），不决定谁能入闸。
 # 纪律：不写死就算完——test_mastery_state 由 fold_observations 实算夹出此值须落在
 # 1 次与 2 次 poor 之间；W_JUDGE 变了测试会红，强制重定常量。
 WEAK_MARGIN = -0.4055
@@ -94,8 +97,9 @@ def decide_stitch(
     Args:
         matched_topic: 问句命中的主题（S_t），None = unknown。
         prereq_closure: matched 的全部前置主题（course_topic_store.get_prereq_predecessors 算）。
-        mastery_map: {topic_id: {risk, risk_used, p_forget, logit, label, observation_count}}，
-            门控唯一学情数据源。logit = theta - b_topic（折叠状态，读侧不再收缩）。
+        mastery_map: {topic_id: {risk, risk_used, p_forget, theta, logit, label, observation_count}}，
+            门控唯一学情数据源。theta 是入闸判据（<= weak_margin）；logit = theta -
+            b_topic 只供 risk/p_need 派生（班级难度不决定谁能入闸）。
         error_repeated: 反复出错的 topic_id 集（mastery_observation 同主题 poor 计数 ≥2 派生）。
         confidence: 问句→主题匹配的置信度 c ∈ [0,1]（sim 经 (sim-θ)/(1-θ) 归一；Ambiguity 因子）。
         severity_map: {topic_id: safety_weight}，Task Risk 因子按**证据主题**（真正预警的
@@ -103,10 +107,10 @@ def decide_stitch(
             前置时，该加权的是后者）。缺省 1.0 = 不加权一致。
         now: cooldown 判定的当前时间戳（调用方传入，保持纯函数可单测；None=用 time.time）。
         冷却时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带，见 _read_mastery）。
-        weak_margin: C1 入闸的 logit 边际（plan §3e，见模块头 WEAK_MARGIN 注释）。
+        weak_margin: C1 入闸的 theta 边际（plan §3e，见模块头 WEAK_MARGIN 注释）。
 
     候选（只在两类上算 p_need，全库薄弱点禁止入闸）：
-        C1 未问也带 = (prereq_closure - {matched}) ∩ {logit <= weak_margin}
+        C1 未问也带 = (prereq_closure - {matched}) ∩ {theta <= weak_margin}
         C2 问到了但提旧错 = matched ∈ error_repeated
 
     决策（VoI 三因子 + 三档）：证据按 score = p_need·severity 选取（value 去掉 c 的
@@ -121,17 +125,18 @@ def decide_stitch(
     if matched_topic is None:
         return StitchBrief(False, None, "unknown", 0.0, 1.0)
 
-    # 2. C1 前置缺口：前置闭包（不含 matched）里薄弱的（logit 空间判据，plan §3e：
-    #    比 risk 不比被 sigmoid 压扁的概率；「至少两次判 poor」的语义锚点），
-    #    按薄弱程度（logit 升序 = risk 降序）排
+    # 2. C1 前置缺口：前置闭包（不含 matched）里薄弱的（theta 判据，plan §3e：
+    #    比 risk 不比被 sigmoid 压扁的概率；「至少两次判 poor」的语义锚点；不用
+    #    theta - b——班级难度不决定谁能入闸，b 只影响入闸后的 risk/p_need），
+    #    按薄弱程度（theta 升序）排
     prereq_gaps = sorted(
         [
             (tid, mastery_map[tid])
             for tid in (prereq_closure - {matched_topic})
             if tid in mastery_map
-            and mastery_map[tid].get("logit", 0.0) <= weak_margin
+            and mastery_map[tid].get("theta", 0.0) <= weak_margin
         ],
-        key=lambda x: x[1].get("logit", 0.0),
+        key=lambda x: x[1].get("theta", 0.0),
     )
     # 3. C2 复发：matched 本身反复出错
     is_recurrence = matched_topic in error_repeated
@@ -206,7 +211,7 @@ def decide_stitch_prism(
     """PRISM 两参数单阈值门控（对照臂，供 eval 消融）。语义与 decide_stitch 同候选口径。
 
     τ = C_FA / (C_FA + p_need·C_FN)，p_need >= τ 才拼（单边界 full-or-silent）。
-    p_need 计算与 VoI 版共享同一套候选（logit 判据）与遗忘口径（复制主体，非互相
+    p_need 计算与 VoI 版共享同一套候选（theta 判据）与遗忘口径（复制主体，非互相
     调用——两臂在 eval 中必须独立可审计）。
     """
     if matched_topic is None:
@@ -216,9 +221,9 @@ def decide_stitch_prism(
         [
             (tid, mastery_map[tid])
             for tid in (prereq_closure - {matched_topic})
-            if tid in mastery_map and mastery_map[tid].get("logit", 0.0) <= weak_margin
+            if tid in mastery_map and mastery_map[tid].get("theta", 0.0) <= weak_margin
         ],
-        key=lambda x: x[1].get("logit", 0.0),
+        key=lambda x: x[1].get("theta", 0.0),
     )
     is_recurrence = matched_topic in error_repeated
 
@@ -412,12 +417,12 @@ async def _read_mastery(
     id-align：行 kp_id 非 topic_id 时，用 label 经 topic_map（label_norm→topic_id）本地兜底，
     避免 N+1（topic_map 由 stitch_for_turn 一次取全传入）。
 
-    掌握度估计器重构（阶段D）：
+    掌握度估计器重构（阶段D，难度口径见 plan「班级难度估计修复」）：
     - risk 由折叠状态算出（mastery = sigmoid(theta - b_topic)，risk = 1 - mastery），
       b_topic 读 course_topic.difficulty_b（全班共享，题目难度即班级先验）；
     - k=3 班级收缩已删（与 U(n) 和 b_topic 先验功能重复且更粗），risk_used = risk；
-    - logit = theta - b_topic 一并放进 map——C1 判据在 logit 空间（WEAK_MARGIN），
-      没被 sigmoid 压扁；
+    - theta 一并放进 map——C1 入闸判据在 theta 空间（WEAK_MARGIN），班级难度 b
+      不决定谁能入闸；logit = theta - b 仍带出供 risk 派生与排查；
     - 遗忘口径（MemoryBank）不变：p_forget = 1 - exp(-t/S)。
     """
     from core.db.database import CourseTopic, KnowledgeMastery
@@ -472,6 +477,7 @@ async def _read_mastery(
             "row_id": r.id,
             "risk": round(risk, 4),
             "risk_used": round(risk, 4),  # 收缩已删（b_topic 即班级先验），保留键供门控口径不变
+            "theta": round(r.theta or 0.0, 4),
             "logit": round(logit, 4),
             "p_forget": forget_prob(age_days, r.strength or 5.0),
             "strength": r.strength or 5.0,

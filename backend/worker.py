@@ -433,6 +433,75 @@ async def cron_cluster_faqs(ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 任务 6：全班难度日频重折（plan「班级难度估计修复」）
+# ---------------------------------------------------------------------------
+
+
+async def cron_refit_difficulty(ctx) -> None:
+    """每日 04:41 全班难度重折：对近 3 天有新观测的 (course, topic)，取该主题全班
+    全量观测跑 fold_class_difficulty，写回 course_topic.difficulty_b / n_item。
+
+    b 不在写路径更新（写侧判分观测只有错题本一处，对话为主的流量下在线重折会让
+    b 恒 0）；每个学生各自 theta 对上共享 b 成对更新（Pelánek/Klinkenberg 口径），
+    按来源权重吃全部观测（判分 1.0 / 对话 0.6 / 词表 0.3）。难度不需要小时级新鲜度，
+    日频足够——新课头一天 b=0 即冷启动口径。全量重折天然幂等；不回写学生 theta
+    （活跃学生下次巩固全量重折自动切到新 b；不活跃学生读侧 theta_old - b_new 有
+    轻微偏差，接受）。零 LLM。ARQ 单容器天然单例；best-effort 全兜异常。
+    """
+    import time as _time
+
+    from sqlalchemy import select, update
+
+    from core.db.database import AsyncSessionLocal, CourseTopic, MasteryObservation
+    from core.memory.mastery_state import fold_class_difficulty
+
+    since = _time.time() - 3 * 86400
+    try:
+        async with AsyncSessionLocal() as db:
+            pairs = (
+                await db.execute(
+                    select(
+                        MasteryObservation.course_id, MasteryObservation.topic_id
+                    ).where(
+                        MasteryObservation.created_at >= since,
+                        MasteryObservation.course_id != "",
+                    ).distinct()
+                )
+            ).all()
+            for cid, tid in pairs:
+                obs = (
+                    (
+                        await db.execute(
+                            select(
+                                MasteryObservation.user_id,
+                                MasteryObservation.outcome,
+                                MasteryObservation.weight,
+                                MasteryObservation.created_at,
+                            ).where(
+                                MasteryObservation.course_id == cid,
+                                MasteryObservation.topic_id == tid,
+                            )
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                b, n_item = fold_class_difficulty(list(obs))
+                await db.execute(
+                    update(CourseTopic)
+                    .where(
+                        CourseTopic.course_id == cid,
+                        CourseTopic.topic_id == tid,
+                    )
+                    .values(difficulty_b=round(b, 6), n_item=n_item)
+                )
+            await db.commit()
+        logger.info("[worker] cron_refit_difficulty topics=%d", len(pairs))
+    except Exception as exc:
+        logger.warning("[worker] cron_refit_difficulty error: %s", exc, exc_info=True)
+
+
+# ---------------------------------------------------------------------------
 # Worker 生命周期：关停时停止 idle reaper（若本进程因索引任务懒启动过它）
 # ---------------------------------------------------------------------------
 
@@ -494,4 +563,6 @@ class WorkerSettings:
         cron(cron_rollup_learning, minute={23}),
         # 每小时 :37 高频问题语义聚类（embedding 较重，独立于 rollup 隔离）。
         cron(cron_cluster_faqs, minute={37}),
+        # 每日 04:41 全班难度重折（低峰期；避开 04:17 GC 与 :23 rollup 的分钟错峰）。
+        cron(cron_refit_difficulty, hour={4}, minute={41}),
     ]

@@ -344,8 +344,10 @@ async def _write_mastery_observations(
 
     折叠纪律（plan 阶段A）：增量更新只在「新观测就是最新一条」时等价；这里写完即折，
     若有迟到观测落库须整体重折（fold_observations 吃全量日志的设计即为此）。
-    题目难度侧（b_topic）只在 quiz 写入时重折——b 只被 source=quiz 的观测更新
-    （elo_update 契约），llm_judge 写入跑了也是原值，白付一次全班日志查询+折叠。
+    题目难度（b）不在写路径更新——由 worker.cron_refit_difficulty 日频全班重折写回
+    course_topic.difficulty_b（对话为主的流量下写侧只有错题本一处判分观测，在线重折
+    会让 b 恒 0）。学生侧从当前 b 起折（FoldState(b_topic=b)，与校准脚本同口径），
+    治「难度被吸进 theta、读侧再减一次」的双计。
     失败非致命——观测日志 append-only，丢了可由重放恢复，不能阻塞 done。
     """
     import time as _time
@@ -379,8 +381,21 @@ async def _write_mastery_observations(
 
     # 折叠写回：按 topic 全量重放观测日志 → 更新 theta/n_obs 与派生 mastery/risk
     topic_ids = sorted({j.topic_id for j in judgements})
-    from core.memory.mastery_state import fold_observations
+    from core.db.database import CourseTopic
+    from core.memory.mastery_state import FoldState, fold_observations
 
+    b_map: dict[str, float] = {}
+    if topic_ids:
+        b_map = {
+            t: float(b or 0.0) for t, b in (
+                await db.execute(
+                    select(CourseTopic.topic_id, CourseTopic.difficulty_b).where(
+                        CourseTopic.course_id == course_id,
+                        CourseTopic.topic_id.in_(topic_ids),
+                    )
+                )
+            ).all()
+        }
     for tid in topic_ids:
         obs_rows = (
             (
@@ -388,7 +403,6 @@ async def _write_mastery_observations(
                     select(
                         MasteryObservation.outcome,
                         MasteryObservation.weight,
-                        MasteryObservation.source,
                         MasteryObservation.created_at,
                     ).where(
                         MasteryObservation.user_id == user_id,
@@ -400,50 +414,10 @@ async def _write_mastery_observations(
             .mappings()
             .all()
         )
-        # 题目难度侧（全班共享）：仅 quiz 写入时全班（course+topic）quiz 观测从零
-        # 整体重折（幂等）。不从 course_topic.difficulty_b 取起点叠加——b 是全班参数，
-        # 任何 (user, topic) 侧的叠加都会把同一份历史重复折进（起点已是历史折出值，
-        # 再重放一遍 = 双计）；也不能只看当前 user 的 quiz——b 要吃全班的判分证据
-        # （新生 theta=0 时 risk = sigmoid(b) 即班级先验，MasteryObservation 表
-        # docstring 同口径）。llm_judge 写入跳过整段（b 只被 quiz 更新，跑了是原值）。
-        if source_override == "quiz":
-            class_quiz = (
-                (
-                    await db.execute(
-                        select(
-                            MasteryObservation.outcome,
-                            MasteryObservation.weight,
-                            MasteryObservation.source,
-                            MasteryObservation.created_at,
-                        ).where(
-                            MasteryObservation.course_id == course_id,
-                            MasteryObservation.topic_id == tid,
-                            MasteryObservation.source == "quiz",
-                        )
-                    )
-                )
-                .mappings()
-                .all()
-            )
-            item_state = fold_observations(class_quiz)  # b 从 0 起、全班 quiz 全量、可重放
-            if item_state.n_item > 0:
-                from core.db.database import CourseTopic
-                from sqlalchemy import update
-
-                await db.execute(
-                    update(CourseTopic)
-                    .where(
-                        CourseTopic.course_id == course_id,
-                        CourseTopic.topic_id == tid,
-                    )
-                    .values(
-                        difficulty_b=round(item_state.b_topic, 6),
-                        n_item=item_state.n_item,
-                    )
-                )
-        # 学生侧：难度冻结为 0 只折 theta——行上 risk/mastery 由读侧用 course_topic
-        # 的全班 b 派生（proactive._read_mastery 同口径），单一真相源不在行上另存
-        state = fold_observations(obs_rows, freeze_item=True)
+        # 学生侧：从当前全班 b 起折（FoldState(b_topic=b)，与校准脚本
+        # run_quiz_calibration 同口径）。b 由 cron_refit_difficulty 日频全班重折，
+        # 不在这里写——写路径全班扫表每次巩固都跑，且对话判定流量下白跑。
+        state = fold_observations(obs_rows, FoldState(b_topic=b_map.get(tid, 0.0)))
 
         row = (
             (

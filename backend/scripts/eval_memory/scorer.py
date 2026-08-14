@@ -155,8 +155,8 @@ async def score_decay(db) -> tuple[int, int, list[str]]:
 def _gate_mastery_map(case_mastery: list[dict]) -> dict[str, dict]:
     """case 语料 mastery → decide_stitch 的 mastery_map（两 suite 共用）。
 
-    b=0 反解 logit（mastery_state.logit_of 单源，与读侧 _read_mastery 同口径）——
-    不反解则 logit 缺省 0，C1 判据 <= WEAK_MARGIN 永不成立，正例只剩 C2 能过，
+    b=0 反解 theta（mastery_state.logit_of 单源，与读侧 _read_mastery 同口径）——
+    不反解则 theta 缺省 0，C1 判据 <= WEAK_MARGIN 永不成立，正例只剩 C2 能过，
     分数失真。p_forget=1.0：case 为跨会话预警场景（非正在学）。
     """
     from core.memory.mastery_state import logit_of
@@ -165,6 +165,7 @@ def _gate_mastery_map(case_mastery: list[dict]) -> dict[str, dict]:
         m["topic_id"]: {
             "risk": m["risk"],
             "risk_used": m["risk"],
+            "theta": logit_of(1.0 - m["risk"]),
             "logit": logit_of(1.0 - m["risk"]),
             "p_forget": 1.0,
             "observation_count": m["observation_count"],

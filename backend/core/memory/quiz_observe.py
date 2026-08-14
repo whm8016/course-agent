@@ -1,8 +1,9 @@
 """判分观测接入：答题结果（NotebookEntry.is_correct）→ mastery_observation。
 
 plan 阶段F（§4b）：题面经 match_topics 映射 topic_id（零 LLM），写 source=quiz 的
-观测（outcome 0/1、weight=W_QUIZ）。这是题目难度 b_topic 唯一合法的更新来源
-（对话判定不冒充班级证据），也是上线后校准的金标数据。
+观测（outcome 0/1、weight=W_QUIZ）。判分观测是全班难度估计权重最高的来源
+（w=1.0），也是上线后校准的金标数据。难度由 cron_refit_difficulty 日频全班重折
+（写路径不在线更新 b，见 plan「班级难度估计修复」）。
 
 幂等：同 (user, question_id) 重复提交不重复写观测（upsert 场景常见——重答/改注）。
 失败非致命：观测丢了可由 notebook 重放，不阻塞答题主流程。

@@ -610,7 +610,9 @@ class MasteryObservation(Base):
     user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     course_id = Column(String(64), nullable=False, default="")
     topic_id = Column(String(64), nullable=False)
-    # quiz（判分，0/1，唯一可更新题目难度的来源）/ llm_judge（闭集序数判定）/ rule（词表兜底）
+    # quiz（判分，0/1）/ llm_judge（闭集序数判定）/ rule（词表兜底）。
+    # 难度估计吃全部来源（weight 承载可信度：quiz 1.0 / llm_judge 0.6 / rule 0.3），
+    # 由日频 cron 全班重折，写路径不在线更新难度。
     source = Column(String(16), nullable=False)
     outcome = Column(Float, nullable=False)  # quiz: 0/1；判定等级映射 good=1.0/fair=0.5/poor=0.0
     weight = Column(Float, nullable=False, default=1.0)  # 来源可信度，由实测一致率设定
@@ -651,9 +653,10 @@ class CourseTopic(Base):
     # 注：原名 severity，与 error_patterns.severity（错误严重度）撞义，已改名 safety_weight
     #（032 未进生产，模型直接改名；033 迁移对旧库做数据搬迁兜底）。
     safety_weight = Column(Float, nullable=False, default=1.0)
-    # Elo 折叠的题目难度侧（全班共享参数，教师可见）：b_topic 只由 source=quiz 的判分观测
-    # 更新（对话判定不冒充班级证据）；n_item 是判分观测数（驱动 K_i 衰减）。
-    # 新生 theta=0 时 risk = sigmoid(b_topic) 本身即班级先验，替代手工班级收缩。
+    # Elo 折叠的题目难度侧（全班共享参数，教师可见）：b 由 worker.cron_refit_difficulty
+    # 日频全班重折（fold_class_difficulty 吃全部来源观测、按 weight 加权）；
+    # n_item 是参与难度估计的观测条数（含对话判定，驱动 K_i 衰减与收缩）。
+    # 新生 theta=0 时 risk = sigmoid(b) 本身即班级先验，替代手工班级收缩。
     difficulty_b = Column(Float, nullable=False, default=0.0)
     n_item = Column(Integer, nullable=False, default=0)
 

@@ -25,7 +25,7 @@ async def _seed(user_id="u1", course_id="c1"):
 
 
 async def test_quiz_observation_written_and_folds(db):
-    """答错 → source=quiz 观测落库 + knowledge_mastery 折叠 + b_topic 上移。"""
+    """答错 → source=quiz 观测落库 + knowledge_mastery 折叠；b 由 cron 重折（不在写路径动）。"""
     await _seed()
     from core.db.database import AsyncSessionLocal, CourseTopic, KnowledgeMastery, MasteryObservation
     from core.memory.quiz_observe import record_quiz_observation
@@ -47,7 +47,8 @@ async def test_quiz_observation_written_and_folds(db):
     assert len(obs) == 1
     assert obs[0].source == "quiz" and obs[0].outcome == 0.0 and obs[0].question_id == "q1"
     assert km[0].n_obs == 1 and km[0].theta < 0  # 答错 → theta 下移
-    assert ct.difficulty_b > 0.0 and ct.n_item == 1  # 题目侧：全班难度上移
+    # 难度不在写路径更新（plan「班级难度估计修复」）：写完观测 b 仍为 0，等 cron 日频重折
+    assert ct.difficulty_b == 0.0 and ct.n_item == 0
 
 
 async def test_quiz_observation_idempotent(db):
@@ -72,14 +73,49 @@ async def test_quiz_observation_idempotent(db):
 
 
 async def test_quiz_second_answer_no_double_count(db):
-    """同一学生第二次答题（另一题）：b_topic 不得把第一条 quiz 观测重复折进去。
+    """难度重折的幂等回归（迁到 cron 口径）：两次跑 fold_class_difficulty 结果一致，
+    且同一份全班观测每条只计一次。
 
-    旧 bug：item_state 以库中 difficulty_b 为起点再重放该学生全部 quiz 历史——
-    第二次写观测时第一条被再折一次（b 越折越难、n_item 虚高）。现在全班 quiz
-    从零整体重折（幂等），每题只计一次。
+    旧在线路径（写观测时全班 quiz 重折）已删——难度由 cron_refit_difficulty 日频
+    全班重折，全量重放天然幂等。本测试直接验证折叠函数的幂等性 + 非零 b 上移。
     """
-    from core.memory.mastery_state import fold_observations
+    from core.memory.mastery_state import fold_class_difficulty
 
+    await _seed()
+    from core.db.database import AsyncSessionLocal, MasteryObservation
+    from core.memory.quiz_observe import record_quiz_observation
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as s:
+        with patch("core.memory.topic_match.match_topics",
+                   AsyncMock(return_value=[("ohm", 0.88)])):
+            await record_quiz_observation(s, "u1", "c1", "q1", "欧姆定律的公式", False)
+        await s.commit()
+    async with AsyncSessionLocal() as s:
+        with patch("core.memory.topic_match.match_topics",
+                   AsyncMock(return_value=[("ohm", 0.88)])):
+            await record_quiz_observation(s, "u1", "c1", "q2", "欧姆定律单位换算", True)
+        await s.commit()
+
+    async with AsyncSessionLocal() as s:
+        obs = (await s.execute(select(MasteryObservation))).scalars().all()
+        rows = [
+            {"user_id": o.user_id, "created_at": o.created_at,
+             "outcome": o.outcome, "weight": o.weight}
+            for o in obs
+        ]
+
+    b1, n1 = fold_class_difficulty(rows)
+    b2, n2 = fold_class_difficulty(rows)
+    assert n1 == n2 == 2  # 两条观测各计一次（无起点叠加）
+    assert abs(b1 - b2) < 1e-12  # 幂等：同一份日志折两次结果一致
+    assert b1 < 0.0  # 一错一对 → 题偏难一点点（theta 被第一条 poor 拉低后第二条 good 的
+    # err 贡献变小，净效应 b 略负）；关键锚是非零且可重放，不是具体符号
+
+
+async def test_cron_refit_difficulty_writes_b(db):
+    """cron_refit_difficulty：对近期有观测的 (course, topic) 全班重折写回
+    difficulty_b / n_item；写路径本身不动 b。"""
     await _seed()
     from core.db.database import AsyncSessionLocal, CourseTopic, MasteryObservation
     from core.memory.quiz_observe import record_quiz_observation
@@ -91,27 +127,18 @@ async def test_quiz_second_answer_no_double_count(db):
             await record_quiz_observation(s, "u1", "c1", "q1", "欧姆定律的公式", False)
         await s.commit()
     async with AsyncSessionLocal() as s:
-        ct1 = (await s.execute(select(CourseTopic))).scalars().first()
+        ct_before = (await s.execute(select(CourseTopic))).scalars().first()
+        assert ct_before.difficulty_b == 0.0  # 写路径不动 b
+
+    import worker as worker_mod
+
+    await worker_mod.cron_refit_difficulty({})
 
     async with AsyncSessionLocal() as s:
-        with patch("core.memory.topic_match.match_topics",
-                   AsyncMock(return_value=[("ohm", 0.88)])):
-            await record_quiz_observation(s, "u1", "c1", "q2", "欧姆定律单位换算", True)
-        await s.commit()
-    async with AsyncSessionLocal() as s:
-        ct2 = (await s.execute(select(CourseTopic))).scalars().first()
-        obs = (await s.execute(select(MasteryObservation))).scalars().all()
-
-    # 期望终态 = 两条观测（q1 poor, q2 good）从零整体折一次
-    expect = fold_observations([
-        {"created_at": o.created_at, "outcome": o.outcome, "weight": o.weight, "source": o.source}
-        for o in obs
-    ])
-    assert ct2.n_item == expect.n_item == 2
-    assert abs(ct2.difficulty_b - expect.b_topic) < 1e-6
-    # 回归锚：旧实现会得到 n_item=3（1 起点值 + 2 重放）
-    assert ct1.n_item == 1
-    assert ct2.difficulty_b < ct1.difficulty_b  # 答对把难度拉回来一点
+        ct_after = (await s.execute(select(CourseTopic))).scalars().first()
+        n_obs = len((await s.execute(select(MasteryObservation))).scalars().all())
+    assert ct_after.n_item == n_obs == 1
+    assert ct_after.difficulty_b > 0.0  # 答错 → cron 重折后全班难度上移
 
 
 async def test_quiz_observation_no_topic_no_write(db):

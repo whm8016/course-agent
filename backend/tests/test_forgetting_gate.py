@@ -1,7 +1,8 @@
 """阶段3：遗忘耦合——p_forget = 1 - exp(-t/S) 换向（旧 eff_risk 方向反了）。
 
-阶段D 口径：mastery_map 用真实折叠状态（3 次 poor → logit -0.74 / risk 0.68），
-入闸靠 logit <= WEAK_MARGIN（不是旧 risk >= 0.5）。缺省自洽性（S=5）：
+阶段D 口径：mastery_map 用真实折叠状态（3 次 poor → theta -0.74 / risk 0.68），
+入闸靠 theta <= WEAK_MARGIN（不是旧 risk >= 0.5；不用 theta - b——班级难度不决定
+谁能入闸）。缺省自洽性（S=5）：
   t=1  → p_forget≈0.181 → p_need≈0.12 → 不拼（正在学，别打扰）
   t=30 → p_forget≈0.998 → p_need≈0.67 → 拼（久未触碰，大概率忘了）
 """
@@ -17,14 +18,15 @@ _PREREQ = {"ohm"}  # kcl 的前置闭包
 def _folded_ohm(levels=("poor",) * 3) -> dict[str, dict]:
     obs = [
         {"created_at": float(i), "outcome": {"poor": 0.0, "fair": 0.5, "good": 1.0}[lv],
-         "weight": W_JUDGE, "source": "llm_judge"}
+         "weight": W_JUDGE}
         for i, lv in enumerate(levels)
     ]
     s = fold_observations(obs)
     return {
         "ohm": {
             "risk": round(s.risk, 4), "risk_used": round(s.risk, 4),
-            "logit": round(s.logit, 4), "p_forget": 0.0, "observation_count": s.n_obs,
+            "theta": round(s.theta, 4), "logit": round(s.logit, 4),
+            "p_forget": 0.0, "observation_count": s.n_obs,
         }
     }
 
