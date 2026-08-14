@@ -159,6 +159,100 @@ async def test_budget_overflow_25_segments(db):
     assert statuses.count("done") == 20
 
 
+async def test_mastery_write_failure_defers(db):
+    """_write_mastery_observations 写库失败 → episode 回 pending（非 done）。
+
+    旧 bug：写库失败 rollback 后照样标 done，这段对话的掌握度观测永久丢失。
+    """
+    await _seed(episodes=[("t1", "欧姆定律我没看懂", "U=IR")])
+    with (
+        patch("core.memory.topic_match.match_topics", AsyncMock(return_value=[("ohm", 0.9)])),
+        patch("core.memory.judge.judge_segment", AsyncMock(return_value=_mk_result())),
+        patch("core.memory.consolidation._promote_segment", AsyncMock()),
+        patch("core.memory.consolidation._write_mastery_observations",
+              AsyncMock(side_effect=RuntimeError("db down"))),
+    ):
+        result = await _run()
+
+    assert result == {"claimed": 1, "promoted": 0}
+    from core.db.database import AsyncSessionLocal, MemoryEpisode
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as s:
+        ep = (await s.execute(select(MemoryEpisode))).scalars().first()
+    assert ep.status == "pending"  # 等下轮重判重写，不是 done
+
+
+async def test_judge_path_crash_defers_whole_session(db):
+    """judge 路径整体抛错（切段/查 meta 崩）→ 该 session 全部 episode 回 pending。"""
+    await _seed(episodes=[
+        (f"t{i}", "欧姆定律我没看懂" if i == 0 else "还是没懂", "U=IR……")
+        for i in range(3)
+    ])
+    with (
+        patch("core.memory.topic_match.match_topics", AsyncMock(return_value=[("ohm", 0.9)])),
+        patch("core.memory.consolidation._promote_segment", AsyncMock()),
+        patch("core.memory.consolidation.split_topic_segments",
+              side_effect=RuntimeError("segment crash")),
+    ):
+        result = await _run()
+
+    assert result == {"claimed": 3, "promoted": 0}
+    from core.db.database import AsyncSessionLocal, MemoryEpisode
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as s:
+        statuses = (await s.execute(select(MemoryEpisode.status))).scalars().all()
+    assert statuses.count("pending") == 3
+
+
+async def test_judge_budget_shared_across_sessions(db):
+    """判定段预算整次 consolidate 共享 20（非 per-session）。
+
+    旧 bug：每 session 各判 20 段，200 条 episode × 10 session → 200 次 LLM，
+    正是预算要防的 ARQ 超时。现在跨 session 共享：2 个 session 各 15 段 →
+    只判 20 次，剩 10 段留 pending。
+    """
+    from core.db.database import AsyncSessionLocal, CourseTopic, MemoryEpisode
+
+    async with AsyncSessionLocal() as s:
+        s.add(CourseTopic(course_id="c1", topic_id="ohm", label="欧姆定律"))
+        s.add(CourseTopic(course_id="c1", topic_id="kcl", label="基尔霍夫电流定律"))
+        # 2 个 session，各 30 轮交替主题 → 各 30 段（每条 episode 自成一段）
+        for si in range(2):
+            for i in range(30):
+                s.add(MemoryEpisode(
+                    user_id="u1", course_id="c1", session_id=f"s{si}", turn_id=f"s{si}t{i}",
+                    user_msg=f"问题{si}-{i}", assistant_msg="回答", status="pending",
+                ))
+        await s.commit()
+
+    async def _fake_match(text, course_id, db, **kw):
+        # "问题{si}-{i}"：按 (si+i) 奇偶交替主题
+        idx = int(text.split("问题")[1].replace("-", "+").split("+")[0]) + int(
+            text.split("-")[1].split("\n")[0]
+        )
+        return [("ohm" if idx % 2 == 0 else "kcl", 0.9)]
+
+    with (
+        patch("core.memory.topic_match.match_topics", AsyncMock(side_effect=_fake_match)),
+        patch("core.memory.judge.judge_segment", AsyncMock(return_value=_mk_result())) as mock_judge,
+        patch("core.memory.consolidation._promote_segment", AsyncMock()),
+    ):
+        result = await _run()
+
+    assert mock_judge.await_count == consolidation._JUDGE_SEGMENTS_PER_RUN == 20
+    assert result["claimed"] == 60
+    assert result["promoted"] == 20
+    from core.db.database import AsyncSessionLocal, MemoryEpisode
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as s:
+        statuses = (await s.execute(select(MemoryEpisode.status))).scalars().all()
+    assert statuses.count("pending") == 40
+    assert statuses.count("done") == 20
+
+
 async def test_no_topic_no_judge(db):
     """无主题段（match_topics 空）不调判定，episode 照常 done。"""
     await _seed(episodes=[("t1", "实验报告几点交", "下周五前")])

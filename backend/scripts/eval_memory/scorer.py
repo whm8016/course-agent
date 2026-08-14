@@ -194,6 +194,8 @@ async def score_stitch_gate(db) -> tuple[int, int, list[str]]:
 
 async def score_stitch_gate_mycourse(db) -> tuple[int, int, list[str]]:
     """mycourse 真实场景：前置闭包从 ``course_topic_edge`` 读，非 stitch_cases 内存图。"""
+    import math
+
     from core.memory.course_topic_store import get_prereq_predecessors
     from core.memory.proactive import decide_stitch
     from sqlalchemy import func, select
@@ -219,7 +221,16 @@ async def score_stitch_gate_mycourse(db) -> tuple[int, int, list[str]]:
             await get_prereq_predecessors(matched, COURSE_ID, db) if matched else set()
         )
         mastery = {
-            m["topic_id"]: {"risk": m["risk"], "eff_risk": m["risk"]}
+            m["topic_id"]: {
+                "risk": m["risk"],
+                "risk_used": m["risk"],
+                # b=0 反解 logit（与读侧 _read_mastery 同口径：logit = log(p/(1-p))，
+                # p=mastery=1-risk）——不反解则 logit 缺省 0，C1 判据 <= WEAK_MARGIN
+                # 永不成立，正例只剩 C2 能过，分数失真
+                "logit": math.log((1.0 - m["risk"]) / m["risk"]),
+                "p_forget": 1.0,  # case 为跨会话预警场景（非正在学）
+                "observation_count": m["observation_count"],
+            }
             for m in c["mastery"]
         }
         repeated = set(c["error_repeated"])

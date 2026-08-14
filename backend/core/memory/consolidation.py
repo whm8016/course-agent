@@ -361,34 +361,51 @@ async def _write_mastery_observations(
             .mappings()
             .all()
         )
-        # 题目难度侧（全班共享）从 course_topic 取初值再叠加判分观测
+        # 题目难度侧（全班共享）：全班（course+topic）quiz 观测从零整体重折（幂等）。
+        # 不从 course_topic.difficulty_b 取起点叠加——b 是全班参数，任何 (user, topic)
+        # 侧的叠加都会把同一份历史重复折进（起点已是历史折出值，再重放一遍 = 双计）；
+        # 也不能只看当前 user 的 quiz——b 要吃全班的判分证据（新生 theta=0 时
+        # risk = sigmoid(b) 即班级先验，MasteryObservation 表 docstring 同口径）。
         from core.db.database import CourseTopic
 
+        class_quiz = (
+            (
+                await db.execute(
+                    select(
+                        MasteryObservation.outcome,
+                        MasteryObservation.weight,
+                        MasteryObservation.source,
+                        MasteryObservation.created_at,
+                    ).where(
+                        MasteryObservation.course_id == course_id,
+                        MasteryObservation.topic_id == tid,
+                        MasteryObservation.source == "quiz",
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
         ct = (
             (
                 await db.execute(
-                    select(CourseTopic.difficulty_b, CourseTopic.n_item).where(
+                    select(CourseTopic.id).where(
                         CourseTopic.course_id == course_id,
                         CourseTopic.topic_id == tid,
                     )
                 )
             ).first()
         )
-        init_b, init_n_item = (ct[0], ct[1]) if ct else (0.0, 0)
-        quiz_obs = [
-            {"created_at": o.created_at, "outcome": o.outcome, "weight": o.weight, "source": o.source}
-            for o in obs_rows if o.source == "quiz"
-        ]
-        from core.memory.mastery_state import FoldState
-
-        item_state = fold_observations(quiz_obs, FoldState(0.0, 0, init_b, init_n_item))
+        item_state = fold_observations(class_quiz)  # b 从 0 起、全班 quiz 全量、可重放
         all_obs = [
             {"created_at": o.created_at, "outcome": o.outcome, "weight": o.weight, "source": o.source}
             for o in obs_rows
         ]
-        state = fold_observations(all_obs, FoldState(0.0, 0, item_state.b_topic, item_state.n_item))
-        # 题目侧（全班共享）：有 quiz 观测变化时写回 course_topic（单一真相源）
-        if item_state.n_item != init_n_item and ct is not None:
+        # 学生侧：难度冻结为 0 只折 theta——行上 risk/mastery 由读侧用 course_topic
+        # 的全班 b 派生（proactive._read_mastery 同口径），单一真相源不在行上另存
+        state = fold_observations(all_obs, freeze_item=True)
+        # 题目侧（全班共享）：写回 course_topic（单一真相源）
+        if item_state.n_item > 0 and ct is not None:
             from sqlalchemy import update
 
             await db.execute(
@@ -457,14 +474,17 @@ async def _write_mastery_observations(
 async def _judge_and_record(
     db, user_id: str, course_id: str, segments: list, topic_ids_per_ep: list,
     topics_meta: dict[str, tuple[str, str]], *,
-    _hits_map: dict[str, list], _eps_all: list,
+    _hits_map: dict[str, list], _eps_all: list, budget_left: list[int],
 ) -> list[str]:
-    """按主题段判定 + 写观测 + 折叠。返回判定不可用（超时/失败/超上限）段的
+    """按主题段判定 + 写观测 + 折叠。返回判定不可用（超时/失败/超上限/写库失败）段的
     episode id 列表——这些 episode 留 pending 等下轮。
 
     topics_meta: {topic_id: (label, definition)}，judge 的闭集输入。
     _hits_map: {episode_id: [topic_id, ...]}，段内可判主题 = 段内各 ep 命中并集（≤3）。
     _eps_all: 该 session 全部 episode（topic_ids_per_ep 的索引基准）。
+    budget_left: 长度 1 的箱子，装「本次 consolidate 还可判定的段数」——预算在
+    **整次巩固**内共享（跨 session），防 200 条 episode × N session 放大到 N×20 次
+    LLM 拖爆 ARQ。函数内原地扣减。
 
     并发模型：LLM 判定（纯 IO）用信号量并发；DB 写回**串行**（write_lock）——SQLAlchemy
     AsyncSession 非并发安全，gather 共享同一 session 会撞事务状态机。写回本身轻
@@ -472,13 +492,15 @@ async def _judge_and_record(
     """
     from core.memory.judge import judge_segment
 
-    overflow = [ep.id for seg in segments[_JUDGE_SEGMENTS_PER_RUN:] for ep in seg]
+    n_budget = min(len(segments), max(0, budget_left[0]))
+    budget_left[0] -= n_budget
+    overflow = [ep.id for seg in segments[n_budget:] for ep in seg]
     if overflow:
         logger.info(
             "[consolidate] judge budget overflow: %d segments deferred",
-            len(segments) - _JUDGE_SEGMENTS_PER_RUN,
+            len(segments) - n_budget,
         )
-    budget = segments[:_JUDGE_SEGMENTS_PER_RUN]
+    budget = segments[:n_budget]
 
     sem = asyncio.Semaphore(_JUDGE_CONCURRENCY)
     write_lock = asyncio.Lock()
@@ -486,6 +508,9 @@ async def _judge_and_record(
     first_idx = {id(ep): i for i, ep in enumerate(_eps_all)}
 
     async def _one(seg) -> None:
+        # 段内 episode id 先快照：rollback 会 expire ORM 实例，之后再读 ep.id 触发
+        # 同步刷新 IO，在 async 上下文抛 MissingGreenlet（连带 guard/外层连环崩）。
+        seg_ids = [ep.id for ep in seg]
         async with sem:
             main_topic = topic_ids_per_ep[first_idx[id(seg[0])]]
             if main_topic is None:
@@ -505,14 +530,14 @@ async def _judge_and_record(
                 )
             except asyncio.TimeoutError:
                 logger.warning("[consolidate] judge timeout, segment deferred")
-                deferred_ids.extend(ep.id for ep in seg)
+                deferred_ids.extend(seg_ids)
                 return
             except Exception as exc:
                 logger.warning("[consolidate] judge failed: %s", exc)
-                deferred_ids.extend(ep.id for ep in seg)
+                deferred_ids.extend(seg_ids)
                 return
             if result is None:
-                deferred_ids.extend(ep.id for ep in seg)
+                deferred_ids.extend(seg_ids)
                 return
             async with write_lock:
                 try:
@@ -520,8 +545,12 @@ async def _judge_and_record(
                         db, user_id, course_id, result.judgements, list(seg)
                     )
                 except Exception as exc:
+                    # 写库失败必须延期：观测没落库就标 done，这段对话的掌握度证据
+                    # 永久丢失（episode 不再被巩固领走）。回 pending 等下轮重判重写。
                     logger.warning("[consolidate] mastery write failed: %s", exc)
                     await db.rollback()
+                    deferred_ids.extend(seg_ids)
+                    return
                 if result.error_patterns:
                     try:
                         from core.memory import graph_memory
@@ -537,11 +566,12 @@ async def _judge_and_record(
 
     # 段级 try 兜底：单段意外异常不拖垮整批（其余段照常判定/写回）
     async def _guard(seg) -> None:
+        seg_ids = [ep.id for ep in seg]  # 同上：rollback/expire 后 ep.id 不可再读
         try:
             await _one(seg)
         except Exception as exc:
             logger.warning("[consolidate] segment judge crashed: %s", exc)
-            deferred_ids.extend(ep.id for ep in seg)
+            deferred_ids.extend(seg_ids)
 
     await asyncio.gather(*(_guard(seg) for seg in budget))
     return sorted(set(deferred_ids))
@@ -562,10 +592,17 @@ async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
     done_ids: list[str] = []
     deferred_ids: set[str] = set()
     promoted = 0
+    # 判定段预算：整次 consolidate 共享 _JUDGE_SEGMENTS_PER_RUN（非 per-session）——
+    # 200 条 episode × 多 session 若每 session 各判 20 段，LLM 次数随 session 数
+    # 线性放大，正是该预算要防的 ARQ 任务超时。超预算的段留 pending 等下轮。
+    judge_budget = [_JUDGE_SEGMENTS_PER_RUN]
 
     from core.memory.topic_match import match_topics
 
     for session_id, eps in group_episodes_by_session(claimed).items():
+        # id 先快照：rollback 会 expire ORM 实例，之后再读 e.id 触发同步刷新 IO 抛
+        # MissingGreenlet（async 上下文不能同步 lazy load）
+        eps_ids = [e.id for e in eps]
         # 0. 逐 episode 闭集命中（每轮 match_topics 只算一次，判定与双槽写入共用）
         hits_per_ep: list = []
         for ep in eps:
@@ -625,19 +662,23 @@ async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
             if topics_meta:
                 deferred = await _judge_and_record(
                     db, user_id, course_id, segments, topic_ids_per_ep, topics_meta,
-                    _hits_map=hits_by_ep, _eps_all=eps,
+                    _hits_map=hits_by_ep, _eps_all=eps, budget_left=judge_budget,
                 )
                 deferred_ids.update(deferred)
         except Exception as exc:
+            # 整段 judge 路径抛错（切段/查 meta）→ 该 session 全部 episode 回 pending：
+            # 标 done 会让这段对话的掌握度观测永久丢失（episode 不再被巩固领走）。
+            # mem0 可能已写（幂等，重放不产生重复事实），掌握度下轮补上即可。
             logger.warning(
                 "[consolidate] judge path failed user=%s session=%s error=%s",
                 user_id, session_id, exc,
             )
+            deferred_ids.update(eps_ids)
             try:
                 await db.rollback()
             except Exception:
                 pass
-        done_ids.extend(e.id for e in eps)
+        done_ids.extend(eps_ids)
         promoted += len(eps)
 
     # 判定不可用的 episode 回 pending（下轮重判）；其余 done

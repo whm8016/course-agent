@@ -28,11 +28,10 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 # ---- 门控参数（可调，代价扫描在 eval-c 跑）----
-from core.memory.course_topic_store import TOPIC_MATCH_THRESHOLD as UNKNOWN_THRESHOLD  # noqa: F401
-# ↑ 阈值单源：读侧 unknown 判定与写侧 match_topics 命中过滤共用 course_topic_store
-#   的 TOPIC_MATCH_THRESHOLD，避免两处常量漂移出不同口径。
-#   注意：写侧判定召回的阈值放宽（plan §4a-2，只作用写侧）不得动这里——读侧降阈
-#   会把无关问句错认成主题，直接放大门控误报。两常量必须分开。
+# 读侧 unknown 判定阈值（余弦）：独立常量，**不得**与写侧 match_topics 的
+# TOPIC_MATCH_THRESHOLD 合并单源——写侧判定召回的阈值放宽（plan §4a-2，只作用写侧）
+# 时，读侧若跟着降阈会把无关问句错认成主题，直接放大门控误报。两常量必须分开。
+UNKNOWN_THRESHOLD = 0.55
 
 # C1 入闸判据（plan §3e）：logit 空间 theta - b_topic <= WEAK_MARGIN。
 # 语义锚点 =「同一主题至少 2 次判 poor」（Elo 折叠下 1 次 poor ≈ -0.30、2 次 ≈ -0.54，
@@ -80,7 +79,7 @@ def decide_stitch(
     error_repeated: set[str],
     *,
     confidence: float = 1.0,
-    severity: float = 1.0,
+    severity_map: dict[str, float] | None = None,
     now: float | None = None,
     c_fa: float = DEFAULT_C_FA,
     c_fn: float = DEFAULT_C_FN,
@@ -95,7 +94,9 @@ def decide_stitch(
             门控唯一学情数据源。logit = theta - b_topic（折叠状态，读侧不再收缩）。
         error_repeated: 反复出错的 topic_id 集（mastery_observation 同主题 poor 计数 ≥2 派生）。
         confidence: 问句→主题匹配的置信度 c ∈ [0,1]（sim 经 (sim-θ)/(1-θ) 归一；Ambiguity 因子）。
-        severity: 证据主题的 course_topic.safety_weight（Task Risk 因子；默认 1.0 = 不加权一致）。
+        severity_map: {topic_id: safety_weight}，Task Risk 因子按**证据主题**（真正预警的
+            前置/复发主题）取——不是问句命中的主题（学生问基尔霍夫、薄弱的是通电操作
+            前置时，该加权的是后者）。缺省 1.0 = 不加权一致。
         now: cooldown 判定的当前时间戳（调用方传入，保持纯函数可单测；None=用 time.time）。
         冷却时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带，见 _read_mastery）。
         weak_margin: C1 入闸的 logit 边际（plan §3e，见模块头 WEAK_MARGIN 注释）。
@@ -163,9 +164,11 @@ def decide_stitch(
             if (now_t - (ls or 0)) < COOLDOWN_HOURS * 3600:
                 return StitchBrief(False, None, "cooldown", p_need, 0.0)
 
-    # 6. VoI 三档：value = p_need·severity·c（Task Risk × Ambiguity），NetVoI 最大者胜
+    # 6. VoI 三档：value = p_need·severity·c（Task Risk × Ambiguity），NetVoI 最大者胜。
+    #    severity 按**证据主题**取（预警指向的薄弱前置/复发主题），非问句命中主题。
     c = min(1.0, max(0.0, confidence))
-    value = p_need * max(0.0, severity) * c
+    sev = 1.0 if severity_map is None else max(0.0, severity_map.get(evidence, 1.0))
+    value = p_need * sev * c
     net_full = 1.0 * value - L_FULL
     net_light = V_LIGHT_COEF * value - L_LIGHT
     if net_full <= 0 and net_light <= 0:
@@ -270,11 +273,14 @@ async def stitch_for_turn(
     mastery_map = await _read_mastery(user_id, course_id, db, topic_map)
     error_repeated = await _read_error_repeated(user_id, course_id, db, topic_map)
 
-    # 5. 决策（VoI：confidence 来自最近邻 sim，severity 来自证据主题行）
-    severity = await _topic_severity(matched_topic, course_id, db)
+    # 5. 决策（VoI：confidence 来自最近邻 sim，severity 按证据主题取——闭包+matched
+    #    全体候选的 safety_weight 一次查齐传入，decide_stitch 内按 evidence 选取）
+    severity_map = await _severity_map(
+        {matched_topic} | closure | set(error_repeated), course_id, db
+    )
     brief = decide_stitch(
         matched_topic, closure, mastery_map, error_repeated,
-        confidence=confidence, severity=severity,
+        confidence=confidence, severity_map=severity_map,
     )
 
     # 6. 应拼则填简报文本（frozen dataclass 用 replace，免手工抄字段）+ 回写 cooldown 戳
@@ -293,23 +299,27 @@ async def stitch_for_turn(
     return brief
 
 
-async def _topic_severity(topic_id: str, course_id: str, db) -> float:
-    """证据主题的 course_topic.safety_weight（Task Risk 因子）。默认 1.0（=不加权一致）。
+async def _severity_map(topic_ids: set[str], course_id: str, db) -> dict[str, float]:
+    """候选主题的 course_topic.safety_weight 批量读（Task Risk 因子，按证据主题取）。
 
     列原名 severity，与 error_patterns.severity（错误严重度）撞义已改名 safety_weight。
+    一次查齐整组候选，免逐主题 round-trip；缺行按默认 1.0（=不加权一致）。
     """
     from core.db.database import CourseTopic
     from sqlalchemy import select
 
-    val = (
+    tids = [t for t in topic_ids if t]
+    if not tids:
+        return {}
+    rows = (
         await db.execute(
-            select(CourseTopic.safety_weight).where(
+            select(CourseTopic.topic_id, CourseTopic.safety_weight).where(
                 CourseTopic.course_id == course_id,
-                CourseTopic.topic_id == topic_id,
+                CourseTopic.topic_id.in_(tids),
             )
         )
-    ).scalar()
-    return float(val) if val else 1.0
+    ).all()
+    return {t: float(w or 1.0) for t, w in rows}
 
 
 async def _mark_stitched(db, user_id: str, course_id: str, topic_id: str) -> None:

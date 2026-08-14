@@ -71,6 +71,49 @@ async def test_quiz_observation_idempotent(db):
     assert n == 1
 
 
+async def test_quiz_second_answer_no_double_count(db):
+    """同一学生第二次答题（另一题）：b_topic 不得把第一条 quiz 观测重复折进去。
+
+    旧 bug：item_state 以库中 difficulty_b 为起点再重放该学生全部 quiz 历史——
+    第二次写观测时第一条被再折一次（b 越折越难、n_item 虚高）。现在全班 quiz
+    从零整体重折（幂等），每题只计一次。
+    """
+    from core.memory.mastery_state import fold_observations
+
+    await _seed()
+    from core.db.database import AsyncSessionLocal, CourseTopic, MasteryObservation
+    from core.memory.quiz_observe import record_quiz_observation
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as s:
+        with patch("core.memory.topic_match.match_topics",
+                   AsyncMock(return_value=[("ohm", 0.88)])):
+            await record_quiz_observation(s, "u1", "c1", "q1", "欧姆定律的公式", False)
+        await s.commit()
+    async with AsyncSessionLocal() as s:
+        ct1 = (await s.execute(select(CourseTopic))).scalars().first()
+
+    async with AsyncSessionLocal() as s:
+        with patch("core.memory.topic_match.match_topics",
+                   AsyncMock(return_value=[("ohm", 0.88)])):
+            await record_quiz_observation(s, "u1", "c1", "q2", "欧姆定律单位换算", True)
+        await s.commit()
+    async with AsyncSessionLocal() as s:
+        ct2 = (await s.execute(select(CourseTopic))).scalars().first()
+        obs = (await s.execute(select(MasteryObservation))).scalars().all()
+
+    # 期望终态 = 两条观测（q1 poor, q2 good）从零整体折一次
+    expect = fold_observations([
+        {"created_at": o.created_at, "outcome": o.outcome, "weight": o.weight, "source": o.source}
+        for o in obs
+    ])
+    assert ct2.n_item == expect.n_item == 2
+    assert abs(ct2.difficulty_b - expect.b_topic) < 1e-6
+    # 回归锚：旧实现会得到 n_item=3（1 起点值 + 2 重放）
+    assert ct1.n_item == 1
+    assert ct2.difficulty_b < ct1.difficulty_b  # 答对把难度拉回来一点
+
+
 async def test_quiz_observation_no_topic_no_write(db):
     """题面映射不到主题 → 不写（常态，非错误）。"""
     await _seed()

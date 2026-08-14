@@ -100,12 +100,32 @@ def test_two_poor_old_observation_silent_when_just_seen():
 
 
 def test_severity_amplifies():
-    """severity=2.0（教师标注安全关键）：value 翻倍升档。"""
+    """severity_map 证据主题标 2.0（安全关键）：value 翻倍升档。"""
     m = _folded_map(["poor"] * 3)  # risk ≈ 0.66
     base = decide_stitch("kcl", _PREREQ, m, set(), confidence=0.5)
-    amp = decide_stitch("kcl", _PREREQ, m, set(), confidence=0.5, severity=2.0)
+    amp = decide_stitch(
+        "kcl", _PREREQ, m, set(), confidence=0.5, severity_map={"ohm": 2.0}
+    )
     assert amp.level != "silent"
     assert _rank(amp.level) >= _rank(base.level)
+
+
+def test_severity_uses_evidence_topic_not_matched():
+    """severity 必须按证据主题（ohm 前置）取，不是问句命中的主题（kcl）。
+
+    旧 bug：severity 单值由调用方按 matched_topic 查——kcl 标再高也传不到真正
+    预警的 ohm 缺口上；ohm 标高却被 kcl 的默认值抵掉。
+    """
+    m = _folded_map(["poor"] * 3)
+    # 只有 matched(kcl) 标高 → 证据(ohm)默认 1.0，不应放大
+    no_amp = decide_stitch(
+        "kcl", _PREREQ, m, set(), confidence=0.5, severity_map={"kcl": 2.0}
+    )
+    # 证据(ohm)标高 → 放大
+    amp = decide_stitch(
+        "kcl", _PREREQ, m, set(), confidence=0.5, severity_map={"ohm": 2.0}
+    )
+    assert _rank(amp.level) > _rank(no_amp.level)
 
 
 def _rank(level: str) -> int:

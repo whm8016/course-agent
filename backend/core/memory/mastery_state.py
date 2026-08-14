@@ -97,17 +97,23 @@ def elo_update(
 
 
 def fold_observations(
-    obs_list: list[dict], init: FoldState | None = None
+    obs_list: list[dict], init: FoldState | None = None, *, freeze_item: bool = False
 ) -> FoldState:
     """全量日志 → 终态。obs 每条 {created_at, outcome, weight, source}。
 
     入口显式按 created_at 升序排（Elo 顺序相关，近期证据权重更大是预期行为）；
     调用方吃全量日志即可，迟到观测整体重折天然幂等。
+
+    freeze_item=True 时题目侧冻结（quiz 观测只动 theta 不动 b_topic/n_item）——
+    供「b 已由全班观测单独折出终值、学生侧在固定难度下折能力」的二次折叠用
+    （consolidation._write_mastery_observations 的两段式口径）。
     """
     state = init or FoldState()
+    src = "" if freeze_item else None  # None = 不冻结；"" != "quiz" 恒成立
     for obs in sorted(obs_list, key=lambda o: o["created_at"]):
         state = elo_update(
-            state, float(obs["outcome"]), float(obs.get("weight", 1.0)), str(obs.get("source", ""))
+            state, float(obs["outcome"]), float(obs.get("weight", 1.0)),
+            src if src is not None else str(obs.get("source", "")),
         )
     return state
 
