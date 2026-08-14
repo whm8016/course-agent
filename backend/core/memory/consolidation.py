@@ -188,14 +188,9 @@ async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
     await _mark(db, done_ids, "done", consolidated=True)
     await _mark(db, retry_ids, "pending")  # 回退重试
 
-    # procedural（Phase 5）：掌握度累计足够时生成 personal SKILL.md 草稿（不自动 always，
-    # 标 auto_generated 待人工确认）。失败非致命（mastery 已落盘）。
-    try:
-        from core.memory.procedural import maybe_generate_procedural
-
-        await maybe_generate_procedural(db, user_id, course_id)
-    except Exception as exc:
-        logger.warning("[consolidate] procedural draft failed user=%s: %s", user_id, exc)
+    # procedural 草稿生成已从主路径摘除：学情拼接门控方案下 procedural 不再作为贡献，
+    # 故 consolidate 不再调 maybe_generate_procedural（模块 procedural.py 保留，避免大删
+    # 前端技能体系）。如需恢复，在此处重新 ``await maybe_generate_procedural(db, user_id, course_id)``。
 
     logger.info(
         "[consolidate] user=%s course=%s claimed=%d promoted=%d retry=%d",

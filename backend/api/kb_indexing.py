@@ -14,11 +14,11 @@ import time
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.courses import invalidate_courses_cache
-from core.db.database import KBFile, KbBuild, KnowledgeBase
+from core.db.database import CourseTopic, CourseTopicEdge, KBFile, KbBuild, KnowledgeBase
 
 logger = logging.getLogger(__name__)
 
@@ -120,4 +120,95 @@ async def trigger_kb_indexing(
         "backend": backend,
         "file_count": len(file_paths),
         "resume_from_chunk": resume_from,
+    }
+
+
+async def trigger_topic_graph_build(
+    db: AsyncSession,
+    kb: KnowledgeBase,
+    course_id: str,
+    force: bool = False,
+) -> dict:
+    """触发课程主题图构建（入队 ARQ build_course_topic_graph）。
+
+    kb 由调用方按各自权限校验后传入（admin 用 _get_kb_or_404，teacher 用 _get_owned_kb）。
+    三步：① 校验索引已 ready（有 chunks 的可用后端）——主题图依赖讲义切块审计 latest.json，
+    未索引则抽取无原料；② skip-if-exists（表已有主题且非 force → 不入队，省 LLM、避锁竞争）；
+    ③ 取 ARQ pool 入队（None → 503，与 trigger_kb_indexing 一致）。
+
+    ready 口径与 ``aggregate_build_status`` / 检索层 _get_ready_backends 同——任一后端
+    ``status=="ready" and chunks_total>0``，防空索引被误判就绪。
+    """
+    builds = (
+        await db.execute(select(KbBuild).where(KbBuild.kb_id == kb.id))
+    ).scalars().all()
+    if not any(b.status == "ready" and (b.chunks_total or 0) > 0 for b in builds):
+        raise HTTPException(
+            status_code=409,
+            detail="知识库尚未索引完成，请先建立索引（生成主题图依赖讲义切块审计）",
+        )
+
+    existing = (
+        await db.execute(
+            select(func.count()).select_from(CourseTopic).where(CourseTopic.course_id == course_id)
+        )
+    ).scalar_one()
+    if existing and not force:
+        return {
+            "status": "already_exists",
+            "course_id": course_id,
+            "topics": int(existing),
+            "message": "主题图已存在，force=true 可重建",
+        }
+
+    from core.arq_pool import get_arq_pool
+    arq_pool = await get_arq_pool()
+    if arq_pool is None:
+        raise HTTPException(status_code=503, detail="任务队列（ARQ/Redis）不可用，请稍后重试")
+    await arq_pool.enqueue_job("build_course_topic_graph", course_id, force)
+    logger.info("ARQ 主题图任务已入队 course_id=%s force=%s", course_id, force)
+    return {
+        "message": "主题图构建任务已启动",
+        "course_id": course_id,
+        "force": force,
+    }
+
+
+async def get_topic_graph_payload(db: AsyncSession, course_id: str) -> dict:
+    """读取课程主题图（主题/边列表）供 teacher/admin GET 端点核对。投影口径与 export_json 一致。
+
+    权限校验由各端点自行完成（teacher 用 _get_owned_kb、admin 用 _get_kb_or_404）后调用本函数，
+    故查询逻辑在此单一真相源，避免两端各写一份漂移。
+    """
+    topics = [
+        {
+            "topic_id": r.topic_id, "label": r.label, "definition": r.definition,
+            "source_section": r.source_section, "order_idx": r.order_idx,
+            "verified_by": r.verified_by,
+        }
+        for r in (
+            await db.execute(
+                select(CourseTopic)
+                .where(CourseTopic.course_id == course_id)
+                .order_by(CourseTopic.order_idx)
+            )
+        ).scalars()
+    ]
+    edges = [
+        {
+            "src": r.src_topic_id, "dst": r.dst_topic_id, "relation": r.relation,
+            "confidence": r.confidence,
+        }
+        for r in (
+            await db.execute(
+                select(CourseTopicEdge).where(CourseTopicEdge.course_id == course_id)
+            )
+        ).scalars()
+    ]
+    return {
+        "course_id": course_id,
+        "topic_count": len(topics),
+        "edge_count": len(edges),
+        "topics": topics,
+        "edges": edges,
     }

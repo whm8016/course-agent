@@ -15,4 +15,5 @@ GATES: dict[str, float] = {
     "knowledge_update": 1.0,  # 掌握度随观测正确演进（改善/退步）
     "abstention": 1.0,        # 无数据/低置信时不得编造薄弱点
     "decay": 1.0,             # 旧观测软衰减（排序靠后，不物理删除）
+    "stitch_gate": 1.0,       # 拼接门控 When 决策正确（正例拼/负例不拼，decide_stitch 纯函数）
 }

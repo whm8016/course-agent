@@ -164,6 +164,58 @@ async def run_indexing(
         await release_index_dlock(lock, renew)
 
 
+async def build_course_topic_graph(ctx, course_id: str, force: bool = False) -> None:
+    """后台从课程讲义切块抽主题图（对应 trigger_topic_graph_build 入队的 ARQ 任务）。
+
+    分布式锁用 backend="topic_graph"，与索引锁 key 独立互不干扰（同一课程可一边建索引一边
+    抽主题图）。耗时大头是 LLM 调用（11 章预计 20min+），故必须走后台而非 API 内联。
+    build_topic_graph 内部 skip-if-exists / force 重建 / 强制算 embedding。
+    """
+    import time
+
+    from core.observability import bind_context, log_flow
+    from core.rag.lightrag import acquire_index_dlock, release_index_dlock
+
+    # 独立锁：backend=topic_graph 与 lightrag/pgvector 索引锁 key 不同，互不阻塞
+    lock, renew = await acquire_index_dlock(course_id, "topic_graph")
+    if lock is None:
+        logger.warning(
+            "课程 %s 的主题图构建任务已在运行（分布式锁），跳过本次 job_id=%s",
+            course_id, ctx.get("job_id"),
+        )
+        return
+    try:
+        job_id = str(ctx.get("job_id", course_id))
+        bind_context(job_id=job_id, course_id=course_id)
+        t0 = time.perf_counter()
+        log_flow("worker.topic_graph.start", job_id=job_id, course_id=course_id, force=force)
+        try:
+            from core.db.database import AsyncSessionLocal
+            from core.memory.course_topic_builder import build_topic_graph
+
+            async with AsyncSessionLocal() as db:
+                result = await build_topic_graph(course_id, db, force=force)
+            _el = int((time.perf_counter() - t0) * 1000)
+            log_flow(
+                "worker.topic_graph.complete", job_id=job_id, course_id=course_id,
+                status=result.get("status"), topics=result.get("topics"), elapsed_ms=_el,
+            )
+            from core.observability.metrics import observe_worker_job
+            observe_worker_job("topic_graph", "ok", _el)
+        except Exception as exc:
+            _el = int((time.perf_counter() - t0) * 1000)
+            log_flow(
+                "worker.topic_graph.error", logger=logger, level=logging.ERROR,
+                job_id=job_id, course_id=course_id, error=str(exc), elapsed_ms=_el,
+            )
+            from core.observability.metrics import observe_worker_job
+            observe_worker_job("topic_graph", "error", _el)
+            await _push_deadletter_if_terminal(ctx, function="build_course_topic_graph", error=exc)
+            raise
+    finally:
+        await release_index_dlock(lock, renew)
+
+
 # ---------------------------------------------------------------------------
 # 任务 3 & 4：Mem0 批量刷新（Producer-Consumer 模式）
 # ---------------------------------------------------------------------------
@@ -472,7 +524,7 @@ class WorkerSettings:
         database=int((_parsed.path or "/0").lstrip("/") or 0),
     )
 
-    functions = [run_indexing, flush_all_pending_job, consolidate_memory]
+    functions = [run_indexing, flush_all_pending_job, consolidate_memory, build_course_topic_graph]
     max_jobs = 10
     job_timeout = 36000   # 单个任务最长 10 小时
     keep_result = 300    # 任务结果保留 5 分钟

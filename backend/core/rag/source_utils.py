@@ -15,6 +15,9 @@ import re
 _CHUNK_SUFFIX_MARKER = "::chunk-"
 # 与 ingestion._build_source_prefix 成对：构建端拼 `【...】\n`，此处反操作剥掉。
 _SOURCE_PREFIX_RE = re.compile(r"^【[^】]*】\n")
+# 前缀内层字段切分：内层形如「章节: x | 第3页」或退化「来源: y.pdf」，取首个章节/来源值。
+# 「章节:」优先（DOCX/PPTX），无则退化取「来源:」文件名（PDF/TXT/MD）作分组键。
+_SECTION_FIELD_RE = re.compile(r"(?:章节|来源):\s*(?P<val>[^|]*)")
 
 
 def strip_source_prefix(chunk: str) -> str:
@@ -23,6 +26,26 @@ def strip_source_prefix(chunk: str) -> str:
     无前缀时原样返回。前缀格式与 ``ingestion._build_source_prefix`` 成对维护，单一真相源。
     """
     return _SOURCE_PREFIX_RE.sub("", chunk)
+
+
+def parse_source_prefix(chunk: str) -> tuple[str, str]:
+    """解析摄入时加的 ``【章节: x | 第3页】\\n`` 前缀，返回 ``(section, body)``。
+
+    与 ``ingestion._build_source_prefix`` 成对——它是构建端（拼前缀），本函数是解析端（拆前缀）。
+    section 取首个字段值：有 ``章节:`` 取章节名；无章节退化取 ``来源:`` 文件名作分组键。
+    body 等价于 ``strip_source_prefix``（剥前缀还原纯正文）。无前缀返回 ``("", 原文)``。
+
+    供 ``course_topic_builder.load_course_chunks`` 把审计 JSON 的纯字符串 chunk 拆成
+    ``{text, section, order_idx}``——抽取函数按 section 聚合分章抽主题。
+    """
+    m = _SOURCE_PREFIX_RE.match(chunk)
+    if m is None:
+        return "", chunk
+    body = chunk[m.end():]
+    # 内层去掉首「【」与尾「】\n」（_SOURCE_PREFIX_RE 结构固定）
+    inner = m.group(0)[1:-2]
+    fm = _SECTION_FIELD_RE.search(inner)
+    return (fm.group("val").strip() if fm else ""), body
 
 
 def strip_chunk_suffix(source: str) -> str:
