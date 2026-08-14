@@ -550,6 +550,12 @@ async def _judge_and_record(
                         best_sim[t] = sim
             seg_topics = sorted(best_sim, key=lambda t: -best_sim[t])[:3] or [main_topic]
             if not all(t in topics_meta for t in seg_topics):
+                # 闭集 meta 缺失（match_topics 命中但 course_topic 行被删等）→ defer
+                # 不静默 done：旧实现直接 return，该段随后被标 done，观测永久丢
+                logger.warning(
+                    "[consolidate] topics_meta missing for %s, segment deferred", seg_topics
+                )
+                deferred_ids.extend(seg_ids)
                 return
             try:
                 result = await asyncio.wait_for(

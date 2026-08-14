@@ -13,6 +13,8 @@
 """
 import time
 
+import pytest
+
 from core.memory.mastery_state import W_JUDGE, fold_observations
 from core.memory.proactive import (
     WEAK_MARGIN,
@@ -186,6 +188,18 @@ def test_low_confidence_can_silence():
     m = _folded_map(["poor"] * 3)
     brief = decide_stitch("kcl", _PREREQ, m, set(), confidence=0.2)
     assert brief.level == "silent"
+
+
+def test_confidence_floor_keeps_borderline_alive():
+    """P1：stitch_for_turn 的 confidence 归一带 0.2 下界——sim 刚过 0.55 的边界命中
+    不再被线性归一压成 c=0（value=0 必沉默，0.55-0.60 这段召回等于白做）。
+    边界（norm=0）→ c=0.2；笃定（norm=1）→ c=1.0。
+    """
+    # 直接测归一式（stitch_for_turn 是 DB 包装，归一逻辑在这里内联）
+    theta = 0.55
+    for sim, expect in ((0.55, 0.2), (0.775, 0.6), (1.0, 1.0)):
+        norm = min(1.0, max(0.0, (sim - theta) / (1.0 - theta)))
+        assert 0.2 + 0.8 * norm == pytest.approx(expect)
 
 
 # ── cooldown ─────────────────────────────────────────────────────────────

@@ -30,12 +30,14 @@ async def record_quiz_observation(
 
     if not course_id or not (question_text or "").strip():
         return False
-    # 幂等：同一 (user, question) 已有 quiz 观测则跳过（重答改注不重复计）
+    # 幂等：同一 (user, course, question) 已有 quiz 观测则跳过（重答改注不重复计）。
+    # 补 course_id——跨课程同题号会被误判重复（观测是 course 隔离的）
     dup = (
         await db.execute(
             select(MasteryObservation.id)
             .where(
                 MasteryObservation.user_id == user_id,
+                MasteryObservation.course_id == course_id,
                 MasteryObservation.source == "quiz",
                 MasteryObservation.question_id == question_id,
             )

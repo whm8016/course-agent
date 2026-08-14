@@ -63,7 +63,11 @@ def _kp_id_from(kp: dict) -> str:
 async def append_mastery(
     db, user_id: str, course_id: str, knowledge_points: list, episode_id: str
 ) -> int:
-    """从抽取的知识点追加掌握度观测（不覆盖历史）。返回写入的观测数。
+    """[DEPRECATED] 旧 hash 口径的掌握度写入。只剩 eval_memory 评测种子在用。
+
+    **勿再接入新调用方**：主路径是 mastery_observation 追加日志 + Elo 折叠
+    （consolidation._write_mastery_observations），本函数直接 blend 行值，
+    与闭集口径并存会污染 knowledge_mastery。评测侧也应逐步改走观测日志。
 
     支持两种抽取格式：
     - catalog(delta)：{entity_id, label, mastery_delta, risk_delta} → 累加 delta

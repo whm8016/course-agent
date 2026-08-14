@@ -276,9 +276,14 @@ async def stitch_for_turn(
     if hit is None:
         return StitchBrief(False, None, "unknown", 0.0, 1.0)
     matched_topic, matched_sim = hit
-    # confidence 归一：sim 刚过阈值 → 0（含糊，预警可能指错前置），sim→1 → 1（笃定）
+    # confidence 归一：sim 刚过阈值 → 下界 0.2（不是 0——边界命中被线性归一压成 0
+    # 会让 value=0 必沉默，0.55-0.60 这段召回等于白做），sim→1 → 1（笃定）
     theta = UNKNOWN_THRESHOLD
-    confidence = min(1.0, max(0.0, (matched_sim - theta) / (1.0 - theta))) if theta < 1 else 1.0
+    if theta < 1:
+        norm = min(1.0, max(0.0, (matched_sim - theta) / (1.0 - theta)))
+        confidence = 0.2 + 0.8 * norm
+    else:
+        confidence = 1.0
 
     # 2. 前置闭包 + label→topic_id 映射（各一次查询，下游复用免 N+1）
     closure = await get_prereq_predecessors(matched_topic, course_id, db)
