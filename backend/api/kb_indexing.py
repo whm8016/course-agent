@@ -184,7 +184,7 @@ async def get_topic_graph_payload(db: AsyncSession, course_id: str) -> dict:
         {
             "topic_id": r.topic_id, "label": r.label, "definition": r.definition,
             "source_section": r.source_section, "order_idx": r.order_idx,
-            "verified_by": r.verified_by,
+            "safety_weight": r.safety_weight,
         }
         for r in (
             await db.execute(

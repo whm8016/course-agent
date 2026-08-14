@@ -30,8 +30,8 @@ from core.db.cache import course_access_invalidate
 from core.db.limiter import limiter
 from core.codes import ensure_unique_join_code
 from core.db.database import (
-    CourseDailyRollup, CourseSchedule, Enrollment, Grade, KBFile, KnowledgeBase, Message,
-    NotebookEntry, Session, User, get_db,
+    CourseDailyRollup, CourseSchedule, CourseTopic, Enrollment, Grade, KBFile,
+    KnowledgeBase, Message, NotebookEntry, Session, User, get_db,
 )
 from core.memory.graph_memory import filter_graph_by_course
 from core.rag.ingestion import IndexingControl
@@ -252,6 +252,47 @@ async def get_topic_graph(
     """返回课程主题图（主题数、边数、主题/边列表），供教师核对与审计 verified_by。"""
     await _get_owned_kb(db, course_id, teacher)
     return await get_topic_graph_payload(db, course_id)
+
+
+class TopicSafetyBody(BaseModel):
+    """教师标注主题安全权重（VoI 门控 Task Risk 因子）。
+
+    0=永不因它预警（合法值，代码按 None 判默认而非 falsy）；1=不加权一致（默认）；
+    >1=安全关键（如通电操作标 3，漏报代价放大，证据选取与档位同口径加权）。
+    """
+    safety_weight: float = Field(..., ge=0.0, le=10.0)
+
+
+@router.patch("/courses/{course_id}/topic-graph/topics/{topic_id}/safety-weight")
+async def set_topic_safety_weight(
+    course_id: str,
+    topic_id: str,
+    body: TopicSafetyBody,
+    teacher: dict = Depends(get_current_teacher),
+    db: AsyncSession = Depends(get_db),
+):
+    """教师标注主题安全权重——safety_weight 唯一合法写入入口（P2）。
+
+    不补此入口则任务风险因子生产恒 1.0（空转）：建库脚本与 course_topic_builder
+    都不写该列，只有教师知道「通电操作漏报会损坏仪器」。门控按证据主题取值：
+    选证据 score=p_need·sev、value=p_need·sev·c 同口径生效。
+    """
+    await _get_owned_kb(db, course_id, teacher)
+    row = (await db.execute(
+        select(CourseTopic).where(
+            CourseTopic.course_id == course_id, CourseTopic.topic_id == topic_id
+        )
+    )).scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail=f"主题 '{topic_id}' 不存在")
+    old = row.safety_weight
+    row.safety_weight = body.safety_weight
+    await db.commit()
+    logger.info(
+        "教师标注主题安全权重 course=%s topic=%s %.2f→%.2f teacher=%s",
+        course_id, topic_id, old, body.safety_weight, teacher["id"],
+    )
+    return {"topic_id": topic_id, "safety_weight": body.safety_weight, "previous": old}
 
 
 # ── 学生管理（选课） ──────────────────────────────────────────────────────────
