@@ -144,15 +144,24 @@ def decide_stitch(
     p_need = 0.0
     evidence = None
     reason = ""
+    # 证据选取按 score = p_need·sev（与第 6 步 value 去掉 c 的口径一致），不能只比
+    # p_need——否则 sev 只能影响已选中证据的档位，p_need 略低但安全权重高的危险
+    # 前置（如通电操作）永远抢不过平淡的复发候选
+    def _sev(t: str) -> float:
+        return max(0.0, (severity_map or {}).get(t, 1.0))
+
+    score = 0.0
     if prereq_gaps:
-        top_tid, top = max(prereq_gaps, key=lambda x: _need_gap(x[1]))
+        top_tid, top = max(prereq_gaps, key=lambda x: _need_gap(x[1]) * _sev(x[0]))
         p_need, evidence, reason = _need_gap(top), top_tid, "prereq_gap"
+        score = p_need * _sev(top_tid)
     if is_recurrence:
         rec = max(
             RECURRENCE_PNEED_FLOOR,
             mastery_map.get(matched_topic, {}).get("risk_used", 0),
         )
-        if rec > p_need:
+        rec_score = rec * _sev(matched_topic)
+        if rec_score > score:
             p_need, evidence, reason = rec, matched_topic, "recurrence"
 
     # 5. cooldown：证据主题 24h 内实际拼过 → 直接沉默（防过载；AIED N=81 依据）。
@@ -318,7 +327,8 @@ async def _severity_map(topic_ids: set[str], course_id: str, db) -> dict[str, fl
             )
         )
     ).all()
-    return {t: float(w or 1.0) for t, w in rows}
+    # w=0 是合法教师标注（「永不因它预警」），不能被 `w or 1.0` 洗成默认 1.0
+    return {t: float(w) if w is not None else 1.0 for t, w in rows}
 
 
 async def _mark_stitched(db, user_id: str, course_id: str, topic_id: str) -> None:

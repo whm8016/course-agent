@@ -128,6 +128,52 @@ def test_severity_uses_evidence_topic_not_matched():
     assert _rank(amp.level) > _rank(no_amp.level)
 
 
+def test_severity_selects_dangerous_evidence():
+    """选证据要看 sev：p_need 略低但安全权重高的危险前置，要抢得过 p_need 略高的
+    平淡复发。旧 bug：先按 p_need 最大锁定 evidence，sev 只影响已选中那条的档位——
+    通电 sev=3 的前置永远进不了 value。
+    """
+    m = _folded_map(["poor"] * 3)          # ohm: risk≈0.678
+    m["ohm"]["p_forget"] = 0.96            # p_need ≈ 0.65
+    # 复发臂 p_need = max(0.7, ·) = 0.70 > 0.65，但 sev=1；
+    # 前置臂 score = 0.65·3 = 1.95 > 0.70 → 应选 ohm 前置
+    brief = decide_stitch(
+        "kcl", _PREREQ, m, {"kcl"}, severity_map={"ohm": 3.0, "kcl": 1.0}
+    )
+    assert brief.reason == "prereq_gap"
+    assert brief.evidence_topic == "ohm"
+
+
+def test_severity_zero_silences():
+    """sev=0（教师标「永不因它预警」）→ value=0 → below_value，不被默认 1.0 抵掉。"""
+    brief = decide_stitch(
+        "kcl", _PREREQ, _folded_map(["poor"] * 6), set(), severity_map={"ohm": 0.0}
+    )
+    assert brief.level == "silent"
+    assert brief.reason == "below_value"
+
+
+def test_severity_map_zero_weight_not_defaulted():
+    """_severity_map：DB 里 safety_weight=0 不能被 `w or 1.0` 洗成 1.0。"""
+    import asyncio
+
+    from core.memory.proactive import _severity_map
+
+    class _Res:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _DB:
+        async def execute(self, _q):
+            return _Res([("ohm", 0.0), ("kcl", 2.0)])
+
+    m = asyncio.run(_severity_map({"ohm", "kcl"}, "c1", _DB()))
+    assert m == {"ohm": 0.0, "kcl": 2.0}
+
+
 def _rank(level: str) -> int:
     return {"silent": 0, "light": 1, "full": 2}[level]
 
