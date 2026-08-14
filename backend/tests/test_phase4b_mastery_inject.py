@@ -63,10 +63,20 @@ async def test_build_layers_skips_mastery_without_user_or_course():
 
 
 async def test_build_layers_uses_preset_ctx_mastery():
-    """ctx.mastery_context 预置非空 → 用之，不查 DB。"""
-    ctx = UnifiedContext(user_id="u1", course_id="c1", mastery_context="[preset mastery]")
-    with patch("core.memory.mastery.get_mastery_context", new=AsyncMock()) as gm, \
+    """ctx.mastery_context 预置非空 → 用之；门控仍跑（供第一路 matched_topic 过滤），
+    但不覆盖预置值。"""
+    from core.memory.proactive import StitchBrief
+
+    ctx = UnifiedContext(
+        user_id="u1", course_id="c1", user_message="欧姆定律怎么用",
+        mastery_context="[preset mastery]",
+    )
+    silent = StitchBrief(False, None, "no_candidate", 0.0, 1.0, matched_topic="ohm")
+    with patch("core.memory.proactive.stitch_for_turn", new=AsyncMock(return_value=silent)) as sf, \
+         patch("core.memory.mem0_client.build_memory_context", new=AsyncMock(return_value="")) as bmc, \
          patch("core.llm.prompts.get_course_prompt", new=AsyncMock(return_value="")):
         layers = await build_common_context_layers(ctx)
     assert layers.mastery_context == "[preset mastery]"
-    gm.assert_not_called()
+    sf.assert_awaited_once()          # 门控仍跑（第一路主题过滤需要 matched_topic）
+    bmc.assert_awaited_once()         # 第一路检索在 pipeline 内，matched_topic 透传
+    assert bmc.await_args.kwargs.get("matched_topic") == "ohm"

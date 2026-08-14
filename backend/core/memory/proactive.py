@@ -61,6 +61,9 @@ class StitchBrief:
 
     level（VoI 三档）：silent=不拼 / light=一句轻提醒 / full=完整简报。
     should_stitch ≡ level != "silent"，pipeline_common 等调用方零改动。
+
+    matched_topic：问句命中的主题（unknown 时 None）。pipeline_common 用它做第一路
+    （memory_context）的主题过滤——两路分工：event 槽只注入本轮命中主题。
     """
 
     should_stitch: bool
@@ -70,6 +73,7 @@ class StitchBrief:
     tau: float
     text: str = ""                      # 应拼时填：拼入 prompt 的简报文本
     level: str = "silent"               # silent / light / full（PRISM 对照臂恒 full 或 silent）
+    matched_topic: str | None = None    # 问句命中的主题 id（第一路主题过滤用）
 
 
 def decide_stitch(
@@ -294,7 +298,8 @@ async def stitch_for_turn(
     )
 
     # 6. 应拼则填简报文本（frozen dataclass 用 replace，免手工抄字段）+ 回写 cooldown 戳
-    #    戳按行主键回写（legacy 行 kp_id 是旧 hash，按 topic_id 更新 0 命中冷却失效）
+    #    戳按行主键回写（legacy 行 kp_id 是旧 hash，按 topic_id 更新 0 命中冷却失效）。
+    #    matched_topic 一并带出（第一路主题过滤用，silent 时也带）。
     if brief.should_stitch and brief.evidence_topic:
         ev = mastery_map.get(brief.evidence_topic, {})
         label = ev.get("label") or brief.evidence_topic
@@ -307,8 +312,8 @@ async def stitch_for_turn(
                 f"## 学情提示（跨会话，未问亦带）\n该生在「{label}」偏薄弱"
                 f"（{ev.get('observation_count', '?')}次观测），本轮涉及其前置/相关内容，请留意诊断。"
             )
-        return replace(brief, text=text)
-    return brief
+        return replace(brief, text=text, matched_topic=matched_topic)
+    return replace(brief, matched_topic=matched_topic)
 
 
 async def _severity_map(topic_ids: set[str], course_id: str, db) -> dict[str, float]:

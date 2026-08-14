@@ -83,13 +83,13 @@ async def chat(
              mode=mode, session_id=session_id or "", question=message[:120],
              attachments=image_count, tools=body.tools, rag_mode=rag_mode)
 
-    # 读 Mem0 记忆（L3）：用当前用户消息做 query 语义检索相关记忆注入
-    from core.memory.mem0_client import build_memory_context as _mem_ctx_fn, has_any as _mem0_has_any
-    _mem_ctx = await _mem_ctx_fn(str(user["id"]), message, course_id=course_id)
+    # 读 Mem0 记忆（L3）：检索已下沉到 pipeline_common.build_common_context_layers
+    # （门控之后——限权与主题过滤才对聊天生效，预填非空会让 pipeline 跳过限权）。
+    # 此处只留可观测性探针：是否有记忆。
+    from core.memory.mem0_client import has_any as _mem0_has_any
     _has_memory = await _mem0_has_any(str(user["id"]), course_id=course_id)
     logger.info(
-        "[chat] memory context built user_id=%s has_memory=%s ctx_len=%d",
-        user["id"], _has_memory, len(_mem_ctx)
+        "[chat] memory probe user_id=%s has_memory=%s", user["id"], _has_memory
     )
 
     # 读 Session Summary（L2）：早期对话摘要。传 user_id 做归属过滤，防越权读他人摘要。
@@ -121,7 +121,7 @@ async def chat(
         attachments=attachments,
         mode=mode,
         enabled_tools=body.tools,
-        memory_context=_mem_ctx,  # L3
+        memory_context="",  # L3：检索下沉 pipeline_common（门控后限权），此处不预填
         session_summary=_session_summary,  # L2
         llm_profile_id=body.model_profile_id or "",
         rag_mode=rag_mode,
