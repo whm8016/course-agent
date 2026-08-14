@@ -294,10 +294,12 @@ async def stitch_for_turn(
     )
 
     # 6. 应拼则填简报文本（frozen dataclass 用 replace，免手工抄字段）+ 回写 cooldown 戳
+    #    戳按行主键回写（legacy 行 kp_id 是旧 hash，按 topic_id 更新 0 命中冷却失效）
     if brief.should_stitch and brief.evidence_topic:
         ev = mastery_map.get(brief.evidence_topic, {})
         label = ev.get("label") or brief.evidence_topic
-        await _mark_stitched(db, user_id, course_id, brief.evidence_topic)
+        if ev.get("row_id"):
+            await _mark_stitched(db, ev["row_id"])
         if brief.level == "light":
             text = f"（顺带一提：该生「{label}」此前偏薄弱，可留意）"
         else:
@@ -333,21 +335,27 @@ async def _severity_map(topic_ids: set[str], course_id: str, db) -> dict[str, fl
     return {t: float(w) if w is not None else 1.0 for t, w in rows}
 
 
-async def _mark_stitched(db, user_id: str, course_id: str, topic_id: str) -> None:
-    """实际拼出简报后回写 last_stitched_at（cooldown 的写入端）。失败非致命。"""
+async def _mark_stitched(db, row_id: str) -> None:
+    """实际拼出简报后回写 last_stitched_at（cooldown 的写入端）。失败非致命。
+
+    按行主键更新（非 kp_id==topic_id）——legacy 行 kp_id 是旧 hash，按 topic_id
+    条件 UPDATE 命中 0 行，last_stitched_at 永远为空，冷却失效。rowcount==0 时
+    warning 不静默（行可能被并发删除）。
+    """
     from core.db.database import KnowledgeMastery
     from sqlalchemy import update
 
     try:
-        await db.execute(
+        result = await db.execute(
             update(KnowledgeMastery)
-            .where(
-                KnowledgeMastery.user_id == user_id,
-                KnowledgeMastery.course_id == course_id,
-                KnowledgeMastery.kp_id == topic_id,
-            )
+            .where(KnowledgeMastery.id == row_id)
             .values(last_stitched_at=time.time())
         )
+        if result.rowcount != 1:
+            logger.warning(
+                "[stitch] last_stitched_at 回写命中 %d 行（期望 1）row_id=%s",
+                result.rowcount, row_id,
+            )
         await db.commit()
     except Exception as exc:
         logger.warning("[stitch] 回写 last_stitched_at 失败（非致命）：%s", exc)
@@ -449,6 +457,9 @@ async def _read_mastery(
         risk = 1.0 - sigmoid(logit)
         age_days = max(0.0, (now - (r.last_observed_at or now)) / 86400.0)
         out[tid] = {
+            # 行主键：legacy 行 kp_id 是旧 hash（靠 label 对齐进 map），_mark_stitched
+            # 按 kp_id==topic_id 更新会 0 命中 → 冷却永不生效（每轮重复拼）。回写走主键。
+            "row_id": r.id,
             "risk": round(risk, 4),
             "risk_used": round(risk, 4),  # 收缩已删（b_topic 即班级先验），保留键供门控口径不变
             "logit": round(logit, 4),

@@ -10,7 +10,6 @@ infer_signal / should_route_error_llm：关键词行为信号规则，已退出�
 from __future__ import annotations
 
 import logging
-import re
 
 logger = logging.getLogger(__name__)
 
@@ -129,25 +128,14 @@ async def match_topics(
 
 
 def extract_preferences(user_msg: str) -> list[str]:
-    """纯函数：抽偏好线索（persona 槽用）。返回命中的原始子句，无则空。
-
-    偏好是跨概念稳定事实（"我喜欢分步讲"），与主题无关，不参与 mastery 门控——
-    由 consolidate 写 mem0 persona 槽（阶段2）。
-    """
-    user = user_msg or ""
-    prefs: list[str] = []
-    for p in _PREFERENCE_PATTERNS:
-        if p in user:
-            # 取命中词所在句（中文句号/问号/感叹号/换行切分），去首尾空白
-            for sent in re.split(r"[。！？!?\n]", user):
-                if p in sent and sent.strip() and sent.strip() not in prefs:
-                    prefs.append(sent.strip())
-            break  # 一轮最多记一条偏好（多命中同句去重）
-    return prefs
+    """已删除：persona 词表抽取被 mem0 原生抽取取代（consolidate._promote_segment，
+    prompt=mem0_client._PERSONA_INSTRUCTION 白名单指令）。保留此占位防误 import。"""
+    raise NotImplementedError(
+        "extract_preferences 已删除：persona 槽走 mem0 原生抽取（_PERSONA_INSTRUCTION）"
+    )
 
 
 __all__ = [
     "match_topics",
     "infer_signal",
-    "extract_preferences",
 ]

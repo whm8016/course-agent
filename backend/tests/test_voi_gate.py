@@ -209,6 +209,84 @@ def test_cooldown_expires_after_24h():
     assert brief.level == "full"
 
 
+# ── P0-3：legacy 行冷却按主键回写 ──────────────────────────────────────────
+
+
+async def test_mark_stitched_updates_by_row_id():
+    """legacy 行（kp_id 是旧 hash，靠 label 对齐进 map）冷却必须按行主键生效。
+
+    旧 bug：_mark_stitched 按 kp_id==topic_id 条件 UPDATE，legacy 行 0 命中，
+    last_stitched_at 永远为空 → 同一主题每轮重复拼。改后 UPDATE 条件是主键 id。
+    """
+    from core.memory.proactive import _mark_stitched
+
+    captured: dict = {}
+
+    class _Result:
+        rowcount = 1
+
+    class _DB:
+        async def execute(self, stmt):
+            captured["stmt"] = stmt
+            return _Result()
+
+        async def commit(self):
+            pass
+
+    await _mark_stitched(_DB(), "row-legacy-1")
+    # 编译出的 WHERE 必须按主键 id 过滤，不含 kp_id 条件
+    compiled = str(captured["stmt"].compile(compile_kwargs={"literal_binds": True}))
+    assert "id" in compiled
+    assert "kp_id" not in compiled
+
+
+async def test_read_mastery_carries_row_id():
+    """_read_mastery 的 map 必须带出行主键 row_id（legacy kp_id 行也要带）。"""
+    from core.memory.proactive import _read_mastery
+
+    class _Row:
+        def __init__(self, kp_id, label):
+            self.id = f"row-{kp_id or label}"
+            self.kp_id = kp_id
+            self.label = label
+            self.theta = -1.0
+            self.risk = 0.7
+            self.last_observed_at = None
+            self.strength = 5.0
+            self.observation_count = 2
+            self.last_stitched_at = None
+
+    class _Scalars:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _Res:
+        def __init__(self, scalars):
+            self._scalars = scalars
+
+        def scalars(self):
+            return self._scalars
+
+    legacy_rows = [_Row("kp:ab12cd34ef56", "欧姆定律")]  # kp_id 旧 hash，靠 label 对齐
+    # 两次 execute：mastery 行 + difficulty_b 查询
+    calls = {"n": 0}
+
+    class _DB:
+        async def execute(self, _q):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _Res(_Scalars(legacy_rows))
+            return _Scalars([])  # b_rows 为空
+
+    topic_map = {"欧姆定律": "ohm"}  # label_norm → topic_id
+    out = await _read_mastery("u1", "c1", _DB(), topic_map)
+    assert "ohm" in out
+    assert out["ohm"]["row_id"] == "row-kp:ab12cd34ef56"
+
+
 def test_no_stitch_history_no_cooldown():
     brief = decide_stitch("kcl", _PREREQ, _folded_map(["poor"] * 6), set())
     assert brief.should_stitch is True

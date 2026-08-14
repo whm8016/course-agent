@@ -39,6 +39,32 @@ def _get_settings():
     return get_settings()
 
 
+# persona 槽抽取指令（persona-v1）：mem0 add(infer=True) 的 per-call prompt。
+# mem0 2.0.10 的 custom_instr 只追加进 user prompt、system prompt 写死，所以白名单
+# 语义靠指令约束 + 抽出后 persona_postfilter 硬过滤兜底（模型仍可能越界）。
+# 版本号随指令变更递增——库里旧行无 persona_prompt_version 即词表时代的行。
+_PERSONA_INSTRUCTION = """[persona-v1] 从这段师生对话中抽取「该学生的稳定学习者事实」，供跨会话调整讲解方式。
+
+只抽以下类型：
+- 讲解/表达偏好（如：喜欢分步讲解、希望讲慢一点、偏好中文术语带英文注释）
+- 学习目标与考试节点（如：下周三实验考试、目标是期末 85 分）
+- 教材与器材/软件版本（如：用的是第 7 版教材、实验室用 Multisim 14）
+- 时间与设备约束（如：每天只能晚上学、手头没有示波器）
+- 学生明确要求记住的事
+
+硬性排除（一律不抽）：
+- 任何关于掌握程度或对错的结论（如「他不会欧姆定律」「欧姆定律薄弱」）
+- 本轮讨论的题目/知识点内容本身
+- 情绪状态、一次性事务请求、教师或助手说过的话
+
+输出简体中文。没有符合上述类型的事实时返回空列表。
+负例：学生问「能不能再讲一遍欧姆定律」→ 无可抽事实（这是讲解请求，不是偏好）。"""
+
+
+# 黑名单硬过滤的触发词：抽出文本含「掌握度结论」措辞即丢弃（提示词约束不住时兜底）
+_PERSONA_BLACKLIST = ("不会", "薄弱", "掌握", "没懂", "不懂", "薄弱点", "答错", "出错")
+
+
 def should_skip_user_message(user_message: str) -> bool:
     """门控过滤：判断用户消息是否应被跳过（不写入记忆）。
 
@@ -128,6 +154,36 @@ def get_memory():
         _memory = AsyncMemory.from_config(_build_config())
         logger.info("Mem0 AsyncMemory initialized (pgvector + openai-compat LLM)")
     return _memory
+
+
+async def persona_postfilter(user_id: str, course_id: str, add_resp) -> None:
+    """persona 抽取后的硬过滤（plan §8-2 的兜底）：黑名单只在提示词里，mem0 的
+    system prompt 覆盖不了，模型仍可能抽出「该生欧姆定律薄弱」写进人设槽。
+
+    对本次 add 返回的事实逐条检查：文本命中掌握度结论措辞（_PERSONA_BLACKLIST）
+    即物理删除并 warning（可观测，不静默）。删失败非致命——读侧 header 三禁令仍在。
+    """
+    try:
+        items = add_resp.get("results", []) if isinstance(add_resp, dict) else add_resp
+        if not items:
+            return
+        m = get_memory()
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            text = it.get("memory") or ""
+            if not text:
+                continue
+            if any(w in text for w in _PERSONA_BLACKLIST):
+                logger.warning(
+                    "[mem0] persona blacklisted (mastery-conclusion leaked), dropped: %s", text
+                )
+                try:
+                    await m.delete(it.get("id"))
+                except Exception:
+                    logger.warning("[mem0] persona blacklist delete failed id=%s", it.get("id"))
+    except Exception as exc:
+        logger.warning("[mem0] persona_postfilter failed (non-fatal): %s", exc)
 
 
 def normalize_results(resp) -> list:

@@ -50,22 +50,23 @@ def test_split_length_mismatch_raises():
 
 
 def test_event_line_format():
-    line = _event_line([1, 2, 3, 4], "ohm", "欧姆定律", ["confusion", "confusion", "纠正"])
-    assert line == "欧姆定律 · 4轮 · confusion/纠正"
+    """event 行标签吃 judge 等级；judge 不可用（None）只留「主题 · N轮」。"""
+    assert _event_line([1, 2, 3, 4], "ohm", "欧姆定律", "poor") == "欧姆定律 · 4轮 · poor"
+    assert _event_line([1, 2], "ohm", "欧姆定律", None) == "欧姆定律 · 2轮"
 
 
 # ── _promote_segment 双槽写入（mock mem0）───────────────────────────────────
 
 
 class _MemRecorder:
-    """伪 mem0：记录每次 add 的 (内容, metadata, infer)。"""
+    """伪 mem0：记录每次 add 的 (内容, metadata, infer, prompt)。"""
 
     def __init__(self):
         self.calls: list[dict] = []
 
-    async def add(self, content, *, user_id=None, metadata=None, infer=None, **kw):
+    async def add(self, content, *, user_id=None, metadata=None, infer=None, prompt=None, **kw):
         self.calls.append(
-            {"content": content, "metadata": metadata or {}, "infer": infer}
+            {"content": content, "metadata": metadata or {}, "infer": infer, "prompt": prompt}
         )
 
 
@@ -90,14 +91,20 @@ async def test_promote_one_event_per_segment_infer_false():
 
 
 async def test_promote_persona_written_separately():
-    """「我喜欢分步讲」→ 独立一次 add，kind=persona，不混进 event。"""
+    """persona 槽：整 session 一次 m.add(messages, infer=True, prompt=白名单指令)，
+    由 mem0 原生抽取（词表已废——「能不能再讲一遍」误伤/「讲慢一点」漏抓都治了）。
+    kind=persona 随 metadata deepcopy 到每条事实，读侧槽位过滤仍成立。"""
     mem = _MemRecorder()
     eps = [_ep(1, "我喜欢分步讲解欧姆定律")]
     await _run_promote(eps, ["ohm"], mem)
     personas = [c for c in mem.calls if c["metadata"].get("kind") == "persona"]
     assert len(personas) == 1
-    assert "我喜欢分步讲解" in personas[0]["content"]
-    assert personas[0]["infer"] is False
+    assert personas[0]["infer"] is True
+    # 整 session 的对话消息（user 消息在内，交给 mem0 抽取）
+    assert {"role": "user", "content": "我喜欢分步讲解欧姆定律"} in personas[0]["content"]
+    # prompt 带版本号（persona-v1），metadata 标 persona_prompt_version 便于排查旧行
+    assert "persona-v1" in personas[0]["prompt"]
+    assert personas[0]["metadata"]["persona_prompt_version"] == "persona-v1"
     # event 也有一条（有主题）
     assert any(c["metadata"].get("kind") == "event" for c in mem.calls)
 

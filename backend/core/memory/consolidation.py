@@ -143,25 +143,34 @@ def split_topic_segments(episodes: list, topic_ids_per_ep: list) -> list[list]:
     return segments
 
 
-def _event_line(seg: list, main_topic: str, label: str, signals: list) -> str:
-    """一段压成一行结构化文本（规则压缩，不接 LLM 摘要——SeCom 自己说 summary 丢细节）。"""
-    tags = "/".join(dict.fromkeys(s for s in signals if s)) or "学习"
-    return f"{label} · {len(seg)}轮 · {tags}"
+def _event_line(seg: list, main_topic: str, label: str, level: str | None) -> str:
+    """一段压成一行结构化文本（规则压缩，不接 LLM 摘要——SeCom 自己说 summary 丢细节）。
+
+    level 是该段判定器给的等级（good/fair/poor，取本段主题那条）；judge 不可用
+    （None）时只留「主题 · N轮」，不退回词表信号。
+    """
+    suffix = f" · {level}" if level else ""
+    return f"{label} · {len(seg)}轮{suffix}"
 
 
 async def _promote_segment(
-    user_id: str, course_id: str, episodes: list, db=None, topic_ids_per_ep: list | None = None
+    user_id: str, course_id: str, episodes: list, db=None, topic_ids_per_ep: list | None = None,
+    segment_levels: dict[str, str] | None = None,
 ) -> None:
-    """episodes → mem0 双槽写入（persona/event 分存，infer=False 零 LLM）。
+    """episodes → mem0 双槽写入（event 规则一行 + persona 一次 LLM 抽取）。
 
-    - kind=event：一个主题连续段一条（split_topic_segments 切），文本规则压一行
-    - kind=persona：偏好线索一条事实一条（extract_preferences），不按段切
+    - kind=event：一个主题连续段一条（split_topic_segments 切），infer=False 零 LLM，
+      标签吃判定器等级（segment_levels: {topic_id: level}，段级取段主话题那条；
+      judge 不可用时不带标签）。
+    - kind=persona：**整 session 一次** m.add(messages, infer=True, prompt=_PERSONA_INSTRUCTION)
+      由 mem0 原生抽取（白名单类型 + 禁掌握度结论，词表抓不到「讲慢一点」这类无触发
+      句）。metadata 会 deepcopy 到每条抽出的事实上，kind 过滤在读侧仍成立。
     topic_ids_per_ep 由 consolidate 算好传入（match_topics 每轮只跑一次，不双倍 embedding）；
     未传且无 db 时按无命中处理（eval/单测路径）。回填段内 episode 的 segment_id/topic_ids。
     """
     import uuid
 
-    from core.memory.topic_match import extract_preferences, infer_signal, match_topics
+    from core.memory.topic_match import match_topics
 
     if topic_ids_per_ep is None:
         topic_ids_per_ep = []
@@ -191,32 +200,16 @@ async def _promote_segment(
         ).all()
         label_by_topic = dict(rows)
 
-    from core.memory.mem0_client import get_memory
+    from core.memory.mem0_client import get_memory, persona_postfilter
 
     m = get_memory()
-    persona_done: set[str] = set()  # 同一偏好句只写一次（跨段去重）
     for seg, main_topic in iter_segments_with_topic(episodes, topic_ids_per_ep):
         seg_id = uuid.uuid4().hex[:16]
-        signals: list[str] = []
-        for ep in seg:
-            sig = infer_signal(ep.user_msg, ep.assistant_msg)
-            signals.extend(sig["signals"])
-            for pref in extract_preferences(ep.user_msg):
-                if pref not in persona_done:
-                    persona_done.add(pref)
-                    await m.add(
-                        pref,
-                        user_id=user_id,
-                        metadata={
-                            "course_id": course_id, "kind": "persona", "source": "consolidate",
-                        },
-                        infer=False,
-                    )
         if main_topic is None:
             continue  # 无主题段不写 event（事务性寒暄/跑题）
         label = label_by_topic.get(main_topic) or main_topic
         await m.add(
-            _event_line(seg, main_topic, label, signals),
+            _event_line(seg, main_topic, label, (segment_levels or {}).get(main_topic)),
             user_id=user_id,
             metadata={
                 "course_id": course_id, "kind": "event", "source": "consolidate",
@@ -235,6 +228,50 @@ async def _promote_segment(
                 .values(segment_id=seg_id, topic_ids=[main_topic])
             )
             await db.commit()
+
+    # persona 槽：整 session 一次 mem0 原生抽取（非每轮、非逐段——成本 = 每 session
+    # 每次 consolidate 一次调用）。additive 抽取自带 md5 去重 + 已有记忆作上下文，
+    # 重复巩固同段不产生重复事实。抽出后的硬过滤兜底黑名单（黑名单在提示词里，
+    # mem0 的 system prompt 覆盖不了，模型仍可能抽出「该生欧姆定律薄弱」）。
+    if episodes:
+        from core.memory.mem0_client import _PERSONA_INSTRUCTION
+
+        msgs = [
+            {"role": "user" if i % 2 == 0 else "assistant",
+             "content": (ep.user_msg if i % 2 == 0 else ep.assistant_msg)}
+            for i, ep in enumerate(episodes)
+            if (ep.user_msg if i % 2 == 0 else ep.assistant_msg)
+        ]
+        if msgs:
+            try:
+                await persona_postfilter(
+                    user_id, course_id,
+                    await m.add(
+                        msgs,
+                        user_id=user_id,
+                        prompt=_PERSONA_INSTRUCTION,
+                        metadata={
+                            "course_id": course_id, "kind": "persona",
+                            "source": "consolidate", "persona_prompt_version": "persona-v1",
+                        },
+                        infer=True,
+                    ),
+                )
+            except TypeError:
+                # mem0 版本不接受 per-call prompt → 退回 custom_instructions 全局指令
+                logger.warning("[consolidate] m.add 不接受 per-call prompt，退回全局指令")
+                await persona_postfilter(
+                    user_id, course_id,
+                    await m.add(
+                        msgs,
+                        user_id=user_id,
+                        metadata={
+                            "course_id": course_id, "kind": "persona",
+                            "source": "consolidate",
+                        },
+                        infer=True,
+                    ),
+                )
 
 
 def iter_segments_with_topic(episodes: list, topic_ids_per_ep: list):
@@ -463,12 +500,15 @@ async def _judge_and_record(
     db, user_id: str, course_id: str, segments: list, topic_ids_per_ep: list,
     topics_meta: dict[str, tuple[str, str]], *,
     _hits_map: dict[str, list], _eps_all: list, budget_left: list[int],
-) -> list[str]:
-    """按主题段判定 + 写观测 + 折叠。返回判定不可用（超时/失败/超上限/写库失败）段的
-    episode id 列表——这些 episode 留 pending 等下轮。
+) -> tuple[dict[str, str], list[str]]:
+    """按主题段判定 + 写观测 + 折叠。返回 ({topic_id: 段级等级}, 判定不可用段的
+    episode id 列表)——后者留 pending 等下轮。等级供 event 行做标签（judge
+    不可用的段不进 map，event 行退回无标签）。
 
     topics_meta: {topic_id: (label, definition)}，judge 的闭集输入。
-    _hits_map: {episode_id: [topic_id, ...]}，段内可判主题 = 段内各 ep 命中并集（≤3）。
+    _hits_map: {episode_id: [(topic_id, sim), ...]}，段内可判主题 = 段内各 ep 命中
+    并集，段内同主题取最大 sim，按 sim 降序取前 3（不再字母序截断——最相关主题
+    可能被字典序切掉，判定器只能看到无关主题）。
     _eps_all: 该 session 全部 episode（topic_ids_per_ep 的索引基准）。
     budget_left: 长度 1 的箱子，装「本次 consolidate 还可判定的段数」——预算在
     **整次巩固**内共享（跨 session），防 200 条 episode × N session 放大到 N×20 次
@@ -493,6 +533,7 @@ async def _judge_and_record(
     sem = asyncio.Semaphore(_JUDGE_CONCURRENCY)
     write_lock = asyncio.Lock()
     deferred_ids: list[str] = list(overflow)
+    levels: dict[str, str] = {}  # {topic_id: 段级等级}，供 event 行做标签
     first_idx = {id(ep): i for i, ep in enumerate(_eps_all)}
 
     async def _one(seg, seg_ids) -> None:
@@ -500,9 +541,14 @@ async def _judge_and_record(
             main_topic = topic_ids_per_ep[first_idx[id(seg[0])]]
             if main_topic is None:
                 return  # 无主题段无可判主题
-            seg_topics = sorted(
-                {t for ep in seg for t in (_hits_map.get(ep.id) or [])}
-            )[:3] or [main_topic]
+            # 段内各 ep 命中并集，同主题取最大 sim，按 sim 降序取前 3——判定器
+            # 只看得到这里选出的主题，选最像的 3 个（字母序截断会把最相关主题切掉）
+            best_sim: dict[str, float] = {}
+            for ep in seg:
+                for t, sim in (_hits_map.get(ep.id) or []):
+                    if t not in best_sim or sim > best_sim[t]:
+                        best_sim[t] = sim
+            seg_topics = sorted(best_sim, key=lambda t: -best_sim[t])[:3] or [main_topic]
             if not all(t in topics_meta for t in seg_topics):
                 return
             try:
@@ -529,6 +575,11 @@ async def _judge_and_record(
                     await _write_mastery_observations(
                         db, user_id, course_id, result.judgements, list(seg)
                     )
+                    # event 标签：段级等级取「本段主话题」那条判定（多主题判定时
+                    # 只有主话题代表这段的学习事件；无主话题判定则无标签）
+                    for j in result.judgements:
+                        if j.topic_id == main_topic and j.level in ("good", "fair", "poor"):
+                            levels[main_topic] = j.level
                 except Exception as exc:
                     # 写库失败必须延期：观测没落库就标 done，这段对话的掌握度证据
                     # 永久丢失（episode 不再被巩固领走）。回 pending 等下轮重判重写。
@@ -561,7 +612,7 @@ async def _judge_and_record(
             deferred_ids.extend(seg_ids)
 
     await asyncio.gather(*(_guard(seg) for seg in budget))
-    return sorted(set(deferred_ids))
+    return levels, sorted(set(deferred_ids))
 
 
 async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
@@ -604,17 +655,9 @@ async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
                 hits_per_ep.append([])
         topic_ids_per_ep = [hits[0][0] if hits else None for hits in hits_per_ep]
 
-        # 1. mem0 双槽升格 —— 失败只降级 warning：不再整段回 pending 拖垮 mastery
-        #    （旧实现 mem0 失败会连带丢掉本可写入的掌握度观测；episodes 永久留存，
-        #    mem0 段丢失可由 episodic 层重放，掌握度观测丢了就是丢了）
-        try:
-            await _promote_segment(user_id, course_id, eps, db, topic_ids_per_ep)
-        except Exception as exc:
-            logger.warning(
-                "[consolidate] mem0 promote failed user=%s session=%s error=%s",
-                user_id, session_id, exc,
-            )
-        # 2. 掌握度路径（一段一次 LLM 判定 → 观测 → 折叠）。失败非致命，不影响 done
+        # 1. 掌握度路径（一段一次 LLM 判定 → 观测 → 折叠）**先跑**：event 行的标签
+        #    吃判定器等级（judge 不可用时不带标签），词表信号已退场。失败非致命。
+        segment_levels: dict[str, str] = {}
         try:
             segments = split_topic_segments(eps, topic_ids_per_ep)
             # 段内可判主题 = 段内各 ep 命中主题的并集（闭集 meta 一次查齐）
@@ -645,12 +688,13 @@ async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
                 topics_meta = {
                     r.topic_id: (r.label, r.definition or "") for r in rows
                 }
-            hits_by_ep = {ep.id: [t for t, _s in hits] for ep, hits in zip(eps, hits_per_ep)}
+            hits_by_ep = {ep.id: hits for ep, hits in zip(eps, hits_per_ep)}
             if topics_meta:
-                deferred = await _judge_and_record(
+                seg_levels, deferred = await _judge_and_record(
                     db, user_id, course_id, segments, topic_ids_per_ep, topics_meta,
                     _hits_map=hits_by_ep, _eps_all=eps, budget_left=judge_budget,
                 )
+                segment_levels = seg_levels
                 deferred_ids.update(deferred)
         except Exception as exc:
             # 整段 judge 路径抛错（切段/查 meta）→ 该 session 全部 episode 回 pending：
@@ -665,6 +709,19 @@ async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
                 await db.rollback()
             except Exception:
                 pass
+        # 2. mem0 双槽升格 —— 失败只降级 warning：不再整段回 pending 拖垮 mastery
+        #    （旧实现 mem0 失败会连带丢掉本可写入的掌握度观测；episodes 永久留存，
+        #    mem0 段丢失可由 episodic 层重放，掌握度观测丢了就是丢了）
+        try:
+            await _promote_segment(
+                user_id, course_id, eps, db, topic_ids_per_ep,
+                segment_levels=segment_levels,
+            )
+        except Exception as exc:
+            logger.warning(
+                "[consolidate] mem0 promote failed user=%s session=%s error=%s",
+                user_id, session_id, exc,
+            )
         done_ids.extend(eps_ids)
         promoted += len(eps)
 
