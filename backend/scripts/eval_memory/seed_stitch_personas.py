@@ -138,7 +138,7 @@ def _json_default(obj: Any) -> Any:
     raise TypeError(type(obj))
 
 
-async def _ensure_user(db, user_id: str, case_id: str) -> None:
+async def _ensure_user(db, user_id: str) -> None:
     from core.db.database import User
     from sqlalchemy import select
 
@@ -252,22 +252,7 @@ async def _backfill_mastery_from_episodes(db, user_id: str, course_id: str) -> i
     门控读侧（logit + topic_id 对齐）读不懂，正例全变 FN。已删除。
     """
     from core.memory.consolidation import consolidate
-    from sqlalchemy import func, select
-
-    from core.db.database import MemoryEpisode
-
-    n_pending = (
-        await db.execute(
-            select(func.count()).select_from(MemoryEpisode).where(
-                MemoryEpisode.user_id == user_id,
-                MemoryEpisode.course_id == course_id,
-                MemoryEpisode.status == "pending",
-            )
-        )
-    ).scalar_one()
-    if not n_pending:
-        return 0
-
+    # consolidate 对无 pending 的 user 零领取直接返回 0，无需预查询计数
     result = await consolidate(db, user_id, course_id)
     return result.get("promoted", 0)
 
@@ -276,7 +261,6 @@ async def _run_persona(
     case_id: str,
     course_id: str,
     *,
-    no_rag: bool,
     cleanup_before: bool,
 ) -> dict[str, Any]:
     from core.db.database import AsyncSessionLocal
@@ -289,12 +273,12 @@ async def _run_persona(
         raise ValueError(f"无对话脚本: {case_id}")
 
     user_id = _user_id_for_case(case_id)
-    enabled_tools: list[str] = [] if no_rag else []
+    enabled_tools: list[str] = []
     history: list[dict[str, Any]] = []
     session_logs: list[dict[str, Any]] = []
 
     async with AsyncSessionLocal() as db:
-        await _ensure_user(db, user_id, case_id)
+        await _ensure_user(db, user_id)
         if cleanup_before:
             await _clear_user_course_data(db, user_id, course_id)
 
@@ -376,9 +360,7 @@ async def _main(args: argparse.Namespace) -> dict:
 
         personas: dict[str, Any] = {}
         for cid in case_ids:
-            personas[cid] = await _run_persona(
-                cid, course_id, no_rag=args.no_rag, cleanup_before=args.cleanup_before
-            )
+            personas[cid] = await _run_persona(cid, course_id, cleanup_before=args.cleanup_before)
 
         out = {
             "course_id": course_id,
@@ -395,7 +377,6 @@ def main() -> None:
     p = argparse.ArgumentParser(description="真实对话沉淀门控评测用学生 persona")
     p.add_argument("--course-id", default="mycourse")
     p.add_argument("--case-id", help="只造指定 case 的 persona")
-    p.add_argument("--no-rag", action="store_true", help="关闭 RAG，减少噪声")
     p.add_argument("--cleanup-before", action="store_true", help="重跑前清该 user 的本课 episode/mastery")
     p.add_argument("--out", type=Path, help="输出 JSON（默认 results/stitch_personas_<course>.json）")
     args = p.parse_args()

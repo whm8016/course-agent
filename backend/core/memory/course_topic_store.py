@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import math
 
-# 主题匹配阈值（余弦）：门控读侧（proactive._match_topic 的 unknown 判定）与写侧
-# （topic_match.match_topics 的命中过滤）共用同一单源，避免两处常量漂移出不同口径。
+# 主题匹配阈值（余弦）：**写侧**（topic_match.match_topics 的命中过滤）专用。
+# 门控读侧（proactive._match_topic 的 unknown 判定）有独立常量
+# proactive.UNKNOWN_THRESHOLD——两者刻意分开：写侧判定召回放宽（plan §4a-2）
+# 不得连带读侧降阈（会把无关问句错认成主题，放大门控误报）。当前数值相等，
+# 但无任何机制保证相等，改动任一侧时只改各自模块。
 TOPIC_MATCH_THRESHOLD = 0.55
 
 

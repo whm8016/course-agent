@@ -167,7 +167,7 @@ def decide_stitch(
     # 6. VoI 三档：value = p_need·severity·c（Task Risk × Ambiguity），NetVoI 最大者胜。
     #    severity 按**证据主题**取（预警指向的薄弱前置/复发主题），非问句命中主题。
     c = min(1.0, max(0.0, confidence))
-    sev = 1.0 if severity_map is None else max(0.0, severity_map.get(evidence, 1.0))
+    sev = max(0.0, (severity_map or {}).get(evidence, 1.0))
     value = p_need * sev * c
     net_full = 1.0 * value - L_FULL
     net_light = V_LIGHT_COEF * value - L_LIGHT
@@ -274,10 +274,9 @@ async def stitch_for_turn(
     error_repeated = await _read_error_repeated(user_id, course_id, db, topic_map)
 
     # 5. 决策（VoI：confidence 来自最近邻 sim，severity 按证据主题取——闭包+matched
-    #    全体候选的 safety_weight 一次查齐传入，decide_stitch 内按 evidence 选取）
-    severity_map = await _severity_map(
-        {matched_topic} | closure | set(error_repeated), course_id, db
-    )
+    #    的 safety_weight 一次查齐传入，decide_stitch 内按 evidence 选取。evidence
+    #    只可能是闭包主题或 matched 本身，error_repeated 里其余主题查了也用不上）
+    severity_map = await _severity_map({matched_topic} | closure, course_id, db)
     brief = decide_stitch(
         matched_topic, closure, mastery_map, error_repeated,
         confidence=confidence, severity_map=severity_map,

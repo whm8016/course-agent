@@ -43,6 +43,11 @@ def sigmoid(x: float) -> float:
     return 1.0 / (1.0 + math.exp(-x))
 
 
+def logit_of(mastery: float) -> float:
+    """sigmoid 的逆：mastery → logit（eval 由 risk 反解 logit 时用，单源防漂移）。"""
+    return math.log(mastery / (1.0 - mastery))
+
+
 @dataclass
 class FoldState:
     """一个 (user, course, topic) 的折叠状态（学生侧 + 题目侧）。"""
@@ -106,14 +111,14 @@ def fold_observations(
 
     freeze_item=True 时题目侧冻结（quiz 观测只动 theta 不动 b_topic/n_item）——
     供「b 已由全班观测单独折出终值、学生侧在固定难度下折能力」的二次折叠用
-    （consolidation._write_mastery_observations 的两段式口径）。
+    （consolidation._write_mastery_observations 的两段式口径）。实现：把 source
+    改写成 ""（永不等于 "quiz"，elo_update 的题目侧分支即不触发）。
     """
     state = init or FoldState()
-    src = "" if freeze_item else None  # None = 不冻结；"" != "quiz" 恒成立
     for obs in sorted(obs_list, key=lambda o: o["created_at"]):
         state = elo_update(
             state, float(obs["outcome"]), float(obs.get("weight", 1.0)),
-            src if src is not None else str(obs.get("source", "")),
+            "" if freeze_item else str(obs.get("source", "")),
         )
     return state
 
@@ -121,6 +126,7 @@ def fold_observations(
 __all__ = [
     "FoldState",
     "sigmoid",
+    "logit_of",
     "elo_update",
     "fold_observations",
     "LEVEL_OUTCOME",

@@ -228,11 +228,9 @@ async def test_judge_budget_shared_across_sessions(db):
         await s.commit()
 
     async def _fake_match(text, course_id, db, **kw):
-        # "问题{si}-{i}"：按 (si+i) 奇偶交替主题
-        idx = int(text.split("问题")[1].replace("-", "+").split("+")[0]) + int(
-            text.split("-")[1].split("\n")[0]
-        )
-        return [("ohm" if idx % 2 == 0 else "kcl", 0.9)]
+        # episode 文本 = f"{user_msg}\n{assistant_msg}"，user_msg = "问题{si}-{i}"
+        si, i = map(int, text.split("\n")[0].split("问题")[1].split("-"))
+        return [("ohm" if (si + i) % 2 == 0 else "kcl", 0.9)]
 
     with (
         patch("core.memory.topic_match.match_topics", AsyncMock(side_effect=_fake_match)),

@@ -307,6 +307,8 @@ async def _write_mastery_observations(
 
     折叠纪律（plan 阶段A）：增量更新只在「新观测就是最新一条」时等价；这里写完即折，
     若有迟到观测落库须整体重折（fold_observations 吃全量日志的设计即为此）。
+    题目难度侧（b_topic）只在 quiz 写入时重折——b 只被 source=quiz 的观测更新
+    （elo_update 契约），llm_judge 写入跑了也是原值，白付一次全班日志查询+折叠。
     失败非致命——观测日志 append-only，丢了可由重放恢复，不能阻塞 done。
     """
     import time as _time
@@ -361,64 +363,50 @@ async def _write_mastery_observations(
             .mappings()
             .all()
         )
-        # 题目难度侧（全班共享）：全班（course+topic）quiz 观测从零整体重折（幂等）。
-        # 不从 course_topic.difficulty_b 取起点叠加——b 是全班参数，任何 (user, topic)
-        # 侧的叠加都会把同一份历史重复折进（起点已是历史折出值，再重放一遍 = 双计）；
-        # 也不能只看当前 user 的 quiz——b 要吃全班的判分证据（新生 theta=0 时
-        # risk = sigmoid(b) 即班级先验，MasteryObservation 表 docstring 同口径）。
-        from core.db.database import CourseTopic
-
-        class_quiz = (
-            (
-                await db.execute(
-                    select(
-                        MasteryObservation.outcome,
-                        MasteryObservation.weight,
-                        MasteryObservation.source,
-                        MasteryObservation.created_at,
-                    ).where(
-                        MasteryObservation.course_id == course_id,
-                        MasteryObservation.topic_id == tid,
-                        MasteryObservation.source == "quiz",
+        # 题目难度侧（全班共享）：仅 quiz 写入时全班（course+topic）quiz 观测从零
+        # 整体重折（幂等）。不从 course_topic.difficulty_b 取起点叠加——b 是全班参数，
+        # 任何 (user, topic) 侧的叠加都会把同一份历史重复折进（起点已是历史折出值，
+        # 再重放一遍 = 双计）；也不能只看当前 user 的 quiz——b 要吃全班的判分证据
+        # （新生 theta=0 时 risk = sigmoid(b) 即班级先验，MasteryObservation 表
+        # docstring 同口径）。llm_judge 写入跳过整段（b 只被 quiz 更新，跑了是原值）。
+        if source_override == "quiz":
+            class_quiz = (
+                (
+                    await db.execute(
+                        select(
+                            MasteryObservation.outcome,
+                            MasteryObservation.weight,
+                            MasteryObservation.source,
+                            MasteryObservation.created_at,
+                        ).where(
+                            MasteryObservation.course_id == course_id,
+                            MasteryObservation.topic_id == tid,
+                            MasteryObservation.source == "quiz",
+                        )
                     )
                 )
+                .mappings()
+                .all()
             )
-            .mappings()
-            .all()
-        )
-        ct = (
-            (
+            item_state = fold_observations(class_quiz)  # b 从 0 起、全班 quiz 全量、可重放
+            if item_state.n_item > 0:
+                from core.db.database import CourseTopic
+                from sqlalchemy import update
+
                 await db.execute(
-                    select(CourseTopic.id).where(
+                    update(CourseTopic)
+                    .where(
                         CourseTopic.course_id == course_id,
                         CourseTopic.topic_id == tid,
                     )
+                    .values(
+                        difficulty_b=round(item_state.b_topic, 6),
+                        n_item=item_state.n_item,
+                    )
                 )
-            ).first()
-        )
-        item_state = fold_observations(class_quiz)  # b 从 0 起、全班 quiz 全量、可重放
-        all_obs = [
-            {"created_at": o.created_at, "outcome": o.outcome, "weight": o.weight, "source": o.source}
-            for o in obs_rows
-        ]
         # 学生侧：难度冻结为 0 只折 theta——行上 risk/mastery 由读侧用 course_topic
         # 的全班 b 派生（proactive._read_mastery 同口径），单一真相源不在行上另存
-        state = fold_observations(all_obs, freeze_item=True)
-        # 题目侧（全班共享）：写回 course_topic（单一真相源）
-        if item_state.n_item > 0 and ct is not None:
-            from sqlalchemy import update
-
-            await db.execute(
-                update(CourseTopic)
-                .where(
-                    CourseTopic.course_id == course_id,
-                    CourseTopic.topic_id == tid,
-                )
-                .values(
-                    difficulty_b=round(item_state.b_topic, 6),
-                    n_item=item_state.n_item,
-                )
-            )
+        state = fold_observations(obs_rows, freeze_item=True)
 
         row = (
             (
@@ -507,10 +495,7 @@ async def _judge_and_record(
     deferred_ids: list[str] = list(overflow)
     first_idx = {id(ep): i for i, ep in enumerate(_eps_all)}
 
-    async def _one(seg) -> None:
-        # 段内 episode id 先快照：rollback 会 expire ORM 实例，之后再读 ep.id 触发
-        # 同步刷新 IO，在 async 上下文抛 MissingGreenlet（连带 guard/外层连环崩）。
-        seg_ids = [ep.id for ep in seg]
+    async def _one(seg, seg_ids) -> None:
         async with sem:
             main_topic = topic_ids_per_ep[first_idx[id(seg[0])]]
             if main_topic is None:
@@ -564,11 +549,13 @@ async def _judge_and_record(
                         logger.warning("[consolidate] error_patterns merge failed: %s", exc)
                         await db.rollback()
 
-    # 段级 try 兜底：单段意外异常不拖垮整批（其余段照常判定/写回）
+    # 段级 try 兜底：单段意外异常不拖垮整批（其余段照常判定/写回）。
+    # seg_ids 在入口快照一次传入：rollback 会 expire ORM 实例，之后再读 ep.id 触发
+    # 同步刷新 IO，在 async 上下文抛 MissingGreenlet（连环崩）。
     async def _guard(seg) -> None:
-        seg_ids = [ep.id for ep in seg]  # 同上：rollback/expire 后 ep.id 不可再读
+        seg_ids = [ep.id for ep in seg]
         try:
-            await _one(seg)
+            await _one(seg, seg_ids)
         except Exception as exc:
             logger.warning("[consolidate] segment judge crashed: %s", exc)
             deferred_ids.extend(seg_ids)
