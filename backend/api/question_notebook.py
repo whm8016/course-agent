@@ -110,6 +110,19 @@ async def upsert_single_entry(
             metadata={"is_correct": payload.is_correct, "difficulty": payload.difficulty},
             db=db,
         )
+        # 阶段F：判分观测入 mastery_observation（题面经 match_topics 映射主题，
+        # source=quiz——b_topic 题目难度的唯一合法证据来源）。best-effort，失败不阻塞答题主流程。
+        try:
+            from core.memory.quiz_observe import record_quiz_observation
+            await record_quiz_observation(
+                db, uid, entry.get("course_id", ""), payload.question_id,
+                payload.question, payload.is_correct,
+            )
+        except Exception:
+            import logging
+            logging.getLogger(__name__).warning(
+                "[notebook] quiz observation failed q=%s", payload.question_id, exc_info=True
+            )
     return entry
 
 

@@ -749,8 +749,9 @@ class CourseDailyRollup(Base):
 class StudentCourseRollup(Base):
     """学情读模型（L1）：每 (学生, 课程) 一行的累计聚合，供教师学情统计/仪表盘只读。
 
-    ARQ cron 从 Session/Message/NotebookEntry 删后重算（幂等）。mastery_avg/risk 等
-    Phase 4 BKT 落地后填，此前为 NULL 占位（读侧遇 NULL 回退旧公式，避免空窗）。
+    ARQ cron 从 Session/Message/NotebookEntry 删后重算（幂等）。mastery_avg/risk 从
+    knowledge_mastery 折叠状态聚合（plan 阶段F：Elo sigmoid(theta-b) 的均值）；
+    无 mastery 行的学生为 NULL（读侧遇 NULL 回退旧公式，避免空窗）。
     """
 
     __tablename__ = "student_course_rollup"

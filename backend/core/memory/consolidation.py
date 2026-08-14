@@ -294,9 +294,16 @@ async def _closed_set_points(db, course_id: str, hits: list, signal: dict) -> li
 
 
 async def _write_mastery_observations(
-    db, user_id: str, course_id: str, judgements, episode_objs: list
+    db, user_id: str, course_id: str, judgements, episode_objs: list,
+    *, source_override: str = "llm_judge", weight_override: float | None = None,
+    created_at_override: float | None = None, question_id: str | None = None,
 ) -> None:
-    """判定 → mastery_observation 追加 + 按 (topic) 折叠写回 knowledge_mastery。
+    """观测追加 + 按 (topic) 折叠写回 knowledge_mastery。
+
+    默认走 LLM 判定口径（source=llm_judge，outcome 由等级映射）；quiz_observe 等
+    其他来源用 source_override/weight_override 覆写（quiz 的 outcome 是 0/1，不
+    经等级映射——由调用方在 judgements 里给 good/poor 对应 1/0 再经 LEVEL_OUTCOME
+    还原，语义等价且免双路径）。
 
     折叠纪律（plan 阶段A）：增量更新只在「新观测就是最新一条」时等价；这里写完即折，
     若有迟到观测落库须整体重折（fold_observations 吃全量日志的设计即为此）。
@@ -310,18 +317,23 @@ async def _write_mastery_observations(
 
     if not judgements:
         return
+    weight = weight_override if weight_override is not None else W_JUDGE
     # 观测时间取段内最后一条 episode 的 created_at（对话发生时刻）而非写入时刻：
     # 巩固延迟批处理时，读侧 p_forget 按「距上次学习」算才对（凌晨批处理若用写入
     # 时间会把 30 天前的对话判成刚学过，p_forget≈0，预警全灭）。
-    ep_time = max((getattr(ep, "created_at", 0) or _time.time()) for ep in episode_objs) \
+    ep_time = created_at_override if created_at_override is not None else (
+        max((getattr(ep, "created_at", 0) or _time.time()) for ep in episode_objs)
         if episode_objs else _time.time()
+    )
     for j in judgements:
         db.add(
             MasteryObservation(
                 user_id=user_id, course_id=course_id, topic_id=j.topic_id,
-                source="llm_judge", outcome=LEVEL_OUTCOME[j.level], weight=W_JUDGE,
+                source=source_override, outcome=LEVEL_OUTCOME[j.level], weight=weight,
                 confidence=j.confidence, evidence_quote=j.evidence_quote,
-                episode_ids=[e.id for e in episode_objs], created_at=ep_time,
+                episode_ids=[e.id for e in episode_objs] or None,
+                question_id=question_id,
+                created_at=ep_time,
             )
         )
     await db.commit()
@@ -375,6 +387,21 @@ async def _write_mastery_observations(
             for o in obs_rows
         ]
         state = fold_observations(all_obs, FoldState(0.0, 0, item_state.b_topic, item_state.n_item))
+        # 题目侧（全班共享）：有 quiz 观测变化时写回 course_topic（单一真相源）
+        if item_state.n_item != init_n_item and ct is not None:
+            from sqlalchemy import update
+
+            await db.execute(
+                update(CourseTopic)
+                .where(
+                    CourseTopic.course_id == course_id,
+                    CourseTopic.topic_id == tid,
+                )
+                .values(
+                    difficulty_b=round(item_state.b_topic, 6),
+                    n_item=item_state.n_item,
+                )
+            )
 
         row = (
             (
