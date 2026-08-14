@@ -68,10 +68,10 @@ async def test_cohort_shrink_n1_pulls_to_class_mean(db):
     m = await _read("fresh", "c1")
     # 班级均值含本人 = (20*0.2+0.9)/21 ≈ 0.2333；n=1,k=3 → 0.25*0.9+0.75*0.2333 ≈ 0.40
     assert m["ohm"]["risk_used"] == pytest.approx(0.4, abs=0.01)
-    # 不入 C1：p_need = 0.4·p_forget(t=30)≈0.399 < τ≈0.455
+    # VoI 口径：p_need≈0.4 → light（一句轻提醒），不再是完整简报——收缩的价值
+    # 从"过闸/不过闸"变成"把强度压到更轻的档位"（n=1 偶发高险不配 full 打扰）
     brief = decide_stitch("kcl", _PREREQ, m, set())
-    assert brief.should_stitch is False
-    assert brief.reason == "below_tau"
+    assert brief.level == "light"
 
 
 async def test_cohort_shrink_n10_trusts_personal(db):
@@ -82,6 +82,7 @@ async def test_cohort_shrink_n10_trusts_personal(db):
     assert m["ohm"]["risk_used"] == pytest.approx(0.74, abs=0.02)
     brief = decide_stitch("kcl", _PREREQ, m, set())
     assert brief.should_stitch is True
+    assert brief.level == "full"
     assert brief.reason == "prereq_gap"
 
 
