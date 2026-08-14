@@ -153,10 +153,8 @@ def test_severity_zero_silences():
     assert brief.reason == "below_value"
 
 
-def test_severity_map_zero_weight_not_defaulted():
+async def test_severity_map_zero_weight_not_defaulted():
     """_severity_map：DB 里 safety_weight=0 不能被 `w or 1.0` 洗成 1.0。"""
-    import asyncio
-
     from core.memory.proactive import _severity_map
 
     class _Res:
@@ -170,7 +168,7 @@ def test_severity_map_zero_weight_not_defaulted():
         async def execute(self, _q):
             return _Res([("ohm", 0.0), ("kcl", 2.0)])
 
-    m = asyncio.run(_severity_map({"ohm", "kcl"}, "c1", _DB()))
+    m = await _severity_map({"ohm", "kcl"}, "c1", _DB())
     assert m == {"ohm": 0.0, "kcl": 2.0}
 
 

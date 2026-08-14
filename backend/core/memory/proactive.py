@@ -105,7 +105,9 @@ def decide_stitch(
         C1 未问也带 = (prereq_closure - {matched}) ∩ {logit <= weak_margin}
         C2 问到了但提旧错 = matched ∈ error_repeated
 
-    决策（VoI 三因子 + 三档）：value = p_need · severity · c，取 NetVoI 最大的动作：
+    决策（VoI 三因子 + 三档）：证据按 score = p_need·severity 选取（value 去掉 c 的
+    口径，危险前置可越过 p_need 更高的平淡候选），档位按 value = p_need · severity · c
+    取 NetVoI 最大的动作：
         full   = 1.0·value - 0.30
         light  = 0.6·value - 0.12
         silent = 0
@@ -146,15 +148,15 @@ def decide_stitch(
     reason = ""
     # 证据选取按 score = p_need·sev（与第 6 步 value 去掉 c 的口径一致），不能只比
     # p_need——否则 sev 只能影响已选中证据的档位，p_need 略低但安全权重高的危险
-    # 前置（如通电操作）永远抢不过平淡的复发候选
+    # 前置永远抢不过平淡的复发候选
     def _sev(t: str) -> float:
         return max(0.0, (severity_map or {}).get(t, 1.0))
 
     score = 0.0
     if prereq_gaps:
         top_tid, top = max(prereq_gaps, key=lambda x: _need_gap(x[1]) * _sev(x[0]))
-        p_need, evidence, reason = _need_gap(top), top_tid, "prereq_gap"
-        score = p_need * _sev(top_tid)
+        p_need, evidence, reason, sev = _need_gap(top), top_tid, "prereq_gap", _sev(top_tid)
+        score = p_need * sev
     if is_recurrence:
         rec = max(
             RECURRENCE_PNEED_FLOOR,
@@ -162,7 +164,7 @@ def decide_stitch(
         )
         rec_score = rec * _sev(matched_topic)
         if rec_score > score:
-            p_need, evidence, reason = rec, matched_topic, "recurrence"
+            p_need, evidence, reason, sev = rec, matched_topic, "recurrence", _sev(matched_topic)
 
     # 5. cooldown：证据主题 24h 内实际拼过 → 直接沉默（防过载；AIED N=81 依据）。
     #    时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带）。
@@ -174,9 +176,9 @@ def decide_stitch(
                 return StitchBrief(False, None, "cooldown", p_need, 0.0)
 
     # 6. VoI 三档：value = p_need·severity·c（Task Risk × Ambiguity），NetVoI 最大者胜。
-    #    severity 按**证据主题**取（预警指向的薄弱前置/复发主题），非问句命中主题。
+    #    severity 沿用第 4 步胜出证据的取值（选取与打分同一口径，单一真相源），
+    #    按**证据主题**取（预警指向的薄弱前置/复发主题），非问句命中主题。
     c = min(1.0, max(0.0, confidence))
-    sev = max(0.0, (severity_map or {}).get(evidence, 1.0))
     value = p_need * sev * c
     net_full = 1.0 * value - L_FULL
     net_light = V_LIGHT_COEF * value - L_LIGHT
