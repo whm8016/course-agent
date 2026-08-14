@@ -42,8 +42,8 @@ def _get_settings():
 def should_skip_user_message(user_message: str) -> bool:
     """门控过滤：判断用户消息是否应被跳过（不写入记忆）。
 
-    与 add_turn / flush_manager.enqueue 共用同一规则，保证生产者-消费者
-    两端过滤口径一致：
+    与 episodic.record_episode（episode 写入前的门控）共用同一规则，保证
+    原始层不进无意义短消息：
     - 命中 skip_patterns（逗号分隔，如"好的"、"嗯"）→ 跳过
     - 长度 < min_length 且 < 5（单字确认等）→ 跳过
     """
@@ -134,59 +134,37 @@ def normalize_results(resp) -> list:
     return resp or []
 
 
-async def add_turn(user_id: str, user_message: str, assistant_message: str, course_id: str = "") -> None:
-    """每轮对话后提取记忆（EventBus / worker 调用）。
-
-    增强特性：
-    - 消息长度门槛过滤：跳过无意义短消息（如"好的"、"嗯"）
-    """
-    if not user_id:
-        logger.warning("[mem0] add_turn skipped: empty user_id")
-        return
-
-    # 门槛过滤：跳过无意义短消息（与 flush_manager.enqueue 共用 should_skip_user_message）
-    user_stripped = user_message.strip()
-    if should_skip_user_message(user_message):
-        logger.info("[mem0] add_turn SKIPPED user_id=%s reason=gate msg=%s", user_id, user_stripped[:20])
-        return
-
-    m = get_memory()
-    logger.info(
-        "[mem0] add_turn START user_id=%s user_msg_len=%d assistant_msg_len=%d",
-        user_id, len(user_message), len(assistant_message)
-    )
-    logger.debug("[mem0] add_turn INPUT user_id=%s user_msg=%s assistant_msg=%s",
-                 user_id, user_message[:200], assistant_message[:200])
-    result = await m.add(
-        [
-            {"role": "user", "content": user_message},
-            {"role": "assistant", "content": assistant_message},
-        ],
-        user_id=user_id,
-        metadata={"course_id": course_id},
-    )
-    # mem0 add 返回可能是 list 或 dict，记录提取/存储的结果
-    if result:
-        items = normalize_results(result)
-        logger.info(
-            "[mem0] add_turn COMPLETE user_id=%s stored_count=%d items=%s",
-            user_id, len(items) if items else 0,
-            [i.get("memory", "")[:50] if isinstance(i, dict) else str(i)[:50] for i in (items or [])]
+async def _search_slot(
+    m, query_text: str, search_filters: dict, top_k: int, threshold: float
+) -> list:
+    """单槽检索（带 threshold 兼容降级），返回 normalize 后的 list。"""
+    try:
+        if threshold > 0:
+            results = await m.search(
+                query_text, filters=search_filters, top_k=top_k, threshold=threshold
+            )
+        else:
+            results = await m.search(query_text, filters=search_filters, top_k=top_k)
+    except TypeError:
+        # mem0 版本不接受 threshold 关键字 → 降级最小参数重试
+        logger.warning(
+            "[mem0] search 不接受 threshold 关键字，降级为最小参数重试", exc_info=True
         )
-    else:
-        logger.info("[mem0] add_turn COMPLETE user_id=%s stored_count=0 (no new facts)", user_id)
+        results = await m.search(query_text, filters=search_filters, top_k=top_k)
+    return normalize_results(results)
 
 
 async def build_memory_context(
     user_id: str, query_text: str, *, course_id: str = "", top_k: int = 5, max_chars: int = 1500
 ) -> str:
-    """注入对话：用 query_text 语义检索该用户相关记忆，拼成文本。无相关则空串。
+    """注入对话：按 persona/event 两槽检索该用户记忆，拼成两段文本。无相关则空串。
 
     course_id 非空时按课程隔离检索，避免 A 课程聊天产生的记忆（如"正在学 XX 实验课"）
     串到 B 课程的对话里；留空则退化为跨课程全局检索（IM 机器人等无课程概念场景用）。
 
-    增强特性（通过配置开关）：
-    - 矛盾检测清理：基于文本相似度规则检测并排除矛盾记忆
+    两槽口径（阶段2）：filters 带 kind=persona / kind=event 各检索一次——persona 是
+    跨概念稳定事实（偏好/目标），event 是主题连续段的学习事件。无 kind 的旧行不注入
+    （巩固路径已停 infer=True 写入，旧行不回灌、不删库）。
     """
     if not user_id or not (query_text or "").strip():
         logger.debug("[mem0] build_memory_context skipped: empty user_id or query")
@@ -199,27 +177,17 @@ async def build_memory_context(
             "[mem0] build_memory_context SEARCH user_id=%s query=%s top_k=%d",
             user_id, query_text[:100], top_k
         )
-        # P0-C：search_threshold 过滤低相关记忆（默认 0=不过滤=行为不变）。mem0 V3 原生
-        # 支持 threshold 关键字，但当前部署版本兼容性未实测（Docker 起不来）——故 >0 时
-        # 才尝试传 threshold，mem0 不接受则 TypeError 自适应降级（不阻塞检索）。
         threshold = settings.mem0.search_threshold
-        search_filters: dict = {"user_id": user_id}
+        base_filters: dict = {"user_id": user_id}
         if course_id:
-            search_filters["course_id"] = course_id
-        try:
-            if threshold > 0:
-                results = await m.search(
-                    query_text, filters=search_filters, top_k=top_k, threshold=threshold
-                )
-            else:
-                results = await m.search(query_text, filters=search_filters, top_k=top_k)
-        except TypeError:
-            # mem0 版本不接受 threshold 关键字 → 降级最小参数重试
-            logger.warning(
-                "[mem0] search 不接受 threshold 关键字，降级为最小参数重试", exc_info=True
-            )
-            results = await m.search(query_text, filters=search_filters, top_k=top_k)
-        results = normalize_results(results)
+            base_filters["course_id"] = course_id
+        persona = await _search_slot(
+            m, query_text, {**base_filters, "kind": "persona"}, top_k, threshold
+        )
+        events = await _search_slot(
+            m, query_text, {**base_filters, "kind": "event"}, top_k, threshold
+        )
+        results = persona + events
     except Exception as exc:
         logger.warning("[mem0] build_memory_context SEARCH_FAILED user_id=%s error=%s", user_id, exc)
         return ""
@@ -228,16 +196,23 @@ async def build_memory_context(
     if settings.mem0.conflict_detect_enabled and len(results) >= 2:
         results = await _detect_and_clean_conflicts(user_id, results, settings)
 
-    items = [r.get("memory") for r in (results or []) if r.get("memory")]
-    if not items:
+    persona_items = [r.get("memory") for r in persona if r.get("memory")]
+    event_items = [r.get("memory") for r in events if r.get("memory")]
+    if not persona_items and not event_items:
         logger.info("[mem0] build_memory_context NO_RESULTS user_id=%s", user_id)
         return ""
-    text = "\n".join(f"- {t}" for t in items)
+    # 拼两段标题（## 学习画像 / ## 相关学习事件），无内容的槽整段省略
+    parts: list[str] = []
+    if persona_items:
+        parts.append("## 学习画像\n" + "\n".join(f"- {t}" for t in persona_items))
+    if event_items:
+        parts.append("## 相关学习事件\n" + "\n".join(f"- {t}" for t in event_items))
+    text = "\n".join(parts)
     if len(text) > max_chars:
         text = text[:max_chars].rstrip() + "..."
     logger.info(
-        "[mem0] build_memory_context FOUND user_id=%s count=%d total_chars=%d memories=%s",
-        user_id, len(items), len(text), [t[:50] for t in items]
+        "[mem0] build_memory_context FOUND user_id=%s persona=%d event=%d total_chars=%d",
+        user_id, len(persona_items), len(event_items), len(text)
     )
     return f"## 用户记忆（仅在直接相关时参考，不要硬塞进答案）\n{text}"
 

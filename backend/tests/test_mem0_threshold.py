@@ -74,7 +74,7 @@ async def test_threshold_typeerror_falls_back(monkeypatch):
     monkeypatch.setattr(mem0_client, "get_memory", lambda: _mock_memory(fake_search))
     out = await mem0_client.build_memory_context("u1", "查询")
 
-    assert calls["n"] == 2          # 首次 TypeError → 降级第二次
+    assert calls["n"] == 4          # 每槽 2 次（TypeError 降级重试）× 两槽
     assert "事实C" in out
 
 

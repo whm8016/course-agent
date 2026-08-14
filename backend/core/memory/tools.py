@@ -9,8 +9,8 @@
     （学生说「记一下我的会员卡号 6225...」必须逐字存）。mem0 ``add`` 内部先把 str
     归一成 ``[{"role":"user","content":...}]``，再走 ``_add_to_vector_store`` 的
     ``infer=False`` 分支逐字入库，不改写不截断。后台自动巩固路径（consolidation.py
-    ``_promote_segment``）仍走 ``infer=True``（默认）做提炼，两条路径职责分明：
-    自动路径提炼、显式路径存证。
+    ``_promote_segment``）同样走 ``infer=False`` 双槽写入（persona/event，metadata.kind
+    区分），全链路零 LLM 抽取。
   - read_memory 走 ``mem0.search``（空 query 退化 ``get_all`` 列最近若干条），filters
     强制带 ``user_id``（多租户隔离）+ ``course_id``（课程隔离，空则跨课程全局）。
   - 删除/修改不在工具范围--破坏性操作只走带 JWT 角色校验的 REST API
@@ -56,10 +56,12 @@ async def execute_write_memory(
 
     m = get_memory()
     # infer=False：逐字存原文，不跑 mem0 事实抽取（详见模块 docstring 的两路径分工）。
+    # kind=persona：学生自述的稳定事实（目标/偏好/教材版本），与巩固路径的双槽同口径，
+    # 保证 build_memory_context 的两槽检索能注入显式记忆（无 kind 的行不注入）。
     await m.add(
         content,
         user_id=user_id,
-        metadata={"course_id": course_id, "source": "explicit_tool"},
+        metadata={"course_id": course_id, "source": "explicit_tool", "kind": "persona"},
         infer=False,
     )
     note = "（内容过长已截断）" if truncated else ""

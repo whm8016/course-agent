@@ -294,7 +294,7 @@ def test_migration_chain_head_is_031():
 
     cfg = Config(str(VERSIONS.parent.parent / "alembic.ini"))
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["031"]
+    assert script.get_heads() == ["032"]
 
     revisions = [r.revision for r in script.walk_revisions()]
     # head 能倒走回 base，证明链完整（025→024→023→022→021→020→019→018→017→016→015→…→001）
