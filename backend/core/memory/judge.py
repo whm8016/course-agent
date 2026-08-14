@@ -4,9 +4,7 @@
 unknown + confidence + 原文引用），数字由 mastery_state 的确定性 Elo 折叠算出。
 输出契约借 ParLD（AAAI 2026）的「闭集 KC + 序数等级 + 文本解释」；不借其四智能体链。
 
-prompt 口径（双臂实测定稿，见 scripts/eval_memory/run_judge_context_ab.py）：
-学生原话全文 + 教师回复每轮截断前 100 字——教师长讲解是 token 大头但全删会丢
-纠正类证据，截断保「不对，应该是…」开头的纠错句。
+prompt 口径：学生原话全文 + 教师回复每轮截前 100 字（依据见 judge_segment docstring）。
 
 三条硬约束（plan §3c）：
 1. topic_id 只能取自传入闭集（id 天然对齐，消除 hash 漂移），越界丢弃；
@@ -19,17 +17,17 @@ prompt 口径（双臂实测定稿，见 scripts/eval_memory/run_judge_context_a
 """
 from __future__ import annotations
 
-import json
 import logging
-import re
 from dataclasses import dataclass
+
+from core.llm.json_extract import extract_json_from_llm
 
 logger = logging.getLogger(__name__)
 
 # 判定等级合法集
 LEVELS = ("poor", "fair", "good", "unknown")
 
-# 教师回复每轮进 prompt 的截断长度（折中版：见 judge_segment docstring）
+# 教师回复每轮进 prompt 的截断长度
 _TEACHER_TRUNCATE_CHARS = 100
 
 _JUDGE_SYSTEM_PROMPT = """你是学习分析判定器。下面给出一个主题连续段的对话（学生原话全文 + 教师回复每轮截断）和该段命中的课程主题列表。
@@ -165,20 +163,18 @@ async def judge_segment(
     lines = [
         f"- {tid}：{label}。{definition or ''}".strip() for tid, label, definition in topics
     ]
-    # 学生与教师口径一致：模型看得到什么就只能引用什么（segment_text），
-    # 截断口径与 dialog 完全相同，否则「引用被截掉的后文」会白白计入 bad_quote
-    dialog = "\n".join(
-        f"学生: {u or ''}\n教师: {(a or '')[:_TEACHER_TRUNCATE_CHARS]}"
-        for u, a in segment_turns
-    )
+    # 截断推导一次，dialog 与 segment_text 共用：模型看得到什么就只能引用什么
+    # （segment_text 是 evidence_quote 子串校验基准），两处口径不同会导致
+    # 「引用被截掉的后文」白白计入 bad_quote
+    truncated = [
+        (u or "", (a or "")[:_TEACHER_TRUNCATE_CHARS]) for u, a in segment_turns
+    ]
+    dialog = "\n".join(f"学生: {u}\n教师: {a}" for u, a in truncated)
     prompt = (
         f"主题列表（只可从中选择）：\n{''.join(lines)}\n\n对话原文：\n{dialog}"
     )
     segment_text = "\n".join(
-        filter(
-            None,
-            (f"{u}\n{(a or '')[:_TEACHER_TRUNCATE_CHARS]}" for u, a in segment_turns),
-        )
+        filter(None, (f"{u}\n{a}" for u, a in truncated))
     )
 
     try:
@@ -199,16 +195,9 @@ async def judge_segment(
             stream=False,
         )
         raw = (resp.choices[0].message.content or "").strip()
-        raw = re.sub(r"^```json\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        # 尾逗号是 LLM JSON 输出最常见的语法错误（实测 [{"...":...},]} 直接解析失败）
-        raw = re.sub(r",\s*([}\]])", r"\1", raw)
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
+        data = extract_json_from_llm(raw)
+        if not data:
             logger.warning("[judge] JSON 解析失败，raw 前200字：%s", raw[:200])
-            return None
-        if not isinstance(data, dict):
             return None
     except Exception as exc:
         logger.warning("[judge] LLM 判定失败（fail-safe 返回 None）：%s", exc)

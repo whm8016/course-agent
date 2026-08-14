@@ -158,8 +158,8 @@ async def test_judge_segment_prompt_truncates_teacher_text(patch_llm):
 
 async def test_teacher_only_quote_dropped_as_bad_quote(patch_llm):
     """只出现在教师回答第 100 字之后的话作 evidence_quote → 子串校验失败。"""
-    tail = "这句话只存在于教师回答的末尾部分" + "填充" * 40  # 落在 100 字截断之后
-    teacher = "欧姆定律是 U=IR，电压等于电流乘电阻。" + tail
+    tail = "这句话只存在于教师回答的末尾部分" + "填充" * 40
+    teacher = "铺垫" * 60 + tail  # 铺垫 ≥100 字，保证 tail 全部落在截断之后
     patch_llm(json.dumps({
         "judgements": [
             # 教师被截掉的后文不在 segment_text 里 → 丢弃并计数

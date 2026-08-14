@@ -14,6 +14,8 @@ from typing import Any
 def extract_json_from_llm(text: str) -> dict[str, Any]:
     """从 LLM 输出提取 JSON 对象，容忍 markdown fence / 前后噪声。"""
     cleaned = re.sub(r"```(?:json)?", "", text or "").strip().rstrip("`").strip()
+    # 尾逗号是 LLM JSON 输出最常见的语法错误（实测 [{"...":...},]} 直接解析失败）
+    cleaned = re.sub(r",\s*([}\]])", r"\1", cleaned)
     try:
         data = json.loads(cleaned)
         return data if isinstance(data, dict) else {}
