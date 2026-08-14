@@ -1,16 +1,32 @@
 """阶段3：遗忘耦合——p_forget = 1 - exp(-t/S) 换向（旧 eff_risk 方向反了）。
 
-缺省自洽性（risk_used=0.5, S=5）：
-  t=1  → p_forget≈0.181 → p_need≈0.091（τ≈0.78）→ 不拼（正在学，别打扰）
-  t=30 → p_forget≈0.998 → p_need≈0.499（τ≈0.40）→ 拼（久未触碰，大概率忘了）
+阶段D 口径：mastery_map 用真实折叠状态（3 次 poor → logit -0.74 / risk 0.68），
+入闸靠 logit <= WEAK_MARGIN（不是旧 risk >= 0.5）。缺省自洽性（S=5）：
+  t=1  → p_forget≈0.181 → p_need≈0.12 → 不拼（正在学，别打扰）
+  t=30 → p_forget≈0.998 → p_need≈0.67 → 拼（久未触碰，大概率忘了）
 """
 import pytest
 
 from core.memory.mastery import forget_prob
+from core.memory.mastery_state import W_JUDGE, fold_observations
 from core.memory.proactive import decide_stitch
 
 _PREREQ = {"ohm"}  # kcl 的前置闭包
-_MASTERY = {"ohm": {"risk": 0.5, "risk_used": 0.5, "p_forget": 0.0}}
+
+
+def _folded_ohm(levels=("poor",) * 3) -> dict[str, dict]:
+    obs = [
+        {"created_at": float(i), "outcome": {"poor": 0.0, "fair": 0.5, "good": 1.0}[lv],
+         "weight": W_JUDGE, "source": "llm_judge"}
+        for i, lv in enumerate(levels)
+    ]
+    s = fold_observations(obs)
+    return {
+        "ohm": {
+            "risk": round(s.risk, 4), "risk_used": round(s.risk, 4),
+            "logit": round(s.logit, 4), "p_forget": 0.0, "observation_count": s.n_obs,
+        }
+    }
 
 
 def test_forget_prob_math():
@@ -21,24 +37,23 @@ def test_forget_prob_math():
 
 
 def _gate(p_forget: float) -> tuple[bool, float]:
-    brief = decide_stitch(
-        "kcl", _PREREQ, {**_MASTERY, "ohm": {**_MASTERY["ohm"], "p_forget": p_forget}},
-        set(),
-    )
+    m = _folded_ohm()
+    m["ohm"]["p_forget"] = p_forget
+    brief = decide_stitch("kcl", _PREREQ, m, set())
     return brief.should_stitch, brief.p_need
 
 
 def test_recent_observation_no_stitch():
-    """t=1（p_forget≈0.181）：刚观测过的薄弱点不拼——正学着呢。"""
+    """t=1（p_forget≈0.181）：刚观测过的薄弱点不拼——正学着呢。risk≈0.678。"""
     should, p_need = _gate(forget_prob(1, 5.0))
-    assert p_need == pytest.approx(0.091, abs=0.002)
+    assert p_need == pytest.approx(0.678 * 0.181, abs=0.005)
     assert should is False
 
 
 def test_stale_observation_stitches():
     """t=30（p_forget≈0.998）：久未触碰的薄弱前置要拼。"""
     should, p_need = _gate(forget_prob(30, 5.0))
-    assert p_need == pytest.approx(0.499, abs=0.002)
+    assert p_need == pytest.approx(0.678 * 0.998, abs=0.005)
     assert should is True
 
 
@@ -51,11 +66,9 @@ def test_zero_forget_never_stitches_c1():
 
 def test_recurrence_ignores_forgetting():
     """C2 复发不乘遗忘：p_forget=0 也保底 0.7 → 拼。"""
-    brief = decide_stitch(
-        "ohm", set(),
-        {"ohm": {"risk": 0.5, "risk_used": 0.5, "p_forget": 0.0}},
-        {"ohm"},
-    )
+    m = _folded_ohm(("fair",))  # fair 观测（复发与薄弱判据无关）
+    m["ohm"]["p_forget"] = 0.0
+    brief = decide_stitch("ohm", set(), m, {"ohm"})
     assert brief.should_stitch is True
     assert brief.reason == "recurrence"
     assert brief.p_need == pytest.approx(0.7)

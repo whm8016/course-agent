@@ -294,7 +294,7 @@ async def _closed_set_points(db, course_id: str, hits: list, signal: dict) -> li
 
 
 async def _write_mastery_observations(
-    db, user_id: str, course_id: str, judgements, episode_ids: list[str]
+    db, user_id: str, course_id: str, judgements, episode_objs: list
 ) -> None:
     """判定 → mastery_observation 追加 + 按 (topic) 折叠写回 knowledge_mastery。
 
@@ -310,14 +310,18 @@ async def _write_mastery_observations(
 
     if not judgements:
         return
-    now = _time.time()
+    # 观测时间取段内最后一条 episode 的 created_at（对话发生时刻）而非写入时刻：
+    # 巩固延迟批处理时，读侧 p_forget 按「距上次学习」算才对（凌晨批处理若用写入
+    # 时间会把 30 天前的对话判成刚学过，p_forget≈0，预警全灭）。
+    ep_time = max((getattr(ep, "created_at", 0) or _time.time()) for ep in episode_objs) \
+        if episode_objs else _time.time()
     for j in judgements:
         db.add(
             MasteryObservation(
                 user_id=user_id, course_id=course_id, topic_id=j.topic_id,
                 source="llm_judge", outcome=LEVEL_OUTCOME[j.level], weight=W_JUDGE,
                 confidence=j.confidence, evidence_quote=j.evidence_quote,
-                episode_ids=list(episode_ids), created_at=now,
+                episode_ids=[e.id for e in episode_objs], created_at=ep_time,
             )
         )
     await db.commit()
@@ -401,8 +405,8 @@ async def _write_mastery_observations(
                     label=label_row or tid,
                     mastery=round(state.mastery, 4), risk=round(state.risk, 4),
                     observation_count=state.n_obs,
-                    first_observed_at=now, last_observed_at=now,
-                    evidence_episode_ids=list(episode_ids)[:20],
+                    first_observed_at=ep_time, last_observed_at=ep_time,
+                    evidence_episode_ids=[e.id for e in episode_objs][:20],
                     theta=round(state.theta, 6), n_obs=state.n_obs,
                 )
             )
@@ -412,11 +416,13 @@ async def _write_mastery_observations(
             row.mastery = round(state.mastery, 4)
             row.risk = round(state.risk, 4)
             row.observation_count = state.n_obs
-            row.last_observed_at = now
+            # last_observed_at 单调不回退：迟到观测重折不把时间戳拉回过去
+            if ep_time > (row.last_observed_at or 0):
+                row.last_observed_at = ep_time
             ev = list(row.evidence_episode_ids or [])
-            for eid in episode_ids:
-                if eid and eid not in ev:
-                    ev.append(eid)
+            for e in episode_objs:
+                if e.id and e.id not in ev:
+                    ev.append(e.id)
             row.evidence_episode_ids = ev[-20:]
         await db.commit()
 
@@ -484,7 +490,7 @@ async def _judge_and_record(
             async with write_lock:
                 try:
                     await _write_mastery_observations(
-                        db, user_id, course_id, result.judgements, [ep.id for ep in seg]
+                        db, user_id, course_id, result.judgements, list(seg)
                     )
                 except Exception as exc:
                     logger.warning("[consolidate] mastery write failed: %s", exc)

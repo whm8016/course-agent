@@ -1,15 +1,17 @@
-"""阶段4：班级收缩（经验贝叶斯 k=3）——观测少时 risk_used 向全班均值靠。
+"""阶段4→阶段D：班级收缩已删——题目难度 b_topic 即班级先验（plan §1 架构取舍）。
 
-口径（plan 阶段4验收）：20 人多数 risk=0.2、新生 n=1 risk=0.9 → 收缩后不入 C1；
-同人 n=10 → risk_used≈0.74 入 C1。
-注：plan 给的 0.375 把班级均值近似成 0.2；精确口径（AVG 含本人，21 人均值≈0.2333）
-算得 n=1 → 0.40，两者同样低于 τ 闸，验收性质不变。
+原 k=3 经验贝叶斯收缩被取代：Elo 的 difficulty_b（course_topic，全班共享、仅判分
+观测可更新）本身携带班级信息——新生 theta=0 时 risk = sigmoid(b_topic) 就是班级
+先验；U(n) 天然实现「观测少则少动」。手工收缩与它功能重复且更粗，故删。
+
+本文件验三点（防有人把收缩加回来）：
+1. _read_mastery 无班级聚合查询，risk_used = risk（个人折叠值，无收缩覆写）；
+2. b_topic 隐先验：theta=0 的行，risk 由 course_topic.difficulty_b 决定（班难→险高）；
+3. U(n) 稀疏保护：单次观测位移有限（0.3 logit），新生偶发 poor 不至于深陷。
 """
-import time
-
 import pytest
 
-from core.memory.proactive import decide_stitch
+from core.memory.mastery_state import W_JUDGE, fold_observations
 
 _PREREQ = {"ohm"}
 
@@ -23,76 +25,33 @@ async def db():
     await close_db()
 
 
-async def _seed_cohort(course_id: str, n_class: int, class_risk: float):
-    """n_class 个同学在 ohm 上观测过 class_risk；返回写入函数给主角补行。"""
-    from core.db.database import AsyncSessionLocal, CourseTopic, KnowledgeMastery
-
-    async with AsyncSessionLocal() as s:
-        s.add(CourseTopic(course_id=course_id, topic_id="ohm", label="欧姆定律"))
-        now = time.time()
-        for i in range(n_class):
-            s.add(KnowledgeMastery(
-                user_id=f"classmate{i}", course_id=course_id, kp_id="ohm",
-                label="欧姆定律", risk=class_risk, observation_count=5,
-                first_observed_at=now, last_observed_at=now - 30 * 86400,
-            ))
-        await s.commit()
+def test_no_cohort_shrink_risk_used_equals_risk():
+    """risk_used 不再被班级均值覆写——个人折叠值直接用。"""
+    s = fold_observations([
+        {"created_at": 1.0, "outcome": 0.0, "weight": W_JUDGE, "source": "llm_judge"},
+        {"created_at": 2.0, "outcome": 0.0, "weight": W_JUDGE, "source": "llm_judge"},
+    ])
+    risk = round(s.risk, 4)
+    assert risk == pytest.approx(0.6326, abs=1e-3)  # 2 次 poor 实算
+    # _read_mastery 输出的 risk_used 与 risk 同源（无第二次覆写），由 test_voi_gate 覆盖
 
 
-async def _seed_target(user_id: str, course_id: str, obs_count: int, risk: float):
-    from core.db.database import AsyncSessionLocal, KnowledgeMastery
+def test_difficulty_b_is_class_prior():
+    """b_topic 隐班级先验：theta 相同的学生，班难度高的主题 risk 更高。
+    这就是「题目难度即班级先验」——替代手工班级收缩的信息通道。"""
+    from core.memory.mastery_state import FoldState, sigmoid
 
-    now = time.time()
-    async with AsyncSessionLocal() as s:
-        s.add(KnowledgeMastery(
-            user_id=user_id, course_id=course_id, kp_id="ohm", label="欧姆定律",
-            risk=risk, observation_count=obs_count,
-            first_observed_at=now, last_observed_at=now - 30 * 86400,  # t=30 天
-        ))
-        await s.commit()
+    easy = FoldState(theta=0.0, b_topic=-0.5)   # 全班都觉得简单
+    hard = FoldState(theta=0.0, b_topic=0.5)    # 全班都觉得难
+    assert sigmoid(hard.logit) < sigmoid(easy.logit)
+    assert (1 - sigmoid(hard.logit)) > 0.5 > (1 - sigmoid(easy.logit))
 
 
-async def _read(user_id: str, course_id: str):
-    from core.db.database import AsyncSessionLocal
-    from core.memory.course_topic_store import get_course_topic_map
-    from core.memory.proactive import _read_mastery
-
-    async with AsyncSessionLocal() as s:
-        topic_map = await get_course_topic_map(course_id, s)
-        return await _read_mastery(user_id, course_id, s, topic_map)
-
-
-async def test_cohort_shrink_n1_pulls_to_class_mean(db):
-    await _seed_cohort("c1", n_class=20, class_risk=0.2)
-    await _seed_target("fresh", "c1", obs_count=1, risk=0.9)
-    m = await _read("fresh", "c1")
-    # 班级均值含本人 = (20*0.2+0.9)/21 ≈ 0.2333；n=1,k=3 → 0.25*0.9+0.75*0.2333 ≈ 0.40
-    assert m["ohm"]["risk_used"] == pytest.approx(0.4, abs=0.01)
-    # VoI 口径：p_need≈0.4 → light（一句轻提醒），不再是完整简报——收缩的价值
-    # 从"过闸/不过闸"变成"把强度压到更轻的档位"（n=1 偶发高险不配 full 打扰）
-    brief = decide_stitch("kcl", _PREREQ, m, set())
-    assert brief.level == "light"
-
-
-async def test_cohort_shrink_n10_trusts_personal(db):
-    await _seed_cohort("c2", n_class=20, class_risk=0.2)
-    await _seed_target("senior", "c2", obs_count=10, risk=0.9)
-    m = await _read("senior", "c2")
-    # (10/13)*0.9 + (3/13)*0.2333 ≈ 0.746
-    assert m["ohm"]["risk_used"] == pytest.approx(0.74, abs=0.02)
-    brief = decide_stitch("kcl", _PREREQ, m, set())
-    assert brief.should_stitch is True
-    assert brief.level == "full"
-    assert brief.reason == "prereq_gap"
-
-
-async def test_cohort_degenerate_only_self(db):
-    """该 topic 只有自己观测 → cohort_mean=个人值，公式退化成个人 risk。"""
-    from core.db.database import AsyncSessionLocal, CourseTopic
-
-    async with AsyncSessionLocal() as s:
-        s.add(CourseTopic(course_id="c3", topic_id="ohm", label="欧姆定律"))
-        await s.commit()
-    await _seed_target("lonely", "c3", obs_count=3, risk=0.8)
-    m = await _read("lonely", "c3")
-    assert m["ohm"]["risk_used"] == pytest.approx(0.8, abs=1e-6)
+def test_sparse_observation_displacement_bounded():
+    """U(n) 稀疏保护：单次 poor 位移 0.3 logit（K=1·weight0.6·(0-0.5)），
+    新生偶发一次 poor 不会深陷（对比旧 delta 口径可一次 +0.2 且无收敛）。"""
+    s = fold_observations([
+        {"created_at": 1.0, "outcome": 0.0, "weight": W_JUDGE, "source": "llm_judge"}
+    ])
+    assert s.theta == pytest.approx(-0.30, abs=1e-9)
+    assert s.logit > -0.4055  # 仍高于 WEAK_MARGIN——1 次 poor 不入闸

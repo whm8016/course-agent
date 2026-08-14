@@ -9,8 +9,10 @@
 门控说不拼则 ``mastery_context`` 为空（沉默 = 这轮不带跨会话预警，不是系统没回）。
 
 数据层约束（id-align）：门控**只读** ``knowledge_mastery``（经 ``course_topic_store``
-对齐 topic_id）；error ``repeated`` 从 ``users.error_graph`` 读。**禁止**读
-``users.knowledge_graph`` 节点上的 risk/mastery（那是仪表盘展示层，非门控数据源）。
+对齐 topic_id；risk/logit 由 mastery_state 折叠状态派生）与 ``mastery_observation``
+（C2 复发 = 同主题 poor 计数 ≥ 2，30 天窗）。**禁止**读 ``users.knowledge_graph`` /
+``users.error_graph``——那是仪表盘展示层，非门控数据源（error_graph 的自由标签哈希
+节点数不准「同一个错又犯」，见 plan §3f）。
 
 代价公式借 PRISM（ICLR 2026）：``p_need >= τ``，``τ = C_FA / (C_FA + p_need·C_FN)``，
 实验课默认 ``C_FN > C_FA``（漏报 = 下次还错可能损坏仪器，重于误报 = 答非所问）。
@@ -29,8 +31,19 @@ logger = logging.getLogger(__name__)
 from core.memory.course_topic_store import TOPIC_MATCH_THRESHOLD as UNKNOWN_THRESHOLD  # noqa: F401
 # ↑ 阈值单源：读侧 unknown 判定与写侧 match_topics 命中过滤共用 course_topic_store
 #   的 TOPIC_MATCH_THRESHOLD，避免两处常量漂移出不同口径。
+#   注意：写侧判定召回的阈值放宽（plan §4a-2，只作用写侧）不得动这里——读侧降阈
+#   会把无关问句错认成主题，直接放大门控误报。两常量必须分开。
 
-RISK_THRESHOLD = 0.5          # mastery risk >= 此值视为薄弱（与 get_mastery_context 同口径）
+# C1 入闸判据（plan §3e）：logit 空间 theta - b_topic <= WEAK_MARGIN。
+# 语义锚点 =「同一主题至少 2 次判 poor」（Elo 折叠下 1 次 poor ≈ -0.30、2 次 ≈ -0.54，
+# 本值取 logit(0.4) ≈ -0.4055，恰等价 risk >= 0.6，便于换算成人能读的概率）。
+# 纪律：不写死就算完——test_mastery_state 由 fold_observations 实算夹出此值须落在
+# 1 次与 2 次 poor 之间；W_JUDGE 变了测试会红，强制重定常量。
+WEAK_MARGIN = -0.4055
+
+# C2 复发：观测日志中同主题 poor 计数（30 天窗，与 p_forget S0=5 量级相称，进 eval 扫）
+RECURRENCE_WINDOW_DAYS = 30
+
 DEFAULT_C_FA = 1.0
 DEFAULT_C_FN = 3.0            # 漏报 3 倍代价（实验课损坏仪器风险 > 答非所问）
 RECURRENCE_PNEED_FLOOR = 0.7  # 复发（C2）固定需求下限
@@ -71,22 +84,24 @@ def decide_stitch(
     now: float | None = None,
     c_fa: float = DEFAULT_C_FA,
     c_fn: float = DEFAULT_C_FN,
-    risk_threshold: float = RISK_THRESHOLD,
+    weak_margin: float = WEAK_MARGIN,
 ) -> StitchBrief:
     """纯函数门控决策（VoI 三因子版，零 LLM）。所有输入已对齐 topic_id 口径。
 
     Args:
         matched_topic: 问句命中的主题（S_t），None = unknown。
         prereq_closure: matched 的全部前置主题（course_topic_store.get_prereq_predecessors 算）。
-        mastery_map: {topic_id: {risk, risk_used, p_forget, label, observation_count}}，门控唯一学情数据源。
-        error_repeated: 反复出错的 topic_id 集（来自 error_graph repeated，label→topic_id 对齐）。
+        mastery_map: {topic_id: {risk, risk_used, p_forget, logit, label, observation_count}}，
+            门控唯一学情数据源。logit = theta - b_topic（折叠状态，读侧不再收缩）。
+        error_repeated: 反复出错的 topic_id 集（mastery_observation 同主题 poor 计数 ≥2 派生）。
         confidence: 问句→主题匹配的置信度 c ∈ [0,1]（sim 经 (sim-θ)/(1-θ) 归一；Ambiguity 因子）。
-        severity: 证据主题的 course_topic.severity（Task Risk 因子；默认 1.0 行为与不加一致）。
+        severity: 证据主题的 course_topic.safety_weight（Task Risk 因子；默认 1.0 = 不加权一致）。
         now: cooldown 判定的当前时间戳（调用方传入，保持纯函数可单测；None=用 time.time）。
         冷却时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带，见 _read_mastery）。
+        weak_margin: C1 入闸的 logit 边际（plan §3e，见模块头 WEAK_MARGIN 注释）。
 
     候选（只在两类上算 p_need，全库薄弱点禁止入闸）：
-        C1 未问也带 = (prereq_closure - {matched}) ∩ {risk >= risk_threshold}
+        C1 未问也带 = (prereq_closure - {matched}) ∩ {logit <= weak_margin}
         C2 问到了但提旧错 = matched ∈ error_repeated
 
     决策（VoI 三因子 + 三档）：value = p_need · severity · c，取 NetVoI 最大的动作：
@@ -99,14 +114,17 @@ def decide_stitch(
     if matched_topic is None:
         return StitchBrief(False, None, "unknown", 0.0, 1.0)
 
-    # 2. C1 前置缺口：前置闭包（不含 matched）里高 risk 的，按 risk 降序
+    # 2. C1 前置缺口：前置闭包（不含 matched）里薄弱的（logit 空间判据，plan §3e：
+    #    比 risk 不比被 sigmoid 压扁的概率；「至少两次判 poor」的语义锚点），
+    #    按薄弱程度（logit 升序 = risk 降序）排
     prereq_gaps = sorted(
         [
             (tid, mastery_map[tid])
             for tid in (prereq_closure - {matched_topic})
-            if tid in mastery_map and mastery_map[tid].get("risk", 0) >= risk_threshold
+            if tid in mastery_map
+            and mastery_map[tid].get("logit", 0.0) <= weak_margin
         ],
-        key=lambda x: -x[1].get("risk", 0),
+        key=lambda x: x[1].get("logit", 0.0),
     )
     # 3. C2 复发：matched 本身反复出错
     is_recurrence = matched_topic in error_repeated
@@ -165,13 +183,13 @@ def decide_stitch_prism(
     *,
     c_fa: float = DEFAULT_C_FA,
     c_fn: float = DEFAULT_C_FN,
-    risk_threshold: float = RISK_THRESHOLD,
+    weak_margin: float = WEAK_MARGIN,
 ) -> StitchBrief:
-    """PRISM 两参数单阈值门控（对照臂，供 eval 消融）。语义与旧 decide_stitch 完全一致。
+    """PRISM 两参数单阈值门控（对照臂，供 eval 消融）。语义与 decide_stitch 同候选口径。
 
     τ = C_FA / (C_FA + p_need·C_FN)，p_need >= τ 才拼（单边界 full-or-silent）。
-    p_need 计算与 VoI 版共享同一套候选与遗忘口径（复制主体，非互相调用——两臂在
-    eval 中必须独立可审计）。
+    p_need 计算与 VoI 版共享同一套候选（logit 判据）与遗忘口径（复制主体，非互相
+    调用——两臂在 eval 中必须独立可审计）。
     """
     if matched_topic is None:
         return StitchBrief(False, None, "unknown", 0.0, 1.0)
@@ -180,9 +198,9 @@ def decide_stitch_prism(
         [
             (tid, mastery_map[tid])
             for tid in (prereq_closure - {matched_topic})
-            if tid in mastery_map and mastery_map[tid].get("risk", 0) >= risk_threshold
+            if tid in mastery_map and mastery_map[tid].get("logit", 0.0) <= weak_margin
         ],
-        key=lambda x: -x[1].get("risk", 0),
+        key=lambda x: x[1].get("logit", 0.0),
     )
     is_recurrence = matched_topic in error_repeated
 
@@ -276,13 +294,16 @@ async def stitch_for_turn(
 
 
 async def _topic_severity(topic_id: str, course_id: str, db) -> float:
-    """证据主题的 course_topic.severity（Task Risk 因子）。默认 1.0（=行为与不加列一致）。"""
+    """证据主题的 course_topic.safety_weight（Task Risk 因子）。默认 1.0（=不加权一致）。
+
+    列原名 severity，与 error_patterns.severity（错误严重度）撞义已改名 safety_weight。
+    """
     from core.db.database import CourseTopic
     from sqlalchemy import select
 
     val = (
         await db.execute(
-            select(CourseTopic.severity).where(
+            select(CourseTopic.safety_weight).where(
                 CourseTopic.course_id == course_id,
                 CourseTopic.topic_id == topic_id,
             )
@@ -347,19 +368,23 @@ async def _match_topic(query: str, course_id: str, db, embed_model) -> tuple[str
 async def _read_mastery(
     user_id: str, course_id: str, db, topic_map: dict[str, str]
 ) -> dict[str, dict]:
-    """读 knowledge_mastery → {topic_id: {risk, risk_used, p_forget, label, ...}}。
+    """读 knowledge_mastery → {topic_id: {risk, risk_used, p_forget, logit, label, ...}}。
 
     id-align：行 kp_id 非 topic_id 时，用 label 经 topic_map（label_norm→topic_id）本地兜底，
     避免 N+1（topic_map 由 stitch_for_turn 一次取全传入）。
 
-    遗忘口径（阶段3，MemoryBank）：p_forget = 1 - exp(-t/S)，S 取行内 strength。
-    旧 eff_risk = risk·exp(-λt) 已废——方向反了：时间越久越该拼前置提醒，不是越不拼。
-    λ=0.01 仅保留在 get_mastery_context 的排序里，门控不再用。
-    risk_used 为阶段4 班级收缩的落点，当前（收缩未启用时）= 个人 risk。
+    掌握度估计器重构（阶段D）：
+    - risk 由折叠状态算出（mastery = sigmoid(theta - b_topic)，risk = 1 - mastery），
+      b_topic 读 course_topic.difficulty_b（全班共享，题目难度即班级先验）；
+    - k=3 班级收缩已删（与 U(n) 和 b_topic 先验功能重复且更粗），risk_used = risk；
+    - logit = theta - b_topic 一并放进 map——C1 判据在 logit 空间（WEAK_MARGIN），
+      没被 sigmoid 压扁；
+    - 遗忘口径（MemoryBank）不变：p_forget = 1 - exp(-t/S)。
     """
-    from core.db.database import KnowledgeMastery
+    from core.db.database import CourseTopic, KnowledgeMastery
     from core.memory.course_topic_store import _norm_label
     from core.memory.mastery import forget_prob
+    from core.memory.mastery_state import sigmoid
     from sqlalchemy import select
 
     rows = (
@@ -374,73 +399,77 @@ async def _read_mastery(
         .scalars()
         .all()
     )
+    # 题目难度（全班共享）一次取齐，行内不存（单一真相源在 course_topic）
+    b_map: dict[str, float] = {}
+    tids_hint = {r.kp_id for r in rows if r.kp_id}
+    if tids_hint:
+        b_rows = (
+            await db.execute(
+                select(CourseTopic.topic_id, CourseTopic.difficulty_b).where(
+                    CourseTopic.course_id == course_id,
+                    CourseTopic.topic_id.in_(tids_hint),
+                )
+            )
+        ).all()
+        b_map = {t: float(b or 0.0) for t, b in b_rows}
+
     now = time.time()
     out: dict[str, dict] = {}
-    # id-align：kp_id 恒非空（写侧 entity_id 或 label 哈希兜底），`or` 短路令 label 兜底
-    # 永不生效。只信任落在 course_topic.topic_id 集内的 kp_id，其余走 label 归一化对齐。
+    # id-align：只信任落在 course_topic.topic_id 集内的 kp_id，其余走 label 归一化对齐。
     topic_ids = set(topic_map.values())
     for r in rows:
         tid = r.kp_id if r.kp_id in topic_ids else topic_map.get(_norm_label(r.label))
         if not tid:
             continue
+        b = b_map.get(tid, 0.0)
+        # risk 按折叠状态重算（不读旧列——旧行可能是 delta 累加口径的历史值）；
+        # theta 为 0 且无观测的行（历史遗留）等于无信息先验 risk=0.5
+        logit = (r.theta or 0.0) - b
+        risk = 1.0 - sigmoid(logit)
         age_days = max(0.0, (now - (r.last_observed_at or now)) / 86400.0)
         out[tid] = {
-            "risk": r.risk or 0,
-            "risk_used": r.risk or 0,  # 下方班级收缩覆写
+            "risk": round(risk, 4),
+            "risk_used": round(risk, 4),  # 收缩已删（b_topic 即班级先验），保留键供门控口径不变
+            "logit": round(logit, 4),
             "p_forget": forget_prob(age_days, r.strength or 5.0),
             "strength": r.strength or 5.0,
             "label": r.label,
             "observation_count": r.observation_count or 1,
             "last_stitched_at": r.last_stitched_at,
         }
-
-    # 班级收缩（阶段4，经验贝叶斯）：观测少的主题向全班均值靠——新生 n=1 的偶发高
-    # risk 不至于直接触发预警；n 足够大时几乎全信个人。k=3 平滑常数。
-    # 该 topic 全班只有自己观测过时 cohort_mean=个人值，公式退化成个人 risk。
-    if out:
-        from sqlalchemy import func
-
-        cohort_rows = (
-            await db.execute(
-                select(
-                    KnowledgeMastery.kp_id,
-                    func.avg(KnowledgeMastery.risk),
-                ).where(
-                    KnowledgeMastery.course_id == course_id,
-                    KnowledgeMastery.kp_id.in_(list(out)),
-                ).group_by(KnowledgeMastery.kp_id)
-            )
-        ).all()
-        k = 3
-        for tid, cohort_mean in cohort_rows:
-            m = out[tid]
-            n = m["observation_count"]
-            mean = float(cohort_mean) if cohort_mean is not None else m["risk"]
-            m["risk_used"] = round(
-                (n / (n + k)) * m["risk"] + (k / (n + k)) * mean, 4
-            )
     return out
 
 
 async def _read_error_repeated(
     user_id: str, course_id: str, db, topic_map: dict[str, str]
 ) -> set[str]:
-    """从 users.error_graph 读 repeated/error_count>1 的 topic，label→topic_id 本地对齐。"""
-    from core.db.database import User
-    from core.memory.course_topic_store import _norm_label
-    from sqlalchemy import select
+    """C2 复发：观测日志中同主题 poor 计数 ≥ 2（30 天窗）派生（plan §3f）。
 
-    row = (await db.execute(select(User.error_graph).where(User.id == user_id))).first()
-    eg = row.error_graph if row else None
-    if not isinstance(eg, dict):
-        return set()
-    out: set[str] = set()
-    for n in eg.get("nodes") or []:
-        if n.get("repeated") or (n.get("error_count") or 0) > 1:
-            tid = topic_map.get(_norm_label(n.get("label") or ""))
-            if tid:
-                out.add(tid)
-    return out
+    不再读 users.error_graph——节点 id 是对 LLM 自由标签哈希的，同一错误换个说法
+    就是新节点，error_count 永远 1；且门控读仪表盘数据违反数据层约束。观测日志的
+    topic_id 是闭集固定 id，数得准；source 不过滤（聊天判 poor + 答错都算复发，
+    跨证据类型统一）。error_graph 退回纯仪表盘用途。
+    """
+    from core.db.database import MasteryObservation
+    from core.memory.mastery_state import POOR_OUTCOME_MAX
+    from sqlalchemy import func, select
+
+    cutoff = time.time() - RECURRENCE_WINDOW_DAYS * 86400
+    rows = (
+        await db.execute(
+            select(MasteryObservation.topic_id, func.count())
+            .where(
+                MasteryObservation.user_id == user_id,
+                MasteryObservation.course_id == course_id,
+                MasteryObservation.outcome <= POOR_OUTCOME_MAX,
+                MasteryObservation.created_at >= cutoff,
+            )
+            .group_by(MasteryObservation.topic_id)
+            .having(func.count() >= 2)
+        )
+    ).all()
+    valid = set(topic_map.values())
+    return {tid for tid, _cnt in rows if tid in valid}
 
 
 __all__ = ["StitchBrief", "decide_stitch", "decide_stitch_prism", "stitch_for_turn"]

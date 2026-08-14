@@ -38,11 +38,11 @@ logger = logging.getLogger(__name__)
 
 
 async def _seed_case(db, course_id: str, user_id: str, case: dict) -> None:
-    """真实写入路径：种 episodes → 走 consolidate（闭集 match_topics + mastery 落库）。
+    """真实写入路径：种 episodes → 走 consolidate（match_topics + 判定 + 观测折叠）。
 
-    match_topics 用确定性向量命中 gold matched_topic（mock 最近邻；mastery/risk/forget
-    的演进是真实的）。mem0 双槽写入也走真实 _promote_segment——这里 mock 掉网络面
-    （mem0 client），只验 DB 面。
+    match_topics / judge_segment mock 为确定性命中（无 LLM / embedding 面），观测
+    折叠（mastery_observation → knowledge_mastery.theta/risk）与读取链路全真实。
+    mem0 双槽写入 mock 掉网络面（mem0 client），只验 DB 面。
     """
     from unittest.mock import AsyncMock, patch
 
@@ -61,34 +61,56 @@ async def _seed_case(db, course_id: str, user_id: str, case: dict) -> None:
     await db.commit()
 
     gold = case["matched_topic"]
-    # episodes：问句即 case query；mastery 通过 mock match_topics 命中 gold 主题
-    db.add(MemoryEpisode(
-        user_id=user_id, course_id=course_id, session_id=f"{user_id}-s", turn_id="t1",
-        user_msg=case["query"], assistant_msg="（回答略）", status="pending",
-    ))
-    await db.commit()
-
-    # case 自带 mastery 状态：预先种进 knowledge_mastery（kp_id=topic_id 闭集口径，
-    # 观测时间 30 天前——p_forget≈1，让 risk_used 直接起作用；近期观测的 case 由
-    # get_mastery_context 路径覆盖，不在此评）
+    # episodes：问句即 case query；mastery 通过 mock match_topics 命中 gold 主题。
+    # 多轮构造观测序列：薄弱主题 poor×n / 已纠正 good×n（模拟判定历史），近 30 天前
+    # 的对话（p_forget≈1，跨会话预警场景）。
     import time as _time
 
-    from core.db.database import KnowledgeMastery
+    from core.memory.judge import Judgement, JudgeResult
 
     now = _time.time()
+    # 观测序列（=判定段数）：一段一次判定一条观测。薄弱主题造 4 个单轮段（4 次 poor
+    # → logit -0.74 越过 WEAK_MARGIN；case 语料是「多次薄弱观测」场景），已纠正主题
+    # 造 2 个 good 段。段间插入无主题轮切开（split_topic_segments 边界=主 topic 变更）。
+    seg_topics: list[str | None] = []  # 每轮的主 topic（None=切段轮）
     for m in case["mastery"]:
-        db.add(KnowledgeMastery(
-            user_id=user_id, course_id=course_id, kp_id=m["topic_id"],
-            label=m["topic_id"], risk=m["risk"], mastery=m.get("mastery", 0.5),
-            observation_count=m.get("observation_count", 1),
-            first_observed_at=now - 30 * 86400, last_observed_at=now - 30 * 86400,
+        n_seg = 4 if m["risk"] >= 0.5 else 2
+        main = m["topic_id"] if gold else "ohm"
+        for _ in range(n_seg):
+            seg_topics.append(None)   # 切段轮
+            seg_topics.append(main)
+    for i, t in enumerate(seg_topics):
+        db.add(MemoryEpisode(
+            user_id=user_id, course_id=course_id, session_id=f"{user_id}-s",
+            turn_id=f"t{i}", user_msg=case["query"], assistant_msg="（回答略）",
+            status="pending", created_at=now - 30 * 86400 + i,
         ))
     await db.commit()
 
-    hits = [(gold, 0.9)] if gold else []
+    # fake match_topics：按调用序回放 seg_topics（consolidate 按 created_at 顺序逐条调用）
+    call_idx = {"i": 0}
+
+    async def _fake_match(text, cid, db_, **kw):
+        t = seg_topics[call_idx["i"]] if call_idx["i"] < len(seg_topics) else None
+        call_idx["i"] += 1
+        return [(t, 0.9)] if t else []
+
+    judge_result = JudgeResult(
+        judgements=[
+            Judgement(
+                m["topic_id"],
+                "poor" if m["risk"] >= 0.5 else "good",
+                0.9, case["query"],
+            )
+            for m in case["mastery"]
+        ],
+        abstained=[], error_patterns=[],
+        dropped_invalid_topic=0, dropped_bad_quote=0,
+    )
     with (
-        patch("core.memory.topic_match.match_topics", AsyncMock(return_value=hits)),
+        patch("core.memory.topic_match.match_topics", AsyncMock(side_effect=_fake_match)),
         patch("core.memory.consolidation._promote_segment", AsyncMock()),
+        patch("core.memory.judge.judge_segment", AsyncMock(return_value=judge_result)),
     ):
         await consolidation.consolidate(db, user_id, course_id)
 

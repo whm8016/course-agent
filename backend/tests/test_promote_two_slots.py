@@ -132,8 +132,12 @@ async def db():
 
 
 async def test_mem0_failure_does_not_block_mastery(db):
-    """mem0 双槽写炸 → warning 降级；episode 照 done、mastery 照写（不回 pending）。"""
+    """mem0 双槽写炸 → warning 降级；episode 照 done、mastery 照写（不回 pending）。
+
+    阶段C：判定路径 mock 为返回 fair 判定（真实走观测折叠写 mastery）；mem0 炸
+    只降级 warning，判定与 done 不受影响。"""
     from core.db.database import AsyncSessionLocal, CourseTopic, KnowledgeMastery, MemoryEpisode
+    from core.memory.judge import Judgement, JudgeResult
     from sqlalchemy import select
 
     async with AsyncSessionLocal() as s:
@@ -144,8 +148,13 @@ async def test_mem0_failure_does_not_block_mastery(db):
         ))
         await s.commit()
 
+    judge_result = JudgeResult(
+        judgements=[Judgement("ohm", "fair", 0.8, "欧姆定律公式是什么")],
+        abstained=[], error_patterns=[], dropped_invalid_topic=0, dropped_bad_quote=0,
+    )
     with (
         patch("core.memory.topic_match.match_topics", AsyncMock(return_value=[("ohm", 0.9)])),
+        patch("core.memory.judge.judge_segment", AsyncMock(return_value=judge_result)),
         patch(
             "core.memory.consolidation._promote_segment",
             AsyncMock(side_effect=RuntimeError("mem0 down")),
@@ -166,3 +175,4 @@ async def test_mem0_failure_does_not_block_mastery(db):
         )).scalars().all()
     assert ep.status == "done"  # 不再回 pending
     assert len(km) == 1 and km[0].kp_id == "ohm"  # mastery 未被拖垮
+    assert km[0].n_obs == 1  # 判定观测已折叠（mem0 失败不影响判定路径）
