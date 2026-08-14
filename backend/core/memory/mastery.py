@@ -187,6 +187,9 @@ async def topic_repeat_hint(db, user_id: str, course_id: str, topic_ids: list[st
 
     供 infer_signal 的 history_hint——同主题此前观测过 ≥1 次又来问 = 重复提问信号。
     不查 learning_events（那要 join 解析，成本高且口径松）。
+
+    注意：掌握度主路径已改走 judge → mastery_observation（见 consolidation），本函数
+    仅剩词表 LF 兜底线（待阶段 E 实测 precision 定去留）使用。
     """
     from core.db.database import KnowledgeMastery
     from sqlalchemy import func, select

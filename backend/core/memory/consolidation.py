@@ -1,16 +1,21 @@
-"""L3 巩固：消费 episodic pending → 升格 semantic(mem0) → 标 done。
+"""L3 巩固：消费 episodic pending → 升格 semantic(mem0) + 掌握度观测 → 标 done。
 
 事件驱动（Phase 3）：热路径 importance 累计超阈值 → enqueue consolidate_memory；
 5min cron safety net 兜底长期 pending + 超时 processing 孤儿（见 worker.cron_consolidate_memory）。
 
-写侧闭集化（零 LLM）：主题命中走 topic_match.match_topics（课程主题图 embedding 最近邻），
-行为信号走 infer_signal 关键词规则；仅 should_route_error_llm 判强错误信号时才调一次 LLM
-抽错题（且只取 error_patterns）。抽象已由建库期课程主题图提供，运行时不再生成式抽取。
+掌握度路径（plan「掌握度估计器重构」阶段C）：按主题连续段一次 LLM 闭集序数判定
+（judge.judge_segment，一段一次调用）→ 写 mastery_observation 追加日志 → 确定性
+Elo 折叠进 knowledge_mastery（mastery_state.fold_observations）。infer_signal 词表
+已退出掌握度主路径（降级为待实测 LF，见 topic_match.py docstring）。
+
+预算约束：单次巩固判定段数上限 _JUDGE_SEGMENTS_PER_RUN（超出的段留 pending 等下轮，
+掌握度晚一轮到账无害）+ 信号量并发 + 单段超时；判定失败不影响 mem0 与 done 标记。
 
 幂等性：mem0.add 内部做事实抽取/去重，重复巩固同一段不产生重复事实；故崩溃重试安全。
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from collections import defaultdict
@@ -20,6 +25,13 @@ logger = logging.getLogger(__name__)
 
 # 单次巩固最多领取的 episode 数（防爆）
 _CLAIM_LIMIT = 200
+
+# 判定预算（plan 阶段C）：200 条 episode 切完可能是几十段，串行几十次 LLM 调用会
+# 拖爆 ARQ 任务超时。超上限的段本次不判定，episode 留 pending 等下轮（宁可多轮
+# 巩固，不要单任务超时全丢）。
+_JUDGE_SEGMENTS_PER_RUN = 20
+_JUDGE_CONCURRENCY = 4    # 并发判定信号量
+_JUDGE_TIMEOUT_SECONDS = 30  # 单段超时；超时段按判定不可用处理
 # pending 超过此秒数 → cron safety net 兜底 enqueue（session 空闲等价触发）
 _PENDING_STALE_SECONDS = 300
 # processing 超过此秒数（用 created_at 近似，正常 promote 仅需数秒）→ 视崩溃遗留回 pending
@@ -249,8 +261,9 @@ async def _mark(db, ep_ids: list[str], status: str, *, consolidated: bool = Fals
 async def _closed_set_points(db, course_id: str, hits: list, signal: dict) -> list[dict]:
     """闭集命中 → 仪表盘 knowledge 节点（entity_id=topic_id，id 永不漂移）。
 
-    教师看板读 users.knowledge_graph，节点改为闭集合成——不为看板另跑一遍开放抽取
-    （开放抽取每次抽出的 entity_id 不稳定，正是 kp_id 断链的成因）。label 查不到的跳过。
+    已不在掌握度主路径上（阶段C 改走 judge → mastery_observation），保留供 eval/
+    看板合成路径复用。教师看板读 users.knowledge_graph，节点闭集合成——不为看板
+    另跑一遍开放抽取（开放抽取的 entity_id 不稳定，正是 kp_id 断链的成因）。
     """
     from core.db.database import CourseTopic
     from sqlalchemy import select
@@ -280,11 +293,232 @@ async def _closed_set_points(db, course_id: str, hits: list, signal: dict) -> li
     ]
 
 
+async def _write_mastery_observations(
+    db, user_id: str, course_id: str, judgements, episode_ids: list[str]
+) -> None:
+    """判定 → mastery_observation 追加 + 按 (topic) 折叠写回 knowledge_mastery。
+
+    折叠纪律（plan 阶段A）：增量更新只在「新观测就是最新一条」时等价；这里写完即折，
+    若有迟到观测落库须整体重折（fold_observations 吃全量日志的设计即为此）。
+    失败非致命——观测日志 append-only，丢了可由重放恢复，不能阻塞 done。
+    """
+    import time as _time
+
+    from core.db.database import KnowledgeMastery, MasteryObservation
+    from core.memory.mastery_state import LEVEL_OUTCOME, W_JUDGE
+    from sqlalchemy import select
+
+    if not judgements:
+        return
+    now = _time.time()
+    for j in judgements:
+        db.add(
+            MasteryObservation(
+                user_id=user_id, course_id=course_id, topic_id=j.topic_id,
+                source="llm_judge", outcome=LEVEL_OUTCOME[j.level], weight=W_JUDGE,
+                confidence=j.confidence, evidence_quote=j.evidence_quote,
+                episode_ids=list(episode_ids), created_at=now,
+            )
+        )
+    await db.commit()
+
+    # 折叠写回：按 topic 全量重放观测日志 → 更新 theta/n_obs 与派生 mastery/risk
+    topic_ids = sorted({j.topic_id for j in judgements})
+    from core.memory.mastery_state import fold_observations
+
+    for tid in topic_ids:
+        obs_rows = (
+            (
+                await db.execute(
+                    select(
+                        MasteryObservation.outcome,
+                        MasteryObservation.weight,
+                        MasteryObservation.source,
+                        MasteryObservation.created_at,
+                    ).where(
+                        MasteryObservation.user_id == user_id,
+                        MasteryObservation.course_id == course_id,
+                        MasteryObservation.topic_id == tid,
+                    )
+                )
+            )
+            .mappings()
+            .all()
+        )
+        # 题目难度侧（全班共享）从 course_topic 取初值再叠加判分观测
+        from core.db.database import CourseTopic
+
+        ct = (
+            (
+                await db.execute(
+                    select(CourseTopic.difficulty_b, CourseTopic.n_item).where(
+                        CourseTopic.course_id == course_id,
+                        CourseTopic.topic_id == tid,
+                    )
+                )
+            ).first()
+        )
+        init_b, init_n_item = (ct[0], ct[1]) if ct else (0.0, 0)
+        quiz_obs = [
+            {"created_at": o.created_at, "outcome": o.outcome, "weight": o.weight, "source": o.source}
+            for o in obs_rows if o.source == "quiz"
+        ]
+        from core.memory.mastery_state import FoldState
+
+        item_state = fold_observations(quiz_obs, FoldState(0.0, 0, init_b, init_n_item))
+        all_obs = [
+            {"created_at": o.created_at, "outcome": o.outcome, "weight": o.weight, "source": o.source}
+            for o in obs_rows
+        ]
+        state = fold_observations(all_obs, FoldState(0.0, 0, item_state.b_topic, item_state.n_item))
+
+        row = (
+            (
+                await db.execute(
+                    select(KnowledgeMastery).where(
+                        KnowledgeMastery.user_id == user_id,
+                        KnowledgeMastery.course_id == course_id,
+                        KnowledgeMastery.kp_id == tid,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if row is None:
+            from core.db.database import CourseTopic as _CT
+
+            label_row = (
+                await db.execute(
+                    select(_CT.label).where(
+                        _CT.course_id == course_id, _CT.topic_id == tid
+                    )
+                )
+            ).scalar()
+            db.add(
+                KnowledgeMastery(
+                    user_id=user_id, course_id=course_id, kp_id=tid,
+                    label=label_row or tid,
+                    mastery=round(state.mastery, 4), risk=round(state.risk, 4),
+                    observation_count=state.n_obs,
+                    first_observed_at=now, last_observed_at=now,
+                    evidence_episode_ids=list(episode_ids)[:20],
+                    theta=round(state.theta, 6), n_obs=state.n_obs,
+                )
+            )
+        else:
+            row.theta = round(state.theta, 6)
+            row.n_obs = state.n_obs
+            row.mastery = round(state.mastery, 4)
+            row.risk = round(state.risk, 4)
+            row.observation_count = state.n_obs
+            row.last_observed_at = now
+            ev = list(row.evidence_episode_ids or [])
+            for eid in episode_ids:
+                if eid and eid not in ev:
+                    ev.append(eid)
+            row.evidence_episode_ids = ev[-20:]
+        await db.commit()
+
+
+async def _judge_and_record(
+    db, user_id: str, course_id: str, segments: list, topic_ids_per_ep: list,
+    topics_meta: dict[str, tuple[str, str]], *,
+    _hits_map: dict[str, list], _eps_all: list,
+) -> list[str]:
+    """按主题段判定 + 写观测 + 折叠。返回判定不可用（超时/失败/超上限）段的
+    episode id 列表——这些 episode 留 pending 等下轮。
+
+    topics_meta: {topic_id: (label, definition)}，judge 的闭集输入。
+    _hits_map: {episode_id: [topic_id, ...]}，段内可判主题 = 段内各 ep 命中并集（≤3）。
+    _eps_all: 该 session 全部 episode（topic_ids_per_ep 的索引基准）。
+
+    并发模型：LLM 判定（纯 IO）用信号量并发；DB 写回**串行**（write_lock）——SQLAlchemy
+    AsyncSession 非并发安全，gather 共享同一 session 会撞事务状态机。写回本身轻
+    （append + 全量重折在观测数小时级），串行不构成瓶颈。
+    """
+    from core.memory.judge import judge_segment
+
+    overflow = [ep.id for seg in segments[_JUDGE_SEGMENTS_PER_RUN:] for ep in seg]
+    if overflow:
+        logger.info(
+            "[consolidate] judge budget overflow: %d segments deferred",
+            len(segments) - _JUDGE_SEGMENTS_PER_RUN,
+        )
+    budget = segments[:_JUDGE_SEGMENTS_PER_RUN]
+
+    sem = asyncio.Semaphore(_JUDGE_CONCURRENCY)
+    write_lock = asyncio.Lock()
+    deferred_ids: list[str] = list(overflow)
+    first_idx = {id(ep): i for i, ep in enumerate(_eps_all)}
+
+    async def _one(seg) -> None:
+        async with sem:
+            main_topic = topic_ids_per_ep[first_idx[id(seg[0])]]
+            if main_topic is None:
+                return  # 无主题段无可判主题
+            seg_topics = sorted(
+                {t for ep in seg for t in (_hits_map.get(ep.id) or [])}
+            )[:3] or [main_topic]
+            if not all(t in topics_meta for t in seg_topics):
+                return
+            try:
+                result = await asyncio.wait_for(
+                    judge_segment(
+                        [(ep.user_msg, ep.assistant_msg) for ep in seg],
+                        [(t, *topics_meta[t]) for t in seg_topics],
+                    ),
+                    timeout=_JUDGE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("[consolidate] judge timeout, segment deferred")
+                deferred_ids.extend(ep.id for ep in seg)
+                return
+            except Exception as exc:
+                logger.warning("[consolidate] judge failed: %s", exc)
+                deferred_ids.extend(ep.id for ep in seg)
+                return
+            if result is None:
+                deferred_ids.extend(ep.id for ep in seg)
+                return
+            async with write_lock:
+                try:
+                    await _write_mastery_observations(
+                        db, user_id, course_id, result.judgements, [ep.id for ep in seg]
+                    )
+                except Exception as exc:
+                    logger.warning("[consolidate] mastery write failed: %s", exc)
+                    await db.rollback()
+                if result.error_patterns:
+                    try:
+                        from core.memory import graph_memory
+
+                        await graph_memory.merge_and_save_graphs(
+                            db, user_id,
+                            {"error_patterns": result.error_patterns},
+                            course_id,
+                        )
+                    except Exception as exc:
+                        logger.warning("[consolidate] error_patterns merge failed: %s", exc)
+                        await db.rollback()
+
+    # 段级 try 兜底：单段意外异常不拖垮整批（其余段照常判定/写回）
+    async def _guard(seg) -> None:
+        try:
+            await _one(seg)
+        except Exception as exc:
+            logger.warning("[consolidate] segment judge crashed: %s", exc)
+            deferred_ids.extend(ep.id for ep in seg)
+
+    await asyncio.gather(*(_guard(seg) for seg in budget))
+    return sorted(set(deferred_ids))
+
+
 async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
     """核心巩固流程（ARQ job 调用，便于单测）。
 
-    claim pending → 按 session 分组 → 每组 mem0.add 升格 → 成功标 done / 失败回 pending 重试。
-    mem0 失败不丢数据：失败的 episode 回 pending 等下次重试（episodes 永久留存）。
+    claim pending → 按 session 分组 → mem0 升格 + 按主题段 LLM 判定写观测折叠
+    → 成功标 done / 判定不可用的 episode 回 pending 等下轮。
 
     Returns: {"claimed": N, "promoted": M}
     """
@@ -293,18 +527,13 @@ async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
         return {"claimed": 0, "promoted": 0}
 
     done_ids: list[str] = []
-    retry_ids: list[str] = []
+    deferred_ids: set[str] = set()
     promoted = 0
-    from core.memory import graph_memory, mastery  # 派生层：graph(dashboard) + mastery(course 维度)
 
-    from core.memory.topic_match import (
-        infer_signal,
-        match_topics,
-        should_route_error_llm,
-    )
+    from core.memory.topic_match import match_topics
 
     for session_id, eps in group_episodes_by_session(claimed).items():
-        # 0. 逐 episode 闭集命中（每轮 match_topics 只算一次，双槽写入与 mastery 共用）
+        # 0. 逐 episode 闭集命中（每轮 match_topics 只算一次，判定与双槽写入共用）
         hits_per_ep: list = []
         for ep in eps:
             try:
@@ -328,60 +557,70 @@ async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
                 "[consolidate] mem0 promote failed user=%s session=%s error=%s",
                 user_id, session_id, exc,
             )
-        # 2. graph + mastery（派生层）。写侧闭集化（零 LLM）：match_topics 定主题，
-        #    infer_signal 出行为 delta；仅强错误信号（should_route_error_llm）才调 LLM
-        #    抽错题（且只取 error_patterns，丢弃 knowledge_points——开放抽取的 entity_id
-        #    不稳定，正是 kp_id 断链的成因）。失败非致命，不影响 done。
-        for ep, hits in zip(eps, hits_per_ep):
-            try:
-                # 重复提问提示：命中的主题此前已有 mastery 观测（本轮写入前）
-                repeat = await mastery.topic_repeat_hint(
-                    db, user_id, course_id, [tid for tid, _sim in hits]
-                )
-                signal = infer_signal(
-                    ep.user_msg, ep.assistant_msg,
-                    history_hint={"topic_repeat_count": repeat},
-                )
-                if hits:
-                    await mastery.append_mastery_from_topics(
-                        db, user_id, course_id, hits, signal, ep.id
-                    )
-                    points = await _closed_set_points(db, course_id, hits, signal)
-                    if points:
-                        await graph_memory.merge_and_save_graphs(
-                            db, user_id, {"knowledge_points": points}, course_id
+        # 2. 掌握度路径（一段一次 LLM 判定 → 观测 → 折叠）。失败非致命，不影响 done
+        try:
+            segments = split_topic_segments(eps, topic_ids_per_ep)
+            # 段内可判主题 = 段内各 ep 命中主题的并集（闭集 meta 一次查齐）
+            seg_topic_ids = sorted(
+                {
+                    t
+                    for hits in hits_per_ep
+                    for t, _sim in hits
+                }
+            )
+            topics_meta: dict[str, tuple[str, str]] = {}
+            if seg_topic_ids:
+                from core.db.database import CourseTopic
+                from sqlalchemy import select
+
+                rows = (
+                    (
+                        await db.execute(
+                            select(
+                                CourseTopic.topic_id, CourseTopic.label, CourseTopic.definition
+                            ).where(
+                                CourseTopic.course_id == course_id,
+                                CourseTopic.topic_id.in_(seg_topic_ids),
+                            )
                         )
-                if should_route_error_llm(signal):
-                    extracted = await graph_memory.extract_knowledge(
-                        course_id, ep.user_msg, ep.assistant_msg
-                    )
-                    err_only = {"error_patterns": (extracted or {}).get("error_patterns") or []}
-                    if err_only["error_patterns"]:
-                        await graph_memory.merge_and_save_graphs(db, user_id, err_only, course_id)
-            except Exception as exc:
-                logger.warning(
-                    "[consolidate] knowledge update failed user=%s ep=%s: %s",
-                    user_id, ep.id, exc,
+                    ).all()
                 )
-                try:
-                    await db.rollback()  # 失败可能令 session 中毒，回滚后续 episode/_mark 才能用
-                except Exception:
-                    pass
+                topics_meta = {
+                    r.topic_id: (r.label, r.definition or "") for r in rows
+                }
+            hits_by_ep = {ep.id: [t for t, _s in hits] for ep, hits in zip(eps, hits_per_ep)}
+            if topics_meta:
+                deferred = await _judge_and_record(
+                    db, user_id, course_id, segments, topic_ids_per_ep, topics_meta,
+                    _hits_map=hits_by_ep, _eps_all=eps,
+                )
+                deferred_ids.update(deferred)
+        except Exception as exc:
+            logger.warning(
+                "[consolidate] judge path failed user=%s session=%s error=%s",
+                user_id, session_id, exc,
+            )
+            try:
+                await db.rollback()
+            except Exception:
+                pass
         done_ids.extend(e.id for e in eps)
         promoted += len(eps)
 
-    await _mark(db, done_ids, "done", consolidated=True)
-    await _mark(db, retry_ids, "pending")  # 回退重试
+    # 判定不可用的 episode 回 pending（下轮重判）；其余 done
+    done_final = [i for i in done_ids if i not in deferred_ids]
+    await _mark(db, done_final, "done", consolidated=True)
+    await _mark(db, sorted(deferred_ids), "pending")
+
+    logger.info(
+        "[consolidate] user=%s course=%s claimed=%d promoted=%d deferred=%d",
+        user_id, course_id, len(claimed), len(done_final), len(deferred_ids),
+    )
+    return {"claimed": len(claimed), "promoted": len(done_final)}
 
     # procedural 草稿生成已从主路径摘除：学情拼接门控方案下 procedural 不再作为贡献，
     # 故 consolidate 不再调 maybe_generate_procedural（模块 procedural.py 保留，避免大删
     # 前端技能体系）。如需恢复，在此处重新 ``await maybe_generate_procedural(db, user_id, course_id)``。
-
-    logger.info(
-        "[consolidate] user=%s course=%s claimed=%d promoted=%d retry=%d",
-        user_id, course_id, len(claimed), promoted, len(retry_ids),
-    )
-    return {"claimed": len(claimed), "promoted": promoted}
 
 
 __all__ = [

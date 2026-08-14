@@ -89,16 +89,6 @@ def infer_signal(
     }
 
 
-def should_route_error_llm(signal: dict) -> bool:
-    """纯函数：该轮是否值得调一次 LLM 抽错题（SAGE 的不确定带）。
-
-    只有强行为证据（教师纠正 / 明确困惑 / 负向反馈 / 重复提问）才路由；偏好线索与
-    肯定确认不路由。零 LLM 闭集匹配覆盖其余全部轮次。
-    """
-    strong = {"correction", "confusion", "negative_ack", "repeat"}
-    return bool(strong & set(signal.get("signals") or []))
-
-
 async def match_topics(
     text: str, course_id: str, db, *, threshold: float | None = None
 ) -> list[tuple[str, float]]:
@@ -159,6 +149,5 @@ def extract_preferences(user_msg: str) -> list[str]:
 __all__ = [
     "match_topics",
     "infer_signal",
-    "should_route_error_llm",
     "extract_preferences",
 ]

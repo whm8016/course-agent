@@ -185,7 +185,11 @@ async def test_consolidate_promotes_and_marks_done(db):
 
 
 async def test_consolidate_groups_multiple_sessions(db):
-    """两个 session → 两条 event（每 session 各一个主题段一条）。"""
+    """两个 session → 两条 event（每 session 各一个主题段一条）。
+
+    掌握度判定 mock 为 None（判定不可用 → episode 回 pending 等下轮）：本用例只验
+    mem0 分组口径，promoted 数按判定可用计 0（阶段C：promoted=判定可用段）。
+    """
     from core.db.database import AsyncSessionLocal, CourseTopic, MemoryEpisode
 
     await _seed([
@@ -198,16 +202,18 @@ async def test_consolidate_groups_multiple_sessions(db):
     with (
         patch("core.memory.mem0_client.get_memory") as gm,
         patch("core.memory.topic_match.match_topics", AsyncMock(return_value=[("ohm", 0.9)])),
+        patch("core.memory.judge.judge_segment", AsyncMock(return_value=None)),
     ):
         gm.return_value.add = AsyncMock(return_value={"results": []})
         async with AsyncSessionLocal() as s:
             result = await consolidation.consolidate(s, "u1", "c1")
-    assert result["promoted"] == 2
+    assert result["claimed"] == 2
+    assert result["promoted"] == 0  # 判定不可用 → 回 pending；mem0 分组口径见 events
     events = [
         c for c in gm.return_value.add.call_args_list
         if (c.kwargs.get("metadata") or {}).get("kind") == "event"
     ]
-    assert len(events) == 2  # 每 session 一段 → 一条 event
+    assert len(events) == 2  # 每 session 一段 → 一条 event（mem0 照常升格）
 
 
 async def test_consolidate_mem0_failure_degrades_not_retry(db):
