@@ -88,7 +88,7 @@ async def _on_capability_complete(event) -> None:
     except Exception:
         logger.warning("EventBus: record_episode failed", exc_info=True)
 
-    # L3 巩固触发（Phase 3）：importance 累计超阈值 / quiz 里程碑 → enqueue consolidate_memory。
+    # L3 巩固触发（Phase 3）：importance 累计超阈值 → enqueue consolidate_memory。
     # 对齐 Generative Agents 的 reflection 累计触发；5min cron safety net 兜底（worker.py）。
     try:
         from core.memory import consolidation, episodic
@@ -103,7 +103,7 @@ async def _on_capability_complete(event) -> None:
         if score > 0:
             accumulated = await consolidation.add_importance(event.user_id, event.course_id, score)
             threshold = get_settings().mem0.consolidation_importance_threshold
-            if accumulated >= threshold or event.mode == "quiz":
+            if accumulated >= threshold:
                 pool = await get_arq_pool()
                 if pool is not None:
                     await pool.enqueue_job(
@@ -435,14 +435,8 @@ async def lifespan(app: FastAPI):
     # worker 上重启。
     mark_shutting_down()
 
-    # Shutdown: 通知 ARQ worker 做 final memory flush（Producer-Consumer 模式）
-    try:
-        pool = await get_arq_pool()
-        if pool is not None:
-            await pool.enqueue_job("flush_all_pending_job")
-            logger.info("Enqueued flush_all_pending_job to ARQ worker")
-    except Exception as e:
-        logger.warning(f"Enqueue flush_all_pending_job failed: {e}")
+    # Shutdown: final memory flush 已停用（flush cron 生产者死透，巩固走 episodes outbox）
+    # （原 flush_all_pending_job enqueue 移除；worker 不再注册该 job）
 
     # 停止单例服务（leader 经 on_lose 回调）+ 清理 leader 选举资源（cancel loop、释放锁）
     await shutdown_leader()

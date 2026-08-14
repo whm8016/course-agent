@@ -64,6 +64,10 @@ LLM_BASE_URL: str = (
 # 不跟随生产聊天模型的 LLM__TEXT_MODEL（避免切生产模型时连带改变出题/阅卷质量）。
 JUDGE_LLM_MODEL: str = os.getenv("EVAL_JUDGE_MODEL", "deepseek-v4-pro")
 GEN_LLM_MODEL: str = os.getenv("EVAL_GEN_MODEL", "deepseek-v4-pro")
+# 评测 answer 生成模型（被评测的 RAG 回答）。用户要求"回答用 flash / 阅卷用 pro"：
+# 阅卷走上面的 JUDGE_LLM_MODEL（pro），answer 走本字段锁定 deepseek-v4-flash，
+# 不跟随生产 LLM__TEXT_MODEL（避免切生产模型时连带改变评测 answer 质量）。
+EVAL_ANSWER_MODEL: str = os.getenv("EVAL_ANSWER_MODEL", "deepseek-v4-flash")
 # RAGAS LLM 输出 token 上限：ragas 默认 max_tokens=1024，NER 抽实体 / faithfulness 分解 claims 等
 # 结构化输出远超 1024 → 输出被截断 → instructor IncompleteOutputException + tenacity 疯狂重试
 # （这正是 NERExtractor 龟速 422s/it 的根因，不是真推理慢）。合成与阅卷均给 8192：合成 NER 抽实体

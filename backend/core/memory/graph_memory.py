@@ -64,9 +64,9 @@ _TURN_COUNT_TTL = 7 * 24 * 3600            # 7 天无活动则计数 key 过期�
 async def _incr_turn_count(user_id: str) -> int:
     """跨进程 turn 计数（Redis INCR 原子递增），返回递增后的值。
 
-    复用 flush_manager 的 Redis 连接池（同属 core.memory 包，避免另开一个 pool）。
+    复用 core.memory 共享 Redis 连接池（redis_pool，避免另开一个 pool）。
     """
-    from core.memory.flush_manager import _get_redis
+    from core.memory.redis_pool import get_redis as _get_redis
 
     r = _get_redis()
     key = f"{_TURN_COUNT_PREFIX}{user_id}"
@@ -382,15 +382,23 @@ def _merge_error_graph(existing: dict, new_errors: list[dict], course_id: str = 
                 "error_count": 1,
                 "notes": str(error.get("notes") or ""),
                 "related_knowledge_points": list(error.get("related_knowledge_points") or []),
+                "related_topic_ids": list(error.get("related_topic_ids") or []),
                 "correction_suggestions": list(error.get("correction_suggestions") or [])[:5],
                 "updated_at": now,
             }
             node_map[nid] = node
             nodes.append(node)
 
+        # 错误→主题边：判定器给 related_topic_ids（闭集 topic_id，优先）；
+        # 旧口径 related_knowledge_points 是自由标签，hash 出的 kp 节点可能不存在
+        #（仪表盘悬空边，可接受——门控已不读 error_graph，见 proactive._read_error_repeated）
+        edge_targets = [f"kp:{t}" for t in (error.get("related_topic_ids") or [])]
         for kp_label in (error.get("related_knowledge_points") or []):
             kp_id = _node_id("kp", kp_label)
-            edge = {"source": nid, "target": kp_id, "relation": "caused_by"}
+            if kp_id not in edge_targets:
+                edge_targets.append(kp_id)
+        for tgt in edge_targets:
+            edge = {"source": nid, "target": tgt, "relation": "caused_by"}
             if edge not in edges:
                 edges.append(edge)
 

@@ -113,13 +113,16 @@ async def rollup_student_course(course_ids: list[str]) -> int:
     """重算指定课程的 student_course_rollup（每课程先删后插，幂等）。返回插入行数。
 
     从 Session/Message/NotebookEntry 重算累计；quiz 按 P1-a 口径 JOIN Session 取 course
-    （避免跨课程泄漏）。mastery_avg/risk 不在此填（Phase 4 BKT，保留 NULL）。
+    （避免跨课程泄漏）。mastery_avg/risk 从 knowledge_mastery 折叠状态聚合（plan 阶段F：
+    mastery = sigmoid(theta - b) 的均值；无行学生保持 NULL，读侧遇 NULL 回退旧公式）。
     """
     if not course_ids:
         return 0
     inserted = 0
     try:
         async with AsyncSessionLocal() as db:
+            from core.db.database import CourseTopic, KnowledgeMastery
+
             now = time.time()
             for cid in course_ids:
                 await db.execute(
@@ -174,9 +177,41 @@ async def rollup_student_course(course_ids: list[str]) -> int:
                         .group_by(NotebookEntry.user_id)
                     )).all()
                 }
+                # mastery 聚合（阶段F）：按 (学生, 主题) 取折叠状态，risk = 1 - sigmoid(theta-b)
+                # b 读 course_topic.difficulty_b（全班共享先验）。无行学生不在结果里 → NULL。
+                b_map = {
+                    r.topic_id: float(r.difficulty_b or 0.0) for r in (await db.execute(
+                        select(CourseTopic.topic_id, CourseTopic.difficulty_b)
+                        .where(CourseTopic.course_id == cid)
+                    )).all()
+                }
+                km_rows = (await db.execute(
+                    select(
+                        KnowledgeMastery.user_id,
+                        KnowledgeMastery.kp_id,
+                        KnowledgeMastery.theta,
+                    )
+                    .where(
+                        KnowledgeMastery.course_id == cid,
+                        KnowledgeMastery.user_id.in_(enrolled),
+                    )
+                )).all()
+                import math as _math
+
+                per_user: dict[str, list[float]] = {}
+                for r in km_rows:
+                    b = b_map.get(r.kp_id, 0.0)
+                    per_user.setdefault(r.user_id, []).append(
+                        1.0 - 1.0 / (1.0 + _math.exp(-(r.theta or 0.0) + b))  # risk
+                    )
+                mastery = {
+                    uid: (round(1.0 - sum(rs) / len(rs), 4), round(sum(rs) / len(rs), 4))
+                    for uid, rs in per_user.items()
+                }
                 for uid in enrolled:
                     s_sess = sess.get(uid, (0, None))
                     q = quiz.get(uid, (0, 0))
+                    m = mastery.get(uid)
                     db.add(StudentCourseRollup(
                         user_id=uid,
                         course_id=cid,
@@ -185,6 +220,8 @@ async def rollup_student_course(course_ids: list[str]) -> int:
                         quiz_total=q[0],
                         quiz_correct=q[1] or 0,
                         last_active_at=s_sess[1],
+                        mastery_avg=m[0] if m else None,   # Elo 折叠派生（plan 阶段F）
+                        risk=m[1] if m else None,
                         updated_at=now,
                     ))
                     inserted += 1

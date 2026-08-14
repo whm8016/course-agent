@@ -148,20 +148,32 @@ async def test_claim_pending_returns_only_returning_rows_under_race(db):
 
 
 async def test_consolidate_promotes_and_marks_done(db):
-    from core.db.database import AsyncSessionLocal, MemoryEpisode
+    from core.db.database import AsyncSessionLocal, CourseTopic, MemoryEpisode
     from sqlalchemy import select
 
     await _seed([
+        CourseTopic(course_id="c1", topic_id="deriv", label="导数"),
         MemoryEpisode(user_id="u1", course_id="c1", session_id="s1", turn_id="t1",
                       user_msg="什么是导数", assistant_msg="变化率", status="pending"),
     ])
-    with patch("core.memory.mem0_client.get_memory") as gm:
+    with (
+        patch("core.memory.mem0_client.get_memory") as gm,
+        # 段级切分后 add 次数取决于主题段：mock 无命中 → 不写 event，只验 done 标记
+        patch("core.memory.topic_match.match_topics", AsyncMock(return_value=[])),
+    ):
         gm.return_value.add = AsyncMock(return_value={"results": []})
         async with AsyncSessionLocal() as s:
             result = await consolidation.consolidate(s, "u1", "c1")
 
     assert result == {"claimed": 1, "promoted": 1}
-    gm.return_value.add.assert_awaited_once()  # 一个 session → 一次 mem0.add
+    async with AsyncSessionLocal() as s:
+        rows = (
+            (await s.execute(select(MemoryEpisode).where(MemoryEpisode.user_id == "u1")))
+            .scalars()
+            .all()
+        )
+    assert all(r.status == "done" for r in rows)
+    assert all(r.consolidated_at is not None for r in rows)
     async with AsyncSessionLocal() as s:
         rows = (
             (await s.execute(select(MemoryEpisode).where(MemoryEpisode.user_id == "u1")))
@@ -173,25 +185,41 @@ async def test_consolidate_promotes_and_marks_done(db):
 
 
 async def test_consolidate_groups_multiple_sessions(db):
-    """两个 session → 两次 mem0.add（每 session 一批）。"""
-    from core.db.database import AsyncSessionLocal, MemoryEpisode
+    """两个 session → 两条 event（每 session 各一个主题段一条）。
+
+    掌握度判定 mock 为 None（判定不可用 → episode 回 pending 等下轮）：本用例只验
+    mem0 分组口径，promoted 数按判定可用计 0（阶段C：promoted=判定可用段）。
+    """
+    from core.db.database import AsyncSessionLocal, CourseTopic, MemoryEpisode
 
     await _seed([
+        CourseTopic(course_id="c1", topic_id="ohm", label="欧姆定律"),
         MemoryEpisode(user_id="u1", course_id="c1", session_id="s1", turn_id="t1",
                       user_msg="q", assistant_msg="a", status="pending"),
         MemoryEpisode(user_id="u1", course_id="c1", session_id="s2", turn_id="t2",
                       user_msg="q", assistant_msg="a", status="pending"),
     ])
-    with patch("core.memory.mem0_client.get_memory") as gm:
+    with (
+        patch("core.memory.mem0_client.get_memory") as gm,
+        patch("core.memory.topic_match.match_topics", AsyncMock(return_value=[("ohm", 0.9)])),
+        patch("core.memory.judge.judge_segment", AsyncMock(return_value=None)),
+    ):
         gm.return_value.add = AsyncMock(return_value={"results": []})
         async with AsyncSessionLocal() as s:
             result = await consolidation.consolidate(s, "u1", "c1")
-    assert result["promoted"] == 2
-    assert gm.return_value.add.await_count == 2
+    assert result["claimed"] == 2
+    assert result["promoted"] == 0  # 判定不可用 → 回 pending；mem0 分组口径见 events
+    events = [
+        c for c in gm.return_value.add.call_args_list
+        if (c.kwargs.get("metadata") or {}).get("kind") == "event"
+    ]
+    assert len(events) == 2  # 每 session 一段 → 一条 event（mem0 照常升格）
 
 
-async def test_consolidate_retry_on_mem0_failure(db):
-    """mem0.add 抛异常 → episode 回 pending（不丢，等重试），promoted=0。"""
+async def test_consolidate_mem0_failure_degrades_not_retry(db):
+    """mem0.add 抛异常 → 降级 warning（阶段2）：episode 照 done、不回 pending。
+
+    旧行为（整段回 pending）已废止：mem0 失败会连带丢掉本可写入的掌握度观测。"""
     from core.db.database import AsyncSessionLocal, MemoryEpisode
     from sqlalchemy import select
 
@@ -199,18 +227,21 @@ async def test_consolidate_retry_on_mem0_failure(db):
         MemoryEpisode(user_id="u1", course_id="c1", session_id="s1", turn_id="t1",
                       user_msg="q", assistant_msg="a", status="pending"),
     ])
-    with patch("core.memory.mem0_client.get_memory") as gm:
+    with (
+        patch("core.memory.mem0_client.get_memory") as gm,
+        patch("core.memory.topic_match.match_topics", AsyncMock(return_value=[])),
+    ):
         gm.return_value.add = AsyncMock(side_effect=RuntimeError("mem0 down"))
         async with AsyncSessionLocal() as s:
             result = await consolidation.consolidate(s, "u1", "c1")
-    assert result == {"claimed": 1, "promoted": 0}
+    assert result == {"claimed": 1, "promoted": 1}
     async with AsyncSessionLocal() as s:
         rows = (
             (await s.execute(select(MemoryEpisode).where(MemoryEpisode.user_id == "u1")))
             .scalars()
             .all()
         )
-    assert all(r.status == "pending" for r in rows)  # 回退重试
+    assert all(r.status == "done" for r in rows)  # 降级不回 pending（mastery 照写）
 
 
 async def test_consolidate_no_pending_noop(db):
@@ -233,7 +264,7 @@ async def test_add_importance_accumulates_via_redis():
     fake_redis = MagicMock()
     fake_redis.pipeline.return_value = pipe
 
-    with patch("core.memory.flush_manager._get_redis", return_value=fake_redis):
+    with patch("core.memory.redis_pool.get_redis", return_value=fake_redis):
         val = await consolidation.add_importance("u1", "c1", 0.4)
 
     assert val == 0.9

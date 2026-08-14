@@ -157,8 +157,11 @@ async def score_stitch_gate(db) -> tuple[int, int, list[str]]:
 
     零 LLM（decide_stitch 纯函数 + stitch_cases 内存数据，无需 DB，但签名与其它 scorer 一致）。
     正例（前置缺口/复发）该拼、负例（unknown/无关/已纠正/全低险/阶段错位）不该拼。
-    mastery 用 risk 作 eff_risk（case 为近期观测，衰减近似无）。
+    case 的 risk 反解成 logit（risk = 1 - sigmoid(theta - b)，b=0 时 logit = logit(1-risk)，
+    近期观测 p_forget≈0 但 case 语料为跨会话场景取 1.0），与阶段D logit 判据同口径。
     """
+    import math
+
     from core.memory.proactive import decide_stitch
 
     from .stitch_cases import STITCH_CASES, prereq_predecessors
@@ -171,7 +174,13 @@ async def score_stitch_gate(db) -> tuple[int, int, list[str]]:
         matched = c["matched_topic"]
         closure = prereq_predecessors(matched) if matched else set()
         mastery = {
-            m["topic_id"]: {"risk": m["risk"], "eff_risk": m["risk"]}
+            m["topic_id"]: {
+                "risk": m["risk"],
+                "risk_used": m["risk"],
+                "logit": math.log((1.0 - m["risk"]) / m["risk"]),  # b=0 反解
+                "p_forget": 1.0,  # case 为跨会话预警场景（非正在学）
+                "observation_count": m["observation_count"],
+            }
             for m in c["mastery"]
         }
         repeated = set(c["error_repeated"])

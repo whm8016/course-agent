@@ -1,0 +1,10 @@
+{
+  "closed_set": {
+    "topic_accuracy": 0.875,
+    "hit": 7,
+    "total": 8,
+    "details": [
+      "pos_prereq_recurrence: got=None gold=kcl"
+    ]
+  }
+}

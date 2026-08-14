@@ -134,7 +134,7 @@ async def test_incr_turn_count_uses_redis_pipeline():
     fake_redis = MagicMock()
     fake_redis.pipeline.return_value = pipe
 
-    with patch("core.memory.flush_manager._get_redis", return_value=fake_redis):
+    with patch("core.memory.redis_pool.get_redis", return_value=fake_redis):
         count = await graph_memory._incr_turn_count("u1")
 
     assert count == 7

@@ -715,7 +715,7 @@ class Mem0Config(BaseModel):
     flush_idle_timeout: float = 120.0
     flush_scan_interval: int = 30
     # L3 巩固（Phase 3）：热路径累计 importance 超此阈值 → enqueue consolidate_memory。
-    # 对齐 Generative Agents 的 reflection 累计触发；quiz 里程碑无视阈值直接触发。
+    # 对齐 Generative Agents 的 reflection 累计触发；5min cron safety net 兜底长期 pending。
     consolidation_importance_threshold: float = 0.7
 
 

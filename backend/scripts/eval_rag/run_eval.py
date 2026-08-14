@@ -96,6 +96,13 @@ async def main():
              "answer 统一用主对话 LLM 生成（对齐 tool_registry._execute_rag）",
     )
     parser.add_argument(
+        "--retriever",
+        choices=["lightrag", "llamaindex_pg"],
+        default="lightrag",
+        help="检索后端：lightrag（默认，含图谱 relationship 路）| llamaindex_pg（pgvector 线，"
+             "dense+BM25 混合，无图谱——relationship 自动降级为 fact）",
+    )
+    parser.add_argument(
         "--metrics",
         default="faithfulness,context_precision",
         help="评测指标列表（逗号分隔）；默认只跑 faithfulness(防幻觉)+context_precision 省成本，"
@@ -180,9 +187,14 @@ async def main():
     else:
         # 原模式路径：逐 LightRAG mode（naive/local/global/mix）查询
         modes = [m.strip() for m in args.modes.split(",")]
+        # pgvector 后端无图谱路径：relationship 降级/过滤为 fact（rag_runner 内亦有兜底）
+        if args.retriever == "llamaindex_pg" and "relationship" in modes:
+            modes = [m for m in modes if m != "relationship"] or ["fact"]
+            logger.info("llamaindex_pg 后端无图谱路径，modes 收为 %s", modes)
         metric_names = [m.strip() for m in args.metrics.split(",")]
         logger.info("评测模式: %s", modes)
         logger.info("评测指标: %s", metric_names)
+        logger.info("检索后端: %s", args.retriever)
 
         from scripts.eval_rag.rag_runner import run_all_modes
         all_results = await run_all_modes(
@@ -192,6 +204,7 @@ async def main():
             no_cache=args.no_cache,
             top_k=args.top_k,
             production_parity=args.production_parity,
+            retriever_backend=args.retriever,
         )
 
     # ---- Step 3-4: RAGAS 指标计算 ----

@@ -37,6 +37,9 @@ htmlcov/
 backend/uploads/
 backend/vectorstore/
 backend/data/
+# ingest_chunks：摄入切块审计JSON + 从 docx 提取的教材图片（派生数据，可重建，整目录删除安全；
+# 且教材图片属版权材料）。原 backend/data/ 规则漏匹配——BASE_DIR 落在仓库根，实际产物在根级 data/
+/data/ingest_chunks/
 backend/lightrag_store/
 backend/kb_store/
 *.db

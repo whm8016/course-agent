@@ -113,25 +113,33 @@ async def test_get_mastery_context_lists_weak_points(db):
     assert len(ctx) <= 300
 
 
-# ── consolidate 双写（mem0 + graph + mastery 单次抽取）──────────────────────
+# ── consolidate 双写（mem0 升格 + LLM 判定路径写 mastery；阶段C 口径）────────
 
 
 async def test_consolidate_writes_mastery_and_marks_done(db):
-    """consolidate 成功：mem0 升格 + graph/mastery 双写 + episode 标 done。"""
-    from core.db.database import AsyncSessionLocal, KnowledgeMastery, MemoryEpisode
+    """consolidate 成功：mem0 升格 + 判定观测折叠写 mastery + episode 标 done。
+
+    阶段C：主题命中 match_topics（mock 0.9 → topic_id "deriv"），判定 mock fair
+    （outcome=0.5 → theta 不动），mastery 行经观测折叠落库 kp_id=topic_id。"""
+    from core.db.database import AsyncSessionLocal, CourseTopic, KnowledgeMastery, MemoryEpisode
+    from core.memory.judge import Judgement, JudgeResult
     from sqlalchemy import select
 
-    # seed pending episode
     async with AsyncSessionLocal() as s:
+        s.add(CourseTopic(course_id="c1", topic_id="deriv", label="导数"))
         s.add(MemoryEpisode(
             user_id="u1", course_id="c1", session_id="s1", turn_id="t1",
             user_msg="什么是导数", assistant_msg="变化率", status="pending",
         ))
         await s.commit()
 
-    extracted = {"knowledge_points": [{"label": "导数", "entity_id": "ent1", "mastery_delta": -0.1, "risk_delta": 0.2}], "error_patterns": []}
+    judge_result = JudgeResult(
+        judgements=[Judgement("deriv", "fair", 0.8, "什么是导数")],
+        abstained=[], error_patterns=[], dropped_invalid_topic=0, dropped_bad_quote=0,
+    )
     with patch("core.memory.mem0_client.get_memory") as gm, \
-         patch("core.memory.graph_memory.extract_knowledge", AsyncMock(return_value=extracted)):
+         patch("core.memory.topic_match.match_topics", AsyncMock(return_value=[("deriv", 0.9)])), \
+         patch("core.memory.judge.judge_segment", AsyncMock(return_value=judge_result)):
         gm.return_value.add = AsyncMock(return_value={"results": []})
         from core.memory.consolidation import consolidate
         async with AsyncSessionLocal() as s:
@@ -141,5 +149,6 @@ async def test_consolidate_writes_mastery_and_marks_done(db):
     async with AsyncSessionLocal() as s:
         ep = (await s.execute(select(MemoryEpisode).where(MemoryEpisode.user_id == "u1"))).scalars().first()
         km = (await s.execute(select(KnowledgeMastery).where(KnowledgeMastery.user_id == "u1"))).scalars().all()
-    assert ep.status == "done"  # mem0 成功 → done
-    assert len(km) == 1 and km[0].kp_id == "ent1"  # mastery 双写
+    assert ep.status == "done"
+    assert len(km) == 1 and km[0].kp_id == "deriv"  # 闭集直写 kp_id=topic_id
+    assert km[0].n_obs == 1  # fair 观测落库（theta 不动是折叠器的预期行为）

@@ -5,8 +5,8 @@
 
 包含后台任务：
 1. run_indexing         – LightRAG 知识库索引（替代 BackgroundTasks）
-2. cron_flush_memory    – Mem0 批量刷新（cron，每 30s 扫描 Redis mem_flush:* key）
-3. flush_all_pending_job – Shutdown 时 Flush 所有 pending buffer
+2. cron_consolidate_memory – L3 episodic 巩固 safety net（5min）
+   （Mem0 flush cron 已停用：生产者 flush_manager.enqueue 早已被 episodic 取代）
 """
 from __future__ import annotations
 
@@ -217,63 +217,11 @@ async def build_course_topic_graph(ctx, course_id: str, force: bool = False) -> 
 
 
 # ---------------------------------------------------------------------------
-# 任务 3 & 4：Mem0 批量刷新（Producer-Consumer 模式）
+# 任务 3 & 4：Mem0 批量刷新（Producer-Consumer 模式）——已停用。
 # ---------------------------------------------------------------------------
-
-
-async def cron_flush_memory(ctx) -> None:
-    """每 30s 扫描 Redis mem_flush:* key，满批或 idle 超时则 flush。"""
-    import time
-    from settings.base import get_settings
-
-    settings = get_settings()
-    max_turns = settings.mem0.flush_max_turns
-    idle_timeout = settings.mem0.flush_idle_timeout
-
-    t0 = time.perf_counter()
-    logger.debug("[worker] cron_flush_memory start max_turns=%d idle_timeout=%.1fs",
-                 max_turns, idle_timeout)
-
-    try:
-        from core.memory.flush_manager import scan_and_flush
-
-        # 优先用 ARQ 注入的 ctx["redis"]；fallback 自建的连接用完必须 aclose（M-3）。
-        r, should_close = await _resolve_redis(ctx)
-        try:
-            flushed = await scan_and_flush(r, max_turns, idle_timeout)
-        finally:
-            if should_close:
-                await r.aclose()
-
-        logger.info("[worker] cron_flush_memory complete flushed=%d elapsed_ms=%d",
-                    flushed, int((time.perf_counter() - t0) * 1000))
-
-    except Exception as exc:
-        logger.warning("[worker] cron_flush_memory error: %s", exc, exc_info=True)
-
-
-async def flush_all_pending_job(ctx) -> None:
-    """Flush 所有 pending buffer（shutdown 时由 main.py enqueue）。"""
-    import time
-    t0 = time.perf_counter()
-    logger.info("[worker] flush_all_pending_job start")
-
-    try:
-        from core.memory.flush_manager import flush_all_pending
-
-        # 优先用 ARQ 注入的 ctx["redis"]；fallback 自建的连接用完必须 aclose（M-3）。
-        r, should_close = await _resolve_redis(ctx)
-        try:
-            flushed = await flush_all_pending(r)
-        finally:
-            if should_close:
-                await r.aclose()
-
-        logger.info("[worker] flush_all_pending_job complete flushed=%d elapsed_ms=%d",
-                    flushed, int((time.perf_counter() - t0) * 1000))
-
-    except Exception as exc:
-        logger.warning("[worker] flush_all_pending_job error: %s", exc, exc_info=True)
+# flush cron 的生产者（flush_manager.enqueue）早已被 episodic.record_episode 取代，
+# Redis mem_flush:* 无新写入；巩固统一走 cron_consolidate_memory（episodes 表 outbox）。
+# flush_manager.py 保留（_flush_turns/_flush_one 仍有历史测试引用），但不再注册 cron/job。
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +232,7 @@ async def flush_all_pending_job(ctx) -> None:
 async def consolidate_memory(ctx, user_id: str, course_id: str = "") -> None:
     """消费某 user(+course) 的 episodic pending → mem0 语义层升格。
 
-    事件驱动触发（main.py _on_capability_complete）：importance 累计超阈值 / quiz 里程碑。
+    事件驱动触发（main.py _on_capability_complete）：importance 累计超阈值。
     幂等：mem0.add 内部去重，崩溃重试不产生重复事实。
     """
     import time
@@ -524,7 +472,7 @@ class WorkerSettings:
         database=int((_parsed.path or "/0").lstrip("/") or 0),
     )
 
-    functions = [run_indexing, flush_all_pending_job, consolidate_memory, build_course_topic_graph]
+    functions = [run_indexing, consolidate_memory, build_course_topic_graph]
     max_jobs = 10
     job_timeout = 36000   # 单个任务最长 10 小时
     keep_result = 300    # 任务结果保留 5 分钟
@@ -532,11 +480,8 @@ class WorkerSettings:
     retry_jobs = True           # 显式开启重试（默认即 True，声明便于阅读；幂等性见 _ARQ_MAX_TRIES 注释）
     on_shutdown = _on_shutdown  # 关停时停止 LightRAG idle reaper（懒启动过的进程才有事做）
 
-    # Mem0 批量刷新 cron：降级为 5min（Phase 2 后 Redis buffer 不再被喂，主路径已是
-    # episodic + consolidate_memory；保留以排干 Phase 2 之前的残留 buffer）。
     from arq import cron
     cron_jobs = [
-        cron(cron_flush_memory, minute=set(range(0, 60, 5))),
         # 5min episodic safety net：捞长期 pending + 超时 processing 孤儿 → enqueue consolidate
         cron(cron_consolidate_memory, minute=set(range(0, 60, 5))),
         # 每日 04:17 磁盘派生数据 GC（低峰期；分钟取质数避免与其他 cron 惊群）。

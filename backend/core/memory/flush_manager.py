@@ -44,13 +44,10 @@ _redis_pool: aioredis.Redis | None = None
 
 
 def _get_redis() -> aioredis.Redis:
-    """返回模块级 Redis 连接池（懒加载，复用同一个 pool，不需要每次 aclose）。"""
-    global _redis_pool
-    if _redis_pool is None:
-        from settings import get_settings
-        REDIS_URL = get_settings().db.redis_url.get_secret_value()
-        _redis_pool = aioredis.from_url(REDIS_URL, decode_responses=True)
-    return _redis_pool
+    """转发到 core.memory.redis_pool（共享池）。flush cron 停用后仅测试经此引用。"""
+    from core.memory.redis_pool import get_redis
+
+    return get_redis()
 
 
 async def enqueue(

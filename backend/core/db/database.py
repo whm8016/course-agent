@@ -541,6 +541,7 @@ class MemoryEpisode(Base):
     assistant_msg = Column(Text, nullable=False, default="")
     importance = Column(Float, nullable=False, default=0.0)
     segment_id = Column(String(32), nullable=True)  # 巩固 job 按话题切分后回填
+    topic_ids = Column(JSON, nullable=True)  # 巩固时 match_topics 命中的 topic_id 列表（段级）
     # pending=待巩固 / processing=巩固中 / done=已升格 / dead=永久失败
     status = Column(String(16), nullable=False, default="pending")
     created_at = Column(Float, nullable=False, default=time.time)
@@ -575,10 +576,52 @@ class KnowledgeMastery(Base):
     first_observed_at = Column(Float, nullable=False, default=time.time)
     last_observed_at = Column(Float, nullable=False, default=time.time)
     evidence_episode_ids = Column(JSON, nullable=False, default=list)  # 贡献过观测的 episode id
+    # MemoryBank 遗忘强度 S：R = exp(-t/S)，teacher_affirm 时 +1（spacing effect）。
+    # 默认 5.0 天——门控的 p_forget = 1 - exp(-t/S) 用它，与 mastery.py forget_prob 同源。
+    strength = Column(Float, nullable=False, default=5.0)
+    # VoI 门控 cooldown：该 (user, course, topic) 上次实际拼出简报的时间戳，24h 内不重复拼
+    last_stitched_at = Column(Float, nullable=True)
+    # Elo 折叠状态（掌握度估计器重构）：theta 为学生潜变量，mastery/risk 是派生值
+    #（mastery = sigmoid(theta - difficulty_b)，risk = 1 - mastery）。n_obs 是折叠观
+    # 测数（驱动不确定度函数 U(n)）。事实源是 mastery_observation 追加日志，本表是
+    # 可重放的物化视图——换估计器只重跑折叠（core.memory.mastery_state），不重跑 LLM。
+    theta = Column(Float, nullable=False, default=0.0)
+    n_obs = Column(Integer, nullable=False, default=0)
 
     __table_args__ = (
         UniqueConstraint("user_id", "course_id", "kp_id", name="uq_mastery_user_course_kp"),
         Index("idx_mastery_user_course", "user_id", "course_id"),
+    )
+
+
+class MasteryObservation(Base):
+    """掌握度观测日志（append-only，唯一事实源）。
+
+    LLM 判定（judge.py）/ 判分（quiz）/ 词表兜底（rule）都只追加这里；状态由
+    core.memory.mastery_state.fold_observations 按时间序确定性折叠进 knowledge_mastery。
+    字段契约参照 pyBKT tutor log（student/skill/correct/opportunity → user/topic/
+    outcome/n_obs）。换估计器（Elo→BKT）只重跑折叠，不重跑 LLM——这也是教师审计
+    「凭啥说他薄弱」的落点。新表：非生产库由 init_db 的 create_all 自动建；生产走 033。
+    """
+
+    __tablename__ = "mastery_observation"
+
+    id = Column(String(32), primary_key=True, default=lambda: _short_uuid(16))
+    user_id = Column(String(32), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    course_id = Column(String(64), nullable=False, default="")
+    topic_id = Column(String(64), nullable=False)
+    # quiz（判分，0/1，唯一可更新题目难度的来源）/ llm_judge（闭集序数判定）/ rule（词表兜底）
+    source = Column(String(16), nullable=False)
+    outcome = Column(Float, nullable=False)  # quiz: 0/1；判定等级映射 good=1.0/fair=0.5/poor=0.0
+    weight = Column(Float, nullable=False, default=1.0)  # 来源可信度，由实测一致率设定
+    confidence = Column(Float, nullable=False, default=1.0)  # 判定器自报置信度（0-1）
+    evidence_quote = Column(Text, nullable=False, default="")  # 判定依据的原文子串（校验不过不落库）
+    episode_ids = Column(JSON, nullable=True)  # 贡献该观测的 episode id 列表（判定按段）
+    question_id = Column(String(64), nullable=True)  # source=quiz 时的题目 id
+    created_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        Index("idx_mastery_obs_u_c_t_time", "user_id", "course_id", "topic_id", "created_at"),
     )
 
 
@@ -603,6 +646,16 @@ class CourseTopic(Base):
     source_section = Column(String(255), nullable=False, default="")  # 来源章节栈
     order_idx = Column(Integer, nullable=False, default=0)  # 讲义顺序（抽前置边的候选约束）
     embedding = Column(JSON, nullable=True)  # list[float]，问句最近邻用；JSON 非 pgvector
+    # VoI 门控 Task Risk 因子：教师标注的安全关键度（如通电操作类标高）。默认 1.0 = 行为
+    # 与不加此列完全一致，只有教师显式标注后才影响门控决策。
+    # 注：原名 severity，与 error_patterns.severity（错误严重度）撞义，已改名 safety_weight
+    #（032 未进生产，模型直接改名；033 迁移对旧库做数据搬迁兜底）。
+    safety_weight = Column(Float, nullable=False, default=1.0)
+    # Elo 折叠的题目难度侧（全班共享参数，教师可见）：b_topic 只由 source=quiz 的判分观测
+    # 更新（对话判定不冒充班级证据）；n_item 是判分观测数（驱动 K_i 衰减）。
+    # 新生 theta=0 时 risk = sigmoid(b_topic) 本身即班级先验，替代手工班级收缩。
+    difficulty_b = Column(Float, nullable=False, default=0.0)
+    n_item = Column(Integer, nullable=False, default=0)
 
     __table_args__ = (
         UniqueConstraint("course_id", "topic_id", name="uq_course_topic"),
@@ -696,8 +749,9 @@ class CourseDailyRollup(Base):
 class StudentCourseRollup(Base):
     """学情读模型（L1）：每 (学生, 课程) 一行的累计聚合，供教师学情统计/仪表盘只读。
 
-    ARQ cron 从 Session/Message/NotebookEntry 删后重算（幂等）。mastery_avg/risk 等
-    Phase 4 BKT 落地后填，此前为 NULL 占位（读侧遇 NULL 回退旧公式，避免空窗）。
+    ARQ cron 从 Session/Message/NotebookEntry 删后重算（幂等）。mastery_avg/risk 从
+    knowledge_mastery 折叠状态聚合（plan 阶段F：Elo sigmoid(theta-b) 的均值）；
+    无 mastery 行的学生为 NULL（读侧遇 NULL 回退旧公式，避免空窗）。
     """
 
     __tablename__ = "student_course_rollup"
