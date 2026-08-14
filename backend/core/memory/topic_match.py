@@ -1,11 +1,11 @@
-"""写侧零 LLM 闭集匹配：对话文本 → 课程主题命中 + 规则行为信号。
+"""闭集主题召回（判定器的上游）+ 待实测的规则弱标注函数。
 
-替代 consolidate 里的 LLM 开放抽取（extract_knowledge）：主题命中靠 embedding 最近邻
-（课程主题图是教师审计过的闭集，抽象已由建库期提供，运行时生成式抽取是纯浪费——
-Zero-Mem 的论证结构）；行为信号（困惑/纠正/偏好/重问）靠关键词规则，零 LLM。
+match_topics：文本 → 课程主题 embedding 最近邻命中（零 LLM、闭集），是 LLM 判定器
+（judge.py）的上游——判定器只看得到这里命中的主题，召回上限由它决定。
 
-只有 should_route_error_llm 判「值得抽错题」时才回退 LLM（SAGE 的不确定带路由：
-判据是行为证据而非 embedding 密度，因为要抽的是错误模式不是新事实）。
+infer_signal / should_route_error_llm：关键词行为信号规则，已退出掌握度主路径，降级
+为 Snorkel 口径的 labeling function——需实测 precision（阶段 E 三臂评测）达标才留作
+低权重兜底观测（source="rule"），precision < 0.6 整条删除。掌握度主路径见 judge.py。
 """
 from __future__ import annotations
 
