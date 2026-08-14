@@ -238,12 +238,38 @@ async def _read_mastery(
         age_days = max(0.0, (now - (r.last_observed_at or now)) / 86400.0)
         out[tid] = {
             "risk": r.risk or 0,
-            "risk_used": r.risk or 0,  # 阶段4 班级收缩覆写
+            "risk_used": r.risk or 0,  # 下方班级收缩覆写
             "p_forget": forget_prob(age_days, r.strength or 5.0),
             "strength": r.strength or 5.0,
             "label": r.label,
             "observation_count": r.observation_count or 1,
         }
+
+    # 班级收缩（阶段4，经验贝叶斯）：观测少的主题向全班均值靠——新生 n=1 的偶发高
+    # risk 不至于直接触发预警；n 足够大时几乎全信个人。k=3 平滑常数。
+    # 该 topic 全班只有自己观测过时 cohort_mean=个人值，公式退化成个人 risk。
+    if out:
+        from sqlalchemy import func
+
+        cohort_rows = (
+            await db.execute(
+                select(
+                    KnowledgeMastery.kp_id,
+                    func.avg(KnowledgeMastery.risk),
+                ).where(
+                    KnowledgeMastery.course_id == course_id,
+                    KnowledgeMastery.kp_id.in_(list(out)),
+                ).group_by(KnowledgeMastery.kp_id)
+            )
+        ).all()
+        k = 3
+        for tid, cohort_mean in cohort_rows:
+            m = out[tid]
+            n = m["observation_count"]
+            mean = float(cohort_mean) if cohort_mean is not None else m["risk"]
+            m["risk_used"] = round(
+                (n / (n + k)) * m["risk"] + (k / (n + k)) * mean, 4
+            )
     return out
 
 
