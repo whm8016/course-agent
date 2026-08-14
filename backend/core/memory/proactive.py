@@ -20,7 +20,6 @@
 from __future__ import annotations
 
 import logging
-import math
 import time
 from dataclasses import dataclass
 
@@ -64,7 +63,7 @@ def decide_stitch(
     Args:
         matched_topic: 问句命中的主题（S_t），None = unknown。
         prereq_closure: matched 的全部前置主题（course_topic_store.get_prereq_predecessors 算）。
-        mastery_map: {topic_id: {risk, eff_risk, label, observation_count}}，门控唯一学情数据源。
+        mastery_map: {topic_id: {risk, risk_used, p_forget, label, observation_count}}，门控唯一学情数据源。
         error_repeated: 反复出错的 topic_id 集（来自 error_graph repeated，label→topic_id 对齐）。
 
     候选（只在两类上算 p_need，全库薄弱点禁止入闸）：
@@ -75,7 +74,7 @@ def decide_stitch(
     if matched_topic is None:
         return StitchBrief(False, None, "unknown", 0.0, 1.0)
 
-    # 2. C1 前置缺口：前置闭包（不含 matched）里高 risk 的，按风险降序
+    # 2. C1 前置缺口：前置闭包（不含 matched）里高 risk 的，按 risk 降序
     prereq_gaps = sorted(
         [
             (tid, mastery_map[tid])
@@ -91,18 +90,24 @@ def decide_stitch(
         # 无候选：前置不缺口、当前问的也没复发 → 沉默（不把无关薄弱点塞进来）
         return StitchBrief(False, None, "no_candidate", 0.0, 1.0)
 
-    # 4. p_need：取前置缺口最高 eff_risk 与复发加成的较大者
-    def _eff(m: dict) -> float:
-        return m.get("eff_risk", m.get("risk", 0))
+    # 4. p_need（阶段3 遗忘耦合，MemoryBank 口径）：
+    #    C1 前置缺口 = risk_used · p_forget——薄弱且久未触碰才值得拼；刚观测过的
+    #    薄弱点（p_forget≈0）不用预警（现在正学着呢）。C2 复发不乘遗忘（复发是错题
+    #    信号不是时间信号），保持 max(0.7, risk_used)。
+    def _need_gap(m: dict) -> float:
+        return m.get("risk_used", m.get("risk", 0)) * m.get("p_forget", 1.0)
 
     p_need = 0.0
     evidence = None
     reason = ""
     if prereq_gaps:
-        top_tid, top = prereq_gaps[0]
-        p_need, evidence, reason = _eff(top), top_tid, "prereq_gap"
+        top_tid, top = max(prereq_gaps, key=lambda x: _need_gap(x[1]))
+        p_need, evidence, reason = _need_gap(top), top_tid, "prereq_gap"
     if is_recurrence:
-        rec = max(RECURRENCE_PNEED_FLOOR, _eff(mastery_map.get(matched_topic, {})))
+        rec = max(
+            RECURRENCE_PNEED_FLOOR,
+            mastery_map.get(matched_topic, {}).get("risk_used", 0),
+        )
         if rec > p_need:
             p_need, evidence, reason = rec, matched_topic, "recurrence"
 
@@ -194,15 +199,19 @@ async def _match_topic(query: str, course_id: str, db, embed_model) -> str | Non
 async def _read_mastery(
     user_id: str, course_id: str, db, topic_map: dict[str, str]
 ) -> dict[str, dict]:
-    """读 knowledge_mastery → {topic_id: {risk, eff_risk, label, observation_count}}。
+    """读 knowledge_mastery → {topic_id: {risk, risk_used, p_forget, label, ...}}。
 
     id-align：行 kp_id 非 topic_id 时，用 label 经 topic_map（label_norm→topic_id）本地兜底，
-    避免 N+1（topic_map 由 stitch_for_turn 一次取全传入）。衰减用 mastery._DECAY_LAMBDA_PER_DAY
-    单一常量，与 mastery.py 同源不漂移。
+    避免 N+1（topic_map 由 stitch_for_turn 一次取全传入）。
+
+    遗忘口径（阶段3，MemoryBank）：p_forget = 1 - exp(-t/S)，S 取行内 strength。
+    旧 eff_risk = risk·exp(-λt) 已废——方向反了：时间越久越该拼前置提醒，不是越不拼。
+    λ=0.01 仅保留在 get_mastery_context 的排序里，门控不再用。
+    risk_used 为阶段4 班级收缩的落点，当前（收缩未启用时）= 个人 risk。
     """
     from core.db.database import KnowledgeMastery
     from core.memory.course_topic_store import _norm_label
-    from core.memory.mastery import _DECAY_LAMBDA_PER_DAY
+    from core.memory.mastery import forget_prob
     from sqlalchemy import select
 
     rows = (
@@ -227,10 +236,11 @@ async def _read_mastery(
         if not tid:
             continue
         age_days = max(0.0, (now - (r.last_observed_at or now)) / 86400.0)
-        eff_risk = (r.risk or 0) * math.exp(-_DECAY_LAMBDA_PER_DAY * age_days)
         out[tid] = {
             "risk": r.risk or 0,
-            "eff_risk": eff_risk,
+            "risk_used": r.risk or 0,  # 阶段4 班级收缩覆写
+            "p_forget": forget_prob(age_days, r.strength or 5.0),
+            "strength": r.strength or 5.0,
             "label": r.label,
             "observation_count": r.observation_count or 1,
         }

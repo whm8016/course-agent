@@ -17,7 +17,24 @@ import time
 logger = logging.getLogger(__name__)
 
 # 读时衰减系数（按天）：0.01 → 半衰期约 69 天。旧错误概念软降权，不物理删除。
+# 注意：λ 只用于 get_mastery_context 的**排序**；门控的遗忘项走 forget_prob
+#（MemoryBank 口径，衰减的是学生掌握而非 agent 记忆），两者勿混。
 _DECAY_LAMBDA_PER_DAY = 0.01
+
+# MemoryBank 遗忘强度初值（天）：R = exp(-t/S)，teacher_affirm 时 +1（spacing effect）
+DEFAULT_STRENGTH = 5.0
+
+
+def forget_prob(age_days: float, strength: float = DEFAULT_STRENGTH) -> float:
+    """遗忘概率 p_forget = 1 - R = 1 - exp(-t/S)（纯函数）。
+
+    t 越久越可能忘了（时间越久越**该**拼前置提醒——方向与旧 eff_risk=risk·exp(-λt)
+    相反：旧式衰减把老薄弱点排到后面，恰好埋掉最需要预警的点）。S 越大（被肯定/
+    强化越多）忘得越慢。
+    """
+    t = max(0.0, float(age_days or 0.0))
+    s = max(0.1, float(strength or DEFAULT_STRENGTH))
+    return 1.0 - math.exp(-t / s)
 
 
 def _clamp(v, default: float) -> float:
@@ -274,4 +291,5 @@ __all__ = [
     "append_mastery_from_topics",
     "topic_repeat_hint",
     "get_mastery_context",
+    "forget_prob",
 ]
