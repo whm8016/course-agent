@@ -58,9 +58,9 @@ _TURN_COUNT_TTL = 7 * 24 * 3600            # 7 天无活动则计数 key 过期�
 async def _incr_turn_count(user_id: str) -> int:
     """跨进程 turn 计数（Redis INCR 原子递增），返回递增后的值。
 
-    复用 flush_manager 的 Redis 连接池（同属 core.memory 包，避免另开一个 pool）。
+    复用 core.memory 共享 Redis 连接池（redis_pool，避免另开一个 pool）。
     """
-    from core.memory.flush_manager import _get_redis
+    from core.memory.redis_pool import get_redis as _get_redis
 
     r = _get_redis()
     key = f"{_TURN_COUNT_PREFIX}{user_id}"

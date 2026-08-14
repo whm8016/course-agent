@@ -435,14 +435,8 @@ async def lifespan(app: FastAPI):
     # worker 上重启。
     mark_shutting_down()
 
-    # Shutdown: 通知 ARQ worker 做 final memory flush（Producer-Consumer 模式）
-    try:
-        pool = await get_arq_pool()
-        if pool is not None:
-            await pool.enqueue_job("flush_all_pending_job")
-            logger.info("Enqueued flush_all_pending_job to ARQ worker")
-    except Exception as e:
-        logger.warning(f"Enqueue flush_all_pending_job failed: {e}")
+    # Shutdown: final memory flush 已停用（flush cron 生产者死透，巩固走 episodes outbox）
+    # （原 flush_all_pending_job enqueue 移除；worker 不再注册该 job）
 
     # 停止单例服务（leader 经 on_lose 回调）+ 清理 leader 选举资源（cancel loop、释放锁）
     await shutdown_leader()
