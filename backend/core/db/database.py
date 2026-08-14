@@ -541,6 +541,7 @@ class MemoryEpisode(Base):
     assistant_msg = Column(Text, nullable=False, default="")
     importance = Column(Float, nullable=False, default=0.0)
     segment_id = Column(String(32), nullable=True)  # 巩固 job 按话题切分后回填
+    topic_ids = Column(JSON, nullable=True)  # 巩固时 match_topics 命中的 topic_id 列表（段级）
     # pending=待巩固 / processing=巩固中 / done=已升格 / dead=永久失败
     status = Column(String(16), nullable=False, default="pending")
     created_at = Column(Float, nullable=False, default=time.time)
@@ -575,6 +576,11 @@ class KnowledgeMastery(Base):
     first_observed_at = Column(Float, nullable=False, default=time.time)
     last_observed_at = Column(Float, nullable=False, default=time.time)
     evidence_episode_ids = Column(JSON, nullable=False, default=list)  # 贡献过观测的 episode id
+    # MemoryBank 遗忘强度 S：R = exp(-t/S)，teacher_affirm 时 +1（spacing effect）。
+    # 默认 5.0 天——门控的 p_forget = 1 - exp(-t/S) 用它，与 mastery.py forget_prob 同源。
+    strength = Column(Float, nullable=False, default=5.0)
+    # VoI 门控 cooldown：该 (user, course, topic) 上次实际拼出简报的时间戳，24h 内不重复拼
+    last_stitched_at = Column(Float, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("user_id", "course_id", "kp_id", name="uq_mastery_user_course_kp"),
@@ -603,6 +609,9 @@ class CourseTopic(Base):
     source_section = Column(String(255), nullable=False, default="")  # 来源章节栈
     order_idx = Column(Integer, nullable=False, default=0)  # 讲义顺序（抽前置边的候选约束）
     embedding = Column(JSON, nullable=True)  # list[float]，问句最近邻用；JSON 非 pgvector
+    # VoI 门控 Task Risk 因子：教师标注的安全关键度（如通电操作类标高）。默认 1.0 = 行为
+    # 与不加此列完全一致，只有教师显式标注后才影响门控决策。
+    severity = Column(Float, nullable=False, default=1.0)
 
     __table_args__ = (
         UniqueConstraint("course_id", "topic_id", name="uq_course_topic"),

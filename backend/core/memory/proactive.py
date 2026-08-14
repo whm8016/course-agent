@@ -216,8 +216,11 @@ async def _read_mastery(
     )
     now = time.time()
     out: dict[str, dict] = {}
+    # id-align：kp_id 恒非空（写侧 entity_id 或 label 哈希兜底），`or` 短路令 label 兜底
+    # 永不生效。只信任落在 course_topic.topic_id 集内的 kp_id，其余走 label 归一化对齐。
+    topic_ids = set(topic_map.values())
     for r in rows:
-        tid = r.kp_id or topic_map.get(_norm_label(r.label))
+        tid = r.kp_id if r.kp_id in topic_ids else topic_map.get(_norm_label(r.label))
         if not tid:
             continue
         age_days = max(0.0, (now - (r.last_observed_at or now)) / 86400.0)
