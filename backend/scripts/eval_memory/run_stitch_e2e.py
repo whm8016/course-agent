@@ -124,7 +124,9 @@ def _balanced_accuracy(tp: int, fn: int, fp: int, tn: int) -> float:
 async def run() -> dict:
     from core.db.database import AsyncSessionLocal, close_db, init_db
     from core.memory.course_topic_store import get_course_topic_map
-    from core.memory.proactive import _read_mastery, decide_stitch, decide_stitch_prism
+    from core.memory.proactive import (
+        _read_error_repeated, _read_mastery, decide_stitch, decide_stitch_prism,
+    )
 
     from .stitch_cases import STITCH_CASES, prereq_predecessors
 
@@ -144,7 +146,10 @@ async def run() -> dict:
                 closure = prereq_predecessors(matched) if matched else set()
                 topic_map = await get_course_topic_map(course_id, db)
                 mastery_map = await _read_mastery(user_id, course_id, db, topic_map)
-                repeated = set(c["error_repeated"])
+                # C2 复发也走真实读侧：观测日志同主题 poor 计数 ≥2（plan §3f），
+                # 不直接抄 case 的 error_repeated——pos_prereq_recurrence 例的
+                # 4 次 poor 观测应被 _read_error_repeated 自然数出
+                repeated = await _read_error_repeated(user_id, course_id, db, topic_map)
 
                 for arm, stitch in (
                     ("baseline_none", lambda: False),
