@@ -183,6 +183,47 @@ async def score_stitch_gate(db) -> tuple[int, int, list[str]]:
     return passed, total, details
 
 
+async def score_stitch_gate_mycourse(db) -> tuple[int, int, list[str]]:
+    """mycourse 真实场景：前置闭包从 ``course_topic_edge`` 读，非 stitch_cases 内存图。"""
+    from core.memory.course_topic_store import get_prereq_predecessors
+    from core.memory.proactive import decide_stitch
+    from sqlalchemy import func, select
+
+    from core.db.database import CourseTopic
+    from .stitch_cases_mycourse import COURSE_ID, STITCH_CASES
+
+    n_topics = (
+        await db.execute(
+            select(func.count()).select_from(CourseTopic).where(CourseTopic.course_id == COURSE_ID)
+        )
+    ).scalar_one()
+    if not n_topics:
+        return 0, 1, [f"{COURSE_ID}: course_topic 为空，请先 build_topic_graph / 建索引"]
+
+    passed = 0
+    total = 0
+    details: list[str] = []
+    for c in STITCH_CASES:
+        total += 1
+        matched = c["matched_topic"]
+        closure = (
+            await get_prereq_predecessors(matched, COURSE_ID, db) if matched else set()
+        )
+        mastery = {
+            m["topic_id"]: {"risk": m["risk"], "eff_risk": m["risk"]}
+            for m in c["mastery"]
+        }
+        repeated = set(c["error_repeated"])
+        brief = decide_stitch(matched, closure, mastery, repeated)
+        if brief.should_stitch == c["gold"]["stitch"]:
+            passed += 1
+        else:
+            details.append(
+                f"{c['id']}: should={brief.should_stitch} gold={c['gold']['stitch']} reason={brief.reason}"
+            )
+    return passed, total, details
+
+
 SCORERS = {
     "knowledge_update": score_knowledge_update,
     "abstention": score_abstention,

@@ -77,6 +77,13 @@ def _build_config() -> dict:
     # DATABASE_URL 形如 postgresql+asyncpg://postgres:postgres@postgres:5432/course_agent
     parsed = up.urlparse(DATABASE_URL.replace("+asyncpg", "+psycopg2"))
     return {
+        # mem0 OSS 抽取 system prompt（ADDITIVE_EXTRACTION_PROMPT）全是英文 few-shot，
+        # 不传 custom_instructions 时 LLM 会把中文对话抽成英文事实。此处强制简体中文。
+        "custom_instructions": (
+            "CRITICAL: Write every extracted memory in Simplified Chinese (简体中文). "
+        
+        
+        ),
         "vector_store": {
             "provider": "pgvector",
             "config": {

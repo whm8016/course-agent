@@ -689,6 +689,16 @@ class ImageIngestConfig(BaseModel):
     wmf_min_blob: int = 2000
 
 
+class CourseTopicConfig(BaseModel):
+    """课程前置图谱离线抽取（build_course_topics from-chunks）。
+
+    独立于 llm.text_model：对话可用 v4-pro，抽取 JSON 须用非 reasoning 档（默认 flash），
+    避免 reasoning 占满 max_tokens → content 空 → json.loads 失败。
+    """
+
+    extract_model: str = "deepseek-v4-flash"
+
+
 class Mem0Config(BaseModel):
     """Mem0 记忆：矛盾检测 / 跳过模式 / 批量刷新。"""
 
@@ -807,6 +817,7 @@ class Settings(BaseSettings):
     feishu: FeishuConfig = Field(default_factory=FeishuConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     image_ingest: ImageIngestConfig = Field(default_factory=ImageIngestConfig)
+    course_topic: CourseTopicConfig = Field(default_factory=CourseTopicConfig)
     mem0: Mem0Config = Field(default_factory=Mem0Config)
     summary: SummaryConfig = Field(default_factory=SummaryConfig)
     question: QuestionConfig = Field(default_factory=QuestionConfig)

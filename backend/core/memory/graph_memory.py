@@ -39,11 +39,17 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from settings import get_settings
-TEXT_MODEL = get_settings().llm.text_model
+
 from core.db.database import User
 from core.llm.llm import client as async_openai_client
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_model() -> str:
+    """JSON 抽取须用非 reasoning 档（与 course_topic.extract_model 同口径）。"""
+    s = get_settings()
+    return s.course_topic.extract_model or s.llm.text_model
 
 _ACTIVE_LIMIT = 200  # 放宽限制，一门课知识点可能很多
 _CANDIDATE_LIMIT = 100
@@ -127,24 +133,24 @@ _MATCH_SYSTEM_PROMPT = """你是学习分析助手。下面是该课程的知识
 3. 识别错误模式（如果有）
 
 返回严格 JSON（不要包含 markdown 围栏）：
-{
+{{
   "matched_points": [
-    {
+    {{
       "entity_id": "目录中的实体ID",
       "label": "知识点名称",
       "mastery_delta": -0.1到0.1,
       "risk_delta": -0.1到0.1,
       "notes": "简短说明"
-    }
+    }}
   ],
   "error_patterns": [
-    {
+    {{
       "label": "错误模式名称",
       "severity": 0.0-1.0,
       "related_entity_ids": ["对应知识点ID"]
-    }
+    }}
   ]
-}
+}}
 
 规则：
 - matched_points 只能包含目录中已有的 entity_id
@@ -152,6 +158,57 @@ _MATCH_SYSTEM_PROMPT = """你是学习分析助手。下面是该课程的知识
 - risk_delta > 0 表示薄弱加剧，< 0 表示改善
 - 如果对话中没有涉及任何知识点，matched_points 返回空数组
 - 不要编造不存在的 entity_id"""
+
+
+def _parse_llm_json(raw: str) -> dict | None:
+    """从 LLM 输出解析 JSON；容忍 markdown 围栏与前后缀噪声。"""
+    text = (raw or "").strip()
+    text = re.sub(r"^```json\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+    if not text:
+        return None
+    try:
+        data = json.loads(text)
+        return data if isinstance(data, dict) else None
+    except json.JSONDecodeError:
+        start, end = text.find("{"), text.rfind("}")
+        if start >= 0 and end > start:
+            try:
+                data = json.loads(text[start : end + 1])
+                return data if isinstance(data, dict) else None
+            except json.JSONDecodeError:
+                return None
+    return None
+
+
+async def _llm_json(prompt: str, *, system: str | None = None, max_tokens: int = 4096) -> dict | None:
+    """带重试的 JSON LLM 调用（与 course_topic_builder 同 max_tokens 口径）。"""
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    last_err: Exception | None = None
+    for attempt in range(2):
+        try:
+            resp = await async_openai_client.chat.completions.create(
+                model=_extract_model(),
+                messages=messages,
+                temperature=0.1,
+                max_tokens=max_tokens,
+                stream=False,
+            )
+            raw = (resp.choices[0].message.content or "").strip()
+            data = _parse_llm_json(raw)
+            if data is not None:
+                return data
+            last_err = ValueError("empty or invalid JSON")
+        except Exception as exc:
+            last_err = exc
+        if attempt == 0:
+            logger.info("[graph] LLM JSON retry after: %s", last_err)
+    if last_err:
+        logger.warning("[graph] LLM JSON failed: %s", last_err)
+    return None
 
 
 def _node_id(prefix: str, label: str) -> str:
@@ -359,8 +416,30 @@ def filter_graph_by_course(graph: dict | None, course_id: str) -> dict:
     return {"nodes": nodes, "edges": edges}
 
 
+async def _get_course_topic_catalog(course_id: str) -> str:
+    """course_topic 目录（topic_id: label），与门控 id-align 同口径，优先于 LightRAG 实体。"""
+    from core.db.database import AsyncSessionLocal, CourseTopic
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(CourseTopic.topic_id, CourseTopic.label).where(
+                    CourseTopic.course_id == course_id
+                )
+            )
+        ).all()
+    if not rows:
+        return ""
+    return "\n".join(f"{tid}: {label}" for tid, label in rows)
+
+
 async def _get_entity_catalog(course_id: str, max_entities: int = 100) -> str:
-    """从 LightRAG 获取实体目录，格式化为 prompt 可用的文本。"""
+    """格式化知识点目录供 LLM 匹配。有 course_topic 时用其 topic_id（门控同源）。"""
+    ct = await _get_course_topic_catalog(course_id)
+    if ct:
+        return ct
+
     from settings import get_settings
     LIGHTRAG_ENABLED = get_settings().lightrag.enabled
 
@@ -397,44 +476,30 @@ async def _extract_from_conversation_with_catalog(
         user_message=user_message[:1500],
         assistant_answer=assistant_answer[:1500],
     )
-    try:
-        resp = await async_openai_client.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=1200,
-            stream=False,
-        )
-        raw = (resp.choices[0].message.content or "").strip()
-        raw = re.sub(r"^```json\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            # 转换 matched_points 为 knowledge_points 格式（兼容下游）
-            matched = data.get("matched_points") or []
-            knowledge_points = []
-            for mp in matched:
-                knowledge_points.append({
-                    "label": mp.get("label", ""),
-                    "entity_id": mp.get("entity_id", ""),
-                    "mastery_delta": mp.get("mastery_delta", 0),
-                    "risk_delta": mp.get("risk_delta", 0),
-                    "notes": mp.get("notes", ""),
-                })
-            # 保留错误模式
-            error_patterns = data.get("error_patterns") or []
-            logger.info(
-                "[graph] extract_with_catalog OK course_id=%s matched=%d errors=%d",
-                course_id, len(knowledge_points), len(error_patterns)
-            )
-            return {
-                "knowledge_points": knowledge_points,
-                "error_patterns": error_patterns,
-                "source": "catalog_match",  # 标记来源
-            }
-    except Exception as e:
-        logger.warning("[graph] extract_with_catalog FAILED course_id=%s error=%s", course_id, e)
-    return None
+    data = await _llm_json(prompt)
+    if not isinstance(data, dict):
+        logger.warning("[graph] extract_with_catalog FAILED course_id=%s", course_id)
+        return None
+    matched = data.get("matched_points") or []
+    knowledge_points = []
+    for mp in matched:
+        knowledge_points.append({
+            "label": mp.get("label", ""),
+            "entity_id": mp.get("entity_id", ""),
+            "mastery_delta": mp.get("mastery_delta", 0),
+            "risk_delta": mp.get("risk_delta", 0),
+            "notes": mp.get("notes", ""),
+        })
+    error_patterns = data.get("error_patterns") or []
+    logger.info(
+        "[graph] extract_with_catalog OK course_id=%s matched=%d errors=%d",
+        course_id, len(knowledge_points), len(error_patterns),
+    )
+    return {
+        "knowledge_points": knowledge_points,
+        "error_patterns": error_patterns,
+        "source": "catalog_match",
+    }
 
 
 async def _extract_from_conversation(
@@ -465,28 +530,13 @@ async def _extract_from_conversation(
         f"学生提问:\n{user_message[:1500]}\n\n"
         f"教师回答:\n{assistant_answer[:1500]}"
     )
-    try:
-        resp = await async_openai_client.chat.completions.create(
-            model=TEXT_MODEL,
-            messages=[
-                {"role": "system", "content": _EXTRACT_SYSTEM_PROMPT},
-                {"role": "user", "content": source},
-            ],
-            temperature=0.1,
-            max_tokens=1200,
-            stream=False,
-        )
-        raw = (resp.choices[0].message.content or "").strip()
-        raw = re.sub(r"^```json\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            kp_count = len(data.get("knowledge_points") or [])
-            err_count = len(data.get("error_patterns") or [])
-            logger.info("[graph] extract OK (fallback) course_id=%s kp=%d err=%d", course_id, kp_count, err_count)
-            return data
-    except Exception as e:
-        logger.warning("[graph] extract FAILED course_id=%s error=%s", course_id, e)
+    data = await _llm_json(source, system=_EXTRACT_SYSTEM_PROMPT)
+    if isinstance(data, dict):
+        kp_count = len(data.get("knowledge_points") or [])
+        err_count = len(data.get("error_patterns") or [])
+        logger.info("[graph] extract OK (fallback) course_id=%s kp=%d err=%d", course_id, kp_count, err_count)
+        return data
+    logger.warning("[graph] extract FAILED course_id=%s", course_id)
     return None
 
 
