@@ -34,14 +34,24 @@ async def _aget_embed(embed_model, text: str) -> list[float] | None:
         return None
 
 
-def export_json(course_id: str, topics: list[dict], edges: list[dict]) -> Path:
-    """导出课程级 JSON artifact（表真相源的投影，供评测复现/教师核对/论文附录）。"""
+def export_json(
+    course_id: str, topics: list[dict], edges: list[dict],
+    failed_sections: list[str] | None = None, stats: dict | None = None,
+) -> Path:
+    """导出课程级 JSON artifact（表真相源的投影，供评测复现/教师核对/论文附录）。
+
+    failed_sections / stats 为本次构建的抽取失败章节与边统计——GET payload 经
+    ``api.kb_indexing._read_failed_sections`` 容错读回展示给教师（不加表列：展示
+    字段不值一次迁移）。旧调用方（scripts/build_course_topics.py）不传则落空默认。
+    """
     JSON_DIR.mkdir(parents=True, exist_ok=True)
     out = JSON_DIR / f"course_{course_id}_topics.json"
     payload = {
         "course_id": course_id,
         "topics": topics,
         "edges": edges,
+        "failed_sections": failed_sections or [],
+        "stats": stats or {},
         "note": "表为真相源，本 JSON 为投影（评测复现/教师核对/论文附录用）",
     }
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -51,41 +61,81 @@ def export_json(course_id: str, topics: list[dict], edges: list[dict]) -> Path:
 
 # -------------------- from-chunks 离线抽取（有课程库数据时跑）--------------------
 
-_EXTRACT_TOPICS_PROMPT = """你是课程结构分析助手。下面是一节实验讲义的文本（开头标注了章节）。
-请抽出本节实际教学的主题，每个主题给一句话定义。返回严格 JSON（不要 markdown 围栏）：
-{"topics": [{"label": "主题名", "definition": "一句话定义"}]}
-规则：只抽本节确实教的内容；主题粒度对齐一个可考核的知识点（如「戴维南等效」而非「电路」）；
-没有明确主题返回空数组；不编造。"""
+_EXTRACT_TOPICS_PROMPT = """---Role---
+你是课程知识图谱专家，负责从课程讲义文本中抽取可考核的知识点。
 
-_EXTRACT_PREREQ_PROMPT = """你是课程结构分析助手。判断 A 是否是 B 的直接前置（学 B 前应先掌握 A）。
-A：{a}
-B：{b}
-返回严格 JSON：{{"is_prereq": true|false, "confidence": 0.0-1.0}}
-规则：只判「A 是 B 的直接前置」这一方向；不确定或双向都依赖时 is_prereq=false（宁可漏连不乱连）。"""
+---Goal---
+抽出本节讲义中实际教学的知识点（KC），每个给一句话定义。
+
+---Instructions---
+1. 粒度锚定：一个知识点 = 可单独考核的最小知识单元。
+   - 正例：「戴维南等效」「三端变阻器的连接方式」「一阶RC电路的零输入响应」
+   - 反例：「电路」「实验」「基本理论」（过宽不可考核，禁止输出这类泛化词）
+2. label 必须逐字使用讲义中出现的原词——不翻译、不改写、不缩写、不自行概括。
+3. 共指消解：讲义中「本章」「该定理」「它」等指代，在输出里解析为所指知识点的完整名称。
+4. 只抽本节确实教的内容；没有明确知识点返回空数组；宁少勿凑数，不编造。
+5. 输出严格 JSON（无 markdown 围栏、无任何其他文字）：
+{"topics": [{"label": "知识点名", "definition": "一句话定义"}]}"""
+
+_JUDGE_PREREQ_BATCH_PROMPT = """---Role---
+你是课程结构分析专家，判定知识点之间的先修关系（学 B 之前应先掌握 A，则 A 是 B 的前置）。
+
+---Goal---
+对 ---Pairs--- 中每一对知识点 (A, B)，判断 A 与 B 的直接先修方向。
+
+---Instructions---
+1. 每对输出 direction 四选一：
+   - "forward"：A 是 B 的直接前置（掌握 A 显著有助于理解 B，B 的教学默认学生已会 A）
+   - "reverse"：B 是 A 的直接前置
+   - "none"：无直接先修关系（含：仅相关但可并行学、互不依赖）
+   - "uncertain"：说不清（先修关系微妙、专家也会有分歧的情形）
+2. 同时输出 score ∈ [-1, 1]：+1 = 强烈认为 A 前置 B；-1 = 强烈认为 B 前置 A；0 = 无关系/说不清。
+3. 非对称互斥：若 A 前置 B，则 B 不得前置 A。若两个方向看起来都成立，说明二者并非
+   直接先修（可并行学习），direction 取 "none"。
+4. 讲义章节顺序（下方标注）仅是参考证据，不是判据——跨章知识点之间同样可能存在先修
+   关系（如第 2 章的「元件伏安特性」是第 5 章「等效内阻测量」的前置）。
+5. 判据是知识内容本身的依赖关系，不是字面相似。
+6. 输出严格 JSON（无围栏）：{{"pairs": [{{"id": <原样返回输入id>, "direction": "...", "score": 0.0}}]}}
+   id 原样返回输入的 id，不要重编号、不要漏。
+
+---Pairs---
+课程章节顺序：{sections_summary}
+
+候选对：
+{pairs_json}
+
+---Output---
+输出 JSON："""
+
+# 批量判定 8 对/批（Batch Prompting, arXiv:2301.08721：6-10 样本/批成本降 ~5x 性能持平）
+_BATCH_SIZE = 8
+# 建边最低置信：|score| < 0.5 不建（旧实现 0.6 偏严；配四分类+uncertain 复判放宽到 0.5）
+_EDGE_SCORE_MIN = 0.5
 
 
 async def _llm_json(
     llm, model: str, prompt: str, track: dict[str, str] | None = None
 ) -> dict | None:
-    try:
-        # deepseek-v4-pro 等 reasoning 模型先吐 reasoning_content 再吐 content；
-        # max_tokens 太小会被 reasoning 占满→content 空(finish=length)→json.loads 崩。
-        resp = await llm.chat.completions.create(
-            model=model, messages=[{"role": "user", "content": prompt}],
-            temperature=0.1, max_tokens=4096, stream=False,
-        )
-        if track is not None:
-            # 用量埋点：主题图抽取是 ARQ 后台课程级调用（无 user），逐次记
-            from core.analytics.token_usage import track_llm_response
+    for attempt in (1, 2):  # 网络抖动/JSON 偶发崩：重试一次，两试皆败返回 None
+        try:
+            # deepseek-v4-pro 等 reasoning 模型先吐 reasoning_content 再吐 content；
+            # max_tokens 太小会被 reasoning 占满→content 空(finish=length)→json.loads 崩。
+            resp = await llm.chat.completions.create(
+                model=model, messages=[{"role": "user", "content": prompt}],
+                temperature=0.1, max_tokens=4096, stream=False,
+            )
+            if track is not None:
+                # 用量埋点：主题图抽取是 ARQ 后台课程级调用（无 user），逐次记
+                from core.analytics.token_usage import track_llm_response
 
-            await track_llm_response(resp, model=model, mode="topic_build", **track)
-        raw = (resp.choices[0].message.content or "").strip()
-        raw = re.sub(r"^```json\s*", "", raw)
-        raw = re.sub(r"\s*```$", "", raw)
-        return json.loads(raw)
-    except Exception as exc:
-        logger.warning("[course_topics] LLM 抽取失败：%s", exc)
-        return None
+                await track_llm_response(resp, model=model, mode="topic_build", **track)
+            raw = (resp.choices[0].message.content or "").strip()
+            raw = re.sub(r"^```json\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw)
+            return json.loads(raw)
+        except Exception as exc:
+            logger.warning("[course_topics] LLM 抽取失败（第 %d 次）：%s", attempt, exc)
+    return None
 
 
 def _pack_blocks(group: list[dict], max_chars_per_call: int) -> list[list[dict]]:
@@ -113,13 +163,16 @@ def _pack_blocks(group: list[dict], max_chars_per_call: int) -> list[list[dict]]
 async def extract_topics_from_chunks(
     course_id: str, chunks: list[dict], llm, model: str, embed_model=None,
     max_chars_per_call: int = 5000,
-) -> list[dict]:
+) -> tuple[list[dict], list[str]]:
     """从讲义 chunk 按「章节」聚合抽主题。chunk: {text, section, order_idx}。
 
     一章内按 chunk 边界分块（每块 <= max_chars_per_call 字符），每块独立问一次 LLM，
     跨块重复主题交给 merge_synonymous 去重。单 chunk 不截断、章节超长也不丢内容。
     max_chars_per_call 权衡：太大→reasoning 模型输出预算(4096)被推理占满→content 截断；
     太小→调用次数多、跨块重复多。默认 5000（probe 实测可调）。
+
+    返回 (topics, failed_sections)：重试后仍抽取失败的块记入 failed_sections
+    （"章节名（第n块）"），随 GET payload 暴露给教师——主题图有洞时教师可见可重试。
     """
     by_section: dict[str, list[dict]] = {}
     for ck in chunks:
@@ -127,14 +180,17 @@ async def extract_topics_from_chunks(
         by_section.setdefault(sec, []).append(ck)
 
     topics: list[dict] = []
+    failed_sections: list[str] = []
     order = 0
     for sec, group in by_section.items():
-        for block in _pack_blocks(group, max_chars_per_call):
+        for bi, block in enumerate(_pack_blocks(group, max_chars_per_call), 1):
             text = "\n".join(ck["text"] for ck in block)
             data = await _llm_json(
                 llm, model, f"章节：{sec}\n\n{text}\n\n{_EXTRACT_TOPICS_PROMPT}",
                 track={"course_id": course_id},
             )
+            if data is None:
+                failed_sections.append(f"{sec}（第{bi}块）")
             for t in (data or {}).get("topics", []) if isinstance(data, dict) else []:
                 label = str(t.get("label") or "").strip()
                 if not label:
@@ -149,14 +205,18 @@ async def extract_topics_from_chunks(
                     "embedding": emb,
                 })
                 order += 1
-    return topics
+    if failed_sections:
+        logger.warning("[course_topics] course=%s %d 块抽取失败：%s",
+                       course_id, len(failed_sections), "; ".join(failed_sections))
+    return topics, failed_sections
 
 
 def merge_synonymous(topics: list[dict], sim_threshold: float = 0.88) -> list[dict]:
     """合并同义主题：label 字符串归一 + embedding 余弦相似度去重。
 
-    保留 order_idx 最小者，定义取较长者。纯函数、可单测。归一化与余弦复用
-    course_topic_store（与门控读出侧同口径，避免漂移）。
+    保留 order_idx 最小者，定义取较长者，embedding 取非空者（首个为 NULL 而重复项
+    有值时用重复项的——NULL 进表后 _match_topic 直接淘汰，该主题永远匹配不上）。
+    纯函数、可单测。归一化与余弦复用 course_topic_store（与门控读出侧同口径）。
     """
     from core.memory.course_topic_store import _norm_label, cosine
 
@@ -172,6 +232,9 @@ def merge_synonymous(topics: list[dict], sim_threshold: float = 0.88) -> list[di
         if dup is not None:
             if len(t["definition"]) > len(merged[dup]["definition"]):
                 merged[dup]["definition"] = t["definition"]
+            if not merged[dup]["embedding"] and t["embedding"]:
+                merged[dup]["embedding"] = t["embedding"]
+                seen[dup] = (seen[dup][0], t["embedding"])
             continue
         seen.append((n, t["embedding"] or []))
         merged.append(t)
@@ -181,30 +244,240 @@ def merge_synonymous(topics: list[dict], sim_threshold: float = 0.88) -> list[di
     return merged
 
 
+def build_edge_candidates(topics: list[dict], k: int = 10) -> list[tuple[int, int]]:
+    """生成前置判定候选对：embedding 余弦 top-k 相似主题（无向，无顺序/章节约束）。
+
+    语义相关是先修的必要条件——ACE（JEDM 2024）实测语义排序候选 recall 0.684 vs
+    随机 0.385，真实课程图直接先修边仅占全部组合 5-15%；先修对几乎必然语义相近，
+    用相似度预筛把 LLM 判定集中在高概率区。取代旧「order 差 ≤3」硬窗口（跨章边
+    全丢）；讲义顺序不再当过滤器，只作判定 prompt 里的参考证据（Auto-Req 协议）。
+
+    embedding 缺失（网络抖动置 NULL）的主题退回「同章全部 + order 差 ≤3」保底，
+    防零候选。返回去重排序后的 (i, j) 索引对（i < j）。纯函数、可单测。
+    """
+    from core.memory.course_topic_store import cosine
+
+    n = len(topics)
+    pair_set: set[tuple[int, int]] = set()
+    has_emb = [bool(t.get("embedding")) for t in topics]
+    for i in range(n):
+        if has_emb[i]:
+            sims = sorted(
+                (
+                    (cosine(topics[i]["embedding"], topics[j]["embedding"]), j)
+                    for j in range(n) if j != i and has_emb[j]
+                ),
+                reverse=True,
+            )
+            for _, j in sims[:k]:
+                pair_set.add((i, j) if i < j else (j, i))
+        else:
+            sec = topics[i].get("source_section")
+            for j in range(n):
+                if j == i:
+                    continue
+                same_sec = topics[j].get("source_section") == sec
+                near = abs(topics[i]["order_idx"] - topics[j]["order_idx"]) <= 3
+                if same_sec or near:
+                    pair_set.add((i, j) if i < j else (j, i))
+    return sorted(pair_set)
+
+
+def _mk_edge(topics: list[dict], src_i: int, dst_i: int, confidence: float) -> dict:
+    """构造一条前置边 dict（src=前置，dst=被前置——门控回溯方向契约）。"""
+    return {
+        "src": topics[src_i]["topic_id"], "dst": topics[dst_i]["topic_id"],
+        "relation": "prerequisite", "confidence": round(float(confidence), 4),
+    }
+
+
+async def judge_pairs_batch(
+    course_id: str, pairs: list[tuple[int, int]], topics: list[dict], llm, model: str,
+) -> tuple[list[dict], list[tuple[int, int]]]:
+    """批量四分类判定候选对，返回 (edges, uncertain_pairs)。
+
+    direction=forward → src=A；reverse → src/dst 翻转（LLM 可判出讲义顺序与先修
+    顺序相反的情形，旧实现方向被讲义顺序锁死）；confidence=|score|（arXiv:2504.08856
+    的非对称分数设计：一个数字同时编码方向与置信，配四分类主判据防两头点头）。
+
+    逐项容错：返回缺 id / 非法 direction / score 不可解析 → 该项按 uncertain 处理
+    （留给上层复判），不整批失败。|score| < _EDGE_SCORE_MIN 不建边。
+    """
+    if not pairs:
+        return [], []
+    sections: list[str] = []
+    for t in topics:
+        sec = t.get("source_section") or "未知章节"
+        if sec not in sections:
+            sections.append(sec)
+
+    edges: list[dict] = []
+    uncertain: list[tuple[int, int]] = []
+    for lo in range(0, len(pairs), _BATCH_SIZE):
+        batch = pairs[lo:lo + _BATCH_SIZE]
+        pairs_payload = [
+            {
+                "id": nid,
+                "a": {"label": topics[i]["label"], "section": topics[i].get("source_section", "")},
+                "b": {"label": topics[j]["label"], "section": topics[j].get("source_section", "")},
+            }
+            for nid, (i, j) in enumerate(batch)
+        ]
+        data = await _llm_json(
+            llm, model,
+            _JUDGE_PREREQ_BATCH_PROMPT.format(
+                sections_summary=" → ".join(sections),
+                pairs_json=json.dumps(pairs_payload, ensure_ascii=False),
+            ),
+            track={"course_id": course_id},
+        )
+        by_id: dict[int, dict] = {}
+        for item in (data or {}).get("pairs", []) if isinstance(data, dict) else []:
+            if isinstance(item, dict):
+                try:
+                    by_id[int(item.get("id"))] = item
+                except (TypeError, ValueError):
+                    continue
+        for nid, (i, j) in enumerate(batch):
+            item = by_id.get(nid)
+            if item is None:
+                logger.warning("[course_topics] 批量判定缺 id=%d（转复判）", nid)
+                uncertain.append((i, j))
+                continue
+            direction = str(item.get("direction") or "").strip().lower()
+            try:
+                score = abs(float(item.get("score") or 0.0))
+            except (TypeError, ValueError):
+                score = 0.0
+            if direction in ("forward", "reverse") and score >= _EDGE_SCORE_MIN:
+                if direction == "forward":
+                    edges.append(_mk_edge(topics, i, j, score))
+                else:
+                    edges.append(_mk_edge(topics, j, i, score))
+            elif direction == "uncertain":
+                uncertain.append((i, j))
+    return edges, uncertain
+
+
+def break_cycles(edges: list[dict]) -> list[dict]:
+    """删环保 DAG：DFS 找环，删环上 confidence 最低的边，重复直到无环。
+
+    门控 get_prereq_predecessors 的 BFS 有 preds 集合防死循环，运行时遇环不炸；
+    但先修语义是严格偏序（反对称+传递，CSUR 2025 综述），成环属 LLM 判定噪声，
+    删最低置信边保留最可信结构。顺序契约：须在 close_transitive 之前调用
+    （DAG 上做闭包才不引环）。纯函数、可单测。
+    """
+    remaining = [dict(e) for e in edges]
+    while True:
+        adj: dict[str, list[str]] = {}
+        for e in remaining:
+            adj.setdefault(e["src"], []).append(e["dst"])
+        color: dict[str, int] = {}  # 0=未访问 1=在当前路径 2=已完成
+        cycle: list[str] | None = None
+
+        def dfs(u: str, path: list[str]) -> list[str] | None:
+            color[u] = 1
+            path.append(u)
+            for v in adj.get(u, []):
+                if color.get(v, 0) == 0:
+                    found = dfs(v, path)
+                    if found:
+                        return found
+                elif color.get(v) == 1:
+                    return path[path.index(v):] + [v]  # 环：从 v 起绕回 v
+            path.pop()
+            color[u] = 2
+            return None
+
+        for node in list(adj):
+            if color.get(node, 0) == 0:
+                cycle = dfs(node, [])
+                if cycle:
+                    break
+        if not cycle:
+            return remaining
+        ring = set(zip(cycle, cycle[1:]))
+        victim = min(
+            (e for e in remaining if (e["src"], e["dst"]) in ring),
+            key=lambda e: e["confidence"],
+        )
+        logger.warning(
+            "[course_topics] 检测到环 %s → 删最低置信边 %s→%s（conf=%.2f）",
+            "→".join(cycle), victim["src"], victim["dst"], victim["confidence"],
+        )
+        remaining.remove(victim)
+
+
+def close_transitive(edges: list[dict]) -> list[dict]:
+    """传递闭包补边：A→B、B→C ⇒ 补 A→C（confidence = 各路径 min 置信的最大值）。
+
+    门控读侧（get_prereq_predecessors）本就 BFS 算全闭包，运行时预警效果等价；
+    此步主要服务学生端可视化（远距离前置直接可见）与教师 safety_weight 标注粒度。
+    已有直接边不覆盖（LLM 直接判定优先）。须在 break_cycles 之后调用。纯函数、可单测。
+    """
+    adj: dict[str, list[tuple[str, float]]] = {}
+    for e in edges:
+        adj.setdefault(e["src"], []).append((e["dst"], float(e["confidence"])))
+    existing = {(e["src"], e["dst"]) for e in edges}
+    added: list[dict] = []
+    for start in adj:
+        # 从 start 出发的 widest-path（每条路径取 min 置信，取各路径最大者）
+        reach: dict[str, float] = {}
+        stack = list(adj[start])
+        while stack:
+            node, conf = stack.pop()
+            cur = reach.get(node)
+            if cur is not None and cur >= conf:
+                continue
+            reach[node] = conf
+            for nxt, c2 in adj.get(node, []):
+                stack.append((nxt, min(conf, c2)))
+        for dst, conf in reach.items():
+            if (start, dst) not in existing:
+                added.append({
+                    "src": start, "dst": dst,
+                    "relation": "prerequisite", "confidence": round(conf, 4),
+                })
+    return edges + added
+
+
 async def extract_prereq_edges(
     course_id: str, topics: list[dict], llm, model: str
-) -> list[dict]:
-    """抽前置边：仅在 order_idx 在前 + 同章或相邻章候选对上判定（Goel 协议）。
+) -> tuple[list[dict], dict]:
+    """抽前置边：embedding top-k 语义候选 → 批量四分类 → uncertain 复判 → 删环 → 闭包。
 
-    不做 O(n²) 全配对——讲义顺序在前 + 章节邻近才作候选，含糊/双向丢弃。
+    取代旧「order 差 ≤3 逐对判定」——旧窗口跨章边系统性丢失（真实课程 32 边跨章仅
+    3 条，门控 4 正例 0/4 no_candidate）。返回 (edges, stats)；stats 记候选数/直接边/
+    复判/删环/闭包补边/跨章边数（跨章边数是本修复的核心验收指标）。
     """
-    edges: list[dict] = []
-    for i, dst in enumerate(topics):
-        for src in topics[:i]:  # 只看顺序在前的
-            # 章节邻近约束：同章或相邻（order 差小）
-            if abs(src["order_idx"] - dst["order_idx"]) > 3:
-                continue
-            data = await _llm_json(
-                llm, model,
-                _EXTRACT_PREREQ_PROMPT.format(a=src["label"], b=dst["label"]),
-                track={"course_id": course_id},
-            )
-            if isinstance(data, dict) and data.get("is_prereq") and (data.get("confidence") or 0) >= 0.6:
-                edges.append({
-                    "src": src["topic_id"], "dst": dst["topic_id"],
-                    "relation": "prerequisite", "confidence": float(data.get("confidence")),
-                })
-    return edges
+    pairs = build_edge_candidates(topics)
+    direct, uncertain = await judge_pairs_batch(course_id, pairs, topics, llm, model)
+    rechecked: list[dict] = []
+    if uncertain:
+        logger.info("[course_topics] 复判 %d 个 uncertain 对", len(uncertain))
+        rechecked, still = await judge_pairs_batch(course_id, uncertain, topics, llm, model)
+        if still:
+            logger.info("[course_topics] %d 对复判仍 uncertain，弃（宁漏勿错）", len(still))
+        direct = direct + rechecked
+
+    acyclic = break_cycles(direct)
+    closed = close_transitive(acyclic)
+    sec_of = {t["topic_id"]: t.get("source_section") for t in topics}
+    cross = sum(1 for e in closed if sec_of.get(e["src"]) != sec_of.get(e["dst"]))
+    stats = {
+        "candidates": len(pairs),
+        "direct_edges": len(direct) - len(rechecked),
+        "rechecked_edges": len(rechecked),
+        "cycle_broken": len(direct) - len(acyclic),
+        "transitive_added": len(closed) - len(acyclic),
+        "cross_section_edges": cross,
+    }
+    logger.info(
+        "[course_topics] 前置边 course=%s：候选 %d → 直接 %d + 复判 %d → 删环 %d → 闭包 +%d → 总 %d（跨章 %d）",
+        course_id, stats["candidates"], stats["direct_edges"], stats["rechecked_edges"],
+        stats["cycle_broken"], stats["transitive_added"], len(closed), cross,
+    )
+    return closed, stats
 
 
 def load_course_chunks(course_id: str) -> list[dict]:
@@ -292,9 +565,11 @@ async def build_topic_graph(course_id: str, db, *, force: bool = False) -> dict:
         course_id, model, len(chunks), force,
     )
 
-    topics = await extract_topics_from_chunks(course_id, chunks, llm, model, embed_model)
+    topics, failed_sections = await extract_topics_from_chunks(
+        course_id, chunks, llm, model, embed_model
+    )
     topics = merge_synonymous(topics)
-    edges = await extract_prereq_edges(course_id, topics, llm, model)
+    edges, edge_stats = await extract_prereq_edges(course_id, topics, llm, model)
 
     for t in topics:
         db.add(CourseTopic(
@@ -308,6 +583,11 @@ async def build_topic_graph(course_id: str, db, *, force: bool = False) -> dict:
             relation=e["relation"], confidence=e["confidence"],
         ))
     await db.commit()
-    export_json(course_id, topics, edges)
+    export_json(course_id, topics, edges, failed_sections=failed_sections, stats=edge_stats)
     logger.info("[course_topics] build_topic_graph done course=%s %d主题 %d边", course_id, len(topics), len(edges))
-    return {"status": "built", "course_id": course_id, "topics": len(topics), "edges": len(edges)}
+    return {
+        "status": "built", "course_id": course_id,
+        "topics": len(topics), "edges": len(edges),
+        "cross_section_edges": edge_stats["cross_section_edges"],
+        "failed_sections": failed_sections,
+    }
