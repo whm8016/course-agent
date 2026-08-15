@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  :root{
+    --navy:#1f2a44;
+    --slate:#3b4a6b;
+    --blue:#2f6fed;
+    --blue-bg:#eaf2ff;
+    --blue-border:#bcd6fb;
+    --gray-border:#d8dee8;
+    --gray-text:#5b6478;
+    --red-bg:#fdecec;
+    --red-border:#f3b9b9;
+    --red-text:#b3261e;
+    --purple:#6b3fd6;
+    --purple-bg:#f3edfd;
+    --purple-border:#c9b3f2;
+    --green:#1e8f5e;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    width:1536px; height:860px;
+    font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;
+    background:#ffffff;
+    color:var(--navy);
+    padding:28px 32px;
+  }
+  .header{
+    display:flex; align-items:center; gap:14px;
+    background:var(--blue-bg);
+    border:1.5px solid var(--blue-border);
+    border-radius:14px;
+    padding:16px 26px;
+    margin-bottom:22px;
+  }
+  .header .icon{flex:0 0 auto;}
+  .header .text{font-size:23px; font-weight:700; color:var(--navy);}
+  .header .text b{color:var(--blue);}
+  .row{display:flex; gap:22px; height:calc(100% - 100px);}
+  .card{
+    flex:1;
+    border-radius:16px;
+    border:1.5px solid var(--gray-border);
+    background:#fbfbfd;
+    padding:22px 24px 20px;
+    display:flex; flex-direction:column;
+  }
+  .card.ours{
+    border:2px solid var(--purple);
+    background:#fbfaff;
+    box-shadow:0 4px 18px rgba(107,63,214,0.10);
+  }
+  .card-title{
+    text-align:center; font-size:23px; font-weight:700; margin-bottom:2px; flex:0 0 auto;
+  }
+  .card-title .sub{
+    display:block; font-size:15px; font-weight:500; color:var(--gray-text); margin-top:3px;
+  }
+  .card.ours .card-title{color:var(--purple);}
+  .card.ours .card-title .sub{color:var(--purple); opacity:0.75;}
+
+  .content{flex:1; display:flex; flex-direction:column; justify-content:center; gap:16px;}
+
+  .status-row{height:30px; display:flex; align-items:center; justify-content:center;}
+
+  .chat-row{display:flex; align-items:flex-start; gap:10px;}
+  .chat-row.student{justify-content:flex-start;}
+  .chat-row.ai{justify-content:flex-end;}
+
+  .mini-avatar{
+    width:48px; height:48px; border-radius:50%;
+    display:flex; align-items:center; justify-content:center;
+    border:1.5px solid; flex:0 0 auto;
+  }
+  .mini-avatar.student{background:#e7edfb; border-color:#b9c9f2;}
+  .mini-avatar.ai{border-radius:13px; background:#eceef7; border-color:#c3c9e2;}
+  .card.ours .mini-avatar.ai{background:#efe7fb; border-color:#d0b9f2;}
+
+  .msg{
+    position:relative;
+    max-width:78%;
+    border-radius:14px;
+    padding:12px 16px;
+    font-size:16.5px;
+    line-height:1.6;
+    color:var(--navy);
+  }
+  .msg.student{
+    background:#eef1f7;
+    border:1px solid #dde2ee;
+    border-top-left-radius:4px;
+  }
+  .msg.ai{
+    background:#eef2ff;
+    border:1px solid #cdd6fb;
+    border-top-right-radius:4px;
+  }
+  .card.ours .msg.ai{
+    background:var(--purple-bg);
+    border-color:var(--purple-border);
+  }
+  .msg ol{padding-left:21px;}
+  .msg li + li{margin-top:3px;}
+
+  .msg .append{
+    margin-top:10px;
+    padding-top:9px;
+    border-top:1px dashed rgba(31,42,68,0.15);
+    font-size:14.5px;
+    line-height:1.5;
+  }
+  .msg .append-title{font-weight:700; margin-bottom:4px;}
+  .msg .append.warn{color:var(--red-text);}
+  .msg .append.warn ul{padding-left:16px; columns:2; column-gap:14px;}
+  .msg .append.info{color:#2c3a7a;}
+
+  .gate{
+    align-self:center;
+    background:var(--purple-bg);
+    border:1px solid var(--purple-border);
+    color:var(--purple);
+    border-radius:8px;
+    padding:8px 16px;
+    font-size:15px;
+    font-weight:700;
+    text-align:center;
+    font-family:"Consolas","Microsoft YaHei",monospace;
+  }
+
+  .footer{
+    flex:0 0 auto;
+    margin-top:16px;
+    border-top:1.5px dashed #c7cede;
+    padding-top:14px;
+    text-align:center;
+  }
+  .utility{
+    display:flex; align-items:center; justify-content:center; gap:10px;
+    font-size:25px; font-weight:800; color:var(--navy);
+  }
+  .card.ours .utility{color:var(--purple);}
+  .utility-desc{font-size:15.5px; color:var(--gray-text); margin-top:5px;}
+  .card.ours .utility-desc{color:var(--purple); opacity:0.8;}
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <svg class="icon" width="30" height="30" viewBox="0 0 24 24" fill="none">
+      <path d="M12 3L2 8L12 13L22 8L12 3Z" fill="#2f6fed"/>
+      <path d="M6 10.5V15C6 16.7 8.7 18.5 12 18.5C15.3 18.5 18 16.7 18 15V10.5" stroke="#2f6fed" stroke-width="1.4" fill="none"/>
+      <path d="M22 8V14" stroke="#2f6fed" stroke-width="1.4" stroke-linecap="round"/>
+    </svg>
+    <div class="text">学生学情：欧姆定律 <b>risk = 0.85</b>（薄弱），当前提问涉及 <b>KCL 节点电流</b></div>
+  </div>
+
+  <div class="row">
+
+    <!-- Column A -->
+    <div class="card">
+      <div class="card-title">A. 无学情<span class="sub">(baseline)</span></div>
+
+      <div class="content">
+        <div class="status-row"></div>
+
+        <div class="chat-row student">
+          <div class="mini-avatar student">
+            <svg width="30" height="30" viewBox="0 0 34 34"><circle cx="17" cy="10" r="7.2" fill="#2c4a8f"/><path d="M4 31c0-9 5.8-14 13-14s13 5 13 14z" fill="#2c4a8f"/></svg>
+          </div>
+          <div class="msg student">节点电流方程怎么列？</div>
+        </div>
+
+        <div class="chat-row ai">
+          <div class="msg ai">
+            <ol>
+              <li>根据基尔霍夫电流定律（KCL），任一节点的代数和电流为零。</li>
+              <li>规定流出节点的电流为正，流入节点的电流为负。</li>
+              <li>将所有与该节点相连支路的电流按正负号相加，等式结果为 0。</li>
+            </ol>
+          </div>
+          <div class="mini-avatar ai">
+            <svg width="28" height="28" viewBox="0 0 30 30">
+              <rect x="9" y="9" width="12" height="12" rx="2.5" fill="none" stroke="#4a5578" stroke-width="1.8"/>
+              <circle cx="15" cy="15" r="2.6" fill="#4a5578"/>
+              <line x1="12" y1="4" x2="12" y2="9" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="18" y1="4" x2="18" y2="9" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="12" y1="21" x2="12" y2="26" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="18" y1="21" x2="18" y2="26" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="4" y1="12" x2="9" y2="12" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="4" y1="18" x2="9" y2="18" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="21" y1="12" x2="26" y2="12" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="21" y1="18" x2="26" y2="18" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <div class="utility">
+          <svg width="28" height="28" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#8a92a6" stroke-width="1.6"/><circle cx="8.5" cy="10" r="1.1" fill="#8a92a6"/><circle cx="15.5" cy="10" r="1.1" fill="#8a92a6"/><path d="M8 16C9 14.5 15 14.5 16 16" stroke="#8a92a6" stroke-width="1.4" fill="none" stroke-linecap="round"/></svg>
+          效用 Utility = 6.0
+        </div>
+        <div class="utility-desc">未提示前置缺口</div>
+      </div>
+    </div>
+
+    <!-- Column B -->
+    <div class="card">
+      <div class="card-title">B. 无条件拼接<span class="sub">(baseline)</span></div>
+
+      <div class="content">
+        <div class="status-row">
+          <svg width="28" height="28" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#8a92a6" stroke-width="1.8"/><text x="12" y="17" font-size="13" text-anchor="middle" fill="#8a92a6" font-family="Arial" font-weight="700">?</text></svg>
+        </div>
+
+        <div class="chat-row student">
+          <div class="mini-avatar student">
+            <svg width="30" height="30" viewBox="0 0 34 34"><circle cx="17" cy="10" r="7.2" fill="#2c4a8f"/><path d="M4 31c0-9 5.8-14 13-14s13 5 13 14z" fill="#2c4a8f"/></svg>
+          </div>
+          <div class="msg student">节点电流方程怎么列？</div>
+        </div>
+
+        <div class="chat-row ai">
+          <div class="msg ai">
+            <ol>
+              <li>根据基尔霍夫电流定律（KCL），任一节点的代数和电流为零。</li>
+              <li>规定流出节点的电流为正，流入节点的电流为负。</li>
+              <li>将所有与该节点相连支路的电流按正负号相加，等式结果为 0。</li>
+            </ol>
+            <div class="append warn">
+              <div class="append-title">【学情提醒】</div>
+              <ul>
+                <li>电容充放电</li>
+                <li>诺顿定理</li>
+                <li>戴维南定理</li>
+                <li>叠加原理</li>
+                <li>一阶电路</li>
+              </ul>
+            </div>
+          </div>
+          <div class="mini-avatar ai">
+            <svg width="28" height="28" viewBox="0 0 30 30">
+              <rect x="9" y="9" width="12" height="12" rx="2.5" fill="none" stroke="#4a5578" stroke-width="1.8"/>
+              <circle cx="15" cy="15" r="2.6" fill="#4a5578"/>
+              <line x1="12" y1="4" x2="12" y2="9" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="18" y1="4" x2="18" y2="9" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="12" y1="21" x2="12" y2="26" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="18" y1="21" x2="18" y2="26" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="4" y1="12" x2="9" y2="12" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="4" y1="18" x2="9" y2="18" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="21" y1="12" x2="26" y2="12" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="21" y1="18" x2="26" y2="18" stroke="#4a5578" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <div class="utility">
+          <svg width="28" height="28" viewBox="0 0 24 24"><path d="M12 3L22 20H2L12 3Z" fill="none" stroke="#d99a1f" stroke-width="1.7" stroke-linejoin="round"/><line x1="12" y1="10" x2="12" y2="14.5" stroke="#d99a1f" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="17" r="0.9" fill="#d99a1f"/></svg>
+          效用 Utility = 5.5
+        </div>
+        <div class="utility-desc">信息不聚焦</div>
+      </div>
+    </div>
+
+    <!-- Column C -->
+    <div class="card ours">
+      <div class="card-title">C. 代价门控拼接（本文方法）<span class="sub">(ours)</span></div>
+
+      <div class="content">
+        <div class="status-row">
+        <svg width="28" height="28" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#6b3fd6" stroke-width="1.8"/><path d="M7.5 12.5L10.5 15.5L16.5 9" stroke="#6b3fd6" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+
+        <div class="chat-row student">
+          <div class="mini-avatar student">
+            <svg width="30" height="30" viewBox="0 0 34 34"><circle cx="17" cy="10" r="7.2" fill="#2c4a8f"/><path d="M4 31c0-9 5.8-14 13-14s13 5 13 14z" fill="#2c4a8f"/></svg>
+          </div>
+          <div class="msg student">节点电流方程怎么列？</div>
+        </div>
+
+        <div class="gate">Δ<i>U</i>（欧姆定律）= 0.62 &gt; c = 0.20 &nbsp;→&nbsp; STITCH</div>
+
+        <div class="chat-row ai">
+          <div class="msg ai">
+            <ol>
+              <li>根据基尔霍夫电流定律（KCL），任一节点的代数和电流为零。</li>
+              <li>规定流出节点的电流为正，流入节点的电流为负。</li>
+              <li>将所有与该节点相连支路的电流按正负号相加，等式结果为 0。</li>
+            </ol>
+            <div class="append info">
+              提醒：KCL 列写需要用欧姆定律做支路电压电流转换，你在欧姆定律上掌握较低，建议先复习。
+            </div>
+          </div>
+          <div class="mini-avatar ai">
+            <svg width="28" height="28" viewBox="0 0 30 30">
+              <rect x="9" y="9" width="12" height="12" rx="2.5" fill="none" stroke="#6b3fd6" stroke-width="1.8"/>
+              <circle cx="15" cy="15" r="2.6" fill="#6b3fd6"/>
+              <line x1="12" y1="4" x2="12" y2="9" stroke="#6b3fd6" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="18" y1="4" x2="18" y2="9" stroke="#6b3fd6" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="12" y1="21" x2="12" y2="26" stroke="#6b3fd6" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="18" y1="21" x2="18" y2="26" stroke="#6b3fd6" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="4" y1="12" x2="9" y2="12" stroke="#6b3fd6" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="4" y1="18" x2="9" y2="18" stroke="#6b3fd6" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="21" y1="12" x2="26" y2="12" stroke="#6b3fd6" stroke-width="1.8" stroke-linecap="round"/>
+              <line x1="21" y1="18" x2="26" y2="18" stroke="#6b3fd6" stroke-width="1.8" stroke-linecap="round"/>
+            </svg>
+          </div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <div class="utility">
+          <svg width="28" height="28" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#6b3fd6"/><path d="M7.5 12.5L10.5 15.5L16.5 9" stroke="#ffffff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          效用 Utility = 9.3
+        </div>
+        <div class="utility-desc">精准、低认知负荷</div>
+      </div>
+    </div>
+
+  </div>
+
+</body>
+</html>

@@ -1,0 +1,146 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 940" width="1600" height="940" font-family="'Microsoft YaHei','PingFang SC','Noto Sans SC',sans-serif">
+  <defs>
+    <marker id="arrowEnd" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2c3e50"/>
+    </marker>
+    <marker id="arrowStart" viewBox="0 0 10 10" refX="2" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2c3e50"/>
+    </marker>
+    <linearGradient id="kernelGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#eaf1ff"/>
+      <stop offset="1" stop-color="#dbe8fb"/>
+    </linearGradient>
+    <symbol id="personIcon" viewBox="0 0 24 24">
+      <circle cx="12" cy="7.5" r="4.3"/>
+      <path d="M3 21c0-4.6 4-8 9-8s9 3.4 9 8"/>
+    </symbol>
+    <symbol id="capIcon" viewBox="0 0 24 24">
+      <path d="M12 3L1 9l4 2.18v6L12 21l7-3.82v-6l2-1.09V17h2V9L12 3zm6.82 6L12 12.72 5.18 9 12 5.28 18.82 9zM17 15.99l-5 2.73-5-2.73v-3.72L12 15l5-2.73v3.72z"/>
+    </symbol>
+    <style>
+      .title{font-size:36px;font-weight:700;fill:#152442;text-anchor:middle;}
+      .colTitle{font-weight:700;font-size:24px;}
+      .boxTitle{font-size:19px;font-weight:600;text-anchor:middle;}
+      .edge{fill:none;stroke:#2c3e50;stroke-width:1.6;}
+      .edgeSoft{fill:none;stroke:#8a94a6;stroke-width:1.3;stroke-dasharray:4,3;}
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1600" height="940" fill="#fbfbfd"/>
+
+  <text x="800" y="46" class="title">课程助手智能体系统 —— 总体架构</text>
+
+  <g>
+    <rect x="50" y="70" width="280" height="108" rx="16" fill="#eef3fc" stroke="#2c3e50" stroke-width="1.4"/>
+    <use href="#personIcon" x="72" y="96" width="52" height="52" fill="#2c3e50"/>
+    <text x="140" y="118" font-size="26" font-weight="700" fill="#152442">教师</text>
+    <text x="140" y="148" font-size="18" fill="#2c4a78">建立知识库</text>
+  </g>
+  <g>
+    <rect x="1270" y="70" width="280" height="108" rx="16" fill="#eef3fc" stroke="#2c3e50" stroke-width="1.4"/>
+    <use href="#personIcon" x="1292" y="96" width="52" height="52" fill="#2c3e50"/>
+    <text x="1360" y="118" font-size="26" font-weight="700" fill="#152442">学生</text>
+    <text x="1360" y="148" font-size="18" fill="#2c4a78">问答</text>
+  </g>
+
+  <path class="edge" marker-end="url(#arrowEnd)" d="M190,178 C320,178 430,220 520,250"/>
+  <path class="edge" marker-end="url(#arrowEnd)" d="M1410,178 C1280,178 1170,220 1080,250"/>
+
+  <rect x="520" y="208" width="560" height="110" rx="18" fill="url(#kernelGrad)" stroke="#2c3e50" stroke-width="1.8"/>
+  <text x="800" y="242" text-anchor="middle" font-size="20" font-weight="700" fill="#14335c">统一调度内核 · 工具调用 推理-行动循环（ReAct Loop）</text>
+
+  <g>
+    <rect x="528" y="260" width="127" height="42" rx="8" fill="#ffffff" stroke="#3d64a6"/>
+    <text x="591.5" y="286" text-anchor="middle" font-size="18" fill="#1d3d6b">问答</text>
+    <rect x="667" y="260" width="127" height="42" rx="8" fill="#ffffff" stroke="#3d64a6"/>
+    <text x="730.5" y="286" text-anchor="middle" font-size="18" fill="#1d3d6b">解题</text>
+    <rect x="806" y="260" width="127" height="42" rx="8" fill="#ffffff" stroke="#3d64a6"/>
+    <text x="869.5" y="286" text-anchor="middle" font-size="18" fill="#1d3d6b">出题</text>
+    <rect x="945" y="260" width="127" height="42" rx="8" fill="#ffffff" stroke="#3d64a6"/>
+    <text x="1008.5" y="286" text-anchor="middle" font-size="18" fill="#1d3d6b">深度研究</text>
+  </g>
+
+  <path class="edge" marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)" d="M520,278 L330,278"/>
+  <path class="edge" marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)" d="M1080,278 L1270,278"/>
+
+  <rect x="50" y="235" width="280" height="86" rx="14" fill="#f4f7ff" stroke="#4a6fa5" stroke-width="1.6" stroke-dasharray="7,5"/>
+  <text x="190" y="287" text-anchor="middle" font-size="22" font-weight="700" fill="#1d3d6b">技能包 Skills</text>
+
+  <rect x="1270" y="235" width="280" height="86" rx="14" fill="#fff6ef" stroke="#c46a3b" stroke-width="1.6" stroke-dasharray="7,5"/>
+  <text x="1410" y="287" text-anchor="middle" font-size="22" font-weight="700" fill="#8a3d16">MCP 外部工具</text>
+
+  <path class="edge" marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)" d="M620,318 L620,348 L280,348 L280,430"/>
+  <path class="edge" marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)" d="M800,318 L800,430"/>
+  <path class="edge" marker-start="url(#arrowStart)" marker-end="url(#arrowEnd)" d="M980,318 L980,348 L1320,348 L1320,430"/>
+
+  <rect x="40" y="430" width="480" height="340" rx="14" fill="#faf7ff" stroke="#8a6fd1" stroke-width="1.6" stroke-dasharray="7,5"/>
+  <text x="70" y="460" class="colTitle" fill="#5b3fa0">① 索引子系统</text>
+
+  <rect x="70" y="482" width="420" height="56" rx="10" fill="#ffffff" stroke="#8a6fd1"/>
+  <text x="280" y="516" class="boxTitle" fill="#3a2a66">标题层级栈驱动的结构化切分</text>
+
+  <path class="edge" marker-end="url(#arrowEnd)" d="M280,538 L280,558"/>
+
+  <rect x="70" y="560" width="420" height="56" rx="10" fill="#ffffff" stroke="#8a6fd1"/>
+  <text x="280" y="594" class="boxTitle" fill="#3a2a66">拼接上下文摘要</text>
+
+  <path class="edge" marker-end="url(#arrowEnd)" d="M280,616 L280,638"/>
+
+  <g stroke="#8a6fd1" fill="#f1ecfb">
+    <ellipse cx="185" cy="650" rx="95" ry="12"/>
+    <rect x="90" y="650" width="190" height="90" fill="#f1ecfb" stroke="none"/>
+    <line x1="90" y1="650" x2="90" y2="740" />
+    <line x1="280" y1="650" x2="280" y2="740" />
+    <ellipse cx="185" cy="740" rx="95" ry="12"/>
+    <path d="M90,650 A95,12 0 0 0 280,650" fill="none"/>
+  </g>
+  <text x="185" y="698" text-anchor="middle" font-size="19" font-weight="700" fill="#3a2a66">知识图谱后端</text>
+
+  <g stroke="#8a6fd1" fill="#f1ecfb">
+    <ellipse cx="405" cy="650" rx="95" ry="12"/>
+    <rect x="310" y="650" width="190" height="90" fill="#f1ecfb" stroke="none"/>
+    <line x1="310" y1="650" x2="310" y2="740" />
+    <line x1="500" y1="650" x2="500" y2="740" />
+    <ellipse cx="405" cy="740" rx="95" ry="12"/>
+    <path d="M310,650 A95,12 0 0 0 500,650" fill="none"/>
+  </g>
+  <text x="405" y="698" text-anchor="middle" font-size="19" font-weight="700" fill="#3a2a66">向量索引后端</text>
+
+  <rect x="560" y="430" width="480" height="340" rx="14" fill="#f2fbf5" stroke="#3fa07a" stroke-width="1.6" stroke-dasharray="7,5"/>
+  <text x="590" y="460" class="colTitle" fill="#1f7a52">② 上下文治理</text>
+
+  <rect x="590" y="482" width="420" height="56" rx="10" fill="#ffffff" stroke="#3fa07a"/>
+  <text x="800" y="516" class="boxTitle" fill="#155c3c">提示词分层：按跨请求稳定性排序</text>
+
+  <path class="edge" marker-end="url(#arrowEnd)" d="M800,538 L800,560"/>
+
+  <rect x="590" y="560" width="420" height="34" fill="#dff3e8" stroke="#3fa07a"/>
+  <text x="800" y="584" text-anchor="middle" font-size="20" font-weight="700" fill="#1f7a52">有效上下文窗口构造</text>
+  <rect x="590" y="594" width="420" height="170" fill="#ffffff" stroke="#3fa07a"/>
+
+  <rect x="602" y="610" width="192" height="140" rx="8" fill="#f4fdf8" stroke="#3fa07a"/>
+  <text x="698" y="684" class="boxTitle" fill="#155c3c">轮前规划</text>
+
+  <rect x="806" y="610" width="192" height="140" rx="8" fill="#f4fdf8" stroke="#3fa07a"/>
+  <text x="902" y="684" class="boxTitle" fill="#155c3c">轮内优先级驱逐</text>
+
+  <rect x="1080" y="430" width="480" height="340" rx="14" fill="#fffaee" stroke="#c99a3b" stroke-width="1.6" stroke-dasharray="7,5"/>
+  <text x="1110" y="460" class="colTitle" fill="#8a6a1a">③ 记忆子系统（按学生个性化）</text>
+
+  <rect x="1110" y="482" width="420" height="85" rx="10" fill="#ffffff" stroke="#c99a3b"/>
+  <text x="1320" y="534" text-anchor="middle" font-size="23" font-weight="700" fill="#7a5c14">短期记忆</text>
+
+  <rect x="1110" y="579" width="420" height="85" rx="10" fill="#ffffff" stroke="#c99a3b"/>
+  <text x="1320" y="631" text-anchor="middle" font-size="23" font-weight="700" fill="#7a5c14">中期记忆</text>
+
+  <rect x="1110" y="676" width="420" height="85" rx="10" fill="#ffffff" stroke="#c99a3b"/>
+  <text x="1320" y="728" text-anchor="middle" font-size="23" font-weight="700" fill="#7a5c14">长期记忆</text>
+
+  <path class="edgeSoft" marker-end="url(#arrowEnd)" d="M280,770 L280,806"/>
+  <path class="edgeSoft" marker-end="url(#arrowEnd)" d="M800,770 L800,806"/>
+  <path class="edgeSoft" marker-end="url(#arrowEnd)" d="M1320,770 L1320,806"/>
+
+  <rect x="60" y="810" width="1480" height="80" rx="16" fill="#eef3fc" stroke="#2c3e50" stroke-width="1.6"/>
+  <use href="#capIcon" x="90" y="830" width="40" height="40" fill="#2c3e50"/>
+  <text x="800" y="860" text-anchor="middle" font-size="24" font-weight="700" fill="#14335c">《电路分析基础实验》课程</text>
+</svg>

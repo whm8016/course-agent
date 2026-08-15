@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  :root{
+    --navy:#1f2a44;
+    --slate:#3b4a6b;
+    --blue:#2f6fed;
+    --blue-bg:#eaf2ff;
+    --blue-border:#bcd6fb;
+    --gray-border:#d8dee8;
+    --gray-text:#5b6478;
+    --red-bg:#fdecec;
+    --red-border:#f3b9b9;
+    --red-text:#b3261e;
+    --purple:#6b3fd6;
+    --purple-bg:#f3edfd;
+    --purple-border:#c9b3f2;
+    --green:#1e8f5e;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    width:1536px; height:1024px;
+    font-family:"Microsoft YaHei","Segoe UI",Arial,sans-serif;
+    background:#ffffff;
+    color:var(--navy);
+    padding:26px 30px;
+  }
+  .header{
+    display:flex; align-items:center; gap:14px;
+    background:var(--blue-bg);
+    border:1.5px solid var(--blue-border);
+    border-radius:14px;
+    padding:16px 26px;
+    margin-bottom:20px;
+  }
+  .header .icon{flex:0 0 auto;}
+  .header .text{font-size:22px; font-weight:700; color:var(--navy);}
+  .header .text b{color:var(--blue);}
+  .row{display:flex; gap:20px; height:calc(100% - 96px);}
+  .card{
+    flex:1;
+    border-radius:16px;
+    border:1.5px solid var(--gray-border);
+    background:#fbfbfd;
+    padding:18px 20px 16px;
+    display:flex; flex-direction:column;
+  }
+  .card.ours{
+    border:2px solid var(--purple);
+    background:#fbfaff;
+    box-shadow:0 4px 18px rgba(107,63,214,0.10);
+  }
+  .card-title{
+    text-align:center; font-size:19px; font-weight:700; margin-bottom:2px;
+  }
+  .card-title .sub{
+    display:block; font-size:13px; font-weight:500; color:var(--gray-text); margin-top:2px;
+  }
+  .card.ours .card-title{color:var(--purple);}
+  .card.ours .card-title .sub{color:var(--purple); opacity:0.75;}
+
+  .status-row{height:26px; display:flex; align-items:center; justify-content:center; margin:6px 0 4px;}
+
+  .actors{
+    display:flex; align-items:flex-start; justify-content:space-between; gap:10px;
+    margin:6px 0 14px;
+  }
+  .actor{display:flex; flex-direction:column; align-items:center; width:74px; flex:0 0 auto;}
+  .actor .label{font-size:11px; color:var(--gray-text); margin-top:4px; letter-spacing:0.5px;}
+
+  .bubble-col{flex:1; display:flex; flex-direction:column; align-items:center; padding-top:2px;}
+  .bubble{
+    position:relative;
+    background:#ffffff;
+    border:1.4px solid #c7cede;
+    border-radius:10px;
+    padding:8px 12px;
+    font-size:13.5px;
+    line-height:1.35;
+    text-align:center;
+    color:var(--navy);
+    max-width:150px;
+  }
+  .bubble.reply{
+    border-color:#cdbdf5;
+    color:var(--slate);
+  }
+  .bubble::after{
+    content:"";
+    position:absolute; top:100%; left:50%; transform:translateX(-50%);
+    border:6px solid transparent;
+    border-top-color:#c7cede;
+  }
+  .bubble::before{
+    content:"";
+    position:absolute; top:100%; left:50%; transform:translateX(-50%);
+    border:5px solid transparent;
+    border-top-color:#ffffff;
+    z-index:1;
+    margin-top:-1.4px;
+  }
+
+  .steps{
+    background:#ffffff;
+    border:1px solid #e3e6ee;
+    border-radius:10px;
+    padding:10px 14px;
+    font-size:13px;
+    line-height:1.55;
+    color:var(--navy);
+  }
+  .steps ol{padding-left:18px;}
+
+  .note{
+    margin-top:10px;
+    border-radius:10px;
+    padding:10px 12px;
+    font-size:12.5px;
+    line-height:1.5;
+  }
+  .note.warn{
+    background:var(--red-bg);
+    border:1px solid var(--red-border);
+    color:var(--red-text);
+  }
+  .note.warn .note-title{font-weight:700; margin-bottom:4px; text-align:center;}
+  .note.warn ul{padding-left:16px;}
+
+  .gate{
+    background:var(--purple-bg);
+    border:1px solid var(--purple-border);
+    color:var(--purple);
+    border-radius:10px;
+    padding:9px 12px;
+    font-size:13px;
+    font-weight:700;
+    text-align:center;
+    margin-bottom:10px;
+    font-family:"Consolas","Microsoft YaHei",monospace;
+  }
+
+  .note.info{
+    background:#eef2ff;
+    border:1px solid #cdd6fb;
+    color:#2c3a7a;
+  }
+
+  .spacer{flex:1;}
+
+  .footer{
+    margin-top:12px;
+    border-top:1.5px dashed #c7cede;
+    padding-top:10px;
+    text-align:center;
+  }
+  .utility{
+    display:flex; align-items:center; justify-content:center; gap:8px;
+    font-size:19px; font-weight:800; color:var(--navy);
+  }
+  .card.ours .utility{color:var(--purple);}
+  .utility-desc{font-size:12.5px; color:var(--gray-text); margin-top:3px;}
+  .card.ours .utility-desc{color:var(--purple); opacity:0.8;}
+</style>
+</head>
+<body>
+
+  <div class="header">
+    <svg class="icon" width="30" height="30" viewBox="0 0 24 24" fill="none">
+      <path d="M12 3L2 8L12 13L22 8L12 3Z" fill="#2f6fed"/>
+      <path d="M6 10.5V15C6 16.7 8.7 18.5 12 18.5C15.3 18.5 18 16.7 18 15V10.5" stroke="#2f6fed" stroke-width="1.4" fill="none"/>
+      <path d="M22 8V14" stroke="#2f6fed" stroke-width="1.4" stroke-linecap="round"/>
+    </svg>
+    <div class="text">学生学情：欧姆定律 <b>risk = 0.85</b>（薄弱），当前提问涉及 <b>KCL 节点电流</b></div>
+  </div>
+
+  <div class="row">
+
+    <!-- Column A -->
+    <div class="card">
+      <div class="card-title">A. 无学情<span class="sub">(baseline)</span></div>
+      <div class="status-row"></div>
+      <div class="actors">
+        <div class="actor">
+          <svg width="46" height="52" viewBox="0 0 46 52">
+            <circle cx="23" cy="14" r="11" fill="#33456e"/>
+            <path d="M4 50C4 36 12 30 23 30C34 30 42 36 42 50Z" fill="#33456e"/>
+          </svg>
+          <div class="label">STUDENT</div>
+        </div>
+        <div class="bubble-col">
+          <div class="bubble">节点电流方程<br>怎么列？</div>
+        </div>
+        <div class="actor">
+          <svg width="50" height="52" viewBox="0 0 50 52">
+            <rect x="6" y="8" width="38" height="32" rx="9" fill="#5b6785"/>
+            <rect x="14" y="16" width="9" height="9" rx="2" fill="#eef1f8"/>
+            <rect x="27" y="16" width="9" height="9" rx="2" fill="#eef1f8"/>
+            <rect x="16" y="40" width="18" height="10" rx="2" fill="#5b6785"/>
+            <rect x="20" y="2" width="10" height="7" rx="2" fill="#5b6785"/>
+          </svg>
+          <div class="label">AI</div>
+        </div>
+      </div>
+
+      <div class="steps">
+        <ol>
+          <li>根据基尔霍夫电流定律（KCL），任一节点的代数和电流为零。</li>
+          <li>规定流出节点的电流为正，流入节点的电流为负。</li>
+          <li>将所有与该节点相连支路的电流按正负号相加，等式结果为 0。</li>
+        </ol>
+      </div>
+
+      <div class="spacer"></div>
+
+      <div class="footer">
+        <div class="utility">
+          <svg width="18" height="18" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#8a92a6" stroke-width="1.6"/><circle cx="8.5" cy="10" r="1.1" fill="#8a92a6"/><circle cx="15.5" cy="10" r="1.1" fill="#8a92a6"/><path d="M8 16C9 14.5 15 14.5 16 16" stroke="#8a92a6" stroke-width="1.4" fill="none" stroke-linecap="round"/></svg>
+          效用 Utility = 6.0
+        </div>
+        <div class="utility-desc">未提示前置缺口</div>
+      </div>
+    </div>
+
+    <!-- Column B -->
+    <div class="card">
+      <div class="card-title">B. 无条件拼接<span class="sub">(baseline)</span></div>
+      <div class="status-row">
+        <svg width="20" height="20" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#8a92a6" stroke-width="1.8"/><text x="12" y="17" font-size="13" text-anchor="middle" fill="#8a92a6" font-family="Arial" font-weight="700">?</text></svg>
+      </div>
+      <div class="actors">
+        <div class="actor">
+          <svg width="46" height="52" viewBox="0 0 46 52">
+            <circle cx="23" cy="14" r="11" fill="#33456e"/>
+            <path d="M4 50C4 36 12 30 23 30C34 30 42 36 42 50Z" fill="#33456e"/>
+          </svg>
+          <div class="label">STUDENT</div>
+        </div>
+        <div class="bubble-col">
+          <div class="bubble">节点电流方程<br>怎么列？</div>
+        </div>
+        <div class="actor">
+          <svg width="50" height="52" viewBox="0 0 50 52">
+            <rect x="6" y="8" width="38" height="32" rx="9" fill="#5b6785"/>
+            <rect x="14" y="16" width="9" height="9" rx="2" fill="#eef1f8"/>
+            <rect x="27" y="16" width="9" height="9" rx="2" fill="#eef1f8"/>
+            <rect x="16" y="40" width="18" height="10" rx="2" fill="#5b6785"/>
+            <rect x="20" y="2" width="10" height="7" rx="2" fill="#5b6785"/>
+          </svg>
+          <div class="label">AI</div>
+        </div>
+      </div>
+
+      <div class="steps">
+        <ol>
+          <li>根据基尔霍夫电流定律（KCL），任一节点的代数和电流为零。</li>
+          <li>规定流出节点的电流为正，流入节点的电流为负。</li>
+          <li>将所有与该节点相连支路的电流按正负号相加，等式结果为 0。</li>
+        </ol>
+      </div>
+
+      <div class="note warn">
+        <div class="note-title">【学情提醒】</div>
+        <ul>
+          <li>电容充放电</li>
+          <li>诺顿定理</li>
+          <li>戴维南定理</li>
+          <li>叠加原理</li>
+          <li>一阶电路</li>
+        </ul>
+      </div>
+
+      <div class="spacer"></div>
+
+      <div class="footer">
+        <div class="utility">
+          <svg width="18" height="18" viewBox="0 0 24 24"><path d="M12 3L22 20H2L12 3Z" fill="none" stroke="#d99a1f" stroke-width="1.7" stroke-linejoin="round"/><line x1="12" y1="10" x2="12" y2="14.5" stroke="#d99a1f" stroke-width="1.6" stroke-linecap="round"/><circle cx="12" cy="17" r="0.9" fill="#d99a1f"/></svg>
+          效用 Utility = 5.5
+        </div>
+        <div class="utility-desc">信息不聚焦</div>
+      </div>
+    </div>
+
+    <!-- Column C -->
+    <div class="card ours">
+      <div class="card-title">C. 代价门控拼接（本文方法）<span class="sub">(ours)</span></div>
+      <div class="status-row">
+        <svg width="20" height="20" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="none" stroke="#6b3fd6" stroke-width="1.8"/><path d="M7.5 12.5L10.5 15.5L16.5 9" stroke="#6b3fd6" stroke-width="1.9" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div class="actors">
+        <div class="actor">
+          <svg width="46" height="52" viewBox="0 0 46 52">
+            <circle cx="23" cy="14" r="11" fill="#33456e"/>
+            <path d="M4 50C4 36 12 30 23 30C34 30 42 36 42 50Z" fill="#33456e"/>
+          </svg>
+          <div class="label">STUDENT</div>
+        </div>
+        <div class="bubble-col">
+          <div class="bubble">节点电流方程<br>怎么列？</div>
+        </div>
+        <div class="actor">
+          <svg width="50" height="52" viewBox="0 0 50 52">
+            <rect x="6" y="8" width="38" height="32" rx="9" fill="#6b3fd6"/>
+            <rect x="14" y="16" width="9" height="9" rx="2" fill="#f3edfd"/>
+            <rect x="27" y="16" width="9" height="9" rx="2" fill="#f3edfd"/>
+            <rect x="16" y="40" width="18" height="10" rx="2" fill="#6b3fd6"/>
+            <rect x="20" y="2" width="10" height="7" rx="2" fill="#6b3fd6"/>
+          </svg>
+          <div class="label">AI</div>
+        </div>
+      </div>
+
+      <div class="gate">Δ<i>U</i>（欧姆定律）= 0.62 &gt; c = 0.20 &nbsp;→&nbsp; STITCH</div>
+
+      <div class="steps">
+        <ol>
+          <li>根据基尔霍夫电流定律（KCL），任一节点的代数和电流为零。</li>
+          <li>规定流出节点的电流为正，流入节点的电流为负。</li>
+          <li>将所有与该节点相连支路的电流按正负号相加，等式结果为 0。</li>
+        </ol>
+      </div>
+
+      <div class="note info">
+        提醒：KCL 列写需要用欧姆定律做支路电压电流转换，你在欧姆定律上掌握较低，建议先复习。
+      </div>
+
+      <div class="spacer"></div>
+
+      <div class="footer">
+        <div class="utility">
+          <svg width="19" height="19" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#6b3fd6"/><path d="M7.5 12.5L10.5 15.5L16.5 9" stroke="#ffffff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          效用 Utility = 9.3
+        </div>
+        <div class="utility-desc">精准、低认知负荷</div>
+      </div>
+    </div>
+
+  </div>
+
+</body>
+</html>

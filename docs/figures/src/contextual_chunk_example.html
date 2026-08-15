@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<style>
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{
+    width:1400px;
+    font-family:"SimSun","Songti SC","Times New Roman",serif;
+    background:#ffffff;
+    color:#111;
+    padding:24px 28px 20px;
+  }
+  .caption{
+    text-align:center;
+    font-size:18px;
+    font-weight:700;
+    margin-bottom:18px;
+    font-family:"SimHei","Microsoft YaHei",sans-serif;
+  }
+  .row{display:flex; gap:16px; align-items:stretch;}
+  .panel{
+    flex:1;
+    border:1px solid #333;
+    background:#fff;
+    padding:14px 16px 16px;
+    display:flex;
+    flex-direction:column;
+    gap:10px;
+  }
+  .panel-label{
+    font-family:"SimHei","Microsoft YaHei",sans-serif;
+    font-size:16px;
+    font-weight:700;
+    text-align:center;
+    padding-bottom:8px;
+    border-bottom:1px solid #333;
+  }
+  .panel-label span{
+    font-weight:400;
+    font-size:14px;
+    color:#444;
+  }
+  .arrow-col{
+    flex:0 0 72px;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    justify-content:center;
+    gap:6px;
+    font-family:"SimHei","Microsoft YaHei",sans-serif;
+    font-size:13px;
+    color:#333;
+    text-align:center;
+    line-height:1.4;
+  }
+  .chunk{
+    border:1px solid #555;
+    background:#fafafa;
+    padding:12px 14px;
+    font-family:"Consolas","SimSun",monospace;
+    font-size:15px;
+    line-height:1.7;
+    color:#111;
+  }
+  .loc{
+    font-weight:700;
+    color:#111;
+  }
+  .bg{
+    border:1px solid #555;
+    background:#f3f3f3;
+    padding:10px 12px;
+    font-size:14.5px;
+    line-height:1.65;
+    font-family:"SimSun","Songti SC",serif;
+  }
+  .bg b{
+    font-family:"SimHei","Microsoft YaHei",sans-serif;
+    font-size:13px;
+  }
+  table{
+    width:100%;
+    border-collapse:collapse;
+    margin-top:0;
+    font-size:14.5px;
+    font-family:"SimSun",serif;
+  }
+  th, td{
+    border:1px solid #333;
+    padding:6px 8px;
+    text-align:center;
+  }
+  th{background:#eee; font-weight:700;}
+  .chunk .loc + table{margin-top:8px;}
+  .note{
+    font-size:14px;
+    line-height:1.65;
+    color:#222;
+    font-family:"SimSun",serif;
+  }
+  .note b{font-family:"SimHei","Microsoft YaHei",sans-serif;}
+</style>
+</head>
+<body>
+  <div class="caption">切块片段的章节定位与背景补充</div>
+  <div class="row">
+    <div class="panel">
+      <div class="panel-label">(a) 切块后的原始片段　<span>baseline</span></div>
+      <div class="chunk">
+        <table>
+          <tr><th>项目</th><th>（V）</th><th>（V）</th><th>(mA)</th><th>（）</th></tr>
+          <tr><td>数值</td><td></td><td></td><td></td><td></td></tr>
+        </table>
+      </div>
+      <div class="note">空白记录表被单独切出，不含“戴维南定理”等提问用词，语义稀疏，检索易失配。</div>
+    </div>
+
+    <div class="arrow-col">
+      <svg width="48" height="18" viewBox="0 0 48 18">
+        <line x1="2" y1="9" x2="38" y2="9" stroke="#111" stroke-width="1.6"/>
+        <path d="M32 3L42 9L32 15" stroke="#111" stroke-width="1.6" fill="none"/>
+      </svg>
+      补充定位<br>与背景
+    </div>
+
+    <div class="panel">
+      <div class="panel-label">(b) 补充背景后的片段　<span>本文方法</span></div>
+      <div class="bg"><b>[背景]</b> 该表格出现在“实验五  含源一端口网络”的实验内容部分，用于记录测量有源二端网络开路电压、负载电压、短路电流及等效电阻的实验数据。</div>
+      <div class="chunk">
+        <div class="loc">【章节: 实验五  含源一端口网络】</div>
+        <table>
+          <tr><th>项目</th><th>（V）</th><th>（V）</th><th>(mA)</th><th>（）</th></tr>
+          <tr><td>数值</td><td></td><td></td><td></td><td></td></tr>
+        </table>
+      </div>
+      <div class="note"><b>定位</b>来自切块时写入的章节前缀，区分其它实验的同类空白表；<b>背景</b>补回开路电压、短路电流、等效电阻及实验主题，使语义检索可命中。</div>
+    </div>
+  </div>
+</body>
+</html>
