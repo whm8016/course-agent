@@ -171,6 +171,10 @@ class LLMConfig(BaseModel):
     api_version: str = ""
     text_model: str = "qwen-plus"
     fast_model: str = "qwen-turbo"
+    # 思考（thinking/reasoning）总闸（照 DeepTutor LLM_REASONING_EFFORT）。空=按型号自动
+    # 分流（deepseek-v4-flash 关 / gemini-2.5*/3* 关 / 推理档开，见 core.llm.reasoning_params）；
+    # "minimal"=全局关；"high"=全局开。仅作用于主聊天链路（_create_with_image_fallback 咽喉）。
+    reasoning_effort: str = ""
     # 生成参数 / 超时（收编原硬编码）
     temperature: float = 0.7
     max_tokens: int = 8192

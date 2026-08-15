@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -189,4 +190,33 @@ def find_by_model(model: str | None) -> ProviderSpec | None:
     return None
 
 
-__all__ = ["ProviderSpec", "PROVIDERS", "find_by_name", "find_by_model"]
+def find_by_base_url(base_url: str | None) -> ProviderSpec | None:
+    """从实际请求的 base_url 反查 ProviderSpec（域名精确匹配各 spec 的 default_api_base）。
+
+    供运行期按端点判定真实供应商（如思考参数方言）：binding 是配置标签、可能
+    与实际端点不符（.env 未设时默认 "dashscope"），端点说了算。本地部署三家
+    （ollama/vllm/lm_studio）域名都是 localhost，用端口区分；端口不匹配不认。
+    """
+    if not base_url:
+        return None
+    try:
+        parsed = urlsplit(base_url if "//" in base_url else f"https://{base_url}")
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:  # 端口段非数字等畸形 URL
+        return None
+    if not host:
+        return None
+    for spec in PROVIDERS:
+        if not spec.default_api_base:
+            continue
+        spec_parsed = urlsplit(spec.default_api_base)
+        if (spec_parsed.hostname or "").lower() != host:
+            continue
+        if host in ("localhost", "127.0.0.1") and spec_parsed.port != port:
+            continue
+        return spec
+    return None
+
+
+__all__ = ["ProviderSpec", "PROVIDERS", "find_by_name", "find_by_model", "find_by_base_url"]

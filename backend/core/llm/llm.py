@@ -17,6 +17,7 @@ LLM_BINDING = get_settings().llm.binding
 LLM_TIMEOUT_SEC = get_settings().llm.timeout_sec
 TEXT_MODEL = get_settings().llm.text_model
 from core.llm.provider_factory import get_llm_client
+from core.llm.reasoning_params import apply_reasoning_kwargs
 from core.llm.reliability import (
     CircuitBreaker,
     CircuitOpenError,
@@ -203,6 +204,11 @@ async def _create_with_image_fallback(
         strip_image_parts_inplace,
     )
 
+    # 思考开关按型号分流（照 DeepTutor reasoning_params 设计，详见该模块 docstring）：
+    # 在统一咽喉层注入，主聊天链路（_one_round / chat_complete）全覆盖；不在表内的
+    # 供应商/型号不传任何开关，行为与原先逐字节一致。
+    apply_reasoning_kwargs(create_kwargs, binding, model, llm_client)
+
     def _make_call(client: object, kwargs: dict, bnd: str, mdl: str):
         async def _call_with_image_fallback():
             # 压测概率分流（LOAD_TEST_MOCK_LLM=1）：stream 请求按 LOAD_TEST_REAL_RATIO 概率
@@ -258,6 +264,9 @@ async def _create_with_image_fallback(
         )
         fb_kwargs = dict(create_kwargs)
         fb_kwargs["model"] = FALLBACK_MODEL
+        # 换了供应商/型号：剥掉主模型的思考参数（如 deepseek 的 thinking disabled），
+        # 按 fallback 端点重算（如 qwen-plus → enable_thinking），避免跨供应商串参数。
+        apply_reasoning_kwargs(fb_kwargs, _fallback_binding, FALLBACK_MODEL, _fallback_client)
         try:
             return await with_retry_and_circuit(
                 _make_call(_fallback_client, fb_kwargs, _fallback_binding, FALLBACK_MODEL),

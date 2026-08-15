@@ -420,6 +420,8 @@ LANGSMITH_PROJECT=course-agent-dev
 
 **stream_options 安全降级**：不支持的 OpenAI 兼容端点会对 `stream_options` 报 400 而非静默忽略。`llm._create_with_image_fallback` 内捕获该错误后剥掉 `stream_options` 重试一次（与 Stage-2 剥图降级同套路，发生在 create 层、reliability 之前，丢本轮 usage 但保 turn 不挂）。
 
+**思考开关按型号分流（照 DeepTutor）**：供应商出厂常默认开思考，聊天被拖成「先想半分钟再出字」且思考占输出额度。`core/llm/reasoning_params.py` 三张表定策略：快档（`deepseek`+`deepseek-v4-flash`）默认关（`extra_body.thinking.type=disabled`）；`gemini-2.5*`/`gemini-3*` 默认关（`reasoning_effort=none`，拒 none 的型号降 `minimal`——思考会吃光 `max_tokens` 致正文空）；推理档（`deepseek-v4-pro`/`deepseek-reasoner`/DashScope `qwen3`/`qwq`/`qwen-plus`）显式开+high；**其余型号不传任何开关**，跟供应商默认。判定优先级：先推理档表后默认关表。env `LLM__REASONING_EFFORT` 是总闸（空=自动分流、`minimal`=全局关、`high`=全局开）。注入点在 `llm._create_with_image_fallback` 咽喉层（主聊天链路 `_one_round`/`chat_complete` 全覆盖；fallback 换模型时剥主模型参数按新供应商重算，不跨供应商串参）。provider 反查顺序 base_url 域名 → 模型名 → binding（binding 是 legacy 标签，可能 "dashscope" 实际打 deepseek 端点）。judge/quiz/vision/bot/LightRAG 等自建 client 的路径不经此层，行为不变。
+
 **用量持久化（账单级，落库）**：Prometheus Counter 无法按 `user_id` 展开（label 基数爆炸，Prometheus 硬约束），Redis 配额键只留 2 天，故「按人/按课查账」另落 PG。`core/analytics/token_usage.py` 两级存储：`llm_usage_records`（明细，每 `run_agent_loop` 一行，无 FK 抗级联删，带 `mode`/`rounds` 供 cost-of-pass 分析，`cost_usd` 摄取时按价目表快照落库——日后改价不篡改历史账）+ `llm_usage_daily`（日聚合读模型）。`loop.py` 在 `observe_cost`/`accrue_cost` 旁 `record_llm_usage`（`usage_tracking.enabled` 默认 True，best-effort 不阻塞）；ARQ `cron_rollup_usage` 每小时 :11 删今日+昨日聚合行后重插（幂等）+ 清过期明细（`detail_retention_days`，日汇总永久保留）。查询 `GET /admin/usage/summary`（全量，group_by day|user|course|model）与 `GET /teacher/courses/{id}/analytics/usage`（`_get_owned_kb` 归属隔离，group_by day|user|model）只读 daily 表。`done` 事件 `metadata.usage` 透出本轮 token（学生端气泡底部小字；美元成本仅 `expose_cost_to_student` 开启时带）。
 
 ---

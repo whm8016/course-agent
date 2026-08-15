@@ -9,6 +9,30 @@ import os
 # Prevent transformers (pulled in by langsmith pytest plugin) from loading TF/Keras
 os.environ.setdefault("USE_TF", "0")
 
+# Windows WMI 服务挂起时 platform.win32_ver() 的 WMI 查询会无限卡死，prometheus_client
+# 等 import 期调 platform.uname() 的库（整个 loop.py 依赖树）全部起不来。预填
+# _uname_cache 让 uname() 直接走缓存、绕过 WMI；字段取值与真 uname 语义一致
+# （system/machine 走固定值与环境变量，release 走 sys.getwindowsversion，均不查 WMI）。
+import sys
+
+if sys.platform == "win32":  # pragma: no cover - 仅 Windows 需要，且仅 WMI 病时生效
+    import platform
+
+    if getattr(platform, "_uname_cache", None) is None:
+        _uv = sys.getwindowsversion()
+        platform._uname_cache = platform.uname_result(
+            system="Windows",
+            node=os.environ.get("COMPUTERNAME", "") or "unknown",
+            release="11" if (_uv.major == 10 and _uv.build >= 22000) else str(_uv.major),
+            version=_uv.service_pack or "",
+            machine=os.environ.get("PROCESSOR_ARCHITECTURE", "AMD64"),
+        )
+    # _uname_cache 只保 uname()；processor()/win32_ver() 走 _wmi_query 懒加载通道
+    # （openai SDK get_platform 遥测线程会踩到）。置 _wmi=None 走 platform 自带的
+    # 「无 WMI 环境」降级分支（Windows Home 同款路径）。
+    if getattr(platform, "_wmi", None) is not None:
+        platform._wmi = None
+
 # Set all env vars before importing backend modules（嵌套式 env 名，对齐 settings 组合式重构）
 os.environ.setdefault("DB__URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("SECURITY__JWT_SECRET", "test-secret-pytest-only-32chars!!")
