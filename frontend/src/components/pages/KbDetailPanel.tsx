@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { authHeaders } from '../../services/auth'
 import { STATUS_LABEL, STATUS_COLOR, formatBytes, formatTime } from './kbUtils'
 
@@ -50,6 +50,34 @@ export interface KbBuild {
   token_estimate: number
   error_msg: string
   updated_at: number
+}
+
+// ── 课程主题图（GET/POST {apiBase}/{course_id}/topic-graph）──────────────────
+
+export interface TgTopic {
+  topic_id: string
+  label: string
+  definition: string
+  source_section: string
+  order_idx: number
+  safety_weight: number
+}
+
+export interface TgEdge {
+  src: string
+  dst: string
+  relation: string
+  confidence: number
+  verified_by?: string | null
+}
+
+export interface TopicGraphPayload {
+  course_id: string
+  topic_count: number
+  edge_count: number
+  topics: TgTopic[]
+  edges: TgEdge[]
+  failed_sections?: string[]
 }
 
 // STATUS_LABEL / STATUS_COLOR / formatBytes / formatTime 已移至 ./kbUtils（避免 react-refresh 冲突）
@@ -161,6 +189,57 @@ export default function KbDetailPanel({
   const [confirmState, setConfirmState] = useState<ConfirmState | null>(null)
 
   const requestConfirm = (state: ConfirmState) => setConfirmState(state)
+
+  // ── 课程主题图（教师端：构建/重建 + 核对 + safety_weight 标注）────────────
+  const [topicGraph, setTopicGraph] = useState<TopicGraphPayload | null>(null)
+  const [tgLoading, setTgLoading] = useState(false)
+  const [tgBuilding, setTgBuilding] = useState(false)
+  const [tgError, setTgError] = useState('')
+  const [swEdit, setSwEdit] = useState<{ tid: string; value: string } | null>(null)
+
+  const loadTopicGraph = async () => {
+    setTgLoading(true)
+    setTgError('')
+    try {
+      setTopicGraph(await apiFetch(`${apiBase}/${kb.course_id}/topic-graph`) as TopicGraphPayload)
+    } catch (e) {
+      setTgError(e instanceof Error ? e.message : String(e))
+    }
+    setTgLoading(false)
+  }
+
+  const handleBuildTopicGraph = async (force: boolean) => {
+    setTgBuilding(true)
+    setTgError('')
+    try {
+      await apiFetch(`${apiBase}/${kb.course_id}/topic-graph${force ? '?force=true' : ''}`, { method: 'POST' })
+    } catch (e) {
+      setTgError(e instanceof Error ? e.message : String(e))
+    }
+    setTgBuilding(false)
+  }
+
+  const handleSaveSafetyWeight = async (topicId: string) => {
+    const value = Number(swEdit?.value)
+    if (!Number.isFinite(value) || value < 0 || value > 10) {
+      setTgError('安全权重须在 0–10 之间')
+      return
+    }
+    setTgError('')
+    try {
+      await apiFetch(
+        `${apiBase}/${kb.course_id}/topic-graph/topics/${encodeURIComponent(topicId)}/safety-weight`,
+        { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ safety_weight: value }) },
+      )
+      setSwEdit(null)
+      await loadTopicGraph()
+    } catch (e) {
+      setTgError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  // 面板按 course_id 生命周期加载（切换课程详情时重查）
+  useEffect(() => { void loadTopicGraph() }, [kb.course_id])
 
   const handleEditSave = async () => {
     setEditLoading(true)
@@ -524,6 +603,112 @@ export default function KbDetailPanel({
             )
           })}
         </div>
+      </div>
+
+      {/* 课程主题图：知识点+先修边抽取。学情预警（stitch 门控）与学生端「课程先修图谱」
+          页共用这张图；依赖上方任一索引已就绪（从讲义切块抽取）。 */}
+      <div className="mt-4 border-t border-line pt-3">
+        <div className="flex items-center justify-between mb-2 flex-wrap gap-1.5">
+          <div className="text-xs text-muted flex items-center gap-2">
+            <span>课程主题图（知识点 + 先修关系）</span>
+            {tgLoading ? (
+              <span className="text-muted/70">加载中…</span>
+            ) : topicGraph && (
+              <span className={`text-[11px] px-1.5 py-0.5 rounded ${topicGraph.topic_count > 0 ? 'text-ok-fg bg-ok-bg' : 'text-muted bg-canvas'}`}>
+                {topicGraph.topic_count > 0 ? `${topicGraph.topic_count} 主题 / ${topicGraph.edge_count} 边` : '未构建'}
+              </span>
+            )}
+          </div>
+          <div className="flex gap-1.5">
+            {(!topicGraph || topicGraph.topic_count === 0) ? (
+              <button type="button" onClick={() => void handleBuildTopicGraph(false)}
+                disabled={tgBuilding}
+                className="text-xs bg-accent text-white px-2.5 py-1 rounded-[var(--radius)] hover:bg-accent-2 transition disabled:opacity-50">
+                生成主题图
+              </button>
+            ) : (
+              <>
+                <button type="button" onClick={() => void loadTopicGraph()}
+                  className="text-xs text-ink-soft border border-line px-2.5 py-1 rounded-[var(--radius)] hover:bg-canvas transition">
+                  刷新
+                </button>
+                <button type="button"
+                  onClick={() => requestConfirm({
+                    action: () => void handleBuildTopicGraph(true),
+                    title: '重建课程主题图',
+                    message: '重建将删除现有主题图并重新抽取（消耗 LLM 调用），教师已标注的安全权重与核对标记会被清除。确定继续？',
+                    confirmLabel: '确认重建', variant: 'warning',
+                  })}
+                  disabled={tgBuilding}
+                  className="text-xs text-warn-fg border border-warn-fg bg-warn-bg px-2.5 py-1 rounded-[var(--radius)] hover:bg-warn-bg transition disabled:opacity-50">
+                  重建
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+        {tgBuilding && (
+          <div className="text-xs text-warn-fg mb-1.5">已提交后台构建，完成后点「刷新」查看结果。</div>
+        )}
+        {tgError && <div className="text-xs text-danger-fg mb-1.5">{tgError}</div>}
+        {topicGraph && (topicGraph.failed_sections?.length ?? 0) > 0 && (
+          <div className="text-xs text-warn-fg bg-warn-bg px-2 py-1 rounded-[var(--radius)] mb-1.5">
+            以下章节抽取失败，图谱可能不完整：{topicGraph.failed_sections!.join('；')}（可「重建」重试）
+          </div>
+        )}
+        {topicGraph && topicGraph.topic_count > 0 && (
+          <>
+            <div className="text-[11px] text-muted mb-1">
+              知识点（×安全权重：任务风险因子，0=永不预警，&gt;1=更易触发学情预警，点击修改）
+            </div>
+            <div className="max-h-56 overflow-y-auto border border-line rounded-[var(--radius)] divide-y divide-line">
+              {topicGraph.topics.map(t => (
+                <div key={t.topic_id} className="flex items-center gap-2 px-2 py-1 text-xs">
+                  <span className="text-ink truncate flex-1" title={t.definition}>{t.label}</span>
+                  <span className="text-muted shrink-0 max-w-[38%] truncate">{t.source_section}</span>
+                  {swEdit?.tid === t.topic_id ? (
+                    <span className="flex items-center gap-1 shrink-0">
+                      <input type="number" step="0.5" min="0" max="10" value={swEdit.value}
+                        onChange={e => setSwEdit({ tid: t.topic_id, value: e.target.value })}
+                        className="w-14 px-1 py-0.5 border border-line rounded bg-surface" />
+                      <button type="button" onClick={() => void handleSaveSafetyWeight(t.topic_id)}
+                        className="text-accent hover:underline">保存</button>
+                    </span>
+                  ) : (
+                    <button type="button" onClick={() => setSwEdit({ tid: t.topic_id, value: String(t.safety_weight) })}
+                      className="shrink-0 text-muted hover:text-ink font-mono" title="点击编辑安全权重">
+                      ×{t.safety_weight}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <details className="mt-1.5">
+              <summary className="text-[11px] text-muted cursor-pointer">先修边（{topicGraph.edge_count}，A → B 表示 A 是 B 的前置）</summary>
+              <div className="mt-1 border border-line rounded-[var(--radius)] divide-y divide-line max-h-48 overflow-y-auto">
+                {topicGraph.edges.map((e, i) => {
+                  const tOf = (tid: string) => topicGraph.topics.find(t => t.topic_id === tid)
+                  const s = tOf(e.src), d = tOf(e.dst)
+                  const cross = !!s && !!d && s.source_section !== d.source_section
+                  return (
+                    <div key={`${e.src}-${e.dst}-${i}`} className="flex items-center gap-2 px-2 py-1 text-xs">
+                      <span className="truncate flex-1 text-ink-soft">
+                        <span className="text-ink">{s?.label ?? e.src}</span> → {d?.label ?? e.dst}
+                      </span>
+                      {cross && (
+                        <span className="shrink-0 text-[10px] px-1 py-0.5 rounded text-info-fg bg-info-bg" title="跨章节先修（重建后重点核对）">跨章</span>
+                      )}
+                      <span className="shrink-0 text-muted font-mono">{e.confidence?.toFixed(2)}</span>
+                      {e.verified_by && (
+                        <span className="shrink-0 text-[10px] px-1 py-0.5 rounded text-ok-fg bg-ok-bg">已核对</span>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </details>
+          </>
+        )}
       </div>
 
       {/* 文件上传区 */}
