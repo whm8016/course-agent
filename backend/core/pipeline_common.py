@@ -185,7 +185,8 @@ async def build_common_context_layers(
             mastery_context = ""
 
     # 第一路：mem0 双槽检索（预填非空则用之，单测/bot 走这条）。course_id 非空才
-    # 做主题过滤（IM 无课程概念时 matched_topic 为 None，保留全量注入）。
+    # 做主题过滤：命中主题→按主题过滤；有课程没命中→event 槽留空（与门控沉默对齐）；
+    # IM 无课程概念（course_id 空）保留全量注入旧行为。
     memory_context = ctx.memory_context or ""
     if not memory_context and ctx.user_id and (ctx.user_message or "").strip():
         try:

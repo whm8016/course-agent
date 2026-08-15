@@ -31,7 +31,11 @@ _CLAIM_LIMIT = 200
 # 巩固，不要单任务超时全丢）。
 _JUDGE_SEGMENTS_PER_RUN = 20
 _JUDGE_CONCURRENCY = 4    # 并发判定信号量
-_JUDGE_TIMEOUT_SECONDS = 30  # 单段超时；超时段按判定不可用处理
+_JUDGE_TIMEOUT_SECONDS = 120  # 单段超时；超时段按判定不可用处理。判定器走推理模型且
+# max_tokens=8000（reasoning_content 与正文共享额度，见 judge.py），思考一长 30s
+# 必超时 → 回 pending → cron 5min 后再捞再超时，队列空转掌握度永远落不了库。
+# 120s 容得下长思考；最坏整次巩固 = 20 段 / 并发 4 × 120s = 600s，远低于 ARQ
+# job_timeout 36000s，不构成新风险。
 # pending 超过此秒数 → cron safety net 兜底 enqueue（session 空闲等价触发）
 _PENDING_STALE_SECONDS = 300
 # processing 超过此秒数（用 created_at 近似，正常 promote 仅需数秒）→ 视崩溃遗留回 pending
@@ -236,11 +240,17 @@ async def _promote_segment(
     if episodes:
         from core.memory.mem0_client import _PERSONA_INSTRUCTION
 
+        # 每条 episode 是完整一轮（学生问 + 教师答），拆成 user→assistant 两条：
+        # 按下标奇偶只取一侧会把第 1 轮教师答/第 2 轮学生问丢掉且角色错位，
+        # 多轮下的稳定偏好（「讲慢一点」常在后续轮）抽不准
         msgs = [
-            {"role": "user" if i % 2 == 0 else "assistant",
-             "content": (ep.user_msg if i % 2 == 0 else ep.assistant_msg)}
-            for i, ep in enumerate(episodes)
-            if (ep.user_msg if i % 2 == 0 else ep.assistant_msg)
+            m
+            for ep in episodes
+            for m in (
+                {"role": "user", "content": ep.user_msg},
+                {"role": "assistant", "content": ep.assistant_msg},
+            )
+            if m["content"]
         ]
         if msgs:
             try:

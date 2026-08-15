@@ -86,13 +86,32 @@ async def test_gate_evidence_topic_dedup(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_no_matched_topic_keeps_legacy_behavior(monkeypatch):
-    """matched_topic 空（IM 无课程概念/门控未跑）→ 不做主题过滤，保留旧行为。"""
+    """matched_topic 空 + course_id 也空（IM 无课程概念）→ 不做主题过滤，保留旧行为。"""
     _mem_settings(monkeypatch)
     results = _items("persona", 1) + _items("event", 3, topic_ids=["x"])
     with patch.object(mem0_client, "get_memory", lambda: _mk(results)):
         out = await mem0_client.build_memory_context("u1", "问", course_id="")
     event_lines = [ln for ln in out.splitlines() if ln.startswith("- ") and "event-" in ln]
     assert len(event_lines) == 2  # 无主题过滤但仍有每槽上限
+
+
+@pytest.mark.asyncio
+async def test_course_without_topic_match_empties_event_slot(monkeypatch):
+    """有课程但问句没命中主题 → event 槽留空（persona 仍注入）。
+
+    与门控「没命中就沉默」对齐：门控刚决定这轮不提跨主题学情，event 槽若照旧
+    全量注入跨主题历史，等于另一条路把话又提了。旧 bug 只区分「matched_topic
+    有无」，把「有课程没命中」混进「IM 无课程」的全量旧行为里。
+    """
+    _mem_settings(monkeypatch)
+    results = _items("persona", 1) + _items("event", 3, topic_ids=["x"])
+    with patch.object(mem0_client, "get_memory", lambda: _mk(results)):
+        out = await mem0_client.build_memory_context(
+            "u1", "问", course_id="c1", matched_topic=""
+        )
+    event_lines = [ln for ln in out.splitlines() if ln.startswith("- ") and "event-" in ln]
+    assert event_lines == []                       # event 槽留空
+    assert any("persona-0" in ln for ln in out.splitlines())  # persona 不受影响
 
 
 @pytest.mark.asyncio
