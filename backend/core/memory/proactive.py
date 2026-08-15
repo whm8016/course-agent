@@ -162,6 +162,10 @@ def decide_stitch(
         return max(0.0, (severity_map or {}).get(t, 1.0))
 
     score = 0.0
+    # sev 先置 0：无候选胜出（如复发主题权重 0、rec_score=0 不大于 score=0）时，
+    # value = p_need·sev·c 不再炸 UnboundLocalError——0 的语义正是「权重 0 →
+    # value 0 → below_value 沉默」，与教师「永不因它预警」标注一致
+    sev = 0.0
     if prereq_gaps:
         top_tid, top = max(prereq_gaps, key=lambda x: _need_gap(x[1]) * _sev(x[0]))
         p_need, evidence, reason, sev = _need_gap(top), top_tid, "prereq_gap", _sev(top_tid)

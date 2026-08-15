@@ -159,6 +159,21 @@ def test_severity_zero_silences():
     assert brief.reason == "below_value"
 
 
+def test_severity_zero_recurrence_only_no_crash():
+    """只复发（无前置缺口）+ 问句主题权重 0 → 不炸（旧 UnboundLocalError）。
+
+    旧 bug：prereq_gaps 空 → 赋值分支不进；rec_score = rec·0 = 0 不大于 score=0
+    → 也不进 → sev 未定义，value = p_need·sev·c 抛 UnboundLocalError，热路径
+    门控整轮失效。语义：权重 0 是教师「永不因它预警」标注 → 应 below_value 沉默。
+    """
+    brief = decide_stitch(
+        "kcl", set(), _folded_map(["poor"] * 6), {"kcl"},
+        severity_map={"kcl": 0.0},
+    )
+    assert brief.level == "silent"
+    assert brief.reason == "below_value"
+
+
 async def test_severity_map_zero_weight_not_defaulted():
     """_severity_map：DB 里 safety_weight=0 不能被 `w or 1.0` 洗成 1.0。"""
     from core.memory.proactive import _severity_map

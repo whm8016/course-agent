@@ -109,6 +109,29 @@ async def test_promote_persona_written_separately():
     assert any(c["metadata"].get("kind") == "event" for c in mem.calls)
 
 
+async def test_promote_persona_multiturn_roles():
+    """多轮 persona 拼装：每条 episode 是完整一轮，须拆成 user→assistant 两条。
+
+    旧 bug：按下标奇偶「第 i 条 episode 只取学生或教师一侧」，第二轮的学生问与
+    第一轮的教师答被丢、角色错位——稳定偏好（「讲慢一点」在第 2 轮）抽不准。
+    """
+    mem = _MemRecorder()
+    eps = [
+        _ep(1, "什么是欧姆定律", "欧姆定律是 U=IR"),
+        _ep(2, "能讲慢一点吗", "好的，我们放慢"),
+    ]
+    await _run_promote(eps, ["ohm", "ohm"], mem)
+    personas = [c for c in mem.calls if c["metadata"].get("kind") == "persona"]
+    assert len(personas) == 1
+    msgs = personas[0]["content"]
+    assert msgs == [
+        {"role": "user", "content": "什么是欧姆定律"},
+        {"role": "assistant", "content": "欧姆定律是 U=IR"},
+        {"role": "user", "content": "能讲慢一点吗"},
+        {"role": "assistant", "content": "好的，我们放慢"},
+    ]
+
+
 async def test_promote_no_event_for_topicless():
     """「好的」+ 无主题命中 → 不 add event。"""
     mem = _MemRecorder()

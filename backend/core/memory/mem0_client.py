@@ -233,7 +233,8 @@ async def build_memory_context(
     未问及缺口归第二路（proactive 门控）独占。限权靠数据流不靠模型自觉：
     - 每槽独立上限：persona ≤3 条、event ≤2 条、每条 ≤80 字（合计仍受 max_chars 裁剪）
     - matched_topic 非空时 event 槽只注入与本轮命中主题相同的事件（metadata.topic_ids）；
-      空串（IM 无课程概念）保留旧的全量注入行为
+      matched_topic 空但 course_id 非空（问句没命中课程主题）→ event 槽留空，与门控
+      「没命中就沉默」对齐；两者都空（IM 无课程概念）才保留旧的全量注入行为
     - gate_evidence_topic 非空（第二路本轮已开口）时，同主题 event 行被剔除——
       同一件事（C2 复发场景）不在两路里说两遍
     - header 三条禁令 + 事件段免责句（不得当掌握度结论/不得展开未问主题/无关时忽略）
@@ -272,12 +273,18 @@ async def build_memory_context(
         results = await _detect_and_clean_conflicts(user_id, results, settings)
 
     # event 槽按主题结构过滤：只留本轮命中主题的事件（两路分工——跨主题历史交给
-    # 门控），再剔除门控本轮已开口的证据主题（同主题不说两遍）
+    # 门控），再剔除门控本轮已开口的证据主题（同主题不说两遍）。
+    # - matched_topic 非空：按命中主题过滤
+    # - matched_topic 空但 course_id 非空（有课程、问句没命中主题）：event 槽留空
+    #   ——门控这轮已决定不提跨主题学情，全量注入等于另一条路把话又提了
+    # - 两者都空（IM 无课程概念）：保留旧的全量注入行为
     if matched_topic:
         events = [
             r for r in events
             if matched_topic in ((r.get("metadata") or {}).get("topic_ids") or [])
         ]
+    elif course_id:
+        events = []
     if gate_evidence_topic:
         events = [
             r for r in events
