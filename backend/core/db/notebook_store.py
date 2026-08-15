@@ -39,6 +39,19 @@ def _entry_to_dict(
     }
 
 
+async def _find_entry_row(
+    db: AsyncSession, user_id: str, session_id: str, question_id: str
+) -> NotebookEntry | None:
+    """按幂等键 (user_id, session_id, question_id) 查行（upsert 的存在性检查）。"""
+    q = select(NotebookEntry).where(
+        NotebookEntry.user_id == user_id,
+        NotebookEntry.session_id == session_id,
+        NotebookEntry.question_id == question_id,
+    )
+    res = await db.execute(q)
+    return res.scalar_one_or_none()
+
+
 async def upsert_notebook_entry(
     db: AsyncSession, user_id: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
@@ -47,13 +60,7 @@ async def upsert_notebook_entry(
     if not session_id or not question_id:
         raise ValueError("session_id and question_id are required")
 
-    q = select(NotebookEntry).where(
-        NotebookEntry.user_id == user_id,
-        NotebookEntry.session_id == session_id,
-        NotebookEntry.question_id == question_id,
-    )
-    res = await db.execute(q)
-    existing = res.scalar_one_or_none()
+    existing = await _find_entry_row(db, user_id, session_id, question_id)
     now = time.time()
     # P1：写时落盘 course_id（反查 Session，省去读侧 JOIN；宪法原则 3）
     course_id = (await db.execute(
@@ -89,8 +96,23 @@ async def upsert_notebook_entry(
             **fields,
         )
         db.add(row)
-        await db.flush()
-        await db.refresh(row)
+        try:
+            await db.flush()
+        except IntegrityError:
+            # 并发 upsert 同一 (user, session, question)：两边同时 SELECT 未命中 → 双 INSERT，
+            # 第二个撞 uq_notebook_entry_natural → 回滚本事务（此前只有只读 SELECT，无写入可丢）
+            # 重查改走 UPDATE（对齐 create_category 的 IntegrityError 处理）。
+            await db.rollback()
+            existing = await _find_entry_row(db, user_id, session_id, question_id)
+            if existing is None:
+                raise
+            for k, v in fields.items():
+                setattr(existing, k, v)
+            await db.flush()
+            await db.refresh(existing)
+            row = existing
+        else:
+            await db.refresh(row)
 
     return _entry_to_dict(row)
 
@@ -98,13 +120,7 @@ async def upsert_notebook_entry(
 async def find_notebook_entry(
     db: AsyncSession, user_id: str, session_id: str, question_id: str
 ) -> dict[str, Any] | None:
-    q = select(NotebookEntry).where(
-        NotebookEntry.user_id == user_id,
-        NotebookEntry.session_id == session_id,
-        NotebookEntry.question_id == question_id,
-    )
-    res = await db.execute(q)
-    row = res.scalar_one_or_none()
+    row = await _find_entry_row(db, user_id, session_id, question_id)
     return _entry_to_dict(row) if row else None
 
 

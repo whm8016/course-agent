@@ -102,6 +102,7 @@ const CAPABILITIES: CapDef[] = [
 // ---------- QAPair → QuizQuestion ----------
 interface QAPairRaw {
   question?: string
+  question_id?: string
   correct_answer?: string
   explanation?: string
   question_type?: string
@@ -124,6 +125,9 @@ function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
           ? 'A'
           : 'B',
       explanation: qa.explanation ?? '',
+      question_id: qa.question_id,
+      question_type: qa.question_type,
+      difficulty: qa.difficulty,
     }
   }
 
@@ -137,6 +141,9 @@ function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
       options,
       answer,
       explanation: qa.explanation ?? '',
+      question_id: qa.question_id,
+      question_type: qa.question_type,
+      difficulty: qa.difficulty,
     }
   }
 
@@ -145,6 +152,9 @@ function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
     options: [],
     answer: qa.correct_answer ?? '',
     explanation: qa.explanation ?? '',
+    question_id: qa.question_id,
+    question_type: qa.question_type,
+    difficulty: qa.difficulty,
   }
 }
 
@@ -1376,6 +1386,7 @@ export default function ChatWindow({
             key={`${sessionId ?? 'none'}-${i}`}
             message={msg}
             courseId={courseId}
+            sessionId={sessionId}
             thinkingSteps={(msg as unknown as Record<string, unknown>)._thinkingSteps as Message[] | undefined}
             isStreaming={loading && i === messages.length - 1}
           />

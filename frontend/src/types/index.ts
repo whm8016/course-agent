@@ -27,6 +27,11 @@ export interface QuizQuestion {
   options: string[]
   answer: string
   explanation: string
+  /** 后端 pipeline 逐题生成的稳定 id（提交答案自动收录笔记本的幂等键）；
+   *  chat 模式 SSE quiz 事件缺省，提交时用 q_{i+1} 兜底 */
+  question_id?: string
+  question_type?: string
+  difficulty?: string
 }
 
 export interface QuizData {

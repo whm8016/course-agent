@@ -158,7 +158,7 @@ export default function NotebookPage({ onBack }: Props) {
           {loading ? (
             <div className="text-center text-muted py-16">加载中...</div>
           ) : entries.length === 0 ? (
-            <EmptyState icon={NotebookPen} title="笔记本还是空的" hint="出题/答题后会自动收录，或手动收藏" />
+            <EmptyState icon={NotebookPen} title="笔记本还是空的" hint="提交答案后，客观题自动收录，或手动收藏" />
           ) : (
             <div className="space-y-3">
               {entries.map((e) => (

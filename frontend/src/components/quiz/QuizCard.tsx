@@ -3,10 +3,13 @@ import { MessageSquare, Send, Square, X, ClipboardList } from 'lucide-react'
 import type { QuizData, QuizQuestion } from '../../types'
 import FormattedMarkdown from '../shared/FormattedMarkdown'
 import { connectQuestionFollowup } from '../../services/questionWs'
+import { upsertNotebookEntry } from '../../services/api'
 
 interface Props {
   quiz: QuizData
   courseId?: string
+  /** 所属会话 id：提交答案自动收录笔记本的幂等键之一 */
+  sessionId?: string | null
 }
 
 // ---------- Follow-up chat (WebSocket /api/question/followup) ----------
@@ -363,10 +366,33 @@ function QuestionItem({
 }
 
 // ---------- 测验卡片 ----------
-export default function QuizCard({ quiz }: Props) {
+export default function QuizCard({ quiz, sessionId }: Props) {
   const [selectedAnswers, setSelectedAnswers] = useState<Record<number, string>>({})
   const [typedAnswers, setTypedAnswers] = useState<Record<number, string>>({})
   const [submitted, setSubmitted] = useState(false)
+
+  // 提交答案：本地判分展示 + 逐题自动收录笔记本（best-effort）。
+  // 只收选择/判断题（options 非空 = 本地可判分）；简答题不收录——后端 is_correct
+  // 非空布尔，未判分传 false 会污染错题过滤与 mastery 观测。失败静默，不阻塞判分展示。
+  const handleSubmit = () => {
+    setSubmitted(true)
+    if (!sessionId) return
+    quiz.questions.forEach((q, i) => {
+      if (q.options.length === 0) return // 判断题已被 toQuizQuestion 归一为 options 形式，天然收录
+      void upsertNotebookEntry({
+        session_id: sessionId,
+        question_id: q.question_id || `q_${i + 1}`, // chat 模式 quiz 事件无后端 id 时兜底
+        question: q.question,
+        question_type: q.question_type || 'choice',
+        options: quizOptionsToRecord(q.options),
+        correct_answer: String(q.answer),
+        explanation: q.explanation,
+        difficulty: q.difficulty || '',
+        user_answer: selectedAnswers[i] ?? '',
+        is_correct: selectedAnswers[i] === q.answer,
+      }).catch(() => {})
+    })
+  }
 
   const choiceQuestions = quiz.questions.filter((q) => q.options.length > 0)
   const correctCount = choiceQuestions.filter(
@@ -415,7 +441,7 @@ export default function QuizCard({ quiz }: Props) {
       {!submitted && (
         <div className="px-4 pb-4">
           <button
-            onClick={() => setSubmitted(true)}
+            onClick={handleSubmit}
             disabled={choiceQuestions.length > 0 && !allChoiceAnswered}
             className="w-full py-2 rounded-[var(--radius)] bg-accent hover:bg-accent-2 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition"
           >

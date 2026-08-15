@@ -736,6 +736,29 @@ export async function fetchNotebookEntries(params: {
   return res.json()
 }
 
+/** 提交答案后自动收录（QuizCard 逐题调用）。后端自带副作用：user_answer 非空时
+ *  落 verb=answered 学情事件 + mastery 观测，前端无需额外上报。 */
+export async function upsertNotebookEntry(payload: {
+  session_id: string
+  question_id: string
+  question: string
+  question_type?: string
+  options?: Record<string, string>
+  correct_answer?: string
+  explanation?: string
+  difficulty?: string
+  user_answer?: string
+  is_correct?: boolean
+}): Promise<void> {
+  const res = await fetch('/api/question/notebook/entries/upsert', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+}
+
 export async function updateNotebookEntry(
   id: number,
   payload: { bookmarked?: boolean; followup_session_id?: string },

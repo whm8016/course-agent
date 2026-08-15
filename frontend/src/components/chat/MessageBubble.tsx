@@ -24,6 +24,8 @@ interface Props {
   message: Message
   thinkingSteps?: Message[]
   courseId?: string
+  /** 所属会话 id：QuizCard 提交答案自动收录笔记本要用（幂等键之一），透传即可 */
+  sessionId?: string | null
   isStreaming?: boolean
 }
 
@@ -129,7 +131,7 @@ function useThrottledStreamContent(content: string, isStreaming: boolean): strin
   return isStreaming ? snapshot : content
 }
 
-export default function MessageBubble({ message, thinkingSteps, courseId, isStreaming }: Props) {
+export default function MessageBubble({ message, thinkingSteps, courseId, sessionId, isStreaming }: Props) {
   const isUser = message.role === 'user'
   // 流式期间喂节流快照（150ms 一次），非流式恒为最新内容
   const streamContent = useThrottledStreamContent(message.content || '', !!isStreaming)
@@ -212,7 +214,7 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
         )}
 
         {message.metadata?.quiz && (
-          <QuizCard quiz={message.metadata.quiz} courseId={courseId} />
+          <QuizCard quiz={message.metadata.quiz} courseId={courseId} sessionId={sessionId} />
         )}
 
         {message.metadata?.hallucination && message.metadata.hallucination.tip && (
