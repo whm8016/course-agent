@@ -148,16 +148,21 @@ class ChatPipeline:
         # ── 解析对话供应商 runtime（client / text_model / binding）─────────────
         # 四条 pipeline 共享步骤（pipeline_common）：用户自配 > 平台 profile > 全 None
         # （loop 回退全局 _default_client + TEXT_MODEL）。binding 决定图片直注格式。
+        _t_profile0 = time.perf_counter()
         rt = await resolve_profile_runtime(context.llm_profile_id, context.user_id)
+        profile_ms = int((time.perf_counter() - _t_profile0) * 1000)
         log_flow("chat.profile_resolved",
                  profile_id=context.llm_profile_id or "default",
                  user_provider=bool(context.user_id),
-                 model_override=str(rt.text_model) if rt.text_model else "none")
+                 model_override=str(rt.text_model) if rt.text_model else "none",
+                 elapsed_ms=profile_ms)
 
         # ── 成本配额（第四批）：超 daily_budget → 降级到便宜档 fast_model（只降级不拒绝）──
         # 软限流：硬拒绝会造成「上一轮刚好超限→下一轮被锁死」；降级 cheaper model 控本又保可用。
         # 仅平台 profile 有 fast_model 时实际切换；用户自配 provider 或无便宜档→仅记录不降级。
         _cq = get_settings().cost_quota
+        quota_ms = 0
+        _t_quota0 = time.perf_counter()
         if _cq.enabled and _cq.degrade_model and context.user_id:
             from core.quota.cost_quota import check_quota
             over, used, budget = await check_quota(context.user_id, context.course_id)
@@ -182,9 +187,11 @@ class ChatPipeline:
                     log_flow("chat.cost_quota_over_no_fast_model",
                              user_id=context.user_id, course_id=context.course_id,
                              used_usd=used, budget_usd=budget)
+        quota_ms = int((time.perf_counter() - _t_quota0) * 1000)
 
         # ── 通用上下文层（course_prompt / bot_persona / always_skills / memory / session / now）──
         # include_skills=True：chat 挂 read_skill 工具，急切注入 always-on skill 全文。
+        _t_prompt0 = time.perf_counter()
         layers = await build_common_context_layers(context, include_skills=True)
 
         # ── chat agent loop 行为规范（YAML 外部化，agentic_chat.yaml）──
@@ -252,12 +259,14 @@ class ChatPipeline:
             list(prompt_kwargs.values())[:7]
         )
 
+        prompt_ms = int((time.perf_counter() - _t_prompt0) * 1000)
         log_flow("chat.prompt_assembled",
                  parts=sum(1 for v in prompt_kwargs.values() if v),
                  system_prompt_chars=len(system_prompt),
                  tools_count=len(tool_schemas) if tool_schemas else 0,
                  skills_manifest=bool(context.skills_manifest),
-                 elapsed_ms=int((time.perf_counter() - _t0) * 1000))
+                 elapsed_ms=int((time.perf_counter() - _t0) * 1000),
+                 prompt_stage_ms=prompt_ms)
         # system prompt 预算护栏：token_accounting_enabled 时按 token 口径告警 + 逐切片分解
         # （比字符口径准，定位膨胀层）；否则保留旧字符口径。只告警不截断--system prompt 静默
         # 截断会破坏 prefix cache 且难排查。Phase 2 协调器接管后此处改走 T2 集体裁剪。
@@ -286,13 +295,17 @@ class ChatPipeline:
         # 必须在 describe_images 之前取原始 user_message 做 query（图描述会改写 user_message）。
         # 命中作为 [知识库预检索] 块经 extra_context 注入首轮消息，材料够时第 1 轮直接作答；
         # 未命中/超时/未挂 rag → 返回空串，loop 行为零变化。
+        _t_kb0 = time.perf_counter()
         kb_seed = await retrieve_kb_seed(
             context, stream, header=(chat_cfg.get("kb_seed") or {}).get("header") or ""
         )
+        kb_seed_ms = int((time.perf_counter() - _t_kb0) * 1000)
 
         # ── 两阶段图片处理（rt.text_model/binding 判断主模型能否看图）──────────
         # 主模型不支持 vision → 视觉模型描述成文字；支持 → 跳过，走 loop 内直注。
+        _t_img0 = time.perf_counter()
         context.user_message = await describe_images(context, context.user_message, rt)
+        image_ms = int((time.perf_counter() - _t_img0) * 1000)
 
         # cron owner 注入（bot 对话：loop._run_turn 写入 metadata；web 无则不 set，cron 工具不挂载）
         from core.bot.cron_tool import reset_cron_owner, set_cron_owner
@@ -305,7 +318,7 @@ class ChatPipeline:
         cron_token = set_cron_owner(context.metadata.get("cron_owner"))
         rs_token = set_read_skill_log()
         try:
-            await run_agent_loop(
+            outcome = await run_agent_loop(
                 context=context,
                 stream=stream,
                 system_prompt=system_prompt,
@@ -320,6 +333,33 @@ class ChatPipeline:
             reset_cron_owner(cron_token)
             reset_deferred_loader(loader_token)
             reset_read_skill_log(rs_token)
+
+        # ── 回合耗时分解汇总（首字延迟排障：空等在学情/记忆/预检索，还是首次模型调用）──
+        # stitch_ms/mem0_ms 由 build_common_context_layers 经 metadata 带回（失败路径也记）。
+        # pre_llm_ms = pipeline 内进模型前各段合计（profile+quota+prompt+kb_seed+image），
+        # 不含 pipeline 外的排队/plan/pretrim；elapsed_ms 从 pipeline 起点 _t0 起算，与
+        # turn.complete 的同名口径不同值同字段名，跨日志对齐时注意。异常路径 loop 抛错时
+        # 不打（turn_runtime 错误链路已有日志），仅正常回合汇总。
+        _tm = (context.metadata.get("_timing") or {})
+        pre_llm_ms = profile_ms + quota_ms + prompt_ms + kb_seed_ms + image_ms
+        log_flow(
+            "chat.turn_breakdown",
+            elapsed_ms=int((time.perf_counter() - _t0) * 1000),
+            profile_ms=profile_ms,
+            quota_ms=quota_ms,
+            stitch_ms=int(_tm.get("stitch_ms") or 0),
+            mem0_ms=int(_tm.get("mem0_ms") or 0),
+            prompt_ms=prompt_ms,
+            kb_seed_ms=kb_seed_ms,
+            image_ms=image_ms,
+            pre_llm_ms=pre_llm_ms,
+            llm0_ttft_ms=outcome.first_ttft_ms,
+            llm0_total_ms=outcome.first_round_ms,
+            extra_rounds=max(0, outcome.rounds - 1),
+            tools_used=outcome.tools_used,
+            system_prompt_chars=len(system_prompt),
+            kb_on=bool(kb_seed),
+        )
 
 
 __all__ = ["ChatPipeline"]

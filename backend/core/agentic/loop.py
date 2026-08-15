@@ -477,6 +477,8 @@ async def run_agent_loop(
     tools_used: list[str] = []
     turn_usage = TokenUsage()  # 本 loop 累积 usage（成本采集汇总），done 时埋 cost Counter
     final_text = ""
+    first_ttft_ms: int | None = None   # 首轮（第一次模型调用）ttft，chat.turn_breakdown 数据源
+    first_round_ms = 0                 # 首轮整段耗时
     # M-4：兜底用——最后一轮若没产出最终文字（见下方「空回复兜底」），回退到本轮模型已生成的
     # 旁白/推理，避免用户得到空 answer。优先取最后一段非空 content（工具轮的旁白）。
     last_nonempty_content = ""
@@ -529,6 +531,11 @@ async def run_agent_loop(
                                               tool_choice_override="none", temperature=_round_temp)
                     final_text = result.content
                     turn_usage = turn_usage.add(result.usage)
+                    # 首轮计时：answer_now 可在任意 iteration 触发，仅当此前无首轮记录
+                    # （first_round_ms==0）才算"第一次模型调用"；多轮工具后点"立即回答"
+                    # 不覆盖真正的首轮值。失败路径（下方 except）不记，保持 0=未记录。
+                    if first_round_ms == 0:
+                        first_ttft_ms, first_round_ms = result.ttft_ms, result.elapsed_ms
                 except Exception:
                     logger.exception("AgentLoop: answer_now 直接回答失败")
                     final_text = "（立即回答失败，请稍后重试。）"
@@ -615,6 +622,9 @@ async def run_agent_loop(
             )
             # 成本采集：累积本轮 usage（provider 不支持采集时 result.usage 为 None，add 等价不变）
             turn_usage = turn_usage.add(result.usage)
+            # 首轮计时（chat.turn_breakdown 数据源）：iteration==0 才记，后续轮不覆盖
+            if iteration == 0:
+                first_ttft_ms, first_round_ms = result.ttft_ms, result.elapsed_ms
         except Exception:
             # 兜底：本轮若已发出 reasoning start（running），补发 complete 避免前端思考块卡转圈
             try:
@@ -803,4 +813,6 @@ async def run_agent_loop(
         tools_used=list(dict.fromkeys(tools_used)),
         completed=True,
         total_usage=turn_usage,
+        first_ttft_ms=first_ttft_ms,
+        first_round_ms=first_round_ms,
     )

@@ -58,3 +58,7 @@ class LoopOutcome:
     # 累加进 turn_usage 并写 context.metadata["llm_usage"]；此处一并挂到返回值，让直接调
     # run_agent_loop 的场景（评测 harness / 单测）无需读 metadata 即可拿到成本。
     total_usage: TokenUsage = field(default_factory=TokenUsage)
+    # 首轮（第一次模型调用）计时，从第一轮 RoundResult 拷贝（chat.turn_breakdown 数据源）。
+    # ttft 可能 None（provider 未吐任何 delta），elapsed 恒有值。
+    first_ttft_ms: int | None = None
+    first_round_ms: int = 0

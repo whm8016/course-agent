@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 from settings import get_settings
@@ -166,6 +167,7 @@ async def build_common_context_layers(
     matched_topic: str | None = None
     gate_evidence_topic: str | None = None
     if ctx.user_id and ctx.course_id:
+        _t_stitch = time.perf_counter()
         try:
             from core.db.database import AsyncSessionLocal
             from core.memory.proactive import stitch_for_turn
@@ -183,12 +185,21 @@ async def build_common_context_layers(
                 "build mastery context failed user=%s course=%s", ctx.user_id, ctx.course_id
             )
             mastery_context = ""
+        finally:
+            # 分段计时（chat.turn_breakdown 数据源）：失败路径也记时，供排障看失败烧了多少毫秒。
+            # 不信任 metadata["_timing"] 的既有值——WS 入口（api/run.py）把客户端 metadata
+            # 原样透传，预置非 dict 会让 setdefault 顶着 TypeError 崩掉整轮，直接覆盖。
+            ctx.metadata["_timing"] = {
+                **(ctx.metadata["_timing"] if isinstance(ctx.metadata.get("_timing"), dict) else {}),
+                "stitch_ms": int((time.perf_counter() - _t_stitch) * 1000),
+            }
 
     # 第一路：mem0 双槽检索（预填非空则用之，单测/bot 走这条）。course_id 非空才
     # 做主题过滤：命中主题→按主题过滤；有课程没命中→event 槽留空（与门控沉默对齐）；
     # IM 无课程概念（course_id 空）保留全量注入旧行为。
     memory_context = ctx.memory_context or ""
     if not memory_context and ctx.user_id and (ctx.user_message or "").strip():
+        _t_mem0 = time.perf_counter()
         try:
             from core.memory.mem0_client import build_memory_context
 
@@ -202,6 +213,13 @@ async def build_common_context_layers(
                 "build memory context failed user=%s course=%s", ctx.user_id, ctx.course_id
             )
             memory_context = ""
+        finally:
+            # 分段计时（chat.turn_breakdown 数据源）：失败路径也记时。_timing 覆盖式
+            # 合并（见上方 stitch 段注释：WS 客户端可预置任意类型值）。
+            ctx.metadata["_timing"] = {
+                **(ctx.metadata["_timing"] if isinstance(ctx.metadata.get("_timing"), dict) else {}),
+                "mem0_ms": int((time.perf_counter() - _t_mem0) * 1000),
+            }
 
     metadata = ctx.metadata or {}
     # Phase 2：coordinator_enabled 时对 T2 动态层（memory/mastery/summary）集体预算裁剪，低优先级
