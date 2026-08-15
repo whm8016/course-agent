@@ -179,3 +179,23 @@ async def join_course_by_code(
     await cache_delete(_user_courses_cache_key(user["id"]))
     await course_access_set(user["id"], kb.course_id, True)
     return {"course_id": kb.course_id, "name": kb.name, "already_enrolled": False}
+
+
+@router.get("/courses/{course_id}/topic-graph/me")
+async def get_my_topic_graph(
+    course_id: str,
+    user: dict = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """学生视角课程主题图：主题 + 先修边 + 我的掌握度着色数据。
+
+    权限复用 check_course_access（Enrollment/Redis 缓存，教师 owner 与 admin 放行）。
+    weak 阈值与门控 C1 入闸同口径（后端算好，前端零阈值）；未构建返回空列表不 404。
+    查询逻辑在 api.kb_indexing.get_student_topic_graph_payload（与教师端 GET 同
+    单一真相源）。kb_indexing 头部 import 本模块（invalidate_courses_cache），
+    此处须函数内延迟 import 防循环。
+    """
+    await check_course_access(db, course_id, user)
+    from api.kb_indexing import get_student_topic_graph_payload
+
+    return await get_student_topic_graph_payload(db, course_id, user["id"])
