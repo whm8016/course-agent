@@ -184,8 +184,9 @@ async def judge_segment(
         from core.llm.llm import client as async_openai_client
         from settings import get_settings
 
+        model = get_settings().llm.text_model
         resp = await async_openai_client.chat.completions.create(
-            model=get_settings().llm.text_model,
+            model=model,
             messages=[
                 {"role": "system", "content": _JUDGE_SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
@@ -201,9 +202,7 @@ async def judge_segment(
             # 用量埋点：判定器是后台巩固的主力 LLM 消耗（每段一次），best-effort 不阻塞
             from core.analytics.token_usage import track_llm_response
 
-            await track_llm_response(
-                resp, model=get_settings().llm.text_model, mode="memory_judge", **track
-            )
+            await track_llm_response(resp, model=model, mode="memory_judge", **track)
         raw = (resp.choices[0].message.content or "").strip()
         data = extract_json_from_llm(raw)
         if not data:

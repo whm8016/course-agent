@@ -68,8 +68,9 @@ async def generate_skill_draft(
 
     prompt = build_draft_prompt(mastery_rows, course_id, risk_by_label)
     try:
+        model = get_settings().llm.text_model
         resp = await async_openai_client.chat.completions.create(
-            model=get_settings().llm.text_model,
+            model=model,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.3,
             max_tokens=600,
@@ -79,7 +80,7 @@ async def generate_skill_draft(
         from core.analytics.token_usage import track_llm_response
 
         await track_llm_response(
-            resp, model=get_settings().llm.text_model, mode="procedural_draft",
+            resp, model=model, mode="procedural_draft",
             user_id=user_id, course_id=course_id,
         )
         return ((resp.choices[0].message.content or "").strip()) or None

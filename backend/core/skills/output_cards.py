@@ -156,7 +156,9 @@ async def generate_output_cards(
 
     outputs: list[dict[str, str]] = []
     for card in cards:
-        content = await _generate_one(card, user_message, assistant_answer, course_id)
+        content = await _generate_one(
+            card, user_message, assistant_answer, track={"course_id": course_id}
+        )
         if content:
             outputs.append({"title": card.title, "content": content})
 
@@ -164,7 +166,10 @@ async def generate_output_cards(
 
 
 async def _generate_one(
-    card: OutputCard, user_message: str, assistant_answer: str, course_id: str = ""
+    card: OutputCard,
+    user_message: str,
+    assistant_answer: str,
+    track: dict[str, str] | None = None,
 ) -> str:
     """为单个卡片生成补充输出。"""
     user_prompt = (
@@ -186,11 +191,10 @@ async def _generate_one(
             stream=False,
         )
         # 用量埋点（当前无生产调用方，保留接入保证启用即有账）
-        from core.analytics.token_usage import track_llm_response
+        if track is not None:
+            from core.analytics.token_usage import track_llm_response
 
-        await track_llm_response(
-            resp, model=TEXT_MODEL, mode="skill_card", course_id=course_id
-        )
+            await track_llm_response(resp, model=TEXT_MODEL, mode="skill_card", **track)
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
         logger.warning("Output card generation failed card=%s: %s", card.id, e)

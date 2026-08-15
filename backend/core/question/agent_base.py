@@ -10,7 +10,7 @@ from typing import Any
 
 from settings import get_settings
 TEXT_MODEL = get_settings().llm.text_model
-from core.llm.llm import client as _openai_client
+from core.llm.llm import _is_stream_options_unsupported, client as _openai_client
 from core.observability.cost import usage_from_response_chunk
 
 TraceCallback = Callable[[dict[str, Any]], Awaitable[None] | None]
@@ -147,8 +147,6 @@ class QuestionAgentBase:
         """create + stream_options 安全降级：端点不支持时报 400 而非静默忽略，
         剥掉重试一次（丢本轮 usage 但保流式不挂，与 llm._create_with_image_fallback
         同套路；此处直连 client 享受不到那层的降级，本地复用同一判定函数）。"""
-        from core.llm.llm import _is_stream_options_unsupported
-
         try:
             return await _openai_client.chat.completions.create(**req)
         except Exception as exc:

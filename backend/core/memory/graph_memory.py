@@ -196,8 +196,9 @@ async def _llm_json(
     last_err: Exception | None = None
     for attempt in range(2):
         try:
+            model = _extract_model()
             resp = await async_openai_client.chat.completions.create(
-                model=_extract_model(),
+                model=model,
                 messages=messages,
                 temperature=0.1,
                 max_tokens=max_tokens,
@@ -206,9 +207,7 @@ async def _llm_json(
             if track is not None:
                 from core.analytics.token_usage import track_llm_response
 
-                await track_llm_response(
-                    resp, model=_extract_model(), mode="graph_extract", **track
-                )
+                await track_llm_response(resp, model=model, mode="graph_extract", **track)
             raw = (resp.choices[0].message.content or "").strip()
             data = _parse_llm_json(raw)
             if data is not None:

@@ -57,6 +57,33 @@ def _openai_chunk(
     )
 
 
+def _fold_anthropic_usage(u: Any) -> tuple[int, int, int]:
+    """Anthropic usage 三互斥字段 → OpenAI 子集语义折算，返回 (总输入, 输出, cache命中)。
+
+    Anthropic 的 input_tokens 不含 cache（input/cache_read/cache_creation 三字段相加
+    关系），OpenAI 的 prompt_tokens 含 cached（子集关系）。折算口径：
+    总输入 = input + cache_read + cache_creation，命中 = cache_read。
+    cache_creation 按 input 价计（真实 1.25x，该切片低估 20%，好过整块丢弃）。
+    u 为 None（消息无 usage 字段）时返回全 0。流式 message_start 与非流式
+    _response_to_openai 共用此折算——单一真相源，勿在调用点内联重写。
+    """
+    in_ = int(getattr(u, "input_tokens", 0) or 0)
+    cr = int(getattr(u, "cache_read_input_tokens", 0) or 0)
+    cc = int(getattr(u, "cache_creation_input_tokens", 0) or 0)
+    out = int(getattr(u, "output_tokens", 0) or 0)
+    return in_ + cr + cc, out, cr
+
+
+def _openai_usage(input_tokens: int, output_tokens: int, cache_read: int) -> Any:
+    """构造 OpenAI 形态的 usage 对象（流式合成块与非流式转换共用同一形状）。"""
+    return SimpleNamespace(
+        prompt_tokens=input_tokens,
+        completion_tokens=output_tokens,
+        total_tokens=input_tokens + output_tokens,
+        prompt_tokens_details=SimpleNamespace(cached_tokens=cache_read),
+    )
+
+
 def _openai_usage_chunk(*, input_tokens: int, output_tokens: int, cache_read: int) -> Any:
     """构造与 OpenAI 末块同形态的 usage chunk（choices=[] + usage 字段）。
 
@@ -65,12 +92,7 @@ def _openai_usage_chunk(*, input_tokens: int, output_tokens: int, cache_read: in
     """
     return SimpleNamespace(
         choices=[],
-        usage=SimpleNamespace(
-            prompt_tokens=input_tokens,
-            completion_tokens=output_tokens,
-            total_tokens=input_tokens + output_tokens,
-            prompt_tokens_details=SimpleNamespace(cached_tokens=cache_read),
-        ),
+        usage=_openai_usage(input_tokens, output_tokens, cache_read),
     )
 
 
@@ -313,23 +335,13 @@ def _response_to_openai(resp: Any) -> Any:
         tool_calls=tool_calls or None,
     )
     finish = "tool_calls" if tool_calls else "stop"
-    # usage 归一（成本采集）：Anthropic 三字段互斥（input 不含 cache），折成 OpenAI 子集
-    # 语义（prompt_tokens = input + cache_read + cache_creation，cached_tokens = cache_read），
-    # 与流式 message_start 分支同款折算——否则辅助调用点的 usage_from_response 读到 None
-    # 静默无账。cache_creation 按 input 价计（真实 1.25x，低估 20%，好过整块丢弃）。
-    _u = getattr(resp, "usage", None)
-    _in = int(getattr(_u, "input_tokens", 0) or 0) if _u else 0
-    _cr = int(getattr(_u, "cache_read_input_tokens", 0) or 0) if _u else 0
-    _cc = int(getattr(_u, "cache_creation_input_tokens", 0) or 0) if _u else 0
+    # usage 归一（成本采集）：折算口径见 _fold_anthropic_usage（流式/非流式共用）。
+    # 不带 usage 的话，辅助调用点的 usage_from_response 会读到 None 静默无账。
+    _total_in, _out, _cr = _fold_anthropic_usage(getattr(resp, "usage", None))
     return SimpleNamespace(
         choices=[SimpleNamespace(message=message, finish_reason=finish)],
         model=getattr(resp, "model", None),
-        usage=SimpleNamespace(
-            prompt_tokens=_in + _cr + _cc,
-            completion_tokens=int(getattr(_u, "output_tokens", 0) or 0) if _u else 0,
-            total_tokens=_in + _cr + _cc + (int(getattr(_u, "output_tokens", 0) or 0) if _u else 0),
-            prompt_tokens_details=SimpleNamespace(cached_tokens=_cr),
-        ),
+        usage=_openai_usage(_total_in, _out, _cr),
     )
 
 
@@ -432,21 +444,13 @@ class _AnthropicStream:
                         ))
 
                     elif etype == "message_start":
-                        # input_tokens + cache_read 在消息开始时给出。
-                        # Anthropic 三字段互斥（input 不含 cache），此处折成 OpenAI 子集语义：
-                        # 合成块的 prompt_tokens = input + cache_read + cache_creation（总输入），
-                        # cached_tokens = cache_read（命中子集）。cache_creation 按 input 价计
-                        # （真实 1.25x，该切片低估 20%，好过整块丢弃），与非流式 _response_to_openai 同款。
+                        # input_tokens + cache_read + cache_creation 在消息开始时给出；
+                        # 折算口径见 _fold_anthropic_usage（与非流式 _response_to_openai 共用）。
+                        # 输出量忽略（message_delta 才给累计 output）。
                         _msg = getattr(event, "message", None)
                         _u = getattr(_msg, "usage", None) if _msg else None
                         if _u is not None:
-                            _cr = int(getattr(_u, "cache_read_input_tokens", 0) or 0)
-                            usage_in = (
-                                int(getattr(_u, "input_tokens", 0) or 0)
-                                + _cr
-                                + int(getattr(_u, "cache_creation_input_tokens", 0) or 0)
-                            )
-                            usage_cache = _cr
+                            usage_in, _, usage_cache = _fold_anthropic_usage(_u)
 
                     elif etype == "message_delta":
                         # output_tokens 在消息增量结束时给出（累计值）

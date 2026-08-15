@@ -33,6 +33,7 @@ from core.observability.cost import (
     observe_usage,
     usage_from_response,
 )
+from settings import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -125,13 +126,13 @@ async def track_llm_usage(
         observe_usage(model, usage)
         cost = estimate_cost(model, usage)
         observe_cost(model, course_id, mode, cost)
-        from settings import get_settings
         if get_settings().usage_tracking.enabled:
+            # 维度值的 str()/空串兜底在 record_llm_usage 内部已做，此处直接透传
             await record_llm_usage(
-                user_id=str(user_id or ""),
-                course_id=str(course_id or ""),
-                session_id=str(session_id or ""),
-                turn_id=str(turn_id or ""),
+                user_id=user_id,
+                course_id=course_id,
+                session_id=session_id,
+                turn_id=turn_id,
                 mode=mode or "aux",
                 model=model,
                 usage=usage,

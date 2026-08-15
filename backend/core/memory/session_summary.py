@@ -23,6 +23,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
+from typing import Any
 
 import redis.asyncio as aioredis
 from sqlalchemy import and_, func, or_, select, update
@@ -30,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from settings import get_settings
 TEXT_MODEL = get_settings().llm.text_model
+from core.analytics.token_usage import track_llm_response
 from core.db.database import Session, Message
 from core.llm.llm import client as async_openai_client
 
@@ -769,6 +771,10 @@ class SessionSummaryManager:
             line += " " + "".join(hints)
         return line
 
+    async def _track_l2_usage(self, resp: Any, track: dict[str, str]) -> None:
+        """L2 压缩 LLM 用量埋点（结构化/降级两条压缩路径共用；best-effort 不抛）。"""
+        await track_llm_response(resp, model=TEXT_MODEL, mode="l2_summary", **track)
+
     async def _do_compress(
         self,
         existing_summary: str,
@@ -808,11 +814,7 @@ class SessionSummaryManager:
                 )
                 if track is not None:
                     # 用量埋点：双温重试循环内逐次记（最多 2 次调用各一行，别只记最后）
-                    from core.analytics.token_usage import track_llm_response
-
-                    await track_llm_response(
-                        resp, model=TEXT_MODEL, mode="l2_summary", **track
-                    )
+                    await self._track_l2_usage(resp, track)
                 raw = (resp.choices[0].message.content or "").strip()
             except Exception as e:
                 logger.warning("[L2] structured compress temp=%s failed: %s", temperature, e)
@@ -866,11 +868,7 @@ class SessionSummaryManager:
                 max_tokens=800,
             )
             if track is not None:
-                from core.analytics.token_usage import track_llm_response
-
-                await track_llm_response(
-                    resp, model=TEXT_MODEL, mode="l2_summary", **track
-                )
+                await self._track_l2_usage(resp, track)
             summary = (resp.choices[0].message.content or "").strip()
             logger.info("[L2] text fallback compress done summary_len=%d", len(summary))
             return summary or None
