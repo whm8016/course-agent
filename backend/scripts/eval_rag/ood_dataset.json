@@ -1,0 +1,182 @@
+[
+  {
+    "id": "o01",
+    "question": "示波器第7种自动测量参数的出厂校准误差是多少？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "easy",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o02",
+    "question": "本课程期末考试的通过率历年是多少？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "easy",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o03",
+    "question": "实验五使用的DG1022信号发生器序列号是多少？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "easy",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o04",
+    "question": "戴维南定理的证明是谁在哪一年发表的？发表在哪本期刊上？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "easy",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o05",
+    "question": "实验室规定晚上几点断电？实验报告迟交一天扣几分？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "easy",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o06",
+    "question": "示波器探头补偿过度时会看到什么波形？该如何调节？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "medium",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o07",
+    "question": "函数信号发生器的输出阻抗是50Ω还是75Ω？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "medium",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o08",
+    "question": "本课程使用的教材是哪一本？第几章讲戴维南定理？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "easy",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o09",
+    "question": "实验二测的二极管型号是什么？它的反向击穿电压是多少伏？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "medium",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o10",
+    "question": "三相电路中中性线的作用是什么？为什么不能装熔断器？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "medium",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o11",
+    "question": "示波器的FFT数学运算功能怎么用来测量谐波失真？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "hard",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o12",
+    "question": "用本实验的稳压电源给手机充电需要注意什么？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "easy",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o13",
+    "question": "实验报告的封面格式是什么？需要贴照片吗？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "easy",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o14",
+    "question": "课程微信群号是多少？助教老师的办公室在哪栋楼？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "easy",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o15",
+    "question": "RLC串联谐振电路的谐振频率公式是什么？品质因数怎么算？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "medium",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o16",
+    "question": "万用表保险丝的规格是多大的？坏了去哪里换？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "easy",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o17",
+    "question": "实验一用的示波器是哪个厂家的什么型号？带宽是多少？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "medium",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o18",
+    "question": "叠加定理的适用范围能否扩展到非线性电路？请给出严格证明。",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "hard",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o19",
+    "question": "实验四的数据如果用SPSS做回归分析，应该选哪种模型？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "medium",
+    "source_experiment": "无",
+    "out_of_scope": true
+  },
+  {
+    "id": "o20",
+    "question": "这门课上一学期的挂科率是多少？平均分多少？",
+    "ground_truth": "",
+    "category": "越界型",
+    "difficulty": "easy",
+    "source_experiment": "无",
+    "out_of_scope": true
+  }
+]
