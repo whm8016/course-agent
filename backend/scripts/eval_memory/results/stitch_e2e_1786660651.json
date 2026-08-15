@@ -1,0 +1,89 @@
+{
+  "mode": "gate_only",
+  "course_id": "mycourse",
+  "gold_agreement": 1.0,
+  "st_match_rate": 1.125,
+  "rows": [
+    {
+      "case_id": "pos_prereq_equiv_r",
+      "gold_stitch": true,
+      "should_stitch": true,
+      "reason": "prereq_gap",
+      "matched_gold": "等效内阻测量",
+      "matched_real": "等效内阻测量",
+      "st_match": true
+    },
+    {
+      "case_id": "pos_prereq_thevenin",
+      "gold_stitch": true,
+      "should_stitch": true,
+      "reason": "prereq_gap",
+      "matched_gold": "戴维南定理",
+      "matched_real": "戴维南定理",
+      "st_match": true
+    },
+    {
+      "case_id": "pos_prereq_potentiometer",
+      "gold_stitch": true,
+      "should_stitch": true,
+      "reason": "prereq_gap",
+      "matched_gold": "分压器调压特性",
+      "matched_real": "分压器调压特性",
+      "st_match": true
+    },
+    {
+      "case_id": "pos_recurrence_thevenin",
+      "gold_stitch": true,
+      "should_stitch": true,
+      "reason": "prereq_gap",
+      "matched_gold": "戴维南等效电路外特性验证",
+      "matched_real": "戴维南等效电路外特性验证",
+      "st_match": true
+    },
+    {
+      "case_id": "neg_unknown",
+      "gold_stitch": false,
+      "should_stitch": false,
+      "reason": "unknown",
+      "matched_gold": null,
+      "matched_real": null,
+      "st_match": true
+    },
+    {
+      "case_id": "neg_irrelevant",
+      "gold_stitch": false,
+      "should_stitch": false,
+      "reason": "no_candidate",
+      "matched_gold": "线性电阻元件的伏安特性",
+      "matched_real": "线性电阻元件的伏安特性",
+      "st_match": true
+    },
+    {
+      "case_id": "neg_corrected",
+      "gold_stitch": false,
+      "should_stitch": false,
+      "reason": "no_candidate",
+      "matched_gold": "等效内阻测量",
+      "matched_real": "等效内阻测量",
+      "st_match": true
+    },
+    {
+      "case_id": "neg_all_low",
+      "gold_stitch": false,
+      "should_stitch": false,
+      "reason": "no_candidate",
+      "matched_gold": "戴维南定理",
+      "matched_real": "戴维南定理",
+      "st_match": true
+    },
+    {
+      "case_id": "neg_stage_mismatch",
+      "gold_stitch": false,
+      "should_stitch": false,
+      "reason": "no_candidate",
+      "matched_gold": "线性电阻元件的伏安特性",
+      "matched_real": "线性电阻元件的伏安特性",
+      "st_match": true
+    }
+  ]
+}

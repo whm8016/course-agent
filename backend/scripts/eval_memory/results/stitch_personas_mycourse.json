@@ -1,0 +1,1003 @@
+{
+  "course_id": "mycourse",
+  "seeded_at": 1786664170.5527642,
+  "personas": {
+    "pos_prereq_equiv_r": {
+      "case_id": "pos_prereq_equiv_r",
+      "user_id": "ss-01",
+      "sessions": [
+        {
+          "session_id": "ss-01-s1-9a5b",
+          "turns": [
+            {
+              "q": 1,
+              "user": "老师，实验二测线性电阻元件的伏安特性，我描的点不成直线，是不是表接错了？",
+              "recorded": true,
+              "turn_id": "t-a9be8b2681"
+            },
+            {
+              "q": 2,
+              "user": "我还是搞不清线性电阻两端电压和电流的关系，算出来的电阻每次都不一样。",
+              "recorded": true,
+              "turn_id": "t-1f3c9aed85"
+            },
+            {
+              "q": 3,
+              "user": "线性电阻伏安特性应该是直线吧？我第三次复测还是弯的，肯定是我不会测。",
+              "recorded": true,
+              "turn_id": "t-3fb41609d9"
+            }
+          ],
+          "consolidate": {
+            "claimed": 3,
+            "promoted": 3
+          }
+        },
+        {
+          "session_id": "ss-01-s2-5077",
+          "turns": [
+            {
+              "q": 1,
+              "user": "做完实验二我又把线性电阻和欧姆定律搞混了，U=IR 我都会背但不会用。",
+              "recorded": true,
+              "turn_id": "t-c449b52d4f"
+            },
+            {
+              "q": 2,
+              "user": "线性电阻元件的伏安特性我复习了两遍还是不懂斜率代表什么，实验报告写不出分析。",
+              "recorded": true,
+              "turn_id": "t-65db310a97"
+            }
+          ],
+          "consolidate": {
+            "claimed": 2,
+            "promoted": 2
+          }
+        }
+      ],
+      "snapshot": {
+        "case_id": "pos_prereq_equiv_r",
+        "knowledge_mastery": [
+          {
+            "kp_id": "线性电阻元件的伏安特性",
+            "label": "线性电阻元件的伏安特性",
+            "mastery": 0.8399999999999999,
+            "risk": 0.13,
+            "observation_count": 5,
+            "topic_id_resolved": "线性电阻元件的伏安特性"
+          },
+          {
+            "kp_id": "非线性电阻元件的伏安特性",
+            "label": "非线性电阻元件的伏安特性",
+            "mastery": 0.6000000000000001,
+            "risk": 0.42,
+            "observation_count": 3,
+            "topic_id_resolved": "非线性电阻元件的伏安特性"
+          },
+          {
+            "kp_id": "伏安特性测量中的方法误差与仪表接法选择",
+            "label": "伏安特性测量中的方法误差与仪表接法选择",
+            "mastery": 0.53,
+            "risk": 0.45,
+            "observation_count": 2,
+            "topic_id_resolved": "伏安特性测量中的方法误差与仪表接法选择"
+          }
+        ],
+        "error_graph_nodes": [
+          {
+            "id": "err:将元件非线性特性误判为仪表接法错误-e36a653b",
+            "type": "error_pattern",
+            "label": "将元件非线性特性误判为仪表接法错误",
+            "course_id": "mycourse",
+            "severity": 0.6,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:12:55.558830"
+          },
+          {
+            "id": "err:混淆电阻恒定性与测量数值波动-2a861497",
+            "type": "error_pattern",
+            "label": "混淆电阻恒定性与测量数值波动",
+            "course_id": "mycourse",
+            "severity": 0.4,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:13:03.199111"
+          },
+          {
+            "id": "err:系统性误差误判为操作失误-ab9841d1",
+            "type": "error_pattern",
+            "label": "系统性误差误判为操作失误",
+            "course_id": "mycourse",
+            "severity": 0.5,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:13:12.273806"
+          },
+          {
+            "id": "err:混淆欧姆定律与线性电阻概念-32fcf2e7",
+            "type": "error_pattern",
+            "label": "混淆欧姆定律与线性电阻概念",
+            "course_id": "mycourse",
+            "severity": 0.6,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:15:01.481604"
+          },
+          {
+            "id": "err:混淆伏安特性曲线斜率与电阻值的关系-01ef088b",
+            "type": "error_pattern",
+            "label": "混淆伏安特性曲线斜率与电阻值的关系",
+            "course_id": "mycourse",
+            "severity": 0.5,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:15:10.009644"
+          }
+        ],
+        "gate_decision": {
+          "query": "等效内阻怎么测量？开路短路法具体步骤是什么？",
+          "gold_stitch": true,
+          "decide_stitch": false,
+          "decide_reason": "no_candidate",
+          "stitch_for_turn": false,
+          "stitch_reason": "no_candidate",
+          "st_match_ok": false
+        }
+      }
+    },
+    "pos_prereq_thevenin": {
+      "case_id": "pos_prereq_thevenin",
+      "user_id": "ss-02",
+      "sessions": [
+        {
+          "session_id": "ss-02-s1-9386",
+          "turns": [
+            {
+              "q": 1,
+              "user": "做实验五前，我对实际电压源的伏安特性还是糊的，外特性曲线看不懂。",
+              "recorded": true,
+              "turn_id": "t-a7e4a1f4e6"
+            },
+            {
+              "q": 2,
+              "user": "独立源置零是什么意思？求戴维南等效电阻时电压源怎么处理？",
+              "recorded": true,
+              "turn_id": "t-28692a56f0"
+            },
+            {
+              "q": 3,
+              "user": "实际电压源和理想电压源的区别我还是分不清，实验四的数据我也解释不了。",
+              "recorded": true,
+              "turn_id": "t-d1319df87d"
+            }
+          ],
+          "consolidate": {
+            "claimed": 3,
+            "promoted": 3
+          }
+        },
+        {
+          "session_id": "ss-02-s2-a97a",
+          "turns": [
+            {
+              "q": 1,
+              "user": "我又把实际电压源的内阻当成外接电阻了，伏安特性图还是画不对。",
+              "recorded": true,
+              "turn_id": "t-1b1f507fef"
+            }
+          ],
+          "consolidate": {
+            "claimed": 1,
+            "promoted": 1
+          }
+        }
+      ],
+      "snapshot": {
+        "case_id": "pos_prereq_thevenin",
+        "knowledge_mastery": [
+          {
+            "kp_id": "戴维南定理",
+            "label": "戴维南定理",
+            "mastery": 0.6,
+            "risk": 0.4,
+            "observation_count": 1,
+            "topic_id_resolved": "戴维南定理"
+          },
+          {
+            "kp_id": "等效内阻测量",
+            "label": "等效内阻测量",
+            "mastery": 0.6,
+            "risk": 0.4,
+            "observation_count": 1,
+            "topic_id_resolved": "等效内阻测量"
+          },
+          {
+            "kp_id": "理想电压源的伏安特性",
+            "label": "理想电压源的伏安特性",
+            "mastery": 0.6000000000000001,
+            "risk": 0.4,
+            "observation_count": 2,
+            "topic_id_resolved": "理想电压源的伏安特性"
+          },
+          {
+            "kp_id": "实际电压源的伏安特性",
+            "label": "实际电压源的伏安特性",
+            "mastery": 0.55,
+            "risk": 0.45000000000000007,
+            "observation_count": 3,
+            "topic_id_resolved": "实际电压源的伏安特性"
+          }
+        ],
+        "error_graph_nodes": [
+          {
+            "id": "err:理想电压源与实际电压源外特性混淆-9c7738e1",
+            "type": "error_pattern",
+            "label": "理想电压源与实际电压源外特性混淆",
+            "course_id": "mycourse",
+            "severity": 0.3,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:17:19.415796"
+          },
+          {
+            "id": "err:理想电压源与实际电压源概念混淆-6e771b52",
+            "type": "error_pattern",
+            "label": "理想电压源与实际电压源概念混淆",
+            "course_id": "mycourse",
+            "severity": 0.6,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:17:59.518251"
+          },
+          {
+            "id": "err:将电源内阻与外接负载电阻混淆-1b0be546",
+            "type": "error_pattern",
+            "label": "将电源内阻与外接负载电阻混淆",
+            "course_id": "mycourse",
+            "severity": 0.8,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:19:09.057925"
+          }
+        ],
+        "gate_decision": {
+          "query": "戴维南定理怎么用？怎么求等效电压和等效电阻？",
+          "gold_stitch": true,
+          "decide_stitch": false,
+          "decide_reason": "no_candidate",
+          "stitch_for_turn": false,
+          "stitch_reason": "no_candidate",
+          "st_match_ok": false
+        }
+      }
+    },
+    "pos_prereq_potentiometer": {
+      "case_id": "pos_prereq_potentiometer",
+      "user_id": "ss-03",
+      "sessions": [
+        {
+          "session_id": "ss-03-s1-16ed",
+          "turns": [
+            {
+              "q": 1,
+              "user": "实验六里三端变阻器我有三种接法，不知道哪种是分压器，滑动端接哪里？",
+              "recorded": true,
+              "turn_id": "t-fe21126d78"
+            },
+            {
+              "q": 2,
+              "user": "分压器调压特性曲线我画出来是弯的，是不是数据取错了？",
+              "recorded": true,
+              "turn_id": "t-a924ba0437"
+            },
+            {
+              "q": 3,
+              "user": "分压器原理我看书两遍还是不懂，滑动端接错是不是就测不到分压？",
+              "recorded": true,
+              "turn_id": "t-326ab09107"
+            }
+          ],
+          "consolidate": {
+            "claimed": 3,
+            "promoted": 3
+          }
+        }
+      ],
+      "snapshot": {
+        "case_id": "pos_prereq_potentiometer",
+        "knowledge_mastery": [
+          {
+            "kp_id": "调压特性曲线的实验数据处理",
+            "label": "调压特性曲线的实验数据处理",
+            "mastery": 0.53,
+            "risk": 0.47,
+            "observation_count": 1,
+            "topic_id_resolved": "调压特性曲线的实验数据处理"
+          },
+          {
+            "kp_id": "三端变阻器的连接方式",
+            "label": "三端变阻器的连接方式",
+            "mastery": 0.6,
+            "risk": 0.4,
+            "observation_count": 2,
+            "topic_id_resolved": "三端变阻器的连接方式"
+          },
+          {
+            "kp_id": "分压器调压特性",
+            "label": "分压器调压特性",
+            "mastery": 0.65,
+            "risk": 0.35,
+            "observation_count": 3,
+            "topic_id_resolved": "分压器调压特性"
+          },
+          {
+            "kp_id": "分压器的技术要求",
+            "label": "分压器的技术要求",
+            "mastery": 0.55,
+            "risk": 0.45,
+            "observation_count": 1,
+            "topic_id_resolved": "分压器的技术要求"
+          }
+        ],
+        "error_graph_nodes": [
+          {
+            "id": "err:三端变阻器接法辨识不清-dfa8ad5c",
+            "type": "error_pattern",
+            "label": "三端变阻器接法辨识不清",
+            "course_id": "mycourse",
+            "severity": 0.5,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:21:54.902737"
+          },
+          {
+            "id": "err:将负载效应误判为数据错误-d00f20ca",
+            "type": "error_pattern",
+            "label": "将负载效应误判为数据错误",
+            "course_id": "mycourse",
+            "severity": 0.6,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:22:05.053122"
+          },
+          {
+            "id": "err:分压器接法混淆-3264a41c",
+            "type": "error_pattern",
+            "label": "分压器接法混淆",
+            "course_id": "mycourse",
+            "severity": 0.5,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:22:13.601818"
+          }
+        ],
+        "gate_decision": {
+          "query": "分压器怎么调压？滑动端应该接在哪里？",
+          "gold_stitch": true,
+          "decide_stitch": false,
+          "decide_reason": "no_candidate",
+          "stitch_for_turn": false,
+          "stitch_reason": "no_candidate",
+          "st_match_ok": false
+        }
+      }
+    },
+    "pos_recurrence_thevenin": {
+      "case_id": "pos_recurrence_thevenin",
+      "user_id": "ss-04",
+      "sessions": [
+        {
+          "session_id": "ss-04-s1-4d3b",
+          "turns": [
+            {
+              "q": 1,
+              "user": "戴维南定理我还是会把开路电压 Uoc 和等效电阻 Req 搞混，步骤能再说一遍吗？",
+              "recorded": true,
+              "turn_id": "t-7681f7049c"
+            }
+          ],
+          "consolidate": {
+            "claimed": 1,
+            "promoted": 1
+          }
+        },
+        {
+          "session_id": "ss-04-s2-8669",
+          "turns": [
+            {
+              "q": 1,
+              "user": "又错了：求戴维南等效时我把短路电流当成开路电压了，这是不是老毛病？",
+              "recorded": true,
+              "turn_id": "t-d6cee74c09"
+            },
+            {
+              "q": 2,
+              "user": "戴维南等效电路外特性验证报告里要画什么图？我上次也是 Uoc 和 Req 混着算。",
+              "recorded": true,
+              "turn_id": "t-e74ede0d0e"
+            }
+          ],
+          "consolidate": {
+            "claimed": 2,
+            "promoted": 2
+          }
+        }
+      ],
+      "snapshot": {
+        "case_id": "pos_recurrence_thevenin",
+        "knowledge_mastery": [
+          {
+            "kp_id": "有源一端口网络外特性测量",
+            "label": "有源一端口网络外特性测量",
+            "mastery": 0.54,
+            "risk": 0.46,
+            "observation_count": 1,
+            "topic_id_resolved": "有源一端口网络外特性测量"
+          },
+          {
+            "kp_id": "开路电压测量",
+            "label": "开路电压测量",
+            "mastery": 0.7000000000000001,
+            "risk": 0.3,
+            "observation_count": 3,
+            "topic_id_resolved": "开路电压测量"
+          },
+          {
+            "kp_id": "等效内阻测量",
+            "label": "等效内阻测量",
+            "mastery": 0.6500000000000001,
+            "risk": 0.35000000000000003,
+            "observation_count": 3,
+            "topic_id_resolved": "等效内阻测量"
+          },
+          {
+            "kp_id": "戴维南定理",
+            "label": "戴维南定理",
+            "mastery": 0.6300000000000001,
+            "risk": 0.37,
+            "observation_count": 3,
+            "topic_id_resolved": "戴维南定理"
+          },
+          {
+            "kp_id": "戴维南等效电路外特性验证",
+            "label": "戴维南等效电路外特性验证",
+            "mastery": 0.56,
+            "risk": 0.44,
+            "observation_count": 1,
+            "topic_id_resolved": "戴维南等效电路外特性验证"
+          }
+        ],
+        "error_graph_nodes": [
+          {
+            "id": "err:开路电压与等效电阻概念混淆-f1bec8cd",
+            "type": "error_pattern",
+            "label": "开路电压与等效电阻概念混淆",
+            "course_id": "mycourse",
+            "severity": 0.6,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:23:15.239346"
+          },
+          {
+            "id": "err:开路电压与短路电流概念混淆-b9fb93b2",
+            "type": "error_pattern",
+            "label": "开路电压与短路电流概念混淆",
+            "course_id": "mycourse",
+            "severity": 0.7,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:25:28.380795"
+          },
+          {
+            "id": "err:uoc-与-req-概念混淆-7914c46e",
+            "type": "error_pattern",
+            "label": "Uoc 与 Req 概念混淆",
+            "course_id": "mycourse",
+            "severity": 0.6,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:25:53.675016"
+          }
+        ],
+        "gate_decision": {
+          "query": "戴维南等效电路的外特性怎么验证？",
+          "gold_stitch": true,
+          "decide_stitch": false,
+          "decide_reason": "no_candidate",
+          "stitch_for_turn": false,
+          "stitch_reason": "no_candidate",
+          "st_match_ok": false
+        }
+      }
+    },
+    "neg_unknown": {
+      "case_id": "neg_unknown",
+      "user_id": "ss-05",
+      "sessions": [
+        {
+          "session_id": "ss-05-s1-cf8b",
+          "turns": [
+            {
+              "q": 1,
+              "user": "实验报告封面上的学号填错了可以重交吗？",
+              "recorded": true,
+              "turn_id": "t-2a04216158"
+            },
+            {
+              "q": 2,
+              "user": "下周五实验课调课通知在哪里看？",
+              "recorded": true,
+              "turn_id": "t-7b6c06df3e"
+            }
+          ],
+          "consolidate": {
+            "claimed": 2,
+            "promoted": 2
+          }
+        }
+      ],
+      "snapshot": {
+        "case_id": "neg_unknown",
+        "knowledge_mastery": [],
+        "error_graph_nodes": [],
+        "gate_decision": {
+          "query": "实验报告下周五几点交到教务处？",
+          "gold_stitch": false,
+          "decide_stitch": false,
+          "decide_reason": "unknown",
+          "stitch_for_turn": false,
+          "stitch_reason": "unknown",
+          "st_match_ok": true
+        }
+      }
+    },
+    "neg_irrelevant": {
+      "case_id": "neg_irrelevant",
+      "user_id": "ss-06",
+      "sessions": [
+        {
+          "session_id": "ss-06-s1-de76",
+          "turns": [
+            {
+              "q": 1,
+              "user": "实验十一滤波器设计里串并联谐振参数我算不对，LC 取值怎么估？",
+              "recorded": true,
+              "turn_id": "t-a161abfd85"
+            },
+            {
+              "q": 2,
+              "user": "滤波器实验波形观测报告格式有模板吗？",
+              "recorded": true,
+              "turn_id": "t-83ed291b69"
+            }
+          ],
+          "consolidate": {
+            "claimed": 2,
+            "promoted": 2
+          }
+        }
+      ],
+      "snapshot": {
+        "case_id": "neg_irrelevant",
+        "knowledge_mastery": [
+          {
+            "kp_id": "串联谐振的选通特性",
+            "label": "串联谐振的选通特性",
+            "mastery": 0.55,
+            "risk": 0.45,
+            "observation_count": 1,
+            "topic_id_resolved": "串联谐振的选通特性"
+          },
+          {
+            "kp_id": "并联谐振的阻波特性",
+            "label": "并联谐振的阻波特性",
+            "mastery": 0.55,
+            "risk": 0.45,
+            "observation_count": 1,
+            "topic_id_resolved": "并联谐振的阻波特性"
+          },
+          {
+            "kp_id": "谐振参数的实验测定方法",
+            "label": "谐振参数的实验测定方法",
+            "mastery": 0.54,
+            "risk": 0.46,
+            "observation_count": 1,
+            "topic_id_resolved": "谐振参数的实验测定方法"
+          },
+          {
+            "kp_id": "谐振式谐波滤波器原理",
+            "label": "谐振式谐波滤波器原理",
+            "mastery": 0.53,
+            "risk": 0.47,
+            "observation_count": 1,
+            "topic_id_resolved": "谐振式谐波滤波器原理"
+          },
+          {
+            "kp_id": "滤波性能的波形观测与分析",
+            "label": "滤波性能的波形观测与分析",
+            "mastery": 0.5,
+            "risk": 0.5,
+            "observation_count": 1,
+            "topic_id_resolved": "滤波性能的波形观测与分析"
+          }
+        ],
+        "error_graph_nodes": [
+          {
+            "id": "err:lc取值缺少第二约束-仅用谐振频率-b8d745c1",
+            "type": "error_pattern",
+            "label": "LC取值缺少第二约束（仅用谐振频率）",
+            "course_id": "mycourse",
+            "severity": 0.7,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:29:10.505882"
+          },
+          {
+            "id": "err:单位换算错误-mh-f未转为h-f-159cd3a2",
+            "type": "error_pattern",
+            "label": "单位换算错误（mH/μF未转为H/F）",
+            "course_id": "mycourse",
+            "severity": 0.5,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:29:10.505889"
+          },
+          {
+            "id": "err:角频率与频率混淆-漏乘2-b2c2418f",
+            "type": "error_pattern",
+            "label": "角频率与频率混淆（漏乘2π）",
+            "course_id": "mycourse",
+            "severity": 0.4,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:29:10.505893"
+          }
+        ],
+        "gate_decision": {
+          "query": "线性电阻的伏安特性怎么测量？",
+          "gold_stitch": false,
+          "decide_stitch": false,
+          "decide_reason": "no_candidate",
+          "stitch_for_turn": false,
+          "stitch_reason": "no_candidate",
+          "st_match_ok": true
+        }
+      }
+    },
+    "neg_corrected": {
+      "case_id": "neg_corrected",
+      "user_id": "ss-07",
+      "sessions": [
+        {
+          "session_id": "ss-07-s1-3722",
+          "turns": [
+            {
+              "q": 1,
+              "user": "线性电阻元件伏安特性测量我一开始表接错了，后来改对了，数据是线性的了。",
+              "recorded": true,
+              "turn_id": "t-5e48507071"
+            },
+            {
+              "q": 2,
+              "user": "按你上次说的方法重新测了线性电阻，斜率就是电阻值，这次应该对了。",
+              "recorded": true,
+              "turn_id": "t-6b4013074b"
+            }
+          ],
+          "consolidate": {
+            "claimed": 2,
+            "promoted": 2
+          }
+        }
+      ],
+      "snapshot": {
+        "case_id": "neg_corrected",
+        "knowledge_mastery": [
+          {
+            "kp_id": "线性电阻元件的伏安特性",
+            "label": "线性电阻元件的伏安特性",
+            "mastery": 0.7,
+            "risk": 0.30000000000000004,
+            "observation_count": 2,
+            "topic_id_resolved": "线性电阻元件的伏安特性"
+          },
+          {
+            "kp_id": "伏安特性测量中的方法误差与仪表接法选择",
+            "label": "伏安特性测量中的方法误差与仪表接法选择",
+            "mastery": 0.6000000000000001,
+            "risk": 0.4,
+            "observation_count": 2,
+            "topic_id_resolved": "伏安特性测量中的方法误差与仪表接法选择"
+          }
+        ],
+        "error_graph_nodes": [
+          {
+            "id": "err:伏安特性测量仪表接法错误-121a95ac",
+            "type": "error_pattern",
+            "label": "伏安特性测量仪表接法错误",
+            "course_id": "mycourse",
+            "severity": 0.4,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:30:43.781101"
+          }
+        ],
+        "gate_decision": {
+          "query": "等效内阻测量时为什么要先测开路电压？",
+          "gold_stitch": false,
+          "decide_stitch": false,
+          "decide_reason": "no_candidate",
+          "stitch_for_turn": false,
+          "stitch_reason": "no_candidate",
+          "st_match_ok": true
+        }
+      }
+    },
+    "neg_all_low": {
+      "case_id": "neg_all_low",
+      "user_id": "ss-08",
+      "sessions": [
+        {
+          "session_id": "ss-08-s1-f5b2",
+          "turns": [
+            {
+              "q": 1,
+              "user": "线性电阻伏安特性我这次测量很顺利，数据点基本在一条直线上。",
+              "recorded": true,
+              "turn_id": "t-ba5bbf95f2"
+            },
+            {
+              "q": 2,
+              "user": "实际电压源和理想电压源的伏安特性区别我理解了，独立源置零也会了。",
+              "recorded": true,
+              "turn_id": "t-ebd1de744e"
+            },
+            {
+              "q": 3,
+              "user": "戴维南定理求 Uoc 和 Req 的步骤我按流程做了一遍，应该没问题。",
+              "recorded": true,
+              "turn_id": "t-9a926ebeff"
+            }
+          ],
+          "consolidate": {
+            "claimed": 3,
+            "promoted": 3
+          }
+        }
+      ],
+      "snapshot": {
+        "case_id": "neg_all_low",
+        "knowledge_mastery": [
+          {
+            "kp_id": "线性电阻元件的伏安特性",
+            "label": "线性电阻元件的伏安特性",
+            "mastery": 0.58,
+            "risk": 0.45,
+            "observation_count": 1,
+            "topic_id_resolved": "线性电阻元件的伏安特性"
+          },
+          {
+            "kp_id": "非线性电阻元件的伏安特性",
+            "label": "非线性电阻元件的伏安特性",
+            "mastery": 0.52,
+            "risk": 0.49,
+            "observation_count": 1,
+            "topic_id_resolved": "非线性电阻元件的伏安特性"
+          },
+          {
+            "kp_id": "伏安特性测量中的方法误差与仪表接法选择",
+            "label": "伏安特性测量中的方法误差与仪表接法选择",
+            "mastery": 0.5,
+            "risk": 0.5,
+            "observation_count": 1,
+            "topic_id_resolved": "伏安特性测量中的方法误差与仪表接法选择"
+          },
+          {
+            "kp_id": "理想电压源的伏安特性",
+            "label": "理想电压源的伏安特性",
+            "mastery": 0.55,
+            "risk": 0.45,
+            "observation_count": 1,
+            "topic_id_resolved": "理想电压源的伏安特性"
+          },
+          {
+            "kp_id": "实际电压源的伏安特性",
+            "label": "实际电压源的伏安特性",
+            "mastery": 0.55,
+            "risk": 0.45,
+            "observation_count": 1,
+            "topic_id_resolved": "实际电压源的伏安特性"
+          },
+          {
+            "kp_id": "戴维南定理",
+            "label": "戴维南定理",
+            "mastery": 0.55,
+            "risk": 0.45,
+            "observation_count": 1,
+            "topic_id_resolved": "戴维南定理"
+          },
+          {
+            "kp_id": "开路电压测量",
+            "label": "开路电压测量",
+            "mastery": 0.55,
+            "risk": 0.45,
+            "observation_count": 1,
+            "topic_id_resolved": "开路电压测量"
+          },
+          {
+            "kp_id": "等效内阻测量",
+            "label": "等效内阻测量",
+            "mastery": 0.55,
+            "risk": 0.45,
+            "observation_count": 1,
+            "topic_id_resolved": "等效内阻测量"
+          }
+        ],
+        "error_graph_nodes": [],
+        "gate_decision": {
+          "query": "戴维南定理和诺顿定理有什么区别？",
+          "gold_stitch": false,
+          "decide_stitch": false,
+          "decide_reason": "no_candidate",
+          "stitch_for_turn": false,
+          "stitch_reason": "no_candidate",
+          "st_match_ok": true
+        }
+      }
+    },
+    "neg_stage_mismatch": {
+      "case_id": "neg_stage_mismatch",
+      "user_id": "ss-09",
+      "sessions": [
+        {
+          "session_id": "ss-09-s1-a784",
+          "turns": [
+            {
+              "q": 1,
+              "user": "分压变阻器阻值与容量选取我老是选太大，实验六报告被扣分了。",
+              "recorded": true,
+              "turn_id": "t-6fe550b176"
+            },
+            {
+              "q": 2,
+              "user": "分压器技术要求里额定电流怎么估算？",
+              "recorded": true,
+              "turn_id": "t-37e1c603a0"
+            }
+          ],
+          "consolidate": {
+            "claimed": 2,
+            "promoted": 2
+          }
+        }
+      ],
+      "snapshot": {
+        "case_id": "neg_stage_mismatch",
+        "knowledge_mastery": [
+          {
+            "kp_id": "分压器调压特性",
+            "label": "分压器调压特性",
+            "mastery": 0.55,
+            "risk": 0.45,
+            "observation_count": 1,
+            "topic_id_resolved": "分压器调压特性"
+          },
+          {
+            "kp_id": "分压器的技术要求",
+            "label": "分压器的技术要求",
+            "mastery": 0.55,
+            "risk": 0.45,
+            "observation_count": 1,
+            "topic_id_resolved": "分压器的技术要求"
+          },
+          {
+            "kp_id": "分压变阻器阻值与容量选取",
+            "label": "分压变阻器阻值与容量选取",
+            "mastery": 0.6000000000000001,
+            "risk": 0.4,
+            "observation_count": 2,
+            "topic_id_resolved": "分压变阻器阻值与容量选取"
+          },
+          {
+            "kp_id": "三端变阻器的连接方式",
+            "label": "三端变阻器的连接方式",
+            "mastery": 0.5,
+            "risk": 0.5,
+            "observation_count": 1,
+            "topic_id_resolved": "三端变阻器的连接方式"
+          }
+        ],
+        "error_graph_nodes": [
+          {
+            "id": "err:阻值与容量选取原则混淆-697962d6",
+            "type": "error_pattern",
+            "label": "阻值与容量选取原则混淆",
+            "course_id": "mycourse",
+            "severity": 0.7,
+            "repeated": false,
+            "error_count": 1,
+            "notes": "",
+            "related_knowledge_points": [],
+            "correction_suggestions": [],
+            "updated_at": "2026-08-13T23:36:00.760580"
+          }
+        ],
+        "gate_decision": {
+          "query": "线性电阻元件的伏安特性曲线怎么画？",
+          "gold_stitch": false,
+          "decide_stitch": false,
+          "decide_reason": "no_candidate",
+          "stitch_for_turn": false,
+          "stitch_reason": "no_candidate",
+          "st_match_ok": true
+        }
+      }
+    }
+  },
+  "user_map": {
+    "pos_prereq_equiv_r": "ss-01",
+    "pos_prereq_thevenin": "ss-02",
+    "pos_prereq_potentiometer": "ss-03",
+    "pos_recurrence_thevenin": "ss-04",
+    "neg_unknown": "ss-05",
+    "neg_irrelevant": "ss-06",
+    "neg_corrected": "ss-07",
+    "neg_all_low": "ss-08",
+    "neg_stage_mismatch": "ss-09"
+  }
+}
