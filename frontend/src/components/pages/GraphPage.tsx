@@ -1,5 +1,9 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
-import { fetchGraphs, deleteGraphNode, type GraphNode, type GraphData, type GraphsResponse } from '../../services/api'
+import {
+  fetchCourses, fetchGraphs, deleteGraphNode, fetchStudentTopicGraph,
+  type GraphNode, type GraphData, type GraphsResponse,
+  type StudentTopic, type StudentTopicEdge, type StudentTopicGraph,
+} from '../../services/api'
 
 interface CanvasNode extends GraphNode {
   x: number
@@ -31,15 +35,93 @@ function getRadius(node: GraphNode): number {
   return 14 + importance * 12
 }
 
+// ── 课程先修图谱（第三 tab）：静态分层 DAG，不跑力导向 ────────────────────────
+
+interface CourseNode extends StudentTopic {
+  x: number
+  y: number
+  layer: number
+  radius: number
+}
+
+/** 拓扑分层：layer(n) = 1 + max(layer(直接前置))，无前置归第 0 层（学习起点）。 */
+function assignLayers(topics: StudentTopic[], edges: StudentTopicEdge[]): Map<string, number> {
+  const preds = new Map<string, string[]>()
+  for (const e of edges) {
+    if (!preds.has(e.dst)) preds.set(e.dst, [])
+    preds.get(e.dst)!.push(e.src)
+  }
+  const layer = new Map<string, number>()
+  const visiting = new Set<string>()
+  const getLayer = (tid: string): number => {
+    const cached = layer.get(tid)
+    if (cached !== undefined) return cached
+    if (visiting.has(tid)) return 0 // 防御：异常数据成环时按第 0 层兜底
+    visiting.add(tid)
+    const ps = preds.get(tid) ?? []
+    const l = ps.length === 0 ? 0 : 1 + Math.max(...ps.map(getLayer))
+    visiting.delete(tid)
+    layer.set(tid, l)
+    return l
+  }
+  for (const t of topics) getLayer(t.topic_id)
+  return layer
+}
+
+/** 分层布局：x = 层列均分（左→右即学习顺序），y = 层内堆叠。 */
+function layoutCourseGraph(
+  topics: StudentTopic[], edges: StudentTopicEdge[], cw: number, ch: number,
+): CourseNode[] {
+  const layer = assignLayers(topics, edges)
+  const byLayer = new Map<number, StudentTopic[]>()
+  let maxLayer = 0
+  for (const t of topics) {
+    const l = layer.get(t.topic_id) ?? 0
+    maxLayer = Math.max(maxLayer, l)
+    const g = byLayer.get(l)
+    if (g) g.push(t)
+    else byLayer.set(l, [t])
+  }
+  const nodes: CourseNode[] = []
+  for (const [l, group] of byLayer) {
+    group.forEach((t, i) => {
+      nodes.push({
+        ...t, layer: l,
+        x: (l + 0.5) * (cw / (maxLayer + 1)),
+        y: (i + 0.5) * (ch / group.length),
+        radius: 16,
+      })
+    })
+  }
+  return nodes
+}
+
+/** 着色（Khan/LeetCode/Duolingo 公约数语义）：灰=未开始、红=薄弱（与学情预警
+    门控同口径，后端算好 weak）、绿=已掌握、蓝渐变=学习中（越深越熟）。 */
+function courseNodeColor(my: StudentTopic['my']): string {
+  if (!my) return '#8A8F94'
+  if (my.weak) return '#9F2F2D'
+  if (my.mastery > 0.7) return '#346538'
+  return `rgba(31, 108, 159, ${(0.35 + my.mastery * 0.6).toFixed(2)})`
+}
+
 export default function GraphPage({ onBack }: { onBack: () => void }) {
   const [data, setData] = useState<GraphsResponse | null>(null)
-  const [activeTab, setActiveTab] = useState<'knowledge' | 'error'>('knowledge')
+  const [activeTab, setActiveTab] = useState<'knowledge' | 'error' | 'course'>('knowledge')
   const [selected, setSelected] = useState<GraphNode | null>(null)
   const [loading, setLoading] = useState(true)
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const animRef = useRef<number>(0)
   const nodesRef = useRef<CanvasNode[]>([])
   const edgesRef = useRef<{ source: string; target: string }[]>([])
+
+  // 课程先修图谱（course tab）：课程选择 + 学生视角主题图 + 选中节点
+  const [courses, setCourses] = useState<{ id: string; name: string }[]>([])
+  const [courseId, setCourseId] = useState('')
+  const [courseGraph, setCourseGraph] = useState<StudentTopicGraph | null>(null)
+  const [courseLoading, setCourseLoading] = useState(false)
+  const [selectedTopic, setSelectedTopic] = useState<CourseNode | null>(null)
+  const courseNodesRef = useRef<CourseNode[]>([])
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -59,7 +141,8 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
 
   useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas || !currentGraph.nodes.length) {
+    // course tab 用独立的静态分层绘制 effect，共用同一 canvas——此处须让位
+    if (activeTab === 'course' || !canvas || !currentGraph.nodes.length) {
       nodesRef.current = []
       return
     }
@@ -169,12 +252,128 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
 
     animRef.current = requestAnimationFrame(simulate)
     return () => cancelAnimationFrame(animRef.current)
-  }, [currentGraph, selected])
+  }, [activeTab, currentGraph, selected])
+
+  // ── course tab：课程列表 lazy 加载（学生只看到自己选的课） ──────────────────
+  useEffect(() => {
+    if (activeTab !== 'course' || courses.length > 0) return
+    fetchCourses()
+      .then(cs => {
+        setCourses(cs.map(c => ({ id: c.id, name: c.name })))
+        if (cs.length > 0) setCourseId(prev => prev || cs[0].id)
+      })
+      .catch(() => { /* 选课列表加载失败时保持空态 */ })
+  }, [activeTab, courses.length])
+
+  useEffect(() => {
+    if (activeTab !== 'course' || !courseId) return
+    let cancelled = false
+    setCourseLoading(true)
+    fetchStudentTopicGraph(courseId)
+      .then(g => { if (!cancelled) setCourseGraph(g) })
+      .catch(() => { if (!cancelled) setCourseGraph(null) })
+      .finally(() => { if (!cancelled) setCourseLoading(false) })
+    return () => { cancelled = true }
+  }, [activeTab, courseId])
+
+  // course tab：静态分层 DAG 单次绘制（选中节点变化时重绘高亮邻接）
+  useEffect(() => {
+    const canvas = canvasRef.current
+    if (activeTab !== 'course' || !canvas || !courseGraph || courseGraph.topic_count === 0) {
+      courseNodesRef.current = []
+      return
+    }
+    canvas.width = canvas.offsetWidth * devicePixelRatio
+    canvas.height = canvas.offsetHeight * devicePixelRatio
+    const ctx = canvas.getContext('2d')!
+    ctx.scale(devicePixelRatio, devicePixelRatio)
+    const cw = canvas.offsetWidth
+    const ch = canvas.offsetHeight
+
+    const nodes = layoutCourseGraph(courseGraph.topics, courseGraph.edges, cw, ch)
+    courseNodesRef.current = nodes
+    const nodeMap = new Map(nodes.map(n => [n.topic_id, n]))
+
+    const selId = selectedTopic?.topic_id
+    const adjIds = new Set<string>()
+    if (selId) {
+      for (const e of courseGraph.edges) {
+        if (e.dst === selId) adjIds.add(e.src)
+        if (e.src === selId) adjIds.add(e.dst)
+      }
+    }
+
+    ctx.clearRect(0, 0, cw, ch)
+    // 先修边：src（前置，左层）→ dst（被前置，右层），dst 端箭头
+    for (const e of courseGraph.edges) {
+      const a = nodeMap.get(e.src), b = nodeMap.get(e.dst)
+      if (!a || !b) continue
+      const hl = selId != null && (e.src === selId || e.dst === selId)
+      ctx.strokeStyle = hl ? '#1F6C9F' : '#D8DCDB'
+      ctx.lineWidth = hl ? 2 : 1.2
+      const ang = Math.atan2(b.y - a.y, b.x - a.x)
+      const ax = a.x + Math.cos(ang) * (a.radius + 3)
+      const ay = a.y + Math.sin(ang) * (a.radius + 3)
+      const bx = b.x - Math.cos(ang) * (b.radius + 9)
+      const by = b.y - Math.sin(ang) * (b.radius + 9)
+      ctx.beginPath()
+      ctx.moveTo(ax, ay)
+      ctx.lineTo(bx, by)
+      ctx.stroke()
+      // 箭头（指向被前置主题）
+      const wing = 0.45
+      ctx.beginPath()
+      ctx.moveTo(bx + Math.cos(ang) * 6, by + Math.sin(ang) * 6)
+      ctx.lineTo(bx - Math.cos(ang - wing) * 8, by - Math.sin(ang - wing) * 8)
+      ctx.lineTo(bx - Math.cos(ang + wing) * 8, by - Math.sin(ang + wing) * 8)
+      ctx.closePath()
+      ctx.fillStyle = hl ? '#1F6C9F' : '#B7BCBB'
+      ctx.fill()
+    }
+    for (const n of nodes) {
+      ctx.beginPath()
+      ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2)
+      ctx.fillStyle = courseNodeColor(n.my)
+      ctx.globalAlpha = 0.9
+      ctx.fill()
+      ctx.globalAlpha = 1
+      ctx.strokeStyle = selId === n.topic_id ? '#2F3437' : (adjIds.has(n.topic_id) ? '#1F6C9F' : '#FFFFFF')
+      ctx.lineWidth = selId === n.topic_id ? 3 : 2
+      ctx.stroke()
+
+      ctx.fillStyle = '#5C615F' // ink-soft
+      ctx.font = '11px sans-serif'
+      ctx.textAlign = 'center'
+      const label = n.label.length > 6 ? n.label.slice(0, 6) + '…' : n.label
+      ctx.fillText(label, n.x, n.y + n.radius + 14)
+    }
+  }, [activeTab, courseGraph, selectedTopic])
+
+  // 侧栏「直接前置」列表（含各自薄弱红点）
+  const topicById = useMemo(
+    () => new Map((courseGraph?.topics ?? []).map(t => [t.topic_id, t])),
+    [courseGraph],
+  )
+  const directPrereqs = useMemo(() => {
+    if (!courseGraph || !selectedTopic) return []
+    return courseGraph.edges
+      .filter(e => e.dst === selectedTopic.topic_id)
+      .map(e => topicById.get(e.src))
+      .filter((t): t is StudentTopic => !!t)
+  }, [courseGraph, selectedTopic, topicById])
 
   const handleCanvasClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
     const rect = canvasRef.current!.getBoundingClientRect()
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
+    if (activeTab === 'course') {
+      const hit = courseNodesRef.current.find(n => {
+        const dx = n.x - x, dy = n.y - y
+        return dx * dx + dy * dy <= n.radius * n.radius
+      })
+      setSelectedTopic(hit ?? null)
+      return
+    }
     const hit = nodesRef.current.find(n => {
       const dx = n.x - x, dy = n.y - y
       return dx * dx + dy * dy <= n.radius * n.radius
@@ -196,7 +395,16 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
       <header className="flex items-center gap-4 px-6 py-3 bg-surface border-b border-line">
         <button onClick={onBack} className="text-sm text-ink-soft hover:text-ink transition">&larr; 返回</button>
         <h1 className="text-lg font-serif text-ink">学习图谱</h1>
-        <div className="flex gap-2 ml-auto">
+        <div className="flex gap-2 ml-auto items-center">
+          {activeTab === 'course' && courses.length > 0 && (
+            <select
+              value={courseId}
+              onChange={e => { setCourseId(e.target.value); setSelectedTopic(null) }}
+              className="text-sm bg-surface-2 text-ink rounded-[var(--radius)] px-2 py-1 border border-line max-w-[180px]"
+            >
+              {courses.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          )}
           <button
             onClick={() => { setActiveTab('knowledge'); setSelected(null) }}
             className={`px-3 py-1 rounded-[var(--radius)] text-sm transition ${activeTab === 'knowledge' ? 'bg-accent text-white' : 'bg-surface-2 text-ink-soft hover:text-ink'}`}
@@ -205,12 +413,31 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
             onClick={() => { setActiveTab('error'); setSelected(null) }}
             className={`px-3 py-1 rounded-[var(--radius)] text-sm transition ${activeTab === 'error' ? 'bg-danger-fg text-white' : 'bg-surface-2 text-ink-soft hover:text-ink'}`}
           >错题图谱</button>
+          <button
+            onClick={() => { setActiveTab('course'); setSelected(null); setSelectedTopic(null) }}
+            className={`px-3 py-1 rounded-[var(--radius)] text-sm transition ${activeTab === 'course' ? 'bg-info-fg text-white' : 'bg-surface-2 text-ink-soft hover:text-ink'}`}
+          >课程先修图谱</button>
         </div>
       </header>
 
       <div className="flex-1 flex overflow-hidden">
         <div className="flex-1 relative">
-          {loading ? (
+          {activeTab === 'course' ? (
+            courseLoading ? (
+              <div className="flex items-center justify-center h-full text-muted">加载中...</div>
+            ) : !courseGraph || courseGraph.topic_count === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-muted gap-1.5">
+                <span>教师尚未生成课程图谱</span>
+                <span className="text-xs">（需教师在知识库详情中「生成主题图」后此处可见）</span>
+              </div>
+            ) : (
+              <canvas
+                ref={canvasRef}
+                className="w-full h-full cursor-pointer"
+                onClick={handleCanvasClick}
+              />
+            )
+          ) : loading ? (
             <div className="flex items-center justify-center h-full text-muted">加载中...</div>
           ) : currentGraph.nodes.length === 0 ? (
             <div className="flex items-center justify-center h-full text-muted">
@@ -225,7 +452,53 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
           )}
         </div>
 
-        {selected && (
+        {activeTab === 'course' && selectedTopic && (
+          <aside className="w-72 bg-surface border-l border-line p-4 overflow-y-auto">
+            <h3 className="font-serif text-base text-ink mb-1">{selectedTopic.label}</h3>
+            <div className="text-xs text-muted mb-3">{selectedTopic.source_section}</div>
+            {selectedTopic.definition && (
+              <p className="text-sm text-ink-soft mb-3">{selectedTopic.definition}</p>
+            )}
+            {selectedTopic.my ? (
+              <div className="space-y-2 text-sm text-ink-soft">
+                {selectedTopic.my.weak && (
+                  <div className="text-xs px-2 py-1 rounded bg-danger-bg text-danger-fg">
+                    薄弱环节（与学情预警同口径）
+                  </div>
+                )}
+                <div className="flex justify-between">
+                  <span>掌握度</span>
+                  <span className="font-mono text-ink">{(selectedTopic.my.mastery * 100).toFixed(0)}%</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>风险度</span>
+                  <span className="font-mono text-ink">{(selectedTopic.my.risk * 100).toFixed(0)}%</span>
+                </div>
+                <div className="flex justify-between">
+                  <span>观测次数</span>
+                  <span className="font-mono text-ink">{selectedTopic.my.observation_count}</span>
+                </div>
+              </div>
+            ) : (
+              <div className="text-sm text-muted">尚未学习此知识点</div>
+            )}
+            {directPrereqs.length > 0 && (
+              <div className="mt-3">
+                <div className="text-xs font-medium text-muted mb-1">直接前置（应先掌握）</div>
+                <ul className="text-sm space-y-1">
+                  {directPrereqs.map(p => (
+                    <li key={p.topic_id} className="flex items-center gap-1.5 text-ink-soft">
+                      {p.my?.weak && <span className="inline-block w-1.5 h-1.5 rounded-full bg-danger-fg shrink-0" />}
+                      <span className="truncate">{p.label}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </aside>
+        )}
+
+        {activeTab !== 'course' && selected && (
           <aside className="w-72 bg-surface border-l border-line p-4 overflow-y-auto">
             <h3 className="font-serif text-base text-ink mb-2">{selected.label}</h3>
             <div className="text-xs text-muted mb-3">{selected.type === 'knowledge_point' ? '知识点' : '错误模式'}</div>

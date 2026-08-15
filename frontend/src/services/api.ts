@@ -392,6 +392,51 @@ export async function fetchGraphs(): Promise<GraphsResponse> {
   return res.json()
 }
 
+// ---------------------------------------------------------------------------
+// 课程主题图（学生端：知识点 + 先修边 + 我的掌握度着色数据）
+// ---------------------------------------------------------------------------
+
+export interface MyTopicMastery {
+  theta: number
+  risk: number
+  mastery: number
+  observation_count: number
+  /** 薄弱（theta <= WEAK_MARGIN，与学情预警门控同口径，后端算好） */
+  weak: boolean
+}
+
+export interface StudentTopic {
+  topic_id: string
+  label: string
+  definition: string
+  source_section: string
+  order_idx: number
+  my: MyTopicMastery | null
+}
+
+export interface StudentTopicEdge {
+  src: string
+  dst: string
+  confidence: number
+}
+
+export interface StudentTopicGraph {
+  course_id: string
+  topic_count: number
+  edge_count: number
+  topics: StudentTopic[]
+  edges: StudentTopicEdge[]
+}
+
+export async function fetchStudentTopicGraph(courseId: string): Promise<StudentTopicGraph> {
+  const res = await fetch(`/api/courses/${encodeURIComponent(courseId)}/topic-graph/me`, {
+    headers: authHeaders(),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  return res.json()
+}
+
 export async function deleteGraphNode(nodeId: string): Promise<GraphsResponse> {
   const res = await fetch('/api/memory/graph/delete', {
     method: 'POST',
