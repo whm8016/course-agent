@@ -92,3 +92,35 @@ def test_get_detail_returns_body_and_meta(tmp_path):
     assert detail["content"] == "正文内容"  # body 不含 frontmatter
     assert detail["source"] == "builtin"
     assert detail["read_only"] is True
+
+
+def test_update_creates_personal_override_from_course_layer(tmp_path):
+    """写入层(personal)无文件但 course 层有 → update 落个人覆盖版；删除后 course 版恢复可见。
+
+    固化"personal 覆盖 course"写入侧的完整闭环：覆盖 → 列表显示 personal → 删除 → course 版回归。
+    """
+    course_root = tmp_path / "course"
+    personal_root = tmp_path / "personal"
+    teacher_svc = SkillService(user_root=course_root, builtin_root=None)
+    teacher_svc.create("demo", "课程版", "课程正文")
+
+    student_svc = SkillService(
+        user_root=course_root, builtin_root=None, personal_root=personal_root
+    )
+    # 覆盖：personal 层无 demo → 以 course 版为底稿落覆盖版
+    info = student_svc.update("demo", description="我的版本")
+    assert info.source == "personal"
+    detail = student_svc.get_detail("demo")
+    assert detail["source"] == "personal"
+    assert detail["description"] == "我的版本"
+    assert "课程正文" in detail["content"]  # 未传 content 时以 course 版正文为底稿
+    entries = {e.name: e for e in student_svc.summary_entries()}
+    assert entries["demo"].source == "personal"
+
+    # 回退：删除个人覆盖版 → course 版重新可见
+    student_svc.delete("demo")
+    reverted = student_svc.get_detail("demo")
+    assert reverted["source"] == "course"
+    assert reverted["description"] == "课程版"
+    # course 原版自始至终未被改动
+    assert teacher_svc.get_detail("demo")["description"] == "课程版"

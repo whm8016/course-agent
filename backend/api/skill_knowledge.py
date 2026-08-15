@@ -68,6 +68,11 @@ async def _assert_course_skill_write_access(
 
     course_id 为空（写个人/全局层）时直接放行——那是用户自己的私有 skill。
     """
+    # 学生（写入层=personal 私有目录）直接放行：course_id 只影响其读取可见的
+    # course 层，写入永远落在 data/skills_user/<uid>/，不触课程共享目录，
+    # 无越权写面（skill_service.get_skill_service 对学生恒构造 personal 层）。
+    if _skill_user_id(user):
+        return
     cid = (course_id or "").strip()
     if not cid or cid == "_global":
         return

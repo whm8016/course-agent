@@ -392,9 +392,27 @@ class SkillService:
         rename_to: str | None = None,
     ) -> SkillInfo:
         slug = self._validate_name(name)
-        self._assert_writable(slug)
+        # 学生编辑 course 层技能：写入层(personal)无此 skill 但三层可读到 course 版 →
+        # 以 course 版正文为底稿，在写入层落一份个人覆盖版（与读取侧 _resolve_skill_dir
+        # 的 personal > course 优先级对称）。builtin 仍只读；三层皆无 → NotFound。
+        # 目录创建推迟到下方所有可抛错校验之后，避免留下空目录孤儿（会让 create 误判重名）。
+        seed_text: str | None = None
+        if not (self._writable_root / slug / "SKILL.md").exists():
+            resolved = self._resolve_skill_dir(slug)
+            if resolved is None:
+                raise SkillNotFoundError(slug)
+            _dir, source = resolved
+            if source == "builtin":
+                raise SkillReadOnlyError(f"Skill is builtin (read-only): {slug}")
+            seed_text = (_dir / "SKILL.md").read_text(encoding="utf-8")
         target_dir = self._skill_dir(slug)
-        text = content if content is not None else self._skill_file(slug).read_text(encoding="utf-8")
+        text = (
+            content
+            if content is not None
+            else seed_text
+            if seed_text is not None
+            else self._skill_file(slug).read_text(encoding="utf-8")
+        )
         if description is not None:
             text = self._rewrite_frontmatter(text, description=description.strip())
         if always is not None:
@@ -410,8 +428,12 @@ class SkillService:
             if new_dir.exists():
                 raise SkillExistsError(new_slug)
             text = self._rewrite_frontmatter(text, name=new_slug)
+            if seed_text is not None:
+                target_dir.mkdir(parents=True, exist_ok=True)
             target_dir.rename(new_dir)
             slug = new_slug
+        elif seed_text is not None:
+            target_dir.mkdir(parents=True, exist_ok=True)
         self._skill_file(slug).write_text(text, encoding="utf-8")
         meta, _ = self._parse_frontmatter(self._skill_file(slug).read_text(encoding="utf-8"))
         source = "personal" if self._personal_root is not None else "course"

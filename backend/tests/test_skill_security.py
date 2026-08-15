@@ -15,12 +15,14 @@ from httpx import AsyncClient
 # M-47 越权写 course 层 skill
 # ---------------------------------------------------------------------------
 
-async def test_m47_student_cannot_write_course_skill(
-    client: AsyncClient, enrolled_user_headers: dict, course_with_code: dict
+async def test_m47_student_write_lands_personal_not_course(
+    client: AsyncClient, admin_headers: dict, enrolled_user_headers: dict, course_with_code: dict
 ):
-    """已选课学生尝试把恶意 skill 写进课程共享目录 → 403（攻击被拒，非 200/500）。
+    """已选课学生带 course_id 建 skill → 200，但只落自己的 personal 层，课程共享目录零污染。
 
-    修复前：学生传 course_id 即可写入 data/skills/<course_id>/，污染该课程所有学生。
+    修复前（M-47 初版拦截过宽）：`_assert_course_skill_write_access` 只看 course_id
+    非空就把学生 403，连"写个人层"也拦了（学生技能包功能全断）。M-47 真正防的是
+    "污染课程共享目录"——本测试改为从 owner 视角断言课程层不含该 skill。
     """
     cid = course_with_code["course_id"]
     r = await client.post(
@@ -33,19 +35,30 @@ async def test_m47_student_cannot_write_course_skill(
             "course_id": cid,
         },
     )
-    assert r.status_code == 403, r.text
-    # 攻击未成功：课程目录里不应出现该 skill
-    svc_r = await client.get(
+    assert r.status_code == 200, r.text
+    assert r.json()["skill"]["source"] == "personal"
+    # 攻击未污染课程共享目录：owner（无 personal 层）视角看不到该 skill
+    owner_r = await client.get(
+        "/api/skill-knowledge", headers=admin_headers, params={"course_id": cid}
+    )
+    owner_names = {s["name"] for s in owner_r.json().get("skills", [])}
+    assert "evil-inject" not in owner_names
+    # 学生自己视角可见（落在了 personal 层）
+    stu_r = await client.get(
         "/api/skill-knowledge", headers=enrolled_user_headers, params={"course_id": cid}
     )
-    names = {s["name"] for s in svc_r.json().get("skills", [])}
-    assert "evil-inject" not in names
+    stu_skills = {s["name"]: s for s in stu_r.json().get("skills", [])}
+    assert stu_skills["evil-inject"]["source"] == "personal"
 
 
 async def test_m47_student_delete_course_skill_denied(
     client: AsyncClient, admin_headers: dict, enrolled_user_headers: dict, course_with_code: dict
 ):
-    """owner 建了一个 course skill，学生尝试删除 → 403，skill 仍在。"""
+    """owner 建了一个 course skill，学生尝试删除 → 404（删除只作用于 personal 层），skill 仍在。
+
+    修复前：删除在权限层就被 403。修复后权限放行（学生写 personal 层无越权面），
+    但 personal 层没有该文件 → SkillNotFoundError → 404，课程版不可达、安然无恙。
+    """
     cid = course_with_code["course_id"]
     create = await client.post(
         "/api/skill-knowledge",
@@ -64,13 +77,95 @@ async def test_m47_student_delete_course_skill_denied(
         headers=enrolled_user_headers,
         params={"course_id": cid},
     )
-    assert dele.status_code == 403, dele.text
+    assert dele.status_code == 404, dele.text
     # owner 仍能看到（未被删）
     mine = await client.get(
         "/api/skill-knowledge", headers=admin_headers, params={"course_id": cid}
     )
     names = {s["name"] for s in mine.json().get("skills", [])}
     assert "course-rule" in names
+
+
+# ---------------------------------------------------------------------------
+# 学生写 personal 层：覆盖语义回归（修复 403 过宽后补齐的写入路径）
+# ---------------------------------------------------------------------------
+
+async def test_student_edit_course_skill_creates_personal_override(
+    client: AsyncClient, admin_headers: dict, enrolled_user_headers: dict, course_with_code: dict
+):
+    """学生"编辑"course 层技能并保存 → 落为 personal 覆盖版，课程版零改动。
+
+    三层 skill 设计的读取侧是 personal > course（同名覆盖），本测试固化写入侧
+    的对称路径：personal 层无文件时以 course 版为底稿落覆盖版。
+    """
+    cid = course_with_code["course_id"]
+    create = await client.post(
+        "/api/skill-knowledge",
+        headers=admin_headers,
+        json={
+            "name": "shared-demo",
+            "description": "课程版",
+            "content": "课程版正文",
+            "course_id": cid,
+        },
+    )
+    assert create.status_code == 200, create.text
+
+    r = await client.put(
+        "/api/skill-knowledge/shared-demo",
+        headers=enrolled_user_headers,
+        json={"description": "我的版本", "content": "我的正文", "course_id": cid},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["skill"]["source"] == "personal"
+
+    # 课程版未被改动（owner 视角 description 仍为原值）
+    owner_detail = await client.get(
+        "/api/skill-knowledge/shared-demo", headers=admin_headers, params={"course_id": cid}
+    )
+    assert owner_detail.status_code == 200, owner_detail.text
+    assert owner_detail.json()["description"] == "课程版"
+    # 学生视角读到自己的覆盖版
+    stu_detail = await client.get(
+        "/api/skill-knowledge/shared-demo", headers=enrolled_user_headers, params={"course_id": cid}
+    )
+    assert stu_detail.json()["description"] == "我的版本"
+
+
+async def test_student_toggle_always_seeds_from_course_content(
+    client: AsyncClient, admin_headers: dict, enrolled_user_headers: dict, course_with_code: dict
+):
+    """学生给 course 层技能开 always（只传 always 不传 content）→ 200，覆盖版正文以 course 版为底稿。
+
+    修复前：PUT 在权限层 403；若只放行权限，update 会因 personal 层无文件 404
+    （前端"仅 always 开关"路径正是这种 payload）。
+    """
+    cid = course_with_code["course_id"]
+    create = await client.post(
+        "/api/skill-knowledge",
+        headers=admin_headers,
+        json={
+            "name": "seed-demo",
+            "description": "课程守则",
+            "content": "课程守则正文：每日复习",
+            "course_id": cid,
+        },
+    )
+    assert create.status_code == 200, create.text
+
+    r = await client.put(
+        "/api/skill-knowledge/seed-demo",
+        headers=enrolled_user_headers,
+        json={"always": True, "course_id": cid},
+    )
+    assert r.status_code == 200, r.text
+    detail = await client.get(
+        "/api/skill-knowledge/seed-demo",
+        headers=enrolled_user_headers,
+        params={"course_id": cid},
+    )
+    assert detail.json()["always"] is True  # personal 层允许 always（M-48 只禁 course 层）
+    assert "每日复习" in detail.json()["content"]  # 底稿 seeding：未传 content 时以 course 版为底
 
 
 # ---------------------------------------------------------------------------
