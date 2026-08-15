@@ -164,7 +164,6 @@ def _gate_mastery_map(case_mastery: list[dict]) -> dict[str, dict]:
     return {
         m["topic_id"]: {
             "risk": m["risk"],
-            "risk_used": m["risk"],
             "theta": logit_of(1.0 - m["risk"]),
             "logit": logit_of(1.0 - m["risk"]),
             "p_forget": 1.0,

@@ -20,10 +20,11 @@
 即显式不拼（PRISM 的 null-intervention，但是拼不拼学情，不是发不发消息）。
 
 门控为**单阈值两档**（2026-08 由 VoI 三档简化定稿）：``p_need >= τ`` 过闸即一律
-输出完整简报（不再分 light/full 档）。``C_FA=1 / C_FN=3`` 代入后 τ 的代数正解
-即 ``p_need >= 0.434``（``p_need >= 1/(1+3·p_need)``），实现仍逐次算 τ 以便
-``StitchBrief.tau`` 有值，但门槛**不随轮变化**。曾有的 value/severity/confidence
-乘子与 L_FULL/L_LIGHT 扣费表未经标定，已删（决策记录见 eval_memory 双臂对比）。
+输出完整简报（不再分 light/full 档）。τ 由公式实算（单一真相源），默认代价
+``C_FA=1 / C_FN=3`` 下代数正解恒为 ``p_need >= 0.434``——门槛不随轮变化；语义
+锚点（「约六天未练」）由 test_stitch_gate 实算夹死。曾有的 value/severity/
+confidence 乘子与 L_FULL/L_LIGHT 扣费表未经标定，已删（复发保底 0.7 > 0.434，
+复发候选除 24h 冷却外必开口）。
 """
 from __future__ import annotations
 
@@ -54,7 +55,7 @@ RECURRENCE_WINDOW_DAYS = 30
 
 DEFAULT_C_FA = 1.0
 DEFAULT_C_FN = 3.0            # 漏报 3 倍代价（实验课损坏仪器风险 > 答非所问）
-RECURRENCE_PNEED_FLOOR = 0.7  # 复发（C2）固定需求下限（> 0.434：复发候选几乎必提，两档的必然结果）
+RECURRENCE_PNEED_FLOOR = 0.7  # 复发（C2）固定需求下限（必提，见模块头）
 COOLDOWN_HOURS = 24           # 同一证据主题 24h 内不重复拼（防过载，AIED N=81 依据）
 
 
@@ -91,14 +92,14 @@ def decide_stitch(
     Args:
         matched_topic: 问句命中的主题（S_t），None = unknown。
         prereq_closure: matched 的全部前置主题（course_topic_store.get_prereq_predecessors 算）。
-        mastery_map: {topic_id: {risk, risk_used, p_forget, theta, logit, label, observation_count}}，
+        mastery_map: {topic_id: {risk, p_forget, theta, logit, label, observation_count}}，
             门控唯一学情数据源。theta 是入闸判据（<= weak_margin）；logit = theta -
             b_topic 只供 risk/p_need 派生（班级难度不决定谁能入闸）。
         error_repeated: 反复出错的 topic_id 集（mastery_observation 同主题 poor 计数 ≥2 派生）。
         now: cooldown 判定的当前时间戳（调用方传入，保持纯函数可单测；None=用 time.time）。
             冷却时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带，见 _read_mastery）。
-        c_fa / c_fn: 误报/漏报代价。默认 1:3 代入 τ 公式的代数正解是 p_need >= 0.434
-            ——τ 逐次计算只为 StitchBrief.tau 有值，门槛不随轮变化。
+        c_fa / c_fn: 误报/漏报代价。τ 由公式实算（单一真相源），默认 1:3 下的
+            门槛是恒定的 0.434（推导见模块头）。
         weak_margin: C1 入闸的 theta 边际（plan §3e，见模块头 WEAK_MARGIN 注释）。
 
     候选（只在两类上算 p_need，全库薄弱点禁止入闸）：
@@ -114,17 +115,13 @@ def decide_stitch(
 
     # 2. C1 前置缺口：前置闭包（不含 matched）里薄弱的（theta 判据，plan §3e：
     #    比 risk 不比被 sigmoid 压扁的概率；「至少两次判 poor」的语义锚点；不用
-    #    theta - b——班级难度不决定谁能入闸，b 只影响入闸后的 risk/p_need），
-    #    按薄弱程度（theta 升序）排
-    prereq_gaps = sorted(
-        [
-            (tid, mastery_map[tid])
-            for tid in (prereq_closure - {matched_topic})
-            if tid in mastery_map
-            and mastery_map[tid].get("theta", 0.0) <= weak_margin
-        ],
-        key=lambda x: x[1].get("theta", 0.0),
-    )
+    #    theta - b——班级难度不决定谁能入闸，b 只影响入闸后的 risk/p_need）
+    prereq_gaps = [
+        (tid, mastery_map[tid])
+        for tid in (prereq_closure - {matched_topic})
+        if tid in mastery_map
+        and mastery_map[tid].get("theta", 0.0) <= weak_margin
+    ]
     # 3. C2 复发：matched 本身反复出错
     is_recurrence = matched_topic in error_repeated
 
@@ -133,12 +130,11 @@ def decide_stitch(
         return StitchBrief(False, None, "no_candidate", 0.0, 1.0)
 
     # 4. p_need（阶段3 遗忘耦合，MemoryBank 口径）：
-    #    C1 前置缺口 = risk_used · p_forget——薄弱且久未触碰才值得拼；刚观测过的
-    #    薄弱点（p_forget≈0）不用预警（现在正学着呢）。C2 复发不乘遗忘（复发是错题
-    #    信号不是时间信号），保持 max(0.7, risk_used)——0.7 > 0.434，复发候选除
-    #    24h 冷却外必开口（两档的必然结果，不是漏实现）。
+    #    C1 前置缺口 = risk · p_forget——薄弱且久未触碰才值得拼；刚观测过的
+    #    薄弱点（p_forget≈0）不用预警（现在正学着呢）。C2 复发不乘遗忘（错题
+    #    信号不是时间信号），保持 max(0.7, risk)（复发必提，见模块头）。
     def _need_gap(m: dict) -> float:
-        return m.get("risk_used", m.get("risk", 0)) * m.get("p_forget", 1.0)
+        return m.get("risk", 0) * m.get("p_forget", 1.0)
 
     p_need = 0.0
     evidence = None
@@ -149,7 +145,7 @@ def decide_stitch(
     if is_recurrence:
         rec = max(
             RECURRENCE_PNEED_FLOOR,
-            mastery_map.get(matched_topic, {}).get("risk_used", 0),
+            mastery_map.get(matched_topic, {}).get("risk", 0),
         )
         if rec > p_need:
             p_need, evidence, reason = rec, matched_topic, "recurrence"
@@ -198,7 +194,7 @@ async def stitch_for_turn(
     hit = await _match_topic(query, course_id, db, embed_model)
     if hit is None:
         return StitchBrief(False, None, "unknown", 0.0, 1.0)
-    matched_topic, _matched_sim = hit
+    matched_topic = hit[0]  # sim 现无消费方（confidence 因子已删），见 _match_topic
 
     # 2. 前置闭包 + label→topic_id 映射（各一次查询，下游复用免 N+1）
     closure = await get_prereq_predecessors(matched_topic, course_id, db)
@@ -208,8 +204,7 @@ async def stitch_for_turn(
     mastery_map = await _read_mastery(user_id, course_id, db, topic_map)
     error_repeated = await _read_error_repeated(user_id, course_id, db, topic_map)
 
-    # 5. 决策（单阈值两档：p_need >= τ 过闸，一律完整简报——confidence/severity
-    #    乘子与三档档位已删，见 decide_stitch docstring）
+    # 5. 决策（口径见 decide_stitch docstring）
     brief = decide_stitch(matched_topic, closure, mastery_map, error_repeated)
 
     # 6. 应拼则填简报文本（frozen dataclass 用 replace，免手工抄字段）+ 回写 cooldown 戳
@@ -290,7 +285,7 @@ async def _match_topic(query: str, course_id: str, db, embed_model) -> tuple[str
 async def _read_mastery(
     user_id: str, course_id: str, db, topic_map: dict[str, str]
 ) -> dict[str, dict]:
-    """读 knowledge_mastery → {topic_id: {risk, risk_used, p_forget, logit, label, ...}}。
+    """读 knowledge_mastery → {topic_id: {risk, p_forget, logit, label, ...}}。
 
     id-align：行 kp_id 非 topic_id 时，用 label 经 topic_map（label_norm→topic_id）本地兜底，
     避免 N+1（topic_map 由 stitch_for_turn 一次取全传入）。
@@ -298,7 +293,7 @@ async def _read_mastery(
     掌握度估计器重构（阶段D，难度口径见 plan「班级难度估计修复」）：
     - risk 由折叠状态算出（mastery = sigmoid(theta - b_topic)，risk = 1 - mastery），
       b_topic 读 course_topic.difficulty_b（全班共享，题目难度即班级先验）；
-    - k=3 班级收缩已删（与 U(n) 和 b_topic 先验功能重复且更粗），risk_used = risk；
+    - k=3 班级收缩已删（与 U(n) 和 b_topic 先验功能重复且更粗），risk 即个人折叠值；
     - theta 一并放进 map——C1 入闸判据在 theta 空间（WEAK_MARGIN），班级难度 b
       不决定谁能入闸；logit = theta - b 仍带出供 risk 派生与排查；
     - 遗忘口径（MemoryBank）不变：p_forget = 1 - exp(-t/S)。
@@ -354,7 +349,6 @@ async def _read_mastery(
             # 按 kp_id==topic_id 更新会 0 命中 → 冷却永不生效（每轮重复拼）。回写走主键。
             "row_id": r.id,
             "risk": round(risk, 4),
-            "risk_used": round(risk, 4),  # 收缩已删（b_topic 即班级先验），保留键供门控口径不变
             "theta": round(r.theta or 0.0, 4),
             "logit": round(logit, 4),
             "p_forget": forget_prob(age_days, r.strength or 5.0),

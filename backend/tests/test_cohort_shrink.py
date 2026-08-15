@@ -7,8 +7,7 @@
 难度更新口径（plan「班级难度估计修复」）：b 由 worker.cron_refit_difficulty 日频
 全班重折（fold_class_difficulty 吃全部来源观测，按 weight 加权），写路径不再
 在线更新。本文件验三点（防有人把收缩加回来）：
-1. 写路径无班级聚合查询，risk_used = risk（个人折叠值，无收缩覆写）；
-   班级聚合走日频 cron，不在写路径；
+1. 个人折叠值即最终 risk（无收缩覆写键）；班级聚合走日频 cron，不在写路径；
 2. b_topic 隐先验：theta=0 的行，risk 由 course_topic.difficulty_b 决定（班难→险高）；
 3. U(n) 稀疏保护：单次观测位移有限（0.3 logit），新生偶发 poor 不至于深陷。
 """
@@ -28,16 +27,14 @@ async def db():
     await close_db()
 
 
-def test_no_cohort_shrink_risk_used_equals_risk():
-    """risk_used 不再被班级均值覆写——个人折叠值直接用（班级聚合走日频 cron，
-    不在写路径，见 worker.cron_refit_difficulty）。"""
+def test_fold_risk_is_personal_value():
+    """折叠器输出即个人 risk（无收缩覆写键——班级聚合走日频 cron，不在写路径，
+    见 worker.cron_refit_difficulty；读侧 _read_mastery 直接取 risk）。"""
     s = fold_observations([
         {"created_at": 1.0, "outcome": 0.0, "weight": W_JUDGE},
         {"created_at": 2.0, "outcome": 0.0, "weight": W_JUDGE},
     ])
-    risk = round(s.risk, 4)
-    assert risk == pytest.approx(0.6326, abs=1e-3)  # 2 次 poor 实算
-    # _read_mastery 输出的 risk_used 与 risk 同源（无第二次覆写），由 test_voi_gate 覆盖
+    assert round(s.risk, 4) == pytest.approx(0.6326, abs=1e-3)  # 2 次 poor 实算
 
 
 def test_difficulty_b_is_class_prior():

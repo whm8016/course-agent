@@ -11,7 +11,7 @@
 import time
 
 from core.memory.mastery import forget_prob
-from core.memory.mastery_state import W_JUDGE, fold_observations
+from core.memory.mastery_state import LEVEL_OUTCOME, W_JUDGE, fold_observations
 from core.memory.proactive import (
     WEAK_MARGIN,
     decide_stitch,
@@ -26,15 +26,13 @@ def _folded_map(levels: list[str], b_topic: float = 0.0) -> dict[str, dict]:
     b_topic 只进 risk/logit（影响 p_need），不进入闸判据（theta）。
     """
     obs = [
-        {"created_at": float(i), "outcome": {"poor": 0.0, "fair": 0.5, "good": 1.0}[lv],
-         "weight": W_JUDGE}
+        {"created_at": float(i), "outcome": LEVEL_OUTCOME[lv], "weight": W_JUDGE}
         for i, lv in enumerate(levels)
     ]
     s = fold_observations(obs)
     return {
         "ohm": {
             "risk": round(s.risk, 4),
-            "risk_used": round(s.risk, 4),
             "theta": round(s.theta, 4),
             "logit": round(s.theta - b_topic, 4),
             "p_forget": 1.0,
@@ -65,17 +63,14 @@ def test_tau_threshold_semantic_anchor():
 
 def test_tau_formula_solves_to_fixed_point():
     """τ 公式在默认代价下的代数正解是 0.434（门槛不随轮变化的证明）。"""
-    import math
-
     for p in (0.1, 0.3, 0.434, 0.6, 0.9):
         m = _folded_map(["poor", "poor"])
         m["ohm"]["p_forget"] = p / m["ohm"]["risk"]  # 拼出指定 p_need
         brief = decide_stitch("kcl", _PREREQ, m, set())
         if p < 0.434:
             assert brief.should_stitch is False
-        # 过闸侧 τ 随 p_need 单调降，恒有 p >= τ；数学上等价 p >= 0.434
+        # p >= 1/(1+3p) 的正根 = (-1+√13)/6 ≈ 0.434，门槛恒定
         assert (brief.p_need >= brief.tau) == brief.should_stitch
-    assert math.isclose(0.434, round((-1 + 13 ** 0.5) / 6, 3), abs_tol=1e-3)
 
 
 def test_recurrence_floor_beats_threshold():

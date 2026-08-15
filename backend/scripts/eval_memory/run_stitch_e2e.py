@@ -14,7 +14,7 @@ knowledge_mastery 真实行过门控。治"种数据时直接 kp_id=topic_id 绕
 的假绿（旧 e2e 的 _seed_case_profile 直接种对齐好的行）。
 
 主指标：balanced accuracy（PASK 口径：TPR 与 TNR 均衡，类不平衡下不被多数类淹没）。
-另报三臂的拼接率。零 LLM（闭集臂 embedding 离线确定性向量）。
+零 LLM（闭集臂 embedding 离线确定性向量）。
 """
 from __future__ import annotations
 
@@ -149,12 +149,12 @@ async def run() -> dict:
                 # 4 次 poor 观测应被 _read_error_repeated 自然数出
                 repeated = await _read_error_repeated(user_id, course_id, db, topic_map)
 
-                for arm, stitch in (
-                    ("baseline_none", lambda: False),
-                    ("baseline_unconditional", lambda: True),
-                    ("gate", lambda: decide_stitch(matched, closure, mastery_map, repeated).should_stitch),
+                gate_should = decide_stitch(matched, closure, mastery_map, repeated).should_stitch
+                for arm, pred in (
+                    ("baseline_none", False),
+                    ("baseline_unconditional", True),
+                    ("gate", gate_should),
                 ):
-                    pred = stitch()
                     s = stats[arm]
                     if gold_stitch and pred:
                         s["tp"] += 1
@@ -181,9 +181,8 @@ def main() -> None:
     out = config.RESULTS_DIR / "stitch_e2e.json"
     out.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     for arm, s in summary.items():
-        if isinstance(s, dict) and "balanced_accuracy" in s:
-            logger.info("[stitch_e2e] %-24s bal_acc=%.3f (tp=%d fn=%d fp=%d tn=%d)",
-                        arm, s["balanced_accuracy"], s["tp"], s["fn"], s["fp"], s["tn"])
+        logger.info("[stitch_e2e] %-24s bal_acc=%.3f (tp=%d fn=%d fp=%d tn=%d)",
+                    arm, s["balanced_accuracy"], s["tp"], s["fn"], s["fp"], s["tn"])
 
 
 if __name__ == "__main__":
