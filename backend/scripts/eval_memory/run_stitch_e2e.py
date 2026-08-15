@@ -1,21 +1,20 @@
-"""学情拼接门控 e2e 四臂评测：真实 consolidate 写入 → 真实 mastery 过闸。
+"""学情拼接门控 e2e 三臂评测：真实 consolidate 写入 → 真实 mastery 过闸。
 
 Usage:
     python -m scripts.eval_memory.run_stitch_e2e
 
-四臂（plan 阶段5b/5c）：
+三臂（VoI 三档已于 2026-08 简化为单阈值两档，gate_voi/PRISM 对照臂随之删除）：
 - baseline_none        不拼（沉默基线）
 - baseline_unconditional 无条件拼（全拼基线）
-- gate                 PRISM 单阈值（decide_stitch_prism，对照臂）
-- gate_voi             VoI 三因子三档（decide_stitch，主方法）
+- gate                 单阈值两档（decide_stitch，p_need >= τ）
 
 与 scorer.score_stitch_gate（纯函数 When 决策）的区别：本脚本**走真实写入链路**——
 record/seed episodes → 真实 consolidate（闭集 match_topics + mastery 写入）→ 用
-knowledge_mastery 真实行过两版门控。治"种数据时直接 kp_id=topic_id 绕过写入路径"
+knowledge_mastery 真实行过门控。治"种数据时直接 kp_id=topic_id 绕过写入路径"
 的假绿（旧 e2e 的 _seed_case_profile 直接种对齐好的行）。
 
 主指标：balanced accuracy（PASK 口径：TPR 与 TNR 均衡，类不平衡下不被多数类淹没）。
-另报四臂的拼接率与 VoI 三档分布。零 LLM（闭集臂 embedding 离线确定性向量）。
+另报三臂的拼接率。零 LLM（闭集臂 embedding 离线确定性向量）。
 """
 from __future__ import annotations
 
@@ -125,15 +124,14 @@ async def run() -> dict:
     from core.db.database import AsyncSessionLocal, close_db, init_db
     from core.memory.course_topic_store import get_course_topic_map
     from core.memory.proactive import (
-        _read_error_repeated, _read_mastery, decide_stitch, decide_stitch_prism,
+        _read_error_repeated, _read_mastery, decide_stitch,
     )
 
     from .stitch_cases import STITCH_CASES, prereq_predecessors
 
     await init_db()
     stats = {arm: {"tp": 0, "fn": 0, "fp": 0, "tn": 0} for arm in
-             ("baseline_none", "baseline_unconditional", "gate", "gate_voi")}
-    levels: dict[str, int] = {"silent": 0, "light": 0, "full": 0}
+             ("baseline_none", "baseline_unconditional", "gate")}
     try:
         async with AsyncSessionLocal() as db:
             for c in STITCH_CASES:
@@ -154,8 +152,7 @@ async def run() -> dict:
                 for arm, stitch in (
                     ("baseline_none", lambda: False),
                     ("baseline_unconditional", lambda: True),
-                    ("gate", lambda: decide_stitch_prism(matched, closure, mastery_map, repeated).should_stitch),
-                    ("gate_voi", lambda: decide_stitch(matched, closure, mastery_map, repeated).should_stitch),
+                    ("gate", lambda: decide_stitch(matched, closure, mastery_map, repeated).should_stitch),
                 ):
                     pred = stitch()
                     s = stats[arm]
@@ -167,19 +164,13 @@ async def run() -> dict:
                         s["fp"] += 1
                     else:
                         s["tn"] += 1
-
-                if matched is not None:
-                    voi = decide_stitch(matched, closure, mastery_map, repeated)
-                    levels[voi.level] += 1
     finally:
         await close_db()
 
-    out = {
+    return {
         arm: {**s, "balanced_accuracy": round(_balanced_accuracy(**s), 4)}
         for arm, s in stats.items()
     }
-    out["voi_level_distribution"] = levels
-    return out
 
 
 def main() -> None:
@@ -193,7 +184,6 @@ def main() -> None:
         if isinstance(s, dict) and "balanced_accuracy" in s:
             logger.info("[stitch_e2e] %-24s bal_acc=%.3f (tp=%d fn=%d fp=%d tn=%d)",
                         arm, s["balanced_accuracy"], s["tp"], s["fn"], s["fp"], s["tn"])
-    logger.info("[stitch_e2e] VoI 三档分布: %s → %s", summary["voi_level_distribution"], out)
 
 
 if __name__ == "__main__":

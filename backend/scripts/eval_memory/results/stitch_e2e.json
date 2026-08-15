@@ -19,17 +19,5 @@
     "fp": 0,
     "tn": 5,
     "balanced_accuracy": 1.0
-  },
-  "gate_voi": {
-    "tp": 4,
-    "fn": 0,
-    "fp": 0,
-    "tn": 5,
-    "balanced_accuracy": 1.0
-  },
-  "voi_level_distribution": {
-    "silent": 4,
-    "light": 0,
-    "full": 4
   }
 }

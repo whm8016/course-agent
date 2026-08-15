@@ -1,4 +1,4 @@
-"""阶段5评测脚本的 CI 冒烟：四臂 e2e + 抽取对比框架可跑、指标合理。"""
+"""阶段5评测脚本的 CI 冒烟：三臂 e2e + 抽取对比框架可跑、指标合理。"""
 import pytest
 
 
@@ -11,18 +11,15 @@ async def db():
     await close_db()
 
 
-async def test_stitch_e2e_four_arms():
+async def test_stitch_e2e_three_arms():
     from scripts.eval_memory import run_stitch_e2e
 
     summary = await run_stitch_e2e.run()
-    for arm in ("baseline_none", "baseline_unconditional", "gate", "gate_voi"):
+    for arm in ("baseline_none", "baseline_unconditional", "gate"):
         assert arm in summary
         assert 0.0 <= summary[arm]["balanced_accuracy"] <= 1.0
-    # 两个门控臂都应显著优于基线（0.5），且不低于 0.75
+    # 门控臂应显著优于基线（0.5），且不低于 0.75
     assert summary["gate"]["balanced_accuracy"] >= 0.75
-    assert summary["gate_voi"]["balanced_accuracy"] >= 0.75
-    # VoI 三档分布字段存在
-    assert set(summary["voi_level_distribution"]) == {"silent", "light", "full"}
 
 
 async def test_extract_compare_closed_set_arm(db):
