@@ -18,6 +18,13 @@
 实验课默认 ``C_FN > C_FA``（漏报 = 下次还错可能损坏仪器，重于误报 = 答非所问）。
 首版不估 ``p_accept``（无弹窗式干预，无"用户接不接受"）。输出 ``should_stitch=False``
 即显式不拼（PRISM 的 null-intervention，但是拼不拼学情，不是发不发消息）。
+
+门控为**单阈值两档**（2026-08 由 VoI 三档简化定稿）：``p_need >= τ`` 过闸即一律
+输出完整简报（不再分 light/full 档）。τ 由公式实算（单一真相源），默认代价
+``C_FA=1 / C_FN=3`` 下代数正解恒为 ``p_need >= 0.434``——门槛不随轮变化；语义
+锚点（「约六天未练」）由 test_stitch_gate 实算夹死。曾有的 value/severity/
+confidence 乘子与 L_FULL/L_LIGHT 扣费表未经标定，已删（复发保底 0.7 > 0.434，
+复发候选除 24h 冷却外必开口）。
 """
 from __future__ import annotations
 
@@ -48,13 +55,7 @@ RECURRENCE_WINDOW_DAYS = 30
 
 DEFAULT_C_FA = 1.0
 DEFAULT_C_FN = 3.0            # 漏报 3 倍代价（实验课损坏仪器风险 > 答非所问）
-RECURRENCE_PNEED_FLOOR = 0.7  # 复发（C2）固定需求下限
-
-# ---- VoI 三因子（阶段6）：确定性效用表，非 parameter-free（论文口径须如实声明）----
-L_FULL = 0.30                 # 完整简报的认知负荷代价
-L_LIGHT = 0.12                # 一句轻提醒的代价
-L_SILENT = 0.0
-V_LIGHT_COEF = 0.6            # 轻提醒的实现价值系数（完整简报=1.0）
+RECURRENCE_PNEED_FLOOR = 0.7  # 复发（C2）固定需求下限（必提，见模块头）
 COOLDOWN_HOURS = 24           # 同一证据主题 24h 内不重复拼（防过载，AIED N=81 依据）
 
 
@@ -62,20 +63,16 @@ COOLDOWN_HOURS = 24           # 同一证据主题 24h 内不重复拼（防过�
 class StitchBrief:
     """门控决策结果。should_stitch=False 即显式不拼。
 
-    level（VoI 三档）：silent=不拼 / light=一句轻提醒 / full=完整简报。
-    should_stitch ≡ level != "silent"，pipeline_common 等调用方零改动。
-
     matched_topic：问句命中的主题（unknown 时 None）。pipeline_common 用它做第一路
     （memory_context）的主题过滤——两路分工：event 槽只注入本轮命中主题。
     """
 
     should_stitch: bool
     evidence_topic: str | None          # 该拼时，简报指向的证据主题（topic_id）
-    reason: str                         # prereq_gap / recurrence / unknown / no_candidate / below_value / cooldown
+    reason: str                         # prereq_gap / recurrence / unknown / no_candidate / below_tau / cooldown
     p_need: float
     tau: float
     text: str = ""                      # 应拼时填：拼入 prompt 的简报文本
-    level: str = "silent"               # silent / light / full（PRISM 对照臂恒 full 或 silent）
     matched_topic: str | None = None    # 问句命中的主题 id（第一路主题过滤用）
 
 
@@ -85,41 +82,32 @@ def decide_stitch(
     mastery_map: dict[str, dict],
     error_repeated: set[str],
     *,
-    confidence: float = 1.0,
-    severity_map: dict[str, float] | None = None,
     now: float | None = None,
     c_fa: float = DEFAULT_C_FA,
     c_fn: float = DEFAULT_C_FN,
     weak_margin: float = WEAK_MARGIN,
 ) -> StitchBrief:
-    """纯函数门控决策（VoI 三因子版，零 LLM）。所有输入已对齐 topic_id 口径。
+    """纯函数门控决策（单阈值两档，零 LLM）。所有输入已对齐 topic_id 口径。
 
     Args:
         matched_topic: 问句命中的主题（S_t），None = unknown。
         prereq_closure: matched 的全部前置主题（course_topic_store.get_prereq_predecessors 算）。
-        mastery_map: {topic_id: {risk, risk_used, p_forget, theta, logit, label, observation_count}}，
+        mastery_map: {topic_id: {risk, p_forget, theta, logit, label, observation_count}}，
             门控唯一学情数据源。theta 是入闸判据（<= weak_margin）；logit = theta -
             b_topic 只供 risk/p_need 派生（班级难度不决定谁能入闸）。
         error_repeated: 反复出错的 topic_id 集（mastery_observation 同主题 poor 计数 ≥2 派生）。
-        confidence: 问句→主题匹配的置信度 c ∈ [0,1]（sim 经 (sim-θ)/(1-θ) 归一；Ambiguity 因子）。
-        severity_map: {topic_id: safety_weight}，Task Risk 因子按**证据主题**（真正预警的
-            前置/复发主题）取——不是问句命中的主题（学生问基尔霍夫、薄弱的是通电操作
-            前置时，该加权的是后者）。缺省 1.0 = 不加权一致。
         now: cooldown 判定的当前时间戳（调用方传入，保持纯函数可单测；None=用 time.time）。
-        冷却时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带，见 _read_mastery）。
+            冷却时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带，见 _read_mastery）。
+        c_fa / c_fn: 误报/漏报代价。τ 由公式实算（单一真相源），默认 1:3 下的
+            门槛是恒定的 0.434（推导见模块头）。
         weak_margin: C1 入闸的 theta 边际（plan §3e，见模块头 WEAK_MARGIN 注释）。
 
     候选（只在两类上算 p_need，全库薄弱点禁止入闸）：
         C1 未问也带 = (prereq_closure - {matched}) ∩ {theta <= weak_margin}
         C2 问到了但提旧错 = matched ∈ error_repeated
 
-    决策（VoI 三因子 + 三档）：证据按 score = p_need·severity 选取（value 去掉 c 的
-    口径，危险前置可越过 p_need 更高的平淡候选），档位按 value = p_need · severity · c
-    取 NetVoI 最大的动作：
-        full   = 1.0·value - 0.30
-        light  = 0.6·value - 0.12
-        silent = 0
-    等价边界（教师可理解口径）：value<0.20 沉默 / 0.20≤value<0.45 轻提醒 / ≥0.45 完整。
+    决策：证据按 max(p_need) 选取（复发臂与前置臂同口径竞争），p_need >= τ 过闸即
+    输出完整简报（两档：过/不过，无 light 中间档）。
     """
     # 1. unknown 直接不拼（问句没命中任何课程主题）
     if matched_topic is None:
@@ -127,17 +115,13 @@ def decide_stitch(
 
     # 2. C1 前置缺口：前置闭包（不含 matched）里薄弱的（theta 判据，plan §3e：
     #    比 risk 不比被 sigmoid 压扁的概率；「至少两次判 poor」的语义锚点；不用
-    #    theta - b——班级难度不决定谁能入闸，b 只影响入闸后的 risk/p_need），
-    #    按薄弱程度（theta 升序）排
-    prereq_gaps = sorted(
-        [
-            (tid, mastery_map[tid])
-            for tid in (prereq_closure - {matched_topic})
-            if tid in mastery_map
-            and mastery_map[tid].get("theta", 0.0) <= weak_margin
-        ],
-        key=lambda x: x[1].get("theta", 0.0),
-    )
+    #    theta - b——班级难度不决定谁能入闸，b 只影响入闸后的 risk/p_need）
+    prereq_gaps = [
+        (tid, mastery_map[tid])
+        for tid in (prereq_closure - {matched_topic})
+        if tid in mastery_map
+        and mastery_map[tid].get("theta", 0.0) <= weak_margin
+    ]
     # 3. C2 复发：matched 本身反复出错
     is_recurrence = matched_topic in error_repeated
 
@@ -146,96 +130,11 @@ def decide_stitch(
         return StitchBrief(False, None, "no_candidate", 0.0, 1.0)
 
     # 4. p_need（阶段3 遗忘耦合，MemoryBank 口径）：
-    #    C1 前置缺口 = risk_used · p_forget——薄弱且久未触碰才值得拼；刚观测过的
-    #    薄弱点（p_forget≈0）不用预警（现在正学着呢）。C2 复发不乘遗忘（复发是错题
-    #    信号不是时间信号），保持 max(0.7, risk_used)。
+    #    C1 前置缺口 = risk · p_forget——薄弱且久未触碰才值得拼；刚观测过的
+    #    薄弱点（p_forget≈0）不用预警（现在正学着呢）。C2 复发不乘遗忘（错题
+    #    信号不是时间信号），保持 max(0.7, risk)（复发必提，见模块头）。
     def _need_gap(m: dict) -> float:
-        return m.get("risk_used", m.get("risk", 0)) * m.get("p_forget", 1.0)
-
-    p_need = 0.0
-    evidence = None
-    reason = ""
-    # 证据选取按 score = p_need·sev（与第 6 步 value 去掉 c 的口径一致），不能只比
-    # p_need——否则 sev 只能影响已选中证据的档位，p_need 略低但安全权重高的危险
-    # 前置永远抢不过平淡的复发候选
-    def _sev(t: str) -> float:
-        return max(0.0, (severity_map or {}).get(t, 1.0))
-
-    score = 0.0
-    # sev 先置 0：无候选胜出（如复发主题权重 0、rec_score=0 不大于 score=0）时，
-    # value = p_need·sev·c 不再炸 UnboundLocalError——0 的语义正是「权重 0 →
-    # value 0 → below_value 沉默」，与教师「永不因它预警」标注一致
-    sev = 0.0
-    if prereq_gaps:
-        top_tid, top = max(prereq_gaps, key=lambda x: _need_gap(x[1]) * _sev(x[0]))
-        p_need, evidence, reason, sev = _need_gap(top), top_tid, "prereq_gap", _sev(top_tid)
-        score = p_need * sev
-    if is_recurrence:
-        rec = max(
-            RECURRENCE_PNEED_FLOOR,
-            mastery_map.get(matched_topic, {}).get("risk_used", 0),
-        )
-        rec_score = rec * _sev(matched_topic)
-        if rec_score > score:
-            p_need, evidence, reason, sev = rec, matched_topic, "recurrence", _sev(matched_topic)
-
-    # 5. cooldown：证据主题 24h 内实际拼过 → 直接沉默（防过载；AIED N=81 依据）。
-    #    时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带）。
-    if evidence is not None:
-        ls = mastery_map.get(evidence, {}).get("last_stitched_at")
-        if ls is not None:
-            now_t = now if now is not None else time.time()
-            if (now_t - (ls or 0)) < COOLDOWN_HOURS * 3600:
-                return StitchBrief(False, None, "cooldown", p_need, 0.0)
-
-    # 6. VoI 三档：value = p_need·severity·c（Task Risk × Ambiguity），NetVoI 最大者胜。
-    #    severity 沿用第 4 步胜出证据的取值（选取与打分同一口径，单一真相源），
-    #    按**证据主题**取（预警指向的薄弱前置/复发主题），非问句命中主题。
-    c = min(1.0, max(0.0, confidence))
-    value = p_need * sev * c
-    net_full = 1.0 * value - L_FULL
-    net_light = V_LIGHT_COEF * value - L_LIGHT
-    if net_full <= 0 and net_light <= 0:
-        return StitchBrief(False, None, "below_value", p_need, 0.0)
-    if net_full >= net_light:
-        return StitchBrief(True, evidence, reason, p_need, 0.0, level="full")
-    return StitchBrief(True, evidence, reason, p_need, 0.0, level="light")
-
-
-def decide_stitch_prism(
-    matched_topic: str | None,
-    prereq_closure: set[str],
-    mastery_map: dict[str, dict],
-    error_repeated: set[str],
-    *,
-    c_fa: float = DEFAULT_C_FA,
-    c_fn: float = DEFAULT_C_FN,
-    weak_margin: float = WEAK_MARGIN,
-) -> StitchBrief:
-    """PRISM 两参数单阈值门控（对照臂，供 eval 消融）。语义与 decide_stitch 同候选口径。
-
-    τ = C_FA / (C_FA + p_need·C_FN)，p_need >= τ 才拼（单边界 full-or-silent）。
-    p_need 计算与 VoI 版共享同一套候选（theta 判据）与遗忘口径（复制主体，非互相
-    调用——两臂在 eval 中必须独立可审计）。
-    """
-    if matched_topic is None:
-        return StitchBrief(False, None, "unknown", 0.0, 1.0)
-
-    prereq_gaps = sorted(
-        [
-            (tid, mastery_map[tid])
-            for tid in (prereq_closure - {matched_topic})
-            if tid in mastery_map and mastery_map[tid].get("theta", 0.0) <= weak_margin
-        ],
-        key=lambda x: x[1].get("theta", 0.0),
-    )
-    is_recurrence = matched_topic in error_repeated
-
-    if not prereq_gaps and not is_recurrence:
-        return StitchBrief(False, None, "no_candidate", 0.0, 1.0)
-
-    def _need_gap(m: dict) -> float:
-        return m.get("risk_used", m.get("risk", 0)) * m.get("p_forget", 1.0)
+        return m.get("risk", 0) * m.get("p_forget", 1.0)
 
     p_need = 0.0
     evidence = None
@@ -246,16 +145,27 @@ def decide_stitch_prism(
     if is_recurrence:
         rec = max(
             RECURRENCE_PNEED_FLOOR,
-            mastery_map.get(matched_topic, {}).get("risk_used", 0),
+            mastery_map.get(matched_topic, {}).get("risk", 0),
         )
         if rec > p_need:
             p_need, evidence, reason = rec, matched_topic, "recurrence"
 
+    # 5. cooldown：证据主题 24h 内实际拼过 → 直接沉默（防过载；AIED N=81 依据）。
+    #    时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带）。
+    if evidence is not None:
+        ls = mastery_map.get(evidence, {}).get("last_stitched_at")
+        if ls is not None:
+            now_t = now if now is not None else time.time()
+            if (now_t - (ls or 0)) < COOLDOWN_HOURS * 3600:
+                return StitchBrief(False, None, "cooldown", p_need, 0.0)
+
+    # 6. 单阈值两档：p_need >= τ 过闸输出完整简报。C_FA=1/C_FN=3 的代数正解是
+    #    0.434；「约六天未练」语义锚点由 test_stitch_gate 实算夹死（b=0 口径）。
     tau = c_fa / (c_fa + p_need * c_fn)
     should = p_need >= tau
     return StitchBrief(
-        should, evidence if should else None, reason if should else "below_tau", p_need, tau,
-        level="full" if should else "silent",
+        should, evidence if should else None,
+        reason if should else "below_tau", p_need, tau,
     )
 
 
@@ -280,19 +190,11 @@ async def stitch_for_turn(
     except Exception:
         pass
 
-    # 1. S_t 问句最近邻（含 sim → VoI 的 confidence 因子）
+    # 1. S_t 问句最近邻
     hit = await _match_topic(query, course_id, db, embed_model)
     if hit is None:
         return StitchBrief(False, None, "unknown", 0.0, 1.0)
-    matched_topic, matched_sim = hit
-    # confidence 归一：sim 刚过阈值 → 下界 0.2（不是 0——边界命中被线性归一压成 0
-    # 会让 value=0 必沉默，0.55-0.60 这段召回等于白做），sim→1 → 1（笃定）
-    theta = UNKNOWN_THRESHOLD
-    if theta < 1:
-        norm = min(1.0, max(0.0, (matched_sim - theta) / (1.0 - theta)))
-        confidence = 0.2 + 0.8 * norm
-    else:
-        confidence = 1.0
+    matched_topic = hit[0]  # sim 现无消费方（confidence 因子已删），见 _match_topic
 
     # 2. 前置闭包 + label→topic_id 映射（各一次查询，下游复用免 N+1）
     closure = await get_prereq_predecessors(matched_topic, course_id, db)
@@ -302,14 +204,8 @@ async def stitch_for_turn(
     mastery_map = await _read_mastery(user_id, course_id, db, topic_map)
     error_repeated = await _read_error_repeated(user_id, course_id, db, topic_map)
 
-    # 5. 决策（VoI：confidence 来自最近邻 sim，severity 按证据主题取——闭包+matched
-    #    的 safety_weight 一次查齐传入，decide_stitch 内按 evidence 选取。evidence
-    #    只可能是闭包主题或 matched 本身，error_repeated 里其余主题查了也用不上）
-    severity_map = await _severity_map({matched_topic} | closure, course_id, db)
-    brief = decide_stitch(
-        matched_topic, closure, mastery_map, error_repeated,
-        confidence=confidence, severity_map=severity_map,
-    )
+    # 5. 决策（口径见 decide_stitch docstring）
+    brief = decide_stitch(matched_topic, closure, mastery_map, error_repeated)
 
     # 6. 应拼则填简报文本（frozen dataclass 用 replace，免手工抄字段）+ 回写 cooldown 戳
     #    戳按行主键回写（legacy 行 kp_id 是旧 hash，按 topic_id 更新 0 命中冷却失效）。
@@ -319,39 +215,12 @@ async def stitch_for_turn(
         label = ev.get("label") or brief.evidence_topic
         if ev.get("row_id"):
             await _mark_stitched(db, ev["row_id"])
-        if brief.level == "light":
-            text = f"（顺带一提：该生「{label}」此前偏薄弱，可留意）"
-        else:
-            text = (
-                f"## 学情提示（跨会话，未问亦带）\n该生在「{label}」偏薄弱"
-                f"（{ev.get('observation_count', '?')}次观测），本轮涉及其前置/相关内容，请留意诊断。"
-            )
+        text = (
+            f"## 学情提示（跨会话，未问亦带）\n该生在「{label}」偏薄弱"
+            f"（{ev.get('observation_count', '?')}次观测），本轮涉及其前置/相关内容，请留意诊断。"
+        )
         return replace(brief, text=text, matched_topic=matched_topic)
     return replace(brief, matched_topic=matched_topic)
-
-
-async def _severity_map(topic_ids: set[str], course_id: str, db) -> dict[str, float]:
-    """候选主题的 course_topic.safety_weight 批量读（Task Risk 因子，按证据主题取）。
-
-    列原名 severity，与 error_patterns.severity（错误严重度）撞义已改名 safety_weight。
-    一次查齐整组候选，免逐主题 round-trip；缺行按默认 1.0（=不加权一致）。
-    """
-    from core.db.database import CourseTopic
-    from sqlalchemy import select
-
-    tids = [t for t in topic_ids if t]
-    if not tids:
-        return {}
-    rows = (
-        await db.execute(
-            select(CourseTopic.topic_id, CourseTopic.safety_weight).where(
-                CourseTopic.course_id == course_id,
-                CourseTopic.topic_id.in_(tids),
-            )
-        )
-    ).all()
-    # w=0 是合法教师标注（「永不因它预警」），不能被 `w or 1.0` 洗成默认 1.0
-    return {t: float(w) if w is not None else 1.0 for t, w in rows}
 
 
 async def _mark_stitched(db, row_id: str) -> None:
@@ -384,8 +253,8 @@ async def _mark_stitched(db, row_id: str) -> None:
 async def _match_topic(query: str, course_id: str, db, embed_model) -> tuple[str, float] | None:
     """S_t：query embedding vs course_topic.embedding 余弦最近邻。
 
-    返回 (topic_id, sim)——sim 供 VoI 的 confidence 因子（(sim-θ)/(1-θ) 归一在调用方）；
-    低于阈值 = unknown = None。
+    返回 (topic_id, sim)——调用方现不再用 sim（confidence 因子已随 VoI 三档删除），
+    保留二元组签名避免无单测覆盖的签名变动；低于阈值 = unknown = None。
     """
     from core.db.database import CourseTopic
     from core.memory.course_topic_store import cosine
@@ -416,7 +285,7 @@ async def _match_topic(query: str, course_id: str, db, embed_model) -> tuple[str
 async def _read_mastery(
     user_id: str, course_id: str, db, topic_map: dict[str, str]
 ) -> dict[str, dict]:
-    """读 knowledge_mastery → {topic_id: {risk, risk_used, p_forget, logit, label, ...}}。
+    """读 knowledge_mastery → {topic_id: {risk, p_forget, logit, label, ...}}。
 
     id-align：行 kp_id 非 topic_id 时，用 label 经 topic_map（label_norm→topic_id）本地兜底，
     避免 N+1（topic_map 由 stitch_for_turn 一次取全传入）。
@@ -424,7 +293,7 @@ async def _read_mastery(
     掌握度估计器重构（阶段D，难度口径见 plan「班级难度估计修复」）：
     - risk 由折叠状态算出（mastery = sigmoid(theta - b_topic)，risk = 1 - mastery），
       b_topic 读 course_topic.difficulty_b（全班共享，题目难度即班级先验）；
-    - k=3 班级收缩已删（与 U(n) 和 b_topic 先验功能重复且更粗），risk_used = risk；
+    - k=3 班级收缩已删（与 U(n) 和 b_topic 先验功能重复且更粗），risk 即个人折叠值；
     - theta 一并放进 map——C1 入闸判据在 theta 空间（WEAK_MARGIN），班级难度 b
       不决定谁能入闸；logit = theta - b 仍带出供 risk 派生与排查；
     - 遗忘口径（MemoryBank）不变：p_forget = 1 - exp(-t/S)。
@@ -480,7 +349,6 @@ async def _read_mastery(
             # 按 kp_id==topic_id 更新会 0 命中 → 冷却永不生效（每轮重复拼）。回写走主键。
             "row_id": r.id,
             "risk": round(risk, 4),
-            "risk_used": round(risk, 4),  # 收缩已删（b_topic 即班级先验），保留键供门控口径不变
             "theta": round(r.theta or 0.0, 4),
             "logit": round(logit, 4),
             "p_forget": forget_prob(age_days, r.strength or 5.0),
@@ -524,4 +392,4 @@ async def _read_error_repeated(
     return {tid for tid, _cnt in rows if tid in valid}
 
 
-__all__ = ["StitchBrief", "decide_stitch", "decide_stitch_prism", "stitch_for_turn"]
+__all__ = ["StitchBrief", "decide_stitch", "stitch_for_turn"]

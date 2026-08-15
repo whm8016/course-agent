@@ -24,7 +24,7 @@ def _folded_ohm(levels=("poor",) * 3) -> dict[str, dict]:
     s = fold_observations(obs)
     return {
         "ohm": {
-            "risk": round(s.risk, 4), "risk_used": round(s.risk, 4),
+            "risk": round(s.risk, 4),
             "theta": round(s.theta, 4), "logit": round(s.logit, 4),
             "p_forget": 0.0, "observation_count": s.n_obs,
         }

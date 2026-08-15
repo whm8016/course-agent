@@ -255,11 +255,7 @@ async def get_topic_graph(
 
 
 class TopicSafetyBody(BaseModel):
-    """教师标注主题安全权重（VoI 门控 Task Risk 因子）。
-
-    0=永不因它预警（合法值，代码按 None 判默认而非 falsy）；1=不加权一致（默认）；
-    >1=安全关键（如通电操作标 3，漏报代价放大，证据选取与档位同口径加权）。
-    """
+    """教师标注主题安全权重（当前门控不读，仅存储与展示；0=不预警 1=默认 >1=安全关键）。"""
     safety_weight: float = Field(..., ge=0.0, le=10.0)
 
 
@@ -271,11 +267,10 @@ async def set_topic_safety_weight(
     teacher: dict = Depends(get_current_teacher),
     db: AsyncSession = Depends(get_db),
 ):
-    """教师标注主题安全权重——safety_weight 唯一合法写入入口（P2）。
+    """教师标注主题安全权重——safety_weight 唯一合法写入入口（P2，当前门控不读）。
 
-    不补此入口则任务风险因子生产恒 1.0（空转）：建库脚本与 course_topic_builder
-    都不写该列，只有教师知道「通电操作漏报会损坏仪器」。门控按证据主题取值：
-    选证据 score=p_need·sev、value=p_need·sev·c 同口径生效。
+    保留原因：删列需写迁移、改 kb_indexing 响应契约与相关测试，超出「去掉 VoI」
+    的范围；将来若恢复任务风险因子可直接接回。
     """
     await _get_owned_kb(db, course_id, teacher)
     row = (await db.execute(
