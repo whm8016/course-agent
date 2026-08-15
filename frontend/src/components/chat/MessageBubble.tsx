@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -95,9 +96,44 @@ function normalizeMathDelimiters(content: string): string {
     )
 }
 
+/** 流式中 Markdown 重解析节流间隔（ms）。每 token 都跑 remark/rehype/KaTeX 是
+ *  O(n²)（累计全量重解析），150ms 封顶后长回答下重解析次数从数千降到 ~40 次/分钟，
+ *  观感仍连贯（人眼对 <200ms 的文本追加不敏感）。 */
+const STREAM_MD_INTERVAL_MS = 150
+
+/**
+ * 流式期间给 Markdown 渲染喂"节流快照"：内容每 150ms 才更新一次到 state，
+ * 避免每个 token 都全量重跑 remark/rehype/KaTeX（O(n²) 卡顿）。流结束
+ * （isStreaming=false）后立即取最新内容渲染，不再等节流周期。
+ */
+function useThrottledStreamContent(content: string, isStreaming: boolean): string {
+  const [snapshot, setSnapshot] = useState(content)
+  // 上次快照渲染时刻；渲染期不能调 Date.now()（React Compiler 判不纯），初值在 effect 里设
+  const lastRenderAtRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (!isStreaming) return // 非流式分支直接用最新 content，不走节流
+    if (content === snapshot) return
+    // 节流窗口从首个 delta 到达时刻起算（挂载内容 useState 已渲过一遍）
+    if (lastRenderAtRef.current === null) lastRenderAtRef.current = Date.now()
+    // 到下一个节流点补渲染。距上次渲染超时则 delay=0（下一宏任务立即追上，
+    // setState 恒在定时器回调里异步触发，满足 React Compiler 级联渲染规则）
+    const delay = Math.max(0, STREAM_MD_INTERVAL_MS - (Date.now() - lastRenderAtRef.current))
+    const timer = setTimeout(() => {
+      lastRenderAtRef.current = Date.now()
+      setSnapshot(content)
+    }, delay)
+    return () => clearTimeout(timer)
+  }, [content, isStreaming, snapshot])
+
+  return isStreaming ? snapshot : content
+}
+
 export default function MessageBubble({ message, thinkingSteps, courseId, isStreaming }: Props) {
   const isUser = message.role === 'user'
-  const renderedContent = normalizeMathDelimiters(message.content || '')
+  // 流式期间喂节流快照（150ms 一次），非流式恒为最新内容
+  const streamContent = useThrottledStreamContent(message.content || '', !!isStreaming)
+  const renderedContent = normalizeMathDelimiters(streamContent)
 
   if (isUser) {
     const userContent = renderedContent
@@ -165,15 +201,9 @@ export default function MessageBubble({ message, thinkingSteps, courseId, isStre
 
         {message.content && (
           <div className="markdown-body text-sm leading-relaxed">
-            {isStreaming ? (
-              // 流式中渲纯文本：避免每个 token 都全量重跑 remark/rehype/KaTeX（O(n²) 体感卡顿）；
-              // done 后 isStreaming 变 false，下面 ReactMarkdown 一次性渲染最终格式。
-              <span className="whitespace-pre-wrap break-words">{message.content}</span>
-            ) : (
-              <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
-                {renderedContent}
-              </ReactMarkdown>
-            )}
+            <ReactMarkdown remarkPlugins={[remarkMath, remarkGfm]} rehypePlugins={[rehypeKatex]}>
+              {renderedContent}
+            </ReactMarkdown>
           </div>
         )}
 
