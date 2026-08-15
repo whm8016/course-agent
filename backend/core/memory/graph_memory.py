@@ -181,8 +181,14 @@ def _parse_llm_json(raw: str) -> dict | None:
     return None
 
 
-async def _llm_json(prompt: str, *, system: str | None = None, max_tokens: int = 4096) -> dict | None:
-    """带重试的 JSON LLM 调用（与 course_topic_builder 同 max_tokens 口径）。"""
+async def _llm_json(
+    prompt: str, *, system: str | None = None, max_tokens: int = 4096,
+    track: dict[str, str] | None = None,
+) -> dict | None:
+    """带重试的 JSON LLM 调用（与 course_topic_builder 同 max_tokens 口径）。
+
+    track 传入则逐次记 LLM 用量（mode 固定 graph_extract；当前生产触发链休眠，
+    保留接入保证脚本/评测路径有账）。"""
     messages: list[dict[str, str]] = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -197,6 +203,12 @@ async def _llm_json(prompt: str, *, system: str | None = None, max_tokens: int =
                 max_tokens=max_tokens,
                 stream=False,
             )
+            if track is not None:
+                from core.analytics.token_usage import track_llm_response
+
+                await track_llm_response(
+                    resp, model=_extract_model(), mode="graph_extract", **track
+                )
             raw = (resp.choices[0].message.content or "").strip()
             data = _parse_llm_json(raw)
             if data is not None:
@@ -484,7 +496,7 @@ async def _extract_from_conversation_with_catalog(
         user_message=user_message[:1500],
         assistant_answer=assistant_answer[:1500],
     )
-    data = await _llm_json(prompt)
+    data = await _llm_json(prompt, track={"course_id": course_id})
     if not isinstance(data, dict):
         logger.warning("[graph] extract_with_catalog FAILED course_id=%s", course_id)
         return None
@@ -538,7 +550,7 @@ async def _extract_from_conversation(
         f"学生提问:\n{user_message[:1500]}\n\n"
         f"教师回答:\n{assistant_answer[:1500]}"
     )
-    data = await _llm_json(source, system=_EXTRACT_SYSTEM_PROMPT)
+    data = await _llm_json(source, system=_EXTRACT_SYSTEM_PROMPT, track={"course_id": course_id})
     if isinstance(data, dict):
         kp_count = len(data.get("knowledge_points") or [])
         err_count = len(data.get("error_patterns") or [])

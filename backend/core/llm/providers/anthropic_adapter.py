@@ -313,8 +313,23 @@ def _response_to_openai(resp: Any) -> Any:
         tool_calls=tool_calls or None,
     )
     finish = "tool_calls" if tool_calls else "stop"
+    # usage 归一（成本采集）：Anthropic 三字段互斥（input 不含 cache），折成 OpenAI 子集
+    # 语义（prompt_tokens = input + cache_read + cache_creation，cached_tokens = cache_read），
+    # 与流式 message_start 分支同款折算——否则辅助调用点的 usage_from_response 读到 None
+    # 静默无账。cache_creation 按 input 价计（真实 1.25x，低估 20%，好过整块丢弃）。
+    _u = getattr(resp, "usage", None)
+    _in = int(getattr(_u, "input_tokens", 0) or 0) if _u else 0
+    _cr = int(getattr(_u, "cache_read_input_tokens", 0) or 0) if _u else 0
+    _cc = int(getattr(_u, "cache_creation_input_tokens", 0) or 0) if _u else 0
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=message, finish_reason=finish)]
+        choices=[SimpleNamespace(message=message, finish_reason=finish)],
+        model=getattr(resp, "model", None),
+        usage=SimpleNamespace(
+            prompt_tokens=_in + _cr + _cc,
+            completion_tokens=int(getattr(_u, "output_tokens", 0) or 0) if _u else 0,
+            total_tokens=_in + _cr + _cc + (int(getattr(_u, "output_tokens", 0) or 0) if _u else 0),
+            prompt_tokens_details=SimpleNamespace(cached_tokens=_cr),
+        ),
     )
 
 
@@ -417,12 +432,21 @@ class _AnthropicStream:
                         ))
 
                     elif etype == "message_start":
-                        # input_tokens + cache_read 在消息开始时给出
+                        # input_tokens + cache_read 在消息开始时给出。
+                        # Anthropic 三字段互斥（input 不含 cache），此处折成 OpenAI 子集语义：
+                        # 合成块的 prompt_tokens = input + cache_read + cache_creation（总输入），
+                        # cached_tokens = cache_read（命中子集）。cache_creation 按 input 价计
+                        # （真实 1.25x，该切片低估 20%，好过整块丢弃），与非流式 _response_to_openai 同款。
                         _msg = getattr(event, "message", None)
                         _u = getattr(_msg, "usage", None) if _msg else None
                         if _u is not None:
-                            usage_in = int(getattr(_u, "input_tokens", 0) or 0)
-                            usage_cache = int(getattr(_u, "cache_read_input_tokens", 0) or 0)
+                            _cr = int(getattr(_u, "cache_read_input_tokens", 0) or 0)
+                            usage_in = (
+                                int(getattr(_u, "input_tokens", 0) or 0)
+                                + _cr
+                                + int(getattr(_u, "cache_creation_input_tokens", 0) or 0)
+                            )
+                            usage_cache = _cr
 
                     elif etype == "message_delta":
                         # output_tokens 在消息增量结束时给出（累计值）

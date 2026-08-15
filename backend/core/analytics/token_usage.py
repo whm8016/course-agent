@@ -20,12 +20,19 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.db.database import AsyncSessionLocal, LlmUsageDaily, LlmUsageRecord
-from core.observability.cost import TokenUsage
+from core.observability.cost import (
+    TokenUsage,
+    estimate_cost,
+    observe_cost,
+    observe_usage,
+    usage_from_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +96,77 @@ async def record_llm_usage(
         logger.warning(
             "record_llm_usage failed model=%s mode=%s", model, mode, exc_info=True
         )
+
+
+async def track_llm_usage(
+    usage: TokenUsage | None,
+    *,
+    model: str,
+    mode: str = "aux",
+    user_id: str = "",
+    course_id: str = "",
+    session_id: str = "",
+    turn_id: str = "",
+) -> None:
+    """辅助 LLM 调用的一站式 usage 埋点（Prometheus token/cost 两 Counter + 明细落库）。
+
+    供**不走 agent loop** 的调用点用（judge/L2 摘要/quiz 追问/视觉/图谱/enrichment/bot…）：
+    loop 主链路在 loop.py 自有采集（turn_usage 累积），勿在此重复调，否则双计。
+
+    - ``mode`` 必须有默认值：防调用方 track dict 缺 key 时 ``**`` 展开 TypeError 被
+      best-effort except 吞掉，静默丢账。
+    - 不调 cost_quota accrue：配额只管对话主链路（超预算降 fast_model 的语义对辅助
+      后台调用无意义）。
+    - best-effort：任何异常只 warning 绝不抛（横切账单关注点，同 record_llm_usage 契约）。
+    """
+    if usage is None:
+        return
+    try:
+        observe_usage(model, usage)
+        cost = estimate_cost(model, usage)
+        observe_cost(model, course_id, mode, cost)
+        from settings import get_settings
+        if get_settings().usage_tracking.enabled:
+            await record_llm_usage(
+                user_id=str(user_id or ""),
+                course_id=str(course_id or ""),
+                session_id=str(session_id or ""),
+                turn_id=str(turn_id or ""),
+                mode=mode or "aux",
+                model=model,
+                usage=usage,
+                cost_usd=cost,
+                rounds=1,
+            )
+    except Exception:
+        logger.warning(
+            "track_llm_usage failed model=%s mode=%s", model, mode, exc_info=True
+        )
+
+
+async def track_llm_response(
+    resp: Any,
+    *,
+    model: str,
+    mode: str = "aux",
+    user_id: str = "",
+    course_id: str = "",
+    session_id: str = "",
+    turn_id: str = "",
+) -> None:
+    """``track_llm_usage`` 的非流式响应版：从 ``resp.usage`` 归一后埋点，无 usage 静默跳过。
+
+    ``model`` 传请求模型名；实际以 ``resp.model`` 优先（fallback 换模型时账按真实模型查价）。
+    """
+    usage = usage_from_response(resp)
+    if usage is None:
+        return
+    real_model = str(getattr(resp, "model", None) or model)
+    await track_llm_usage(
+        usage, model=real_model, mode=mode,
+        user_id=user_id, course_id=course_id,
+        session_id=session_id, turn_id=turn_id,
+    )
 
 
 async def rollup_daily(days: list[str]) -> int:

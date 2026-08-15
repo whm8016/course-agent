@@ -102,6 +102,12 @@ class OpenAICompatProvider(LLMProvider):
             logger.error("OpenAI-compat API error: %s", e)
             return LLMResponse(content=f"Error calling LLM: {e}", finish_reason="error")
 
+        # 用量埋点：bot 子系统自建 client，不经 agent loop / chat_complete，单独计费。
+        # mode-only（user 归属在 bot loop 上层，provider 层无 user 概念，账单归平台成本）。
+        from core.analytics.token_usage import track_llm_response
+
+        await track_llm_response(response, model=model, mode="bot_chat")
+
         choice = response.choices[0] if response.choices else None
         if not choice:
             return LLMResponse(content="No response from model", finish_reason="error")

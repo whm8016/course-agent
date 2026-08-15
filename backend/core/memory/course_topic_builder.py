@@ -64,7 +64,7 @@ B：{b}
 规则：只判「A 是 B 的直接前置」这一方向；不确定或双向都依赖时 is_prereq=false（宁可漏连不乱连）。"""
 
 
-async def _llm_json(llm, model: str, prompt: str) -> dict | None:
+async def _llm_json(llm, model: str, prompt: str, course_id: str = "") -> dict | None:
     try:
         # deepseek-v4-pro 等 reasoning 模型先吐 reasoning_content 再吐 content；
         # max_tokens 太小会被 reasoning 占满→content 空(finish=length)→json.loads 崩。
@@ -72,6 +72,13 @@ async def _llm_json(llm, model: str, prompt: str) -> dict | None:
             model=model, messages=[{"role": "user", "content": prompt}],
             temperature=0.1, max_tokens=4096, stream=False,
         )
+        if course_id:
+            # 用量埋点：主题图抽取是 ARQ 后台课程级调用（无 user），逐次记
+            from core.analytics.token_usage import track_llm_response
+
+            await track_llm_response(
+                resp, model=model, mode="topic_build", course_id=course_id
+            )
         raw = (resp.choices[0].message.content or "").strip()
         raw = re.sub(r"^```json\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
@@ -124,7 +131,10 @@ async def extract_topics_from_chunks(
     for sec, group in by_section.items():
         for block in _pack_blocks(group, max_chars_per_call):
             text = "\n".join(ck["text"] for ck in block)
-            data = await _llm_json(llm, model, f"章节：{sec}\n\n{text}\n\n{_EXTRACT_TOPICS_PROMPT}")
+            data = await _llm_json(
+                llm, model, f"章节：{sec}\n\n{text}\n\n{_EXTRACT_TOPICS_PROMPT}",
+                course_id=course_id,
+            )
             for t in (data or {}).get("topics", []) if isinstance(data, dict) else []:
                 label = str(t.get("label") or "").strip()
                 if not label:
@@ -187,6 +197,7 @@ async def extract_prereq_edges(
             data = await _llm_json(
                 llm, model,
                 _EXTRACT_PREREQ_PROMPT.format(a=src["label"], b=dst["label"]),
+                course_id=course_id,
             )
             if isinstance(data, dict) and data.get("is_prereq") and (data.get("confidence") or 0) >= 0.6:
                 edges.append({

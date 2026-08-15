@@ -41,6 +41,10 @@ _PENDING_STALE_SECONDS = 300
 # processing 超过此秒数（用 created_at 近似，正常 promote 仅需数秒）→ 视崩溃遗留回 pending
 _PROCESSING_TIMEOUT_SECONDS = 600
 
+# 遗忘强度 S 强化上限（MemoryBank spacing effect）：good 观测（llm_judge 判 good /
+# quiz 答对）每次 +1，封顶防无限增长让 p_forget 恒 0。
+_STRENGTH_CAP = 15.0
+
 # importance 累计 Redis key（事件驱动触发用）
 _IMPORTANCE_KEY = "mem_importance:"
 _IMPORTANCE_TTL = 86400
@@ -391,6 +395,10 @@ async def _write_mastery_observations(
 
     # 折叠写回：按 topic 全量重放观测日志 → 更新 theta/n_obs 与派生 mastery/risk
     topic_ids = sorted({j.topic_id for j in judgements})
+    # strength 强化集：本批判 good 的主题（quiz 答对经 Judgement(level="good") 同入口）。
+    # 论文式(4)：S 随强化增大 → p_forget 减小（忘得更慢）。教师肯定词表路径已废
+    # （append_mastery_from_topics 无生产调用方），这里是 S 唯一的生产递增点。
+    reinforced = {j.topic_id for j in judgements if j.level == "good"}
     from core.db.database import CourseTopic
     from core.memory.mastery_state import FoldState, fold_observations
 
@@ -461,6 +469,8 @@ async def _write_mastery_observations(
                     first_observed_at=ep_time, last_observed_at=ep_time,
                     evidence_episode_ids=[e.id for e in episode_objs][:20],
                     theta=round(state.theta, 6), n_obs=state.n_obs,
+                    # 新行含 good 观测：初值 5 + 1（与 append_mastery_from_topics 旧口径一致）
+                    strength=6.0 if tid in reinforced else 5.0,
                 )
             )
         else:
@@ -469,6 +479,8 @@ async def _write_mastery_observations(
             row.mastery = round(state.mastery, 4)
             row.risk = round(state.risk, 4)
             row.observation_count = state.n_obs
+            if tid in reinforced:
+                row.strength = min(_STRENGTH_CAP, (row.strength or 5.0) + 1.0)
             # last_observed_at 单调不回退：迟到观测重折不把时间戳拉回过去
             if ep_time > (row.last_observed_at or 0):
                 row.last_observed_at = ep_time
@@ -546,6 +558,11 @@ async def _judge_and_record(
                     judge_segment(
                         [(ep.user_msg, ep.assistant_msg) for ep in seg],
                         [(t, *topics_meta[t]) for t in seg_topics],
+                        track={
+                            "user_id": user_id,
+                            "course_id": course_id,
+                            "session_id": seg[0].session_id if seg else "",
+                        },
                     ),
                     timeout=_JUDGE_TIMEOUT_SECONDS,
                 )

@@ -297,7 +297,7 @@ async def test_seg_topics_ranked_by_sim_not_alphabetical(db):
 
     seen_topics: list[list] = []
 
-    async def _fake_judge(dialog, topics):
+    async def _fake_judge(dialog, topics, track=None):
         seen_topics.append([t for t, _l, _d in topics])
         return _mk_result()
 

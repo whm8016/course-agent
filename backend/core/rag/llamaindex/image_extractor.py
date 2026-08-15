@@ -421,6 +421,11 @@ def _make_vision_caption_func(
                 )
 
         content = resp.choices[0].message.content or ""
+        # 用量埋点：摄入期 VLM 图注（上面三个 create 分支共用此出口，一处覆盖）。
+        # caption 工厂无 course 上下文，mode-only 入平台账（与 bot_chat 同策略）。
+        from core.analytics.token_usage import track_llm_response
+
+        await track_llm_response(resp, model=INDEX_VISION_MODEL, mode="index_vision")
         if cache_key and content.strip():
             async with cache_lock:
                 desc_cache[cache_key] = content

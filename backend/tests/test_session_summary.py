@@ -342,7 +342,7 @@ async def test_do_compress_falls_back_to_text_on_bad_json():
         resp.choices[0].message.content = "这不是JSON，重试也没用"
         return resp
 
-    async def fake_text(existing, msgs):
+    async def fake_text(existing, msgs, track=None):
         return "降级文本摘要"
 
     with patch.object(ss, "async_openai_client", _mock_client_with(fake_create)):

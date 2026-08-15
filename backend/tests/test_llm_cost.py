@@ -88,8 +88,25 @@ def test_anthropic_synthesized_chunk_read_back_by_normalizer():
 def test_estimate_cost_prefix_match():
     # deepseek-v4-pro 未全等命中，应模糊命中家族前缀 deepseek-v4
     cost = estimate_cost("deepseek-v4-pro", TokenUsage(1_000_000, 500_000, 200_000))
-    # input 0.5 + output 1.0 + cache 0.02 = 1.52
-    assert cost == pytest.approx(1.52, abs=1e-6)
+    # 扣减公式：(1M-0.2M)*0.5 + 0.5M*2.0 + 0.2M*0.1 = 0.4 + 1.0 + 0.02 = 1.42
+    # （旧加法公式 1.52 是双重计费：cache 命中部分被 input 价又收了一遍，LiteLLM #6215 同款）
+    assert cost == pytest.approx(1.42, abs=1e-6)
+
+
+def test_estimate_cost_full_cache_hit_no_double_charge():
+    """全命中不得双计：input 全部来自 cache 命中时，只应按 cache 价收一份。"""
+    cost = estimate_cost("gpt-4o", TokenUsage(1_000_000, 0, 1_000_000))
+    # (1M-1M)*2.5 + 0 + 1M*1.25 = 1.25（旧加法会算出 2.5+1.25=3.75）
+    assert cost == pytest.approx(1.25, abs=1e-6)
+
+
+def test_estimate_cost_cache_exceeds_input_clamped():
+    """语义异常 provider（cache_read > input）钳制，未命中量不为负、成本不为负。
+    min(200,100)=100：只按 input 上限内的 100 计 cache 价，超出部分不重复计。"""
+    cost = estimate_cost("gpt-4o", TokenUsage(100, 0, 200))
+    # (100-100)*2.5 + 0 + 100*1.25/1M
+    assert cost == pytest.approx(100 * 1.25 / 1_000_000, abs=1e-9)
+    assert cost >= 0
 
 
 def test_estimate_cost_exact_match():
@@ -230,10 +247,11 @@ class _FakeAnthropicClient:
 @pytest.mark.asyncio
 async def test_anthropic_stream_emits_usage_chunk_from_events():
     events = [
-        SimpleNamespace(  # message_start：input + cache_read
+        SimpleNamespace(  # message_start：input + cache_read + cache_creation（Anthropic 三字段互斥）
             type="message_start",
             message=SimpleNamespace(usage=SimpleNamespace(
-                input_tokens=100, cache_read_input_tokens=30, output_tokens=1,
+                input_tokens=100, cache_read_input_tokens=30,
+                cache_creation_input_tokens=20, output_tokens=1,
             )),
         ),
         SimpleNamespace(  # 文本 delta
@@ -254,12 +272,50 @@ async def test_anthropic_stream_emits_usage_chunk_from_events():
     async for chunk in stream:
         chunks.append(chunk)
 
-    # 末块必须是合成的 usage 块，且能被 normalizer 读回正确值
+    # 末块必须是合成的 usage 块，且能被 normalizer 读回正确值。
+    # 折算后为 OpenAI 子集语义：input = 100+30+20 = 150（总输入），cache_read = 30（命中子集）。
     assert usage_from_response_chunk(chunks[-1]) == TokenUsage(
-        input_tokens=100, output_tokens=50, cache_read_tokens=30,
+        input_tokens=150, output_tokens=50, cache_read_tokens=30,
     )
     # 文本块仍在（验证 usage 合成没破坏正文流）
     assert any(
         getattr(getattr(getattr(c, "choices", [None])[0] or SimpleNamespace(), "delta", SimpleNamespace()), "content", None) == "hi"
         for c in chunks
     )
+
+
+# ---------------------------------------------------------------------------
+# Anthropic 非流式：_response_to_openai 补 usage 折算（辅助调用点计费的前提）
+# ---------------------------------------------------------------------------
+
+def test_anthropic_nonstream_response_carries_folded_usage():
+    """非流式转换必须带 usage 且折成 OpenAI 子集语义（binding=anthropic 时 judge/L2
+    摘要等辅助调用点靠 resp.usage 计费，缺失则静默无账）。"""
+    from core.llm.providers.anthropic_adapter import _response_to_openai
+
+    resp = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="ok")],
+        model="claude-sonnet-4",
+        usage=SimpleNamespace(
+            input_tokens=100, cache_read_input_tokens=30,
+            cache_creation_input_tokens=20, output_tokens=50,
+        ),
+    )
+    out = _response_to_openai(resp)
+    # usage_from_response（非流式归一）能读回：input=100+30+20、cached=30
+    from core.observability.cost import usage_from_response
+    assert usage_from_response(out) == TokenUsage(150, 50, 30)
+    # 正文不受影响
+    assert out.choices[0].message.content == "ok"
+    # 真实模型名透传（计费按实际模型查价）
+    assert out.model == "claude-sonnet-4"
+
+
+def test_anthropic_nonstream_response_without_usage():
+    """anthropic Message 无 usage 字段时不炸：usage 归一为全 0 而非崩溃。"""
+    from core.llm.providers.anthropic_adapter import _response_to_openai
+    from core.observability.cost import usage_from_response
+
+    resp = SimpleNamespace(content=[SimpleNamespace(type="text", text="x")])
+    out = _response_to_openai(resp)
+    assert usage_from_response(out) == TokenUsage(0, 0, 0)

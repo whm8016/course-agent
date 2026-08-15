@@ -48,6 +48,7 @@ async def websocket_question_followup(websocket: WebSocket):
             user_message=user_message,
             question_context=ctx,
             history_context=hist,
+            user_id=str(getattr(user, "user_id", "") or ""),
         ):
             full += chunk
             try:

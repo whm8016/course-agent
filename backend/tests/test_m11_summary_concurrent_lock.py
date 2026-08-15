@@ -91,7 +91,7 @@ async def test_concurrent_compress_same_session_only_one_runs():
     compress_call_count = 0
     compress_started = asyncio.Event()
 
-    async def slow_do_compress(existing, msgs):
+    async def slow_do_compress(existing, msgs, track=None):
         nonlocal compress_call_count
         compress_call_count += 1
         compress_started.set()
@@ -121,7 +121,7 @@ async def test_different_sessions_compress_concurrently():
 
     barrier = asyncio.Event()
 
-    async def gated_do_compress(existing, msgs):
+    async def gated_do_compress(existing, msgs, track=None):
         await barrier.wait()  # 让两个并发压缩同时卡在 _do_compress
         return "summary"
 

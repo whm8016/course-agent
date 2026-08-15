@@ -51,6 +51,21 @@ class TokenUsage:
         )
 
 
+def _normalize_usage(usage: Any) -> TokenUsage | None:
+    """把 OpenAI 形态的 usage 对象归一为 TokenUsage；prompt/completion 均缺失返回 None。"""
+    prompt = getattr(usage, "prompt_tokens", None)
+    completion = getattr(usage, "completion_tokens", None)
+    if prompt is None and completion is None:
+        return None
+    details = getattr(usage, "prompt_tokens_details", None)
+    cached = getattr(details, "cached_tokens", 0) if details is not None else 0
+    return TokenUsage(
+        input_tokens=int(prompt or 0),
+        output_tokens=int(completion or 0),
+        cache_read_tokens=int(cached or 0),
+    )
+
+
 def usage_from_response_chunk(chunk: Any) -> TokenUsage | None:
     """从流式 chunk 归一出 TokenUsage；无 usage 字段返回 None。
 
@@ -66,17 +81,20 @@ def usage_from_response_chunk(chunk: Any) -> TokenUsage | None:
     usage = getattr(chunk, "usage", None)
     if usage is None:
         return None
-    prompt = getattr(usage, "prompt_tokens", None)
-    completion = getattr(usage, "completion_tokens", None)
-    if prompt is None and completion is None:
+    return _normalize_usage(usage)
+
+
+def usage_from_response(resp: Any) -> TokenUsage | None:
+    """从非流式响应对象归一出 TokenUsage（``resp.usage`` 与流式末块同字段结构）。
+
+    供不走 agent loop 的辅助 LLM 调用点读 usage（judge/L2 摘要/追问/视觉/图谱等，
+    经 ``analytics.token_usage.track_llm_response`` 一站式埋点）；Anthropic binding 下
+    ``resp.usage`` 由 anthropic_adapter._response_to_openai 合成（同 OpenAI 形态）。
+    """
+    usage = getattr(resp, "usage", None)
+    if usage is None:
         return None
-    details = getattr(usage, "prompt_tokens_details", None)
-    cached = getattr(details, "cached_tokens", 0) if details is not None else 0
-    return TokenUsage(
-        input_tokens=int(prompt or 0),
-        output_tokens=int(completion or 0),
-        cache_read_tokens=int(cached or 0),
-    )
+    return _normalize_usage(usage)
 
 
 # --------------------------------------------------------------------------
@@ -142,6 +160,12 @@ def estimate_cost(model: str | None, usage: TokenUsage | None) -> float:
     价目表单位：每 1M token 的美元价，结构
     ``{"<model>": {"input": 1.1, "output": 2.76, "cache_read": 0.28}}``。
     缺字段按 0 处理；模型未命中/无价目表/usage 为 None 均返回 0.0（可观测但不阻塞业务）。
+
+    【扣减公式，勿改回加法】TokenUsage 是 OpenAI 子集语义：cache 命中量已计入
+    input_tokens（provider 把命中部分算在 prompt_tokens 里，见 TokenUsage docstring）。
+    故命中部分必须先从 input 里扣掉再乘 input 全价，否则同一批 token 会被收两遍钱
+    （input 价 + cache 价）——LiteLLM #6215/#11364、Langfuse #12306 同款历史 bug。
+    ``min`` 钳制防御语义异常的 provider（cache_read > input 时不让未命中量变负）。
     """
     if usage is None:
         return 0.0
@@ -151,10 +175,11 @@ def estimate_cost(model: str | None, usage: TokenUsage | None) -> float:
     in_per_1m = float(price.get("input", 0) or 0)
     out_per_1m = float(price.get("output", 0) or 0)
     cache_per_1m = float(price.get("cache_read", 0) or 0)
+    cache = min(usage.cache_read_tokens, usage.input_tokens)
     cost = (
-        usage.input_tokens * in_per_1m / 1_000_000
+        (usage.input_tokens - cache) * in_per_1m / 1_000_000
         + usage.output_tokens * out_per_1m / 1_000_000
-        + usage.cache_read_tokens * cache_per_1m / 1_000_000
+        + cache * cache_per_1m / 1_000_000
     )
     return round(cost, 6)
 

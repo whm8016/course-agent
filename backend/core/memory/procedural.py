@@ -75,6 +75,13 @@ async def generate_skill_draft(
             max_tokens=600,
             stream=False,
         )
+        # 用量埋点（当前该链路休眠，保留接入保证启用即有账）
+        from core.analytics.token_usage import track_llm_response
+
+        await track_llm_response(
+            resp, model=get_settings().llm.text_model, mode="procedural_draft",
+            user_id=user_id, course_id=course_id,
+        )
         return ((resp.choices[0].message.content or "").strip()) or None
     except Exception as exc:
         logger.warning(
@@ -150,8 +157,15 @@ async def maybe_generate_procedural(db, user_id: str, course_id: str) -> str | N
     }
     import math as _math
 
+    # risk = 1 - sigmoid(theta - b_topic)（掌握度取反）。旧版写成 1 - sigmoid(-theta + b)
+    # = sigmoid(theta - b) = 掌握度本身——风险算成了掌握度，薄弱点排序全反（掌握越高
+    # 越"薄弱"）。与门控读侧（proactive._read_mastery）、mastery_state 同口径。
+    def _risk_derived(theta: float, b: float) -> float:
+        # 1 - sigmoid(theta - b) = 1/(1+e^{theta-b})：theta 越高（掌握越好）risk 越低
+        return 1.0 / (1.0 + _math.exp(theta - b))
+
     risk_by_label = {
-        r.label: 1.0 - 1.0 / (1.0 + _math.exp(-(r.theta or 0.0) + b_map.get(r.kp_id, 0.0)))
+        r.label: _risk_derived(r.theta or 0.0, b_map.get(r.kp_id, 0.0))
         for r in rows
         if r.label
     }

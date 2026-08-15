@@ -30,6 +30,7 @@ class FollowupAgent(QuestionAgentBase):
         question_context: dict[str, Any],
         history_context: str = "",
         attachments: list[Any] | None = None,
+        user_id: str = "",
     ) -> AsyncGenerator[str, None]:
         """Yield LLM content chunks for one follow-up turn."""
         system_prompt = self.get_prompt("system", "") or (
@@ -55,6 +56,9 @@ class FollowupAgent(QuestionAgentBase):
             system_prompt=system_prompt,
             stage="followup_answer",
             attachments=attachments,
+            # 用量埋点：单题追问不走 agent loop（loop 只覆盖 /run/quiz 主链路），
+            # 此处单独计费；course/session 维度此旁路拿不到，留空入平台账
+            track={"mode": "quiz_followup", "user_id": user_id},
             trace_meta=build_trace_metadata(
                 call_id=new_call_id(f"quiz-followup-{qid}"),
                 phase="generation",

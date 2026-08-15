@@ -77,6 +77,7 @@ async def describe_image_attachments(
     prompt: str = _VISION_DESC_PROMPT,
     max_tokens: int = 1024,
     retry_config: Any = None,
+    track: dict[str, str] | None = None,
 ) -> list[str]:
     """用 vision 模型逐张描述图片，返回描述列表（与 images 等长，失败/无数据项为空串）。
 
@@ -136,6 +137,11 @@ async def describe_image_attachments(
             )
             desc = ((resp.choices[0].message.content or "").strip()) if resp.choices else ""
             descriptions.append(desc)
+            if track is not None:
+                # 用量埋点：逐张计（vision 独立供应商，账单与主对话模型分开看）
+                from core.analytics.token_usage import track_llm_response
+
+                await track_llm_response(resp, model=vision_model, **track)
             if not desc:
                 logger.warning("vision_describe: 图片 %d 返回空描述", idx + 1)
         except (CircuitOpenError, LLMRetryError) as exc:
@@ -257,7 +263,15 @@ async def describe_images_into(
         return base_text
 
     descriptions = await describe_image_attachments(
-        vision_client, eff_vision_model, image_attachments
+        vision_client, eff_vision_model, image_attachments,
+        # 用量埋点：两阶段视觉描述不走 agent loop，单独计费；user/course/session
+        # 取自 UnifiedContext（与 loop 的 record_llm_usage 同源）
+        track={
+            "mode": "vision_describe",
+            "user_id": str(user_id or getattr(context, "user_id", "") or ""),
+            "course_id": str(getattr(context, "course_id", "") or ""),
+            "session_id": str(getattr(context, "session_id", "") or ""),
+        },
     )
     block = build_image_description_block(descriptions)
     if not block:

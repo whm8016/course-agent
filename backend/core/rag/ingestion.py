@@ -466,6 +466,9 @@ async def _apply_contextual_enrichment(
                 model=fast_model,
                 temperature=0.3,
                 max_tokens=200,
+                # 用量埋点：enrichment 是索引期课程级调用（无 user），mode 单独标记
+                # 便于在用量明细里与对话主链路区分。
+                track={"mode": "rag_enrich", "course_id": course_id},
             )
 
         cache_path = _lightrag_ingest_chunks_dir(course_id) / "contextual_cache.json"

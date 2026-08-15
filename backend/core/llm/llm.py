@@ -310,6 +310,7 @@ async def chat_complete(
     model: str | None = None,
     temperature: float = 0.7,
     max_tokens: int = 2048,
+    track: dict[str, str] | None = None,
 ) -> str:
     """
     非流式 LLM 调用（带可靠性增强）
@@ -321,6 +322,9 @@ async def chat_complete(
         model: 模型名称（可选，默认使用 TEXT_MODEL）
         temperature: 温度参数
         max_tokens: 最大 token 数
+        track: 可选 usage 埋点维度 dict（user_id/course_id/session_id/turn_id/mode），
+            传入则 resp.usage 经 track_llm_response 埋 Prometheus + 落用量明细；不传
+            行为零变化（usage 照旧丢弃）。供不走 agent loop 的辅助调用点计费。
 
     返回：
         LLM 生成的完整回复
@@ -339,6 +343,11 @@ async def chat_complete(
             temperature=temperature,
             max_tokens=max_tokens,
         )
+        if track is not None:
+            # 函数内 lazy import（先例 loop.py 的 record_llm_usage）：token_usage 依赖
+            # database engine，避免 import 期触发构建；依赖方向无环（红队已验证）。
+            from core.analytics.token_usage import track_llm_response
+            await track_llm_response(response, model=model, **track)
         return response.choices[0].message.content or ""
 
     except (CircuitOpenError, LLMRetryError) as e:

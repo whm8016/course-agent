@@ -140,6 +140,7 @@ def _validate(
 async def judge_segment(
     segment_turns: list[tuple[str, str]],
     topics: list[tuple[str, str, str]],
+    track: dict[str, str] | None = None,
 ) -> JudgeResult | None:
     """一段一次 LLM 闭集序数判定。学生原话全文 + 教师回复每轮截断前 100 字。
 
@@ -153,6 +154,8 @@ async def judge_segment(
         segment_turns: [(user_msg, assistant_msg)]，段内全部轮次原文。
         topics: [(topic_id, label, definition)]，仅该段 match_topics 命中的主题（≤3）。
             空列表 = 无可判主题，直接返回 None（不调 LLM）。
+        track: 可选 usage 埋点维度（user_id/course_id/session_id），传入则 LLM 用量
+            落 Prometheus + 明细（mode 固定 memory_judge）；不传零变化（评测脚本用）。
 
     Returns:
         JudgeResult；LLM 不可用/解析失败返回 None（fail-safe，调用方跳过掌握度
@@ -194,6 +197,13 @@ async def judge_segment(
             max_tokens=8000,
             stream=False,
         )
+        if track is not None:
+            # 用量埋点：判定器是后台巩固的主力 LLM 消耗（每段一次），best-effort 不阻塞
+            from core.analytics.token_usage import track_llm_response
+
+            await track_llm_response(
+                resp, model=get_settings().llm.text_model, mode="memory_judge", **track
+            )
         raw = (resp.choices[0].message.content or "").strip()
         data = extract_json_from_llm(raw)
         if not data:

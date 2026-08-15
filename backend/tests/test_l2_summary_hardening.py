@@ -88,7 +88,7 @@ async def test_keyset_incremental_only_feeds_post_cursor(client):
         mgr = ss.SessionSummaryManager(window_size=_WINDOW, buffer_size=_BUFFER, compress_interval=1)
         seen: list[str] = []
 
-        async def record(existing, msgs):
+        async def record(existing, msgs, track=None):
             seen.extend(m.id for m in msgs)
             return '{"topics":["t"]}'
 
@@ -118,7 +118,7 @@ async def test_legacy_cursor_compat_writes_new_cursor(client):
         mgr = ss.SessionSummaryManager(window_size=_WINDOW, buffer_size=_BUFFER, compress_interval=1)
         seen: list[str] = []
 
-        async def record(existing, msgs):
+        async def record(existing, msgs, track=None):
             seen.extend(m.id for m in msgs)
             return '{"topics":["t"]}'
 

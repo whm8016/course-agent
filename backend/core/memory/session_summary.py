@@ -695,8 +695,14 @@ class SessionSummaryManager:
             )
             return False
 
-        # 7) LLM 压缩（增量消息）
-        new_summary = await self._do_compress(existing_summary, new_messages)
+        # 7) LLM 压缩（增量消息）；track 携带 user/course/session（Session 行已在手，
+        #    供 LLM 用量埋点，比从 main.py 事件穿 4 层透传波及更小）
+        track = {
+            "user_id": str(session.user_id or ""),
+            "course_id": str(session.course_id or ""),
+            "session_id": session_id,
+        }
+        new_summary = await self._do_compress(existing_summary, new_messages, track)
         if not new_summary:
             return False
 
@@ -767,6 +773,7 @@ class SessionSummaryManager:
         self,
         existing_summary: str,
         messages: list[Message],
+        track: dict[str, str] | None = None,
     ) -> str | None:
         """结构化 v2 抽取 + 代码裁决合并 + 显著度淘汰；失败降级旧文本逻辑。
 
@@ -799,6 +806,13 @@ class SessionSummaryManager:
                     temperature=temperature,
                     max_tokens=800,
                 )
+                if track is not None:
+                    # 用量埋点：双温重试循环内逐次记（最多 2 次调用各一行，别只记最后）
+                    from core.analytics.token_usage import track_llm_response
+
+                    await track_llm_response(
+                        resp, model=TEXT_MODEL, mode="l2_summary", **track
+                    )
                 raw = (resp.choices[0].message.content or "").strip()
             except Exception as e:
                 logger.warning("[L2] structured compress temp=%s failed: %s", temperature, e)
@@ -827,12 +841,13 @@ class SessionSummaryManager:
 
         # 降级：旧自由文本融合逻辑（结构化连续失败时兜底，保证不阻塞）
         logger.warning("[L2] structured compress exhausted, fallback to text summary")
-        return await self._do_compress_text(existing_summary, messages)
+        return await self._do_compress_text(existing_summary, messages, track)
 
     async def _do_compress_text(
         self,
         existing_summary: str,
         messages: list[Message],
+        track: dict[str, str] | None = None,
     ) -> str | None:
         """降级路径：旧自由文本融合（结构化 JSON 抽取连续失败时兜底，保证不阻塞）。"""
         msg_text = "\n".join(
@@ -850,6 +865,12 @@ class SessionSummaryManager:
                 temperature=0.3,
                 max_tokens=800,
             )
+            if track is not None:
+                from core.analytics.token_usage import track_llm_response
+
+                await track_llm_response(
+                    resp, model=TEXT_MODEL, mode="l2_summary", **track
+                )
             summary = (resp.choices[0].message.content or "").strip()
             logger.info("[L2] text fallback compress done summary_len=%d", len(summary))
             return summary or None

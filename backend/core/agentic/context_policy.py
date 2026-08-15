@@ -242,6 +242,9 @@ async def _summarize_masked_text(masked_text: str, model: str) -> str:
             model=model,
             temperature=0.3,
             max_tokens=512,
+            # 用量埋点：此摘要调用独立于 loop 的 turn_usage（loop 只计 _one_round），
+            # 单独记 mode=ctx_summary（user/course 在 loop 层未下传到此，留空入平台账）。
+            track={"mode": "ctx_summary"},
         )
     except Exception:
         logger.warning("context_policy hybrid 摘要失败，降级为占位符", exc_info=True)
