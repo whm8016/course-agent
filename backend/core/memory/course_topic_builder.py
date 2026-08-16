@@ -349,8 +349,10 @@ async def judge_pairs_batch(
     顺序相反的情形，旧实现方向被讲义顺序锁死）；confidence=|score|（arXiv:2504.08856
     的非对称分数设计：一个数字同时编码方向与置信，配四分类主判据防两头点头）。
 
-    逐项容错：返回缺 id / 非法 direction / score 不可解析 → 该项按 uncertain 处理
-    （留给上层复判），不整批失败。|score| < _EDGE_SCORE_MIN 不建边。
+    逐项容错：缺 id / 非法 direction / score 不可解析 / 方向与分数符号矛盾（prompt
+    语义 forward⟺正分、reverse⟺负分，矛盾即模型自相矛盾）→ 该项按 uncertain 处理
+    （留给上层复判），不整批失败。direction=none 或 |score| < _EDGE_SCORE_MIN 是明确
+    低置信，有意丢弃（宁漏勿错）。
     """
     if not pairs:
         return [], []
@@ -393,17 +395,38 @@ async def judge_pairs_batch(
                 uncertain.append((i, j))
                 continue
             direction = str(item.get("direction") or "").strip().lower()
+            if direction == "none":
+                continue  # 明确无关系：有意丢弃（宁漏勿错）
+            if direction == "uncertain":
+                uncertain.append((i, j))
+                continue
+            if direction not in ("forward", "reverse"):
+                logger.warning(
+                    "[course_topics] 判定 id=%d 非法 direction=%r（转复判）",
+                    nid, item.get("direction"),
+                )
+                uncertain.append((i, j))
+                continue
             try:
-                score = abs(float(item.get("score") or 0.0))
+                score = float(item.get("score") or 0.0)
             except (TypeError, ValueError):
-                score = 0.0
-            if direction in ("forward", "reverse") and score >= _EDGE_SCORE_MIN:
+                logger.warning(
+                    "[course_topics] 判定 id=%d score 不可解析 %r（转复判）",
+                    nid, item.get("score"),
+                )
+                uncertain.append((i, j))
+                continue
+            # 方向与符号矛盾（forward 配负分 / reverse 配正分）= 模型自相矛盾，
+            # 不可信 direction，转复判
+            if (direction == "forward" and score < 0) or (direction == "reverse" and score > 0):
+                uncertain.append((i, j))
+                continue
+            score = abs(score)
+            if score >= _EDGE_SCORE_MIN:
                 if direction == "forward":
                     edges.append(_mk_edge(topics[i]["topic_id"], topics[j]["topic_id"], score))
                 else:
                     edges.append(_mk_edge(topics[j]["topic_id"], topics[i]["topic_id"], score))
-            elif direction == "uncertain":
-                uncertain.append((i, j))
     return edges, uncertain
 
 
@@ -510,7 +533,10 @@ async def extract_prereq_edges(
     acyclic = break_cycles(direct)
     closed = close_transitive(acyclic)
     sec_of = {t["topic_id"]: t.get("source_section") for t in topics}
-    cross = sum(1 for e in closed if sec_of.get(e["src"]) != sec_of.get(e["dst"]))
+    # 跨章验收口径只数直接边：推断边经 fan-in/fan-out 抬高指标（1 条直接跨章可生多条
+    # 跨章推断边）；且推断跨章边必伴随直接跨章边（路径必经直接跨章段），只数直接边
+    # 不损失「0→正」的检出能力
+    cross = sum(1 for e in acyclic if sec_of.get(e["src"]) != sec_of.get(e["dst"]))
     stats = {
         "candidates": len(pairs),
         "direct_edges": len(direct) - len(rechecked),

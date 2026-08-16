@@ -81,8 +81,9 @@ async def get_prereq_predecessors(topic_id: str, course_id: str, db) -> set[str]
     """从 ``course_topic_edge`` 表递归回溯 topic_id 的全部（直接+间接）前置主题。
 
     一次拉全边内存 BFS（非每节点一次 round-trip），与 ``stitch_cases.prereq_predecessors``
-    （内存图版）同算法：沿 prerequisite 边从 dst 回溯到 src。门控用前置闭包去掉 matched 后
-    ∩ 高 risk 掌握度找未问的前置缺口。
+    （内存图版）同算法：沿 prerequisite / prerequisite_inferred 边从 dst 回溯到 src（显式
+    relation 过滤——防未来往同表加 related 等非先修边后被当成「必须先学」）。门控用前置
+    闭包去掉 matched 后 ∩ 高 risk 掌握度找未问的前置缺口。
     """
     from core.db.database import CourseTopicEdge
     from sqlalchemy import select
@@ -90,7 +91,8 @@ async def get_prereq_predecessors(topic_id: str, course_id: str, db) -> set[str]
     rows = (
         await db.execute(
             select(CourseTopicEdge.src_topic_id, CourseTopicEdge.dst_topic_id).where(
-                CourseTopicEdge.course_id == course_id
+                CourseTopicEdge.course_id == course_id,
+                CourseTopicEdge.relation.in_(("prerequisite", "prerequisite_inferred")),
             )
         )
     ).all()

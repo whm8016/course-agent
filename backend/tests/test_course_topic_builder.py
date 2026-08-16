@@ -3,6 +3,8 @@
 覆盖跨章先修边修复的四件套：
 - build_edge_candidates：embedding top-k 语义候选（取代 order 差 ≤3 硬窗口）
 - judge_pairs_batch：批量四分类判定（forward/reverse/none/uncertain + score）
+  + 逐项容错契约（缺 id / 非法 direction / score 不可解析 / 方向符号矛盾 → 复判）
+- extract_prereq_edges：整链编排 stats（跨章边数只数直接边）
 - break_cycles / close_transitive：DAG 保证与传递闭包
 - 次级修复：merge 保留非 NULL embedding / _llm_json 重试 / failed_sections 记录
 """
@@ -19,6 +21,7 @@ from core.memory.course_topic_builder import (
     break_cycles,
     build_edge_candidates,
     close_transitive,
+    extract_prereq_edges,
     extract_topics_from_chunks,
     judge_pairs_batch,
     merge_synonymous,
@@ -122,6 +125,58 @@ async def test_judge_pairs_batch_missing_id_goes_uncertain():
     edges, uncertain = await judge_pairs_batch("c1", [(0, 1)], topics, llm, "m")
     assert edges == []
     assert uncertain == [(0, 1)]
+
+
+@pytest.mark.asyncio
+async def test_judge_pairs_batch_malformed_goes_uncertain():
+    # 注释契约：非法 direction / score 不可解析 → uncertain 复判，不静默丢；
+    # prompt 语义 forward⟺正分 / reverse⟺负分，方向与符号矛盾 = 模型自相矛盾 →
+    # 不可信 direction，同转复判；none 为明确否定，有意丢弃
+    topics = [_topic("A"), _topic("B"), _topic("C"), _topic("D"), _topic("E")]
+    reply = json.dumps({"pairs": [
+        {"id": 0, "direction": "fwd", "score": 0.9},       # 非法方向
+        {"id": 1, "direction": "forward", "score": "崩"},   # score 不可解析
+        {"id": 2, "direction": "forward", "score": -0.8},   # forward 配负分：矛盾
+        {"id": 3, "direction": "none", "score": 0.9},       # none：有意丢弃
+        {"id": 4, "direction": "reverse", "score": 0.8},    # reverse 配正分：矛盾
+    ]}, ensure_ascii=False)
+    llm = _fake_llm([reply])
+    edges, uncertain = await judge_pairs_batch(
+        "c1", [(0, 1), (1, 2), (2, 3), (3, 4), (0, 4)], topics, llm, "m")
+    assert edges == []
+    assert uncertain == [(0, 1), (1, 2), (2, 3), (0, 4)]
+
+
+# ---------------------------------------------------------------------------
+# extract_prereq_edges：整链编排（候选 → 判定 → 复判 → 删环 → 闭包 → stats）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_extract_prereq_edges_orchestration():
+    # 3 主题全配对成候选；首轮 A-C uncertain 转复判返回 reverse 建边 C→A，与 A→B、
+    # B→C 成环 → 删最低置信 C→A；闭包补 A→C（prerequisite_inferred）。
+    # 跨章验收口径只数直接边：仅 B→C 一条（在 closed 上数会被推断边 A→C 虚高到 2）
+    topics = [
+        _topic("A", [1.0, 0.0], sec="第1章", order=0),
+        _topic("B", [1.0, 0.0], sec="第1章", order=1),
+        _topic("C", [0.0, 1.0], sec="第5章", order=2),
+    ]
+    llm = _fake_llm([
+        json.dumps({"pairs": [
+            {"id": 0, "direction": "forward", "score": 0.9},    # A→B（同章）
+            {"id": 1, "direction": "uncertain", "score": 0.2},   # A-C 转复判
+            {"id": 2, "direction": "forward", "score": 0.8},    # B→C（跨章）
+        ]}),
+        json.dumps({"pairs": [{"id": 0, "direction": "reverse", "score": -0.7}]}),  # 复判 C→A
+    ])
+    edges, stats = await extract_prereq_edges("c1", topics, llm, "m")
+    by = {(e["src"], e["dst"]): e for e in edges}
+    assert set(by) == {("A", "B"), ("B", "C"), ("A", "C")}
+    assert by[("A", "C")]["relation"] == "prerequisite_inferred"
+    assert stats == {
+        "candidates": 3, "direct_edges": 2, "rechecked_edges": 1,
+        "cycle_broken": 1, "transitive_added": 1, "cross_section_edges": 1,
+    }
 
 
 # ---------------------------------------------------------------------------

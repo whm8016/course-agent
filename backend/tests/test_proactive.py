@@ -103,3 +103,21 @@ async def test_read_mastery_drops_unalignable_row(db):
     async with AsyncSessionLocal() as s:
         m = await _read_mastery("u_ghost", "c3", s, await _topic_map("c3"))
     assert m == {}
+
+
+async def test_prereq_predecessors_filters_non_prerequisite_relation(db):
+    """门控回溯只沿先修类边（prerequisite / prerequisite_inferred）。
+
+    防御契约：未来往同表加 related 等非先修 relation 时，不得被 BFS 当成
+    「必须先学」混入前置闭包。"""
+    from core.db.database import AsyncSessionLocal, CourseTopicEdge
+    from core.memory.course_topic_store import get_prereq_predecessors
+
+    async with AsyncSessionLocal() as s:
+        for src, rel in (("a", "prerequisite"), ("c", "prerequisite_inferred"), ("d", "related")):
+            s.add(CourseTopicEdge(course_id="c9", src_topic_id=src, dst_topic_id="target", relation=rel))
+        await s.commit()
+
+    async with AsyncSessionLocal() as s:
+        preds = await get_prereq_predecessors("target", "c9", s)
+    assert preds == {"a", "c"}

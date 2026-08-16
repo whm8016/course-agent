@@ -669,8 +669,9 @@ class CourseTopic(Base):
 class CourseTopicEdge(Base):
     """课程结构层：主题间先修边（prerequisite 唯一事实源），全班共享。
 
-    建库时离线抽取：仅在「讲义顺序在前 + 同章或相邻章」候选对上判定，含糊或双向判定的
-    候选一律丢弃（Goel 协议，防 LLM 乱连边）。门控沿 prerequisite 边回溯前置闭包，找未掌握的
+    建库时离线抽取：embedding top-k 语义候选对上批量四分类判定（forward/reverse/none/
+    uncertain），uncertain 复判一次、仍不确定则弃；直接边删环成 DAG 后补传递闭包。
+    门控沿先修类边（prerequisite / prerequisite_inferred）回溯前置闭包，找未掌握的
     前置缺口。与 ``users.knowledge_graph`` 的区别：那是每生对话现编的图（仪表盘展示 +
     error ``repeated`` 来源），本表是全班一致、可审计的课程结构。verified_by 标教师已核对。
     """
@@ -681,7 +682,7 @@ class CourseTopicEdge(Base):
     course_id = Column(String(64), nullable=False, default="")
     src_topic_id = Column(String(64), nullable=False)  # 前置（学 dst 前应先掌握 src）
     dst_topic_id = Column(String(64), nullable=False)
-    relation = Column(String(32), nullable=False, default="prerequisite")  # 当前仅 prerequisite
+    relation = Column(String(32), nullable=False, default="prerequisite")  # prerequisite=LLM 直接判定 / prerequisite_inferred=闭包推断
     confidence = Column(Float, nullable=False, default=1.0)
     verified_by = Column(String(64), nullable=True)  # 教师审计标记，NULL=未审
 
