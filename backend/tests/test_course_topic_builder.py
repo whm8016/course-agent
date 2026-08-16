@@ -10,6 +10,8 @@
 - assemble_edges：删环 → 闭包 → stats 五键（跨章口径只数直接边）
 - break_cycles / close_transitive：DAG 保证与传递闭包
 - 次级：_llm_json 契约（非 JSON 重试一次 / 传输失败吞 LLMRetryError 返 None）
+- 输出预算三防：known 清单渲染封顶（闭集不受影响）/ finish=length 不原样重试 /
+  gleaning 输入守卫（首轮超限跳过补抽）+ 数量上限随 prompt 下发
 """
 from __future__ import annotations
 
@@ -20,8 +22,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from core.memory.course_topic_builder import (
+    _GLEANING_FIRST_ROUND_CHAR_CAP,
+    _KNOWN_LIST_RENDER_CAP,
+    _MAX_EDGES_PER_BLOCK,
+    _MAX_TOPICS_PER_BLOCK,
     _llm_json,
     _parse_reply,
+    _render_known,
     _validate_block_edges,
     assemble_edges,
     break_cycles,
@@ -168,6 +175,77 @@ async def test_extract_block_graph_gleaning_failure_keeps_first_round():
 async def test_extract_block_graph_all_fail_returns_none():
     llm = _fake_llm(["崩", "还崩"])
     assert await extract_block_graph("c1", "第1章", "文本", {}, llm, "m", gleaning=0) is None
+
+
+# ---------------------------------------------------------------------------
+# 输出预算三防：清单封顶 / finish=length 快速失败 / gleaning 输入守卫
+# ---------------------------------------------------------------------------
+
+def _fake_llm_raw(responses):
+    """任意响应序列的假 LLM（finish_reason 混排时用，_fake_llm 只能全 stop）。"""
+    llm = SimpleNamespace()
+    llm.chat = SimpleNamespace()
+    llm.chat.completions = SimpleNamespace()
+    llm.chat.completions.create = AsyncMock(side_effect=responses)
+    return llm
+
+
+def test_render_known_caps_at_recent():
+    # 130 条旧点只渲染最近 60 条 + 说明行；封顶只管「给模型看」，校验闭集仍是全量 known
+    known = {f"点{i}": f"点{i}" for i in range(130)}
+    rendered = _render_known(known, [])
+    lines = rendered.splitlines()
+    assert "只列最近" in lines[0]  # 首行说明：更早旧点仍可当边端点
+    body = [l for l in lines if l.startswith("- ")]
+    assert len(body) == _KNOWN_LIST_RENDER_CAP
+    assert body[-1] == "- 点129"  # 最近的保留
+    assert "- 点0" not in rendered  # 最早的挤出渲染（闭集校验仍认）
+    # 不超量：全量渲染、无说明行；空清单：占位说明不变
+    assert _render_known({"a": "a"}, []) == "- a"
+    assert _render_known({}, []) == "（暂无——本块是第一块）"
+
+
+@pytest.mark.asyncio
+async def test_llm_json_finish_length_fails_fast_no_retry():
+    # finish=length = 输出额度用尽被腰斩，同额度原样重试必再截（线上实测 17k 字截两次）：
+    # 不烧第二次调用，直接 None（上层记 failed_section）
+    llm = _fake_llm_raw([_resp('{"topics": [{"label": "半截', finish_reason="length")])
+    assert await _llm_json(llm, "m", "p") is None
+    assert llm.chat.completions.create.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_llm_json_non_json_with_stop_still_retries_once():
+    # 对比锁死：finish=stop 的非 JSON（偶发噪声）仍重试一次——快速失败只针对 length
+    llm = _fake_llm_raw([_resp("崩"), _resp("还崩")])
+    assert await _llm_json(llm, "m", "p") is None
+    assert llm.chat.completions.create.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_extract_block_graph_skips_gleaning_on_huge_first_round():
+    # LightRAG gleaning 输入守卫：首轮结果超大 → 跳过补抽（省一次肥调用），首轮成果照常返回
+    big = {"topics": [{"label": f"知识点{i:03d}", "definition": "定" * 30} for i in range(100)],
+           "edges": []}
+    assert len(json.dumps(big, ensure_ascii=False)) > _GLEANING_FIRST_ROUND_CHAR_CAP
+    llm = _fake_llm([json.dumps(big, ensure_ascii=False)])
+    topics, edges, dropped = await extract_block_graph(
+        "c1", "第1章", "文本", {}, llm, "m", gleaning=1,
+    )
+    assert llm.chat.completions.create.await_count == 1  # 只有首轮，没有补抽
+    assert len(topics) == 100
+    assert edges == []
+
+
+@pytest.mark.asyncio
+async def test_extract_prompt_carries_output_caps_and_compact_json():
+    # prompt 契约：数量上限 + 单行紧凑指令必须随请求下发（防手改 prompt 时丢防线）
+    llm = _fake_llm(['{"topics": [], "edges": []}'])
+    await extract_block_graph("c1", "第1章", "文本", {}, llm, "m", gleaning=0)
+    prompt = llm.chat.completions.create.await_args.kwargs["messages"][0]["content"]
+    assert f"每块至多 {_MAX_TOPICS_PER_BLOCK} 条" in prompt
+    assert f"每块至多 {_MAX_EDGES_PER_BLOCK} 条边" in prompt
+    assert "单行紧凑" in prompt
 
 
 # ---------------------------------------------------------------------------

@@ -187,23 +187,25 @@ _EXTRACT_BLOCK_PROMPT = """---Role---
 2. label 必须逐字使用讲义中出现的原词——不翻译、不改写、不缩写、不自行概括。
 3. 共指消解：讲义中「本章」「该定理」「它」等指代，在输出里解析为所指知识点的完整名称。
 4. topics 只收本块**新教**的知识点；「已有知识点清单」里的旧点不要再输出进 topics；
-   没有新知识点返回空数组；宁少勿凑数，不编造。
+   没有新知识点返回空数组；宁少勿凑数，不编造。每块至多 {max_topics} 条——超出时只留
+   最可考核的核心知识点。
 
 【先修边 edges】
 5. 只抽文本中**明示**的先修依赖——「在X的基础上」「复习/回顾X」「由X推导」「需先掌握X」
    「利用X求Y」这类讲义亲口写出的依赖。凭常识猜测、文本没写的不要输出。
 6. 每条边 src=前置知识点，dst=依赖它的知识点；strength ∈ [0,1] 表示依赖的明确程度；
-   evidence 逐字摘抄块原文中体现该依赖的句子（只抄一句，不改写、不拼接）。
+   evidence 逐字摘抄块原文中体现该依赖的句子（只抄一句，50 字内，不改写、不拼接）。
 7. 边的两端可以是本块新教的知识点，也可以是「已有知识点清单」中的旧点——如第 5 章写
    「在元件伏安特性的基础上测等效内阻」，src 用清单里的「元件伏安特性」。两端都不在
    清单、也不在本块新点里的，不要输出该边。
-8. 不确定是不是先修关系的不要输出（宁漏勿错）。
+8. 不确定是不是先修关系的不要输出（宁漏勿错）。每个新知识点至多 2 条先修边，
+   每块至多 {max_edges} 条边。
 
 ---已有知识点清单---
 {known_list}
 
 ---Output---
-输出严格 JSON（无 markdown 围栏、无任何其他文字）：
+输出严格 JSON（无 markdown 围栏、无任何其他文字），单行紧凑、无缩进无换行：
 {{"topics": [{{"label": "知识点名", "definition": "一句话定义"}}], "edges": [{{"src": "前置点", "dst": "后继点", "strength": 0.8, "evidence": "原文句"}}]}}"""
 
 # gleaning 补抽（LightRAG extract_entities 固定单次模式）：首轮解析成功后追加「只补遗漏」
@@ -221,7 +223,7 @@ _GLEANING_PROMPT = """---Role---
   「已有知识点清单」里的旧点不进 topics；泛化词（「电路」「实验」）不收。
 【先修边 edges】
 - 只抽文本**明示**的先修依赖（「在X的基础上」「复习X」「由X推导」等写法）；src=前置，
-  dst=后继；strength ∈ [0,1]；evidence 逐字摘抄块原文一句；两端须在本块新点或清单旧点内。
+  dst=后继；strength ∈ [0,1]；evidence 逐字摘抄块原文一句（50 字内）；两端须在本块新点或清单旧点内。
 - 没有遗漏就返回空：{{"topics": [], "edges": []}}
 
 ---第一轮结果---
@@ -231,13 +233,26 @@ _GLEANING_PROMPT = """---Role---
 {known_list}
 
 ---Output---
-输出严格 JSON（无围栏）：
+输出严格 JSON（无围栏），单行紧凑、无缩进无换行：
 {{"topics": [{{"label": "知识点名", "definition": "一句话定义"}}], "edges": [{{"src": "前置点", "dst": "后继点", "strength": 0.8, "evidence": "原文句"}}]}}"""
 
 # 库函数签名默认（直接调用方/probe 不传时用）；部署级默认在 settings.course_topic.gleaning
 _DEFAULT_GLEANING = 1
 # strength 缺失/不可解析时的兜底置信（GraphRAG _process_result 对 weight 解析失败兜底同款）
 _DEFAULT_STRENGTH = 0.75
+# 单块输出硬上限：known 清单滚雪球后模型对满屏旧点喷边（实测块 1 即 +42主题+54边），输出
+# JSON 跟着肥 → 16917 字顶满 max_tokens=8000 被 finish=length 腰斩。flash 档输出上限已到顶，
+# 抬不了额度，只能让模型少写——数量上限对模型的约束力远高于「宁少勿凑数」这类形容词。
+# 20 主题 + 25 边 ≈ 3k token，对 8000 额度余量 2.5 倍。
+_MAX_TOPICS_PER_BLOCK = 20
+_MAX_EDGES_PER_BLOCK = 25
+# 「已有知识点清单」渲染封顶：只影响模型可见性，校验闭集仍是全量 known（闭集在
+# extract_block_graph 的 set(known)）——旧点真被引用时其名字本就写在证据句原文里，
+# 模型照抄即得，更早旧点依旧合法当边端点。60 ≈ 相邻两章的量，清单不再随课程长度无限涨。
+_KNOWN_LIST_RENDER_CAP = 60
+# gleaning 输入守卫（LightRAG extract_entities 同款）：首轮结果序列化超此字符数即跳过
+# 补抽——补抽输入（原文 + 首轮 JSON + 清单）跟着首轮一起肥，且首轮近满时补抽收益趋零。
+_GLEANING_FIRST_ROUND_CHAR_CAP = 6000
 # embedding 并发上限（照 consolidation._JUDGE_CONCURRENCY 模式——全仓 fan-out 都有 cap）。
 # 裸 gather 在大课程数百主题时一次打满嵌入端点，429 风暴被 _aget_embed 吞成 None →
 # 静默产出 embedding 全 NULL 的残废图（门控永远匹配不上），限流才能看见。
@@ -304,9 +319,18 @@ async def _llm_json(
             continue
         if data:
             return data
+        finish = getattr(choice, "finish_reason", None)
+        if finish == "length":
+            # 输出额度用尽被腰斩（JSON 半截必解析失败）：同额度原样重试必再截一次，
+            # 白烧一整次大调用——直接放弃本块（上层记 failed_section，教师可见）
+            logger.warning(
+                "[course_topics] 输出被 max_tokens 截断 finish=length chars=%d，不再原样重试",
+                len(raw),
+            )
+            return None
         logger.warning(
             "[course_topics] LLM 输出非 JSON（第 %d 次） finish=%s chars=%d preview=%r",
-            attempt, getattr(choice, "finish_reason", None), len(raw), raw[:200],
+            attempt, finish, len(raw), raw[:200],
         )
     return None
 
@@ -397,11 +421,24 @@ def _validate_block_edges(
 
 
 def _render_known(known: dict[str, str], extra_labels: list[str]) -> str:
-    """渲染 prompt 的「已有知识点清单」；空清单给占位说明（第一块）。"""
+    """渲染 prompt 的「已有知识点清单」；空清单给占位说明（第一块）。
+
+    超 ``_KNOWN_LIST_RENDER_CAP`` 条只渲染**最近**的（尾部=本块新点 extra + 最新旧点，
+    gleaning 去重最需要的正是尾部）+ 说明行。封顶只影响模型可见性：旧点真被本块明示
+    引用时，其名字本就写在证据句原文里，模型照抄即得，闭集校验（全量 known）照过——
+    防的是模型对着满屏旧点喷边导致输出膨胀，不是砍掉早期旧点当端点的资格。
+    """
     labels = list(known.values()) + list(extra_labels)
     if not labels:
         return "（暂无——本块是第一块）"
-    return "\n".join(f"- {l}" for l in labels)
+    if len(labels) <= _KNOWN_LIST_RENDER_CAP:
+        return "\n".join(f"- {l}" for l in labels)
+    shown = labels[-_KNOWN_LIST_RENDER_CAP:]
+    note = (
+        f"（清单只列最近 {_KNOWN_LIST_RENDER_CAP} 条旧点；更早的旧点若被本块原文"
+        f"明示引用，仍可作为边端点）"
+    )
+    return note + "\n" + "\n".join(f"- {l}" for l in shown)
 
 
 async def extract_block_graph(
@@ -418,7 +455,10 @@ async def extract_block_graph(
 
     data = await _llm_json(
         llm, model,
-        f"章节：{sec}\n\n{text}\n\n" + _EXTRACT_BLOCK_PROMPT.format(known_list=_render_known(known, [])),
+        f"章节：{sec}\n\n{text}\n\n" + _EXTRACT_BLOCK_PROMPT.format(
+            known_list=_render_known(known, []),
+            max_topics=_MAX_TOPICS_PER_BLOCK, max_edges=_MAX_EDGES_PER_BLOCK,
+        ),
         track={"course_id": course_id},
     )
     if data is None:
@@ -426,6 +466,14 @@ async def extract_block_graph(
     all_topics, raw_edges = _parse_reply(data)
     for _ in range(gleaning):
         first_round = json.dumps({"topics": all_topics, "edges": raw_edges}, ensure_ascii=False)
+        if len(first_round) > _GLEANING_FIRST_ROUND_CHAR_CAP:
+            # 首轮已很大时补抽输入（原文 + 首轮 JSON + 清单）跟着肥、补抽收益趋零，
+            # 跳过——gleaning 是增益不是依赖，首轮成果照常返回
+            logger.info(
+                "[course_topics] 首轮结果 %d 字符超上限 %d，跳过 gleaning 补抽",
+                len(first_round), _GLEANING_FIRST_ROUND_CHAR_CAP,
+            )
+            break
         gdata = await _llm_json(
             llm, model,
             f"章节：{sec}\n\n{text}\n\n" + _GLEANING_PROMPT.format(
@@ -459,8 +507,9 @@ async def extract_graph_from_chunks(
 
     块顺序 = 章节首现序 → 章内 chunk 序（讲义阅读序）：已抽清单随块累积，后面块的边
     可以引用前面块的点。一章内按 chunk 边界分块（每块 <= max_chars_per_call 字符），
-    单 chunk 不截断。max_chars_per_call 权衡：太大→reasoning 模型输出预算(4096)被推理
-    占满→content 截断；太小→调用次数多、跨块重复多。默认 5000（probe 实测可调）。
+    单 chunk 不截断。max_chars_per_call 权衡：太大→单块条目数多、输出逼近 max_tokens
+    上限（有 topics/edges 数量硬上限兜底）；太小→调用次数多、跨块重复多。默认 5000
+    （probe 实测可调）。
 
     返回 (topics, raw_edges, meta)：topics 待 merge_synonymous 去重定 topic_id；
     raw_edges 端点是 label，merge 后经别名表重映射成 topic_id；meta 含
