@@ -424,21 +424,20 @@ def _render_known(known: dict[str, str], extra_labels: list[str]) -> str:
     """渲染 prompt 的「已有知识点清单」；空清单给占位说明（第一块）。
 
     超 ``_KNOWN_LIST_RENDER_CAP`` 条只渲染**最近**的（尾部=本块新点 extra + 最新旧点，
-    gleaning 去重最需要的正是尾部）+ 说明行。封顶只影响模型可见性：旧点真被本块明示
-    引用时，其名字本就写在证据句原文里，模型照抄即得，闭集校验（全量 known）照过——
-    防的是模型对着满屏旧点喷边导致输出膨胀，不是砍掉早期旧点当端点的资格。
+    gleaning 去重最需要的正是尾部）并加说明行。封顶为何不砍跨章边（闭集校验仍是
+    全量 known），见常量注释。
     """
     labels = list(known.values()) + list(extra_labels)
     if not labels:
         return "（暂无——本块是第一块）"
-    if len(labels) <= _KNOWN_LIST_RENDER_CAP:
-        return "\n".join(f"- {l}" for l in labels)
-    shown = labels[-_KNOWN_LIST_RENDER_CAP:]
-    note = (
-        f"（清单只列最近 {_KNOWN_LIST_RENDER_CAP} 条旧点；更早的旧点若被本块原文"
-        f"明示引用，仍可作为边端点）"
-    )
-    return note + "\n" + "\n".join(f"- {l}" for l in shown)
+    shown = labels[-_KNOWN_LIST_RENDER_CAP:]  # 不超量时切片即全量
+    head = ""
+    if len(shown) < len(labels):
+        head = (
+            f"（清单只列最近 {_KNOWN_LIST_RENDER_CAP} 条旧点；更早的旧点若被本块原文"
+            f"明示引用，仍可作为边端点）\n"
+        )
+    return head + "\n".join(f"- {l}" for l in shown)
 
 
 async def extract_block_graph(
@@ -467,8 +466,8 @@ async def extract_block_graph(
     for _ in range(gleaning):
         first_round = json.dumps({"topics": all_topics, "edges": raw_edges}, ensure_ascii=False)
         if len(first_round) > _GLEANING_FIRST_ROUND_CHAR_CAP:
-            # 首轮已很大时补抽输入（原文 + 首轮 JSON + 清单）跟着肥、补抽收益趋零，
-            # 跳过——gleaning 是增益不是依赖，首轮成果照常返回
+            # 超限跳过（理由见 _GLEANING_FIRST_ROUND_CHAR_CAP 注释）——gleaning 是增益
+            # 不是依赖，首轮成果照常返回
             logger.info(
                 "[course_topics] 首轮结果 %d 字符超上限 %d，跳过 gleaning 补抽",
                 len(first_round), _GLEANING_FIRST_ROUND_CHAR_CAP,

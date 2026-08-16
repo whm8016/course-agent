@@ -51,11 +51,15 @@ def _resp(content: str, *, reasoning_content=None, finish_reason="stop"):
     )])
 
 
-def _fake_llm(contents: list[str]):
+def _fake_llm(responses: list):
+    """假 LLM：str 项经 _resp 包一层（默认 finish=stop）；传 _resp 响应对象则原样用
+    （finish_reason 混排场景）。"""
     llm = SimpleNamespace()
     llm.chat = SimpleNamespace()
     llm.chat.completions = SimpleNamespace()
-    llm.chat.completions.create = AsyncMock(side_effect=[_resp(c) for c in contents])
+    llm.chat.completions.create = AsyncMock(side_effect=[
+        _resp(r) if isinstance(r, str) else r for r in responses
+    ])
     return llm
 
 
@@ -181,15 +185,6 @@ async def test_extract_block_graph_all_fail_returns_none():
 # 输出预算三防：清单封顶 / finish=length 快速失败 / gleaning 输入守卫
 # ---------------------------------------------------------------------------
 
-def _fake_llm_raw(responses):
-    """任意响应序列的假 LLM（finish_reason 混排时用，_fake_llm 只能全 stop）。"""
-    llm = SimpleNamespace()
-    llm.chat = SimpleNamespace()
-    llm.chat.completions = SimpleNamespace()
-    llm.chat.completions.create = AsyncMock(side_effect=responses)
-    return llm
-
-
 def test_render_known_caps_at_recent():
     # 130 条旧点只渲染最近 60 条 + 说明行；封顶只管「给模型看」，校验闭集仍是全量 known
     known = {f"点{i}": f"点{i}" for i in range(130)}
@@ -208,18 +203,11 @@ def test_render_known_caps_at_recent():
 @pytest.mark.asyncio
 async def test_llm_json_finish_length_fails_fast_no_retry():
     # finish=length = 输出额度用尽被腰斩，同额度原样重试必再截（线上实测 17k 字截两次）：
-    # 不烧第二次调用，直接 None（上层记 failed_section）
-    llm = _fake_llm_raw([_resp('{"topics": [{"label": "半截', finish_reason="length")])
+    # 不烧第二次调用，直接 None（上层记 failed_section）。finish=stop 噪声的重试一次
+    # 语义不变，由既有 test_llm_json_two_failures_return_none 锁死——快速失败只针对 length
+    llm = _fake_llm([_resp('{"topics": [{"label": "半截', finish_reason="length")])
     assert await _llm_json(llm, "m", "p") is None
     assert llm.chat.completions.create.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_llm_json_non_json_with_stop_still_retries_once():
-    # 对比锁死：finish=stop 的非 JSON（偶发噪声）仍重试一次——快速失败只针对 length
-    llm = _fake_llm_raw([_resp("崩"), _resp("还崩")])
-    assert await _llm_json(llm, "m", "p") is None
-    assert llm.chat.completions.create.await_count == 2
 
 
 @pytest.mark.asyncio
