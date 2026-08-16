@@ -647,7 +647,7 @@ async def purge_course_workspace(course_id: str) -> None:
 
 # 分布式索引锁：跨 worker 进程互斥（asyncio.Lock 只在单进程内有效，多容器/多进程
 # 部署下护不住）。租约语义（对标 Redisson 看门狗 / 本仓库 leader.py 同族）：
-#   - 短租约 60s + 每 ttl/3=20s 用 reacquire() 把 TTL 拨回 60s（重置而非累加——
+#   - 短租约 60s + 每 20s 用 reacquire() 把 TTL 拨回 60s（重置而非累加——
 #     extend() 是往剩余时间上加，长任务会把 TTL 滚到远超标称值，被杀后残留同倍放大）；
 #   - 活持有者的牌子永远像刚租到；持有者被 SIGKILL/OOM 后 key 最多 60s 自然过期，
 #     别人正常抢（SIGTERM 走 ARQ cancel → job finally → release，零残留）；
@@ -662,7 +662,7 @@ async def acquire_index_dlock(course_id: str, backend: str = "lightrag"):
 
     key 含 backend：同一课程 lightrag 与 pgvector 两套索引可并行构建（互不阻塞），但同一
     后端同一课程仍互斥（防 ainsert/delete 并发写同一份 store 产生重复/损坏）。
-    租约 _INDEX_DLOCK_TTL（60s），持有期间每 ttl/3 续约拨回；持有者崩溃后最长 60s 自然过期。
+    租约 _INDEX_DLOCK_TTL（60s），持有期间每 20s（租约的 1/3）续约拨回；持有者崩溃后最长 60s 自然过期。
     """
     from core.db.cache import _get_pool
     redis = _get_pool()
@@ -679,7 +679,7 @@ async def acquire_index_dlock(course_id: str, backend: str = "lightrag"):
                 try:
                     await lock.reacquire()
                 except LockNotOwnedError:
-                    # 锁已不归本任务（Redis 断超 ttl 自然过期被别人抢走）。互斥已破
+                    # 锁已不归本任务（Redis 断超租约自然过期被别人抢走）。互斥已破
                     # 但无法从这里中止 job，只能 ERROR 留痕供排查；续约循环随之退出。
                     logger.error(
                         "索引锁已丢失（续约期间过期被抢）course=%s backend=%s，"
@@ -688,7 +688,7 @@ async def acquire_index_dlock(course_id: str, backend: str = "lightrag"):
                     )
                     return
                 except Exception:
-                    # Redis 暂不可达：TTL 继续衰减，恢复后下一轮拨回；持续断超 ttl 才丢锁
+                    # Redis 暂不可达：TTL 继续衰减，恢复后下一轮拨回；持续断超租约才丢锁
                     logger.warning(
                         "索引锁续约失败 course=%s backend=%s", course_id, backend, exc_info=True
                     )

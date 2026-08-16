@@ -4,7 +4,7 @@
 - 空锁直接拿到，release 摘牌 + 取消续约
 - 被占（活人持有）→ 返回 (None, None) 跳过，绝不动别人的锁（无偷锁设计）
 - 默认租约 60s，acquire 即写满 TTL
-- 续约走 reacquire()（重置回 ttl，防 extend 累加滚雪球），节奏 ttl/3=20s
+- 续约走 reacquire()（重置回满租，防 extend 累加滚雪球），节奏 20s（租约的 1/3）
 - 丢锁（LockNotOwnedError）→ ERROR 留痕后续约循环退出，不再空转
 
 FakeRedis 手写 redis-py asyncio.Lock 的最小镜像（对齐 test_leader.py 手写 mock 的做法）。
@@ -106,17 +106,14 @@ async def test_held_lock_returns_none_and_never_touches_it(fake_redis):
 
 
 async def test_renew_uses_reacquire_at_ttl_third_interval(fake_redis, monkeypatch):
-    """续约走 reacquire()（TTL 重置不滚雪球）且不碰 extend；节奏 = ttl/3（60s 租约 → 20s）。"""
+    """续约走 reacquire()（TTL 重置不滚雪球）且不碰 extend；节奏 20s（租约 60s 的 1/3）。"""
     real_sleep = asyncio.sleep
     intervals: list[float] = []
-    calls = 0
 
     async def fast_sleep(t):
-        nonlocal calls
-        calls += 1
         intervals.append(t)
-        if calls >= 3:
-            await real_sleep(30)  # 跑满 3 轮后停车等 release 的 cancel，消除忙转
+        if len(intervals) >= 3:  # 跑满 3 轮后停车等 release 的 cancel，消除忙转
+            await real_sleep(30)
         await real_sleep(0)  # 立即让出控制权，推进 renew 循环
 
     monkeypatch.setattr("core.rag.lightrag.instance_pool.asyncio.sleep", fast_sleep)
