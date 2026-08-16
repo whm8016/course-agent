@@ -74,16 +74,17 @@ def gate_decide(case: dict, edges: list[dict]):
 def build_mastery_map(case: dict) -> dict[str, dict]:
     """case 档案 → decide_stitch 的 mastery_map（真实折叠 + 遗忘实算）。
 
-    theta 由 ``fold_observations`` 折 levels（不手拍）；risk 复用 ``FoldState.risk``
-    属性（b 进 risk/logit，不进入闸判据，与生产读侧同公式同源）；p_forget 按
-    days_since_last 实算（默认强度 S=5）；last_stitched_at 折成固定时钟 NOW。
+    theta/risk/logit 全由 ``fold_observations(obs, FoldState(b_topic=b))`` 折出——
+    b≠0 时 theta 与生产同 regime（从 b 起折，consolidation.py 同款 init，非
+    b=0 折完读时补减）；b 只进 risk/logit 不进入闸判据（theta 空间）。p_forget
+    按 days_since_last 实算（默认强度 S=5）；last_stitched_at 折成固定时钟 NOW。
     字段集对齐 _read_mastery / scorer._gate_mastery_map 的 map 形状（label 便于
     调试）；decide_stitch 只读 risk/theta/p_forget/last_stitched_at（.get 默认）。
     """
-    from dataclasses import replace
-
     from core.memory.mastery import forget_prob
-    from core.memory.mastery_state import LEVEL_OUTCOME, W_JUDGE, fold_observations
+    from core.memory.mastery_state import (
+        LEVEL_OUTCOME, W_JUDGE, FoldState, fold_observations,
+    )
 
     out: dict[str, dict] = {}
     for m in case["mastery"]:
@@ -91,12 +92,11 @@ def build_mastery_map(case: dict) -> dict[str, dict]:
             {"created_at": float(i), "outcome": LEVEL_OUTCOME[lv], "weight": W_JUDGE}
             for i, lv in enumerate(m["levels"])
         ]
-        s = fold_observations(obs)
-        b = m.get("b_topic", 0.0)
+        s = fold_observations(obs, FoldState(b_topic=m.get("b_topic", 0.0)))
         entry = {
-            "risk": round(replace(s, b_topic=b).risk, 4),
+            "risk": round(s.risk, 4),
             "theta": round(s.theta, 4),
-            "logit": round(s.theta - b, 4),
+            "logit": round(s.logit, 4),
             "p_forget": forget_prob(m["days_since_last"]),
             "observation_count": s.n_obs,
             "label": m.get("label", m["topic_id"]),

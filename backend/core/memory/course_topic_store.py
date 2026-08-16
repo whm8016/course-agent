@@ -85,9 +85,9 @@ PREREQ_RELATIONS = ("prerequisite", "prerequisite_inferred")
 def prereq_closure(topic_id: str, prereq_pairs) -> set[str]:
     """沿 (src, dst) 先修对回溯 topic_id 的全部（直接+间接）先修（纯函数，无 IO）。
 
-    闭包 BFS 的单一实现：DB 路径（``get_prereq_predecessors``）与离线快照路径
-    （``eval_memory.stitch_cases_table_e``，表E评测零 DB）共用——评测口径与生产
-    门控逐位一致靠这一处，不再靠两份 docstring 互指。
+    闭包 BFS 的单一实现：DB 路径（``get_prereq_predecessors``）与离线评测路径
+    （``eval_memory`` 的快照 / 内存图 fixture）共用——评测口径与生产门控逐位
+    一致靠这一处，不再靠多份 docstring 互指。
     """
     adj: dict[str, list[str]] = {}
     for src, dst in prereq_pairs:

@@ -46,8 +46,7 @@ def prereq_predecessors(topic_id: str) -> set[str]:
     """沿 PREREQ_EDGES 递归回溯 topic_id 的全部（直接+间接）前置主题。
 
     BFS 核心复用 ``course_topic_store.prereq_closure``（PREREQ_EDGES 本就是
-    (src, dst) 对且人工标注为先修专用、无 relation 维度）——CI 评测与生产
-    门控的闭包计算同实现。
+    (src, dst) 对且人工标注为先修专用、无 relation 维度，不走 relation 过滤）。
     """
     from core.memory.course_topic_store import prereq_closure
 
