@@ -177,10 +177,10 @@ async def build_course_topic_graph(ctx, course_id: str, force: bool = False) -> 
     from core.rag.lightrag import acquire_index_dlock, release_index_dlock
 
     # 独立锁：backend=topic_graph 与 lightrag/pgvector 索引锁 key 不同，互不阻塞。
-    # 主题图 20min 级但锁是"租约"不是"占坑"：ttl=3min + 每 ≤30s reacquire 拨回，
-    # worker 被 SIGKILL/compose recreate 杀死后最多 3min 自然过期（SIGTERM 走
-    # ARQ cancel → finally 释放，零残留），重建容器后界面很快恢复可重建。
-    lock, renew = await acquire_index_dlock(course_id, "topic_graph", ttl=180)
+    # 与索引同一套租约数字（默认 60s + 20s 续约拨回）：worker 被 SIGKILL 后 key
+    # 最多 60s 自然过期（SIGTERM 走 ARQ cancel → finally 释放零残留），重建容器
+    # 后点重建最多 1 分钟就能抢到，不再整段跳过。
+    lock, renew = await acquire_index_dlock(course_id, "topic_graph")
     if lock is None:
         ttl = None
         try:
