@@ -162,10 +162,18 @@ async def trigger_topic_graph_build(
         }
 
     from core.arq_pool import get_arq_pool
+    from core.memory.course_topic_builder import clear_rebuild_pending, mark_rebuild_pending
+
     arq_pool = await get_arq_pool()
     if arq_pool is None:
         raise HTTPException(status_code=503, detail="任务队列（ARQ/Redis）不可用，请稍后重试")
-    await arq_pool.enqueue_job("build_course_topic_graph", course_id, force)
+    # 先打 pending 再入队：POST 返回前 GET 就不能把上一轮失败当成本次失败。
+    mark_rebuild_pending(course_id)
+    try:
+        await arq_pool.enqueue_job("build_course_topic_graph", course_id, force)
+    except Exception:
+        clear_rebuild_pending(course_id)
+        raise
     logger.info("ARQ 主题图任务已入队 course_id=%s force=%s", course_id, force)
     return {
         "message": "主题图构建任务已启动",
@@ -180,7 +188,7 @@ async def get_topic_graph_payload(db: AsyncSession, course_id: str) -> dict:
     权限校验由各端点自行完成（teacher 用 _get_owned_kb、admin 用 _get_kb_or_404）后调用本函数，
     故查询逻辑在此单一真相源，避免两端各写一份漂移。
     """
-    from core.memory.course_topic_builder import read_failed_sections
+    from core.memory.course_topic_builder import read_build_status, read_failed_sections
     from core.memory.course_topic_store import fetch_course_edges, fetch_course_topics
 
     topics = [
@@ -206,6 +214,9 @@ async def get_topic_graph_payload(db: AsyncSession, course_id: str) -> dict:
         "topics": topics,
         "edges": edges,
         "failed_sections": read_failed_sections(course_id),
+        # 构建进度（pending 旁路文件投影）：queued/extracting/finalizing/stalled/error，
+        # None = 无进行中构建。前端据此轮询并渲染进度条/失败横幅。
+        "build": read_build_status(course_id),
     }
 
 

@@ -25,11 +25,16 @@ import asyncio
 import json
 import logging
 import math
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 JSON_DIR = Path("data/course_topics")
+
+# queued/extracting 超过该秒数无进度更新 → GET 改报 stalled：worker 被 SIGKILL/挂死时
+# 没人写 error（上次的事故形态），靠 ts 兜底提示教师可重试
+_STALL_WARN_SECONDS = 900
 
 
 async def _aget_embed(embed_model, text: str) -> list[float] | None:
@@ -63,6 +68,7 @@ def export_json(
         "note": "表为真相源，本 JSON 为投影（评测复现/教师核对/论文附录用）",
     }
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    clear_rebuild_pending(course_id)
     logger.info("[course_topics] JSON 导出 → %s（%d 主题 %d 边）", out, len(topics), len(edges))
     return out
 
@@ -72,12 +78,23 @@ def export_json(
 _failed_sections_cache: dict[str, tuple[int, list[str]]] = {}
 
 
+def _artifact_path(course_id: str) -> Path:
+    return JSON_DIR / f"course_{course_id}_topics.json"
+
+
+def _pending_path(course_id: str) -> Path:
+    return JSON_DIR / f"course_{course_id}_topics.pending"
+
+
 def read_failed_sections(course_id: str) -> list[str]:
     """读回构建时落盘的抽取失败章节（与 export_json 同模块——文件名契约单一真相源）。
 
+    重建已入队尚未导出时 pending 标记存在：返回 []，避免 GET 把上一轮失败当成本次抽取失败。
     文件缺失 / 解析失败 / 字段缺失一律返回 []：纯展示字段，不因 IO 问题打断 GET。
     """
-    path = JSON_DIR / f"course_{course_id}_topics.json"
+    if _pending_path(course_id).exists():
+        return []
+    path = _artifact_path(course_id)
     try:
         mtime = path.stat().st_mtime_ns
     except OSError:
@@ -93,6 +110,65 @@ def read_failed_sections(course_id: str) -> list[str]:
         result = []
     _failed_sections_cache[str(path)] = (mtime, result)
     return result
+
+
+def write_build_progress(course_id: str, **fields) -> None:
+    """写构建进度旁路文件（pending，temp+replace 原子写防读到半截 JSON）。
+
+    ts 由本函数统一盖（读侧 stalled 判定依据，backend 与 worker 同宿主机内核时钟）。
+    IO 失败静默返回：进度是纯展示，不因 data 盘问题弄挂构建主链路。
+    """
+    payload = {"ts": time.time(), **fields}
+    try:
+        JSON_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = _pending_path(course_id).with_name(_pending_path(course_id).name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(_pending_path(course_id))
+    except OSError:
+        return
+    _failed_sections_cache.pop(str(_artifact_path(course_id)), None)
+
+
+def read_build_status(course_id: str) -> dict | None:
+    """读回构建进度（GET topic-graph 的 ``build`` 字段）。None = 无进行中/失败遗留构建。
+
+    queued/extracting 且 ts 距今超过 ``_STALL_WARN_SECONDS`` → 改报 stalled；error 是
+    终态不改写。文件缺失/损坏/缺 status 一律 None：纯展示字段，不因 IO 问题打断 GET。
+    """
+    try:
+        data = json.loads(_pending_path(course_id).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not data.get("status"):
+        return None
+    status = str(data["status"])
+    ts = data.get("ts")
+    if (status in ("queued", "extracting") and isinstance(ts, (int, float))
+            and time.time() - ts > _STALL_WARN_SECONDS):
+        status = "stalled"
+    out = {"status": status, "ts": ts}
+    for k in ("done", "total", "section", "error"):
+        if data.get(k) is not None:
+            out[k] = data[k]
+    return out
+
+
+def mark_rebuild_pending(course_id: str) -> None:
+    """入队/开抽时写 queued 进度：GET 在本次 export_json 前不展示上一轮 failed_sections，
+    且前端拿到「已入队」状态启动轮询（旧版只 touch 空文件）。
+
+    只写旁路文件，不改写含 embedding 的 artifact（避免与正在导出的 worker 互相覆盖）。
+    """
+    write_build_progress(course_id, status="queued")
+
+
+def clear_rebuild_pending(course_id: str) -> None:
+    """本次构建结束（导出成功 / skip / 失败回滚）后去掉 pending，GET 恢复读 artifact。"""
+    try:
+        _pending_path(course_id).unlink(missing_ok=True)
+    except OSError:
+        return
+    _failed_sections_cache.pop(str(_artifact_path(course_id)), None)
 
 
 # -------------------- from-chunks 离线抽取（有课程库数据时跑）--------------------
@@ -190,14 +266,25 @@ async def _llm_json(
 
     breaker = get_llm_circuit_breaker("topic_build")
     retry_config = RetryConfig()
+    from core.llm.reasoning_params import apply_reasoning_kwargs
+    from settings import get_settings
+
+    s = get_settings()
+    create_kwargs: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.1,
+        "max_tokens": 8000,
+        "stream": False,
+    }
+    # flash 出厂开思考，思考与正文抢额度 → finish=length、content 空。抽取关思考，只拿最终 JSON。
+    apply_reasoning_kwargs(create_kwargs, s.llm.binding, model, llm)
+
     for attempt in (1, 2):  # 200-但非 JSON：重试一次
         try:
-            # deepseek-v4-pro 等 reasoning 模型先吐 reasoning_content 再吐 content；
-            # max_tokens 太小会被 reasoning 占满→content 空(finish=length)。
             resp = await with_retry_and_circuit(
                 llm.chat.completions.create,
-                model=model, messages=[{"role": "user", "content": prompt}],
-                temperature=0.1, max_tokens=4096, stream=False,
+                **create_kwargs,
                 retry_config=retry_config, circuit_breaker=breaker,
             )
         except (CircuitOpenError, LLMRetryError) as exc:
@@ -209,14 +296,18 @@ async def _llm_json(
                 from core.analytics.token_usage import track_llm_response
 
                 await track_llm_response(resp, model=model, mode="topic_build", **track)
-            # 围栏/前后噪声/尾逗号容错走全库单一真相源（judge/question/research 同款）
-            data = extract_json_from_llm(resp.choices[0].message.content or "")
+            choice = resp.choices[0]
+            raw = (choice.message.content or "").strip()
+            data = extract_json_from_llm(raw)
         except Exception as exc:  # 埋点/解析偶发崩不废整轮——按本次失败重试
             logger.warning("[course_topics] 响应处理失败（第 %d 次）：%s", attempt, exc)
             continue
         if data:
             return data
-        logger.warning("[course_topics] LLM 输出非 JSON（第 %d 次）", attempt)
+        logger.warning(
+            "[course_topics] LLM 输出非 JSON（第 %d 次） finish=%s chars=%d preview=%r",
+            attempt, getattr(choice, "finish_reason", None), len(raw), raw[:200],
+        )
     return None
 
 
@@ -389,16 +480,40 @@ async def extract_graph_from_chunks(
     order = 0
     from core.memory.course_topic_store import _norm_label
 
-    for sec, group in by_section.items():
-        for bi, block in enumerate(_pack_blocks(group, max_chars_per_call), 1):
+    # 先按章打包再抽：总块数（进度分母）在开抽前即可全部确定
+    packed_by_section = [
+        (sec, _pack_blocks(group, max_chars_per_call)) for sec, group in by_section.items()
+    ]
+    total_blocks = sum(len(packed) for _, packed in packed_by_section)
+    done_blocks = 0
+    for sec, packed in packed_by_section:
+        n_blocks = len(packed)
+        for bi, block in enumerate(packed, 1):
             text = "\n".join(ck["text"] for ck in block)
+            write_build_progress(
+                course_id, status="extracting", done=done_blocks,
+                total=total_blocks, section=sec,
+            )
+            logger.info(
+                "[course_topics] 抽取中 course=%s section=%s block=%d/%d chars=%d known=%d",
+                course_id, sec, bi, n_blocks, len(text), len(known),
+            )
             res = await extract_block_graph(
                 course_id, sec, text, known, llm, model, gleaning=gleaning,
             )
+            done_blocks += 1  # 失败块也算已处理：进度是"走到哪了"不是"成功几块"
             if res is None:
+                logger.warning(
+                    "[course_topics] 抽取失败 course=%s section=%s block=%d/%d",
+                    course_id, sec, bi, n_blocks,
+                )
                 failed_sections.append(f"{sec}（第{bi}块）")
                 continue
             block_topics, block_edges, dropped = res
+            logger.info(
+                "[course_topics] 抽取完成 course=%s section=%s block=%d/%d +%d主题 +%d边",
+                course_id, sec, bi, n_blocks, len(block_topics), len(block_edges),
+            )
             dropped_invalid += dropped
             for t in block_topics:
                 topics.append({
@@ -412,6 +527,11 @@ async def extract_graph_from_chunks(
                 order += 1
                 known[_norm_label(t["label"])] = t["label"]
             raw_edges.extend(block_edges)
+    # 抽取完进入收尾（embedding/去重/删环闭包/入库，数分钟量级）：满格进度 + 独立状态，
+    # 不让最后一块后出现「卡在 n-1/n」的假停滞
+    write_build_progress(
+        course_id, status="finalizing", done=total_blocks, total=total_blocks,
+    )
     # embedding 并发（_aget_embed 自吞异常返 None，单条失败不拖垮整批）——
     # 串行逐个 await 数十次网络往返会白占 worker 槽位；Semaphore 限流防嵌入端点 429
     if topics and embed_model is not None:
@@ -696,68 +816,76 @@ async def build_topic_graph(course_id: str, db, *, force: bool = False) -> dict:
     ).scalar_one()
     if existing and not force:
         logger.info("[course_topics] course=%s 已有 %d 主题，skip（force=True 重建）", course_id, existing)
+        clear_rebuild_pending(course_id)
         return {"status": "already_exists", "course_id": course_id, "topics": int(existing)}
     if force:
         await db.execute(delete(CourseTopicEdge).where(CourseTopicEdge.course_id == course_id))
         await db.execute(delete(CourseTopic).where(CourseTopic.course_id == course_id))
         await db.flush()
 
-    chunks = load_course_chunks(course_id)
-
+    mark_rebuild_pending(course_id)
     try:
-        from core.rag.llamaindex.pg_store import get_embed_model
+        chunks = load_course_chunks(course_id)
 
-        embed_model = get_embed_model()
-    except Exception as exc:
-        # 门控硬依赖：embed_model 不可用 = 产物对门控无用（全 unknown）。fail-fast 让 worker 兜底。
-        raise RuntimeError(f"embed_model 不可用，无法构建有效主题图（门控依赖 embedding）：{exc}") from exc
+        try:
+            from core.rag.llamaindex.pg_store import get_embed_model
 
-    from core.llm.llm import client as llm
-    from settings import get_settings
-    s = get_settings()
-    model = s.course_topic.extract_model or s.llm.text_model
-    gleaning = s.course_topic.gleaning
-    logger.info(
-        "[course_topics] build_topic_graph course=%s model=%s chunks=%d force=%s gleaning=%s",
-        course_id, model, len(chunks), force, gleaning,
-    )
+            embed_model = get_embed_model()
+        except Exception as exc:
+            # 门控硬依赖：embed_model 不可用 = 产物对门控无用（全 unknown）。fail-fast 让 worker 兜底。
+            raise RuntimeError(f"embed_model 不可用，无法构建有效主题图（门控依赖 embedding）：{exc}") from exc
 
-    topics, raw_edges, meta = await extract_graph_from_chunks(
-        course_id, chunks, llm, model, embed_model, gleaning=gleaning,
-    )
-    if not topics:
-        # 全量失败保护：所有块两试皆败（坏 key / 持续限流熔断）时 force 已删旧图——
-        # 不 commit 空图冒充 built；raise 让 worker deadletter，事务回滚保住旧图。
-        # 部分失败不算（topics 非空），教师经 failed_sections 可见可重试。
-        raise RuntimeError(
-            f"course={course_id} 全部块抽取失败（{len(chunks)} chunks，LLM 不可用？），不落空图"
+        from core.llm.llm import client as llm
+        from settings import get_settings
+        s = get_settings()
+        model = s.course_topic.extract_model or s.llm.text_model
+        gleaning = s.course_topic.gleaning
+        logger.info(
+            "[course_topics] build_topic_graph course=%s model=%s chunks=%d force=%s gleaning=%s",
+            course_id, model, len(chunks), force, gleaning,
         )
-    topics, alias = merge_synonymous(topics)
-    edges, edge_stats = assemble_edges(
-        raw_edges, alias, topics, dropped_invalid=meta["edges_dropped_invalid"],
-    )
 
-    for t in topics:
-        db.add(CourseTopic(
-            course_id=course_id, topic_id=t["topic_id"], label=t["label"],
-            definition=t["definition"], source_section=t["source_section"],
-            order_idx=t["order_idx"], embedding=t["embedding"],
-        ))
-    for e in edges:
-        db.add(CourseTopicEdge(
-            course_id=course_id, src_topic_id=e["src"], dst_topic_id=e["dst"],
-            relation=e["relation"], confidence=e["confidence"],
-            evidence=e["evidence"],
-        ))
-    await db.commit()
-    export_json(
-        course_id, topics, edges,
-        failed_sections=meta["failed_sections"], stats=edge_stats,
-    )
-    logger.info("[course_topics] build_topic_graph done course=%s %d主题 %d边", course_id, len(topics), len(edges))
-    return {
-        "status": "built", "course_id": course_id,
-        "topics": len(topics), "edges": len(edges),
-        "cross_section_edges": edge_stats["cross_section_edges"],
-        "failed_sections": meta["failed_sections"],
-    }
+        topics, raw_edges, meta = await extract_graph_from_chunks(
+            course_id, chunks, llm, model, embed_model, gleaning=gleaning,
+        )
+        if not topics:
+            # 全量失败保护：所有块两试皆败（坏 key / 持续限流熔断）时 force 已删旧图——
+            # 不 commit 空图冒充 built；raise 让 worker deadletter，事务回滚保住旧图。
+            # 部分失败不算（topics 非空），教师经 failed_sections 可见可重试。
+            raise RuntimeError(
+                f"course={course_id} 全部块抽取失败（{len(chunks)} chunks，LLM 不可用？），不落空图"
+            )
+        topics, alias = merge_synonymous(topics)
+        edges, edge_stats = assemble_edges(
+            raw_edges, alias, topics, dropped_invalid=meta["edges_dropped_invalid"],
+        )
+
+        for t in topics:
+            db.add(CourseTopic(
+                course_id=course_id, topic_id=t["topic_id"], label=t["label"],
+                definition=t["definition"], source_section=t["source_section"],
+                order_idx=t["order_idx"], embedding=t["embedding"],
+            ))
+        for e in edges:
+            db.add(CourseTopicEdge(
+                course_id=course_id, src_topic_id=e["src"], dst_topic_id=e["dst"],
+                relation=e["relation"], confidence=e["confidence"],
+                evidence=e["evidence"],
+            ))
+        await db.commit()
+        export_json(
+            course_id, topics, edges,
+            failed_sections=meta["failed_sections"], stats=edge_stats,
+        )
+        logger.info("[course_topics] build_topic_graph done course=%s %d主题 %d边", course_id, len(topics), len(edges))
+        return {
+            "status": "built", "course_id": course_id,
+            "topics": len(topics), "edges": len(edges),
+            "cross_section_edges": edge_stats["cross_section_edges"],
+            "failed_sections": meta["failed_sections"],
+        }
+    except BaseException as exc:
+        # 失败写 error（不删 pending）：教师端看到真实原因；且 pending 存在使
+        # read_failed_sections 不回显上一轮 artifact 里的陈旧失败章节
+        write_build_progress(course_id, status="error", error=str(exc)[:300])
+        raise

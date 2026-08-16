@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { authHeaders } from '../../services/auth'
 import { INFERRED_RELATION, type TeacherTopicGraph } from '../../services/api'
+import { toast } from '../../lib/toast'
 import { STATUS_LABEL, STATUS_COLOR, formatBytes, formatTime } from './kbUtils'
 
 // ── 共享类型 ─────────────────────────────────────────────────────────────────
@@ -85,8 +87,9 @@ function ConfirmDialog({
   onClose: () => void
 }) {
   const isDanger = state.variant === 'danger'
-  return (
-    <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={onClose}>
+  // portal 到 body：本面板在 teacher/admin 的 overflow-y-auto 里，fixed 会被裁成「点了没反应」
+  return createPortal(
+    <div data-confirm-overlay className="fixed inset-0 bg-black/30 flex items-center justify-center z-[80]" onClick={onClose}>
       <div className="bg-surface rounded-[var(--radius-lg)] shadow-2xl w-full max-w-sm p-6" onClick={e => e.stopPropagation()}>
         <div className="flex items-center gap-3 mb-4">
           <div className={`w-10 h-10 rounded-full flex items-center justify-center shrink-0 ${isDanger ? 'bg-danger-bg' : 'bg-warn-bg'}`}>
@@ -114,7 +117,8 @@ function ConfirmDialog({
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -167,8 +171,14 @@ export default function KbDetailPanel({
   const [topicGraph, setTopicGraph] = useState<TeacherTopicGraph | null>(null)
   const [tgLoading, setTgLoading] = useState(false)
   const [tgBuilding, setTgBuilding] = useState(false)
+  const [tgQueued, setTgQueued] = useState(false)
+  const [tgPoll, setTgPoll] = useState(false)
   const [tgError, setTgError] = useState('')
   const [swEdit, setSwEdit] = useState<{ tid: string; value: string } | null>(null)
+  const courseIdRef = useRef(kb.course_id)
+  courseIdRef.current = kb.course_id
+  const tgFetchGen = useRef(0)
+  const tgWasBuildingRef = useRef(false)
 
   // topic_id→主题 Map（边列表渲染 O(1) 查 label/章节，避免每边两次 O(n) find）
   const topicById = useMemo(
@@ -176,26 +186,57 @@ export default function KbDetailPanel({
     [topicGraph],
   )
 
+  // 后端 pending 文件投影的构建进度（null = 无进行中构建）
+  const tgBuild = topicGraph?.build ?? null
+  // 构建在跑（含排队/收尾）时锁按钮：防双击入队两个 job 抢同一份 pending/旧图
+  const tgBusy = tgBuilding || tgQueued
+    || (tgBuild != null && tgBuild.status !== 'error' && tgBuild.status !== 'stalled')
+
   const loadTopicGraph = async () => {
+    const gen = ++tgFetchGen.current
     setTgLoading(true)
     setTgError('')
     try {
-      setTopicGraph(await apiFetch(`${apiBase}/${kb.course_id}/topic-graph`) as TeacherTopicGraph)
+      const data = await apiFetch(`${apiBase}/${kb.course_id}/topic-graph`) as TeacherTopicGraph
+      if (gen !== tgFetchGen.current) return
+      setTopicGraph(data)
+      setTgQueued(false)
+      // build 字段驱动轮询：非终态构建在跑 → 保持 5s 一拍；上一拍在建设一拍消失 → 完成
+      const active = !!data.build && data.build.status !== 'error'
+      if (tgWasBuildingRef.current && !data.build) {
+        toast.success(`主题图构建完成：${data.topic_count} 主题 / ${data.edge_count} 边`)
+      }
+      tgWasBuildingRef.current = active
+      setTgPoll(active)
     } catch (e) {
+      if (gen !== tgFetchGen.current) return
       setTgError(e instanceof Error ? e.message : String(e))
     }
-    setTgLoading(false)
+    if (gen === tgFetchGen.current) setTgLoading(false)
   }
 
   const handleBuildTopicGraph = async (force: boolean) => {
+    const courseId = kb.course_id
+    tgFetchGen.current += 1
     setTgBuilding(true)
     setTgError('')
+    // 点重建立刻拿掉上一轮失败横幅：入队成功前后台还没跑，不能报抽取失败
+    setTopicGraph(prev => (prev ? { ...prev, failed_sections: [], build: null } : prev))
     try {
-      await apiFetch(`${apiBase}/${kb.course_id}/topic-graph${force ? '?force=true' : ''}`, { method: 'POST' })
+      await apiFetch(`${apiBase}/${courseId}/topic-graph${force ? '?force=true' : ''}`, { method: 'POST' })
+      if (courseIdRef.current !== courseId) return
+      setTgQueued(true)
+      toast.info('构建任务已提交，正在跟踪进度…')
+      void loadTopicGraph()  // 立即查一拍拿 queued 状态，不等第一个 5s 间隔
     } catch (e) {
-      setTgError(e instanceof Error ? e.message : String(e))
+      if (courseIdRef.current !== courseId) return
+      const msg = e instanceof Error ? e.message : String(e)
+      setTgError(msg)
+      toast.error(msg)
+      void loadTopicGraph()
+    } finally {
+      if (courseIdRef.current === courseId) setTgBuilding(false)
     }
-    setTgBuilding(false)
   }
 
   const handleSaveSafetyWeight = async (topicId: string) => {
@@ -218,7 +259,23 @@ export default function KbDetailPanel({
   }
 
   // 面板按 course_id 生命周期加载（切换课程详情时重查）
-  useEffect(() => { void loadTopicGraph() }, [kb.course_id])
+  useEffect(() => {
+    setTgQueued(false)
+    setTgBuilding(false)
+    setTgError('')
+    setTgPoll(false)
+    tgWasBuildingRef.current = false
+    setConfirmState(null)
+    void loadTopicGraph()
+  }, [kb.course_id])
+
+  // 构建进度轮询：build 字段在（queued/extracting/finalizing/stalled）就 5s 一拍，
+  // 完成/失败即停。刷新页面后挂载首查发现 build 也能接上，进度不因刷新丢失。
+  useEffect(() => {
+    if (!tgPoll) return
+    const t = setInterval(() => { void loadTopicGraph() }, 5_000)
+    return () => clearInterval(t)
+  }, [tgPoll])
 
   const handleEditSave = async () => {
     setEditLoading(true)
@@ -601,7 +658,7 @@ export default function KbDetailPanel({
           <div className="flex gap-1.5">
             {(!topicGraph || topicGraph.topic_count === 0) ? (
               <button type="button" onClick={() => void handleBuildTopicGraph(false)}
-                disabled={tgBuilding}
+                disabled={tgBusy}
                 className="text-xs bg-accent text-white px-2.5 py-1 rounded-[var(--radius)] hover:bg-accent-2 transition disabled:opacity-50">
                 生成主题图
               </button>
@@ -615,10 +672,10 @@ export default function KbDetailPanel({
                   onClick={() => requestConfirm({
                     action: () => void handleBuildTopicGraph(true),
                     title: '重建课程主题图',
-                    message: '重建将删除现有主题图并重新抽取（消耗 LLM 调用），教师已标注的安全权重与核对标记会被清除。确定继续？',
+                    message: '重建将删除现有主题图并重新抽取。确定继续？',
                     confirmLabel: '确认重建', variant: 'warning',
                   })}
-                  disabled={tgBuilding}
+                  disabled={tgBusy}
                   className="text-xs text-warn-fg border border-warn-fg bg-warn-bg px-2.5 py-1 rounded-[var(--radius)] hover:bg-warn-bg transition disabled:opacity-50">
                   重建
                 </button>
@@ -626,19 +683,59 @@ export default function KbDetailPanel({
             )}
           </div>
         </div>
-        {tgBuilding && (
-          <div className="text-xs text-warn-fg mb-1.5">已提交后台构建，完成后点「刷新」查看结果。</div>
+        {(tgBuilding || tgQueued || tgBuild) && (
+          <div className="mb-1.5 space-y-1.5">
+            {tgBuilding && (
+              <div className="text-xs text-warn-fg">正在提交重建任务…</div>
+            )}
+            {!tgBuilding && !tgBuild && tgQueued && (
+              <div className="text-xs text-warn-fg">构建任务已提交后台…</div>
+            )}
+            {tgBuild?.status === 'queued' && (
+              <div className="text-xs text-warn-fg">已入队，等待后台开始构建…</div>
+            )}
+            {(tgBuild?.status === 'extracting' || tgBuild?.status === 'finalizing') && (
+              <div>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 h-2 bg-surface-2 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-accent rounded-full transition-all duration-700"
+                      style={{ width: `${tgBuild.total ? Math.round(((tgBuild.done ?? 0) / tgBuild.total) * 100) : 0}%` }}
+                    />
+                  </div>
+                  <span className="text-xs text-muted shrink-0 w-12 text-right">
+                    {tgBuild.done ?? 0}/{tgBuild.total ?? 0} 块
+                  </span>
+                </div>
+                <p className="text-xs text-ink-soft mt-0.5">
+                  {tgBuild.status === 'finalizing'
+                    ? '抽取完成，正在去重与入库…'
+                    : `正在抽取：${tgBuild.section ?? ''}`}
+                </p>
+              </div>
+            )}
+            {tgBuild?.status === 'stalled' && (
+              <div className="text-xs text-warn-fg bg-warn-bg px-2 py-1 rounded-[var(--radius)]">
+                构建进度超过 15 分钟无更新，疑似中断——可点击「重建」重试
+              </div>
+            )}
+            {tgBuild?.status === 'error' && (
+              <div className="text-xs bg-danger-bg text-danger-fg px-2 py-1 rounded-[var(--radius)]">
+                构建失败：{tgBuild.error ?? '未知原因'}（可点击「重建」重试）
+              </div>
+            )}
+          </div>
         )}
         {tgError && <div className="text-xs text-danger-fg mb-1.5">{tgError}</div>}
-        {topicGraph && (topicGraph.failed_sections?.length ?? 0) > 0 && (
+        {!(tgBuilding || tgQueued || tgBuild) && topicGraph && (topicGraph.failed_sections?.length ?? 0) > 0 && (
           <div className="text-xs text-warn-fg bg-warn-bg px-2 py-1 rounded-[var(--radius)] mb-1.5">
-            以下章节抽取失败，图谱可能不完整：{topicGraph.failed_sections!.join('；')}（可「重建」重试）
+            抽取失败：{topicGraph.failed_sections!.join('；')}
           </div>
         )}
         {topicGraph && topicGraph.topic_count > 0 && (
           <>
             <div className="text-[11px] text-muted mb-1">
-              知识点（×安全权重：任务风险因子，0=永不预警，&gt;1=更易触发学情预警，点击修改）
+              知识点
             </div>
             <div className="max-h-56 overflow-y-auto border border-line rounded-[var(--radius)] divide-y divide-line">
               {topicGraph.topics.map(t => (
@@ -663,7 +760,7 @@ export default function KbDetailPanel({
               ))}
             </div>
             <details className="mt-1.5">
-              <summary className="text-[11px] text-muted cursor-pointer">先修边（{topicGraph.edge_count}，A → B 表示 A 是 B 的前置）</summary>
+              <summary className="text-[11px] text-muted cursor-pointer">先修边（{topicGraph.edge_count}）</summary>
               <div className="mt-1 border border-line rounded-[var(--radius)] divide-y divide-line max-h-48 overflow-y-auto">
                 {topicGraph.edges.map((e, i) => {
                   const s = topicById.get(e.src), d = topicById.get(e.dst)

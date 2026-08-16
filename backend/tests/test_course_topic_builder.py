@@ -25,17 +25,23 @@ from core.memory.course_topic_builder import (
     _validate_block_edges,
     assemble_edges,
     break_cycles,
+    clear_rebuild_pending,
     close_transitive,
     extract_block_graph,
     extract_graph_from_chunks,
     finalize_edges,
+    mark_rebuild_pending,
     merge_synonymous,
+    read_failed_sections,
 )
 
 
-def _resp(content: str):
+def _resp(content: str, *, reasoning_content=None, finish_reason="stop"):
     """构造 _llm_json 能吃的假 LLM 响应（无 usage 属性 → track 静默跳过）。"""
-    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=content))])
+    return SimpleNamespace(choices=[SimpleNamespace(
+        message=SimpleNamespace(content=content, reasoning_content=reasoning_content),
+        finish_reason=finish_reason,
+    )])
 
 
 def _fake_llm(contents: list[str]):
@@ -365,3 +371,177 @@ async def test_llm_json_transport_error_returns_none():
     assert await _llm_json(llm, "m", "prompt") is None
     assert llm.chat.completions.create.await_count == 1
     breaker.reset()
+
+
+@pytest.mark.asyncio
+async def test_llm_json_disables_thinking_for_flash():
+    """抽取关思考：flash 注入 thinking=disabled，只解析 content。"""
+    llm = _fake_llm(['{"ok": 1}'])
+    llm.base_url = "https://api.deepseek.com"
+    data = await _llm_json(llm, "deepseek-v4-flash", "prompt")
+    assert data == {"ok": 1}
+    kwargs = llm.chat.completions.create.await_args.kwargs
+    assert kwargs.get("extra_body") == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.asyncio
+async def test_llm_json_ignores_reasoning_content():
+    """只要最终 content；思考字段里即使有 JSON 也不用。"""
+    llm = _fake_llm([])
+    llm.chat.completions.create = AsyncMock(
+        return_value=_resp("", reasoning_content='{"ok": 1}', finish_reason="length"),
+    )
+    assert await _llm_json(llm, "m", "prompt") is None
+
+
+def test_clear_failed_sections_drops_stale_banner(tmp_path, monkeypatch):
+    """重建入队后 GET 不得继续读上一轮 failed_sections（否则教师面板立刻误报抽取失败）。"""
+    from core.memory import course_topic_builder as m
+
+    monkeypatch.setattr(m, "JSON_DIR", tmp_path)
+    path = tmp_path / "course_c1_topics.json"
+    path.write_text(json.dumps({
+        "course_id": "c1",
+        "topics": [],
+        "edges": [],
+        "failed_sections": ["未知章节（第1块）"],
+    }, ensure_ascii=False), encoding="utf-8")
+    assert read_failed_sections("c1") == ["未知章节（第1块）"]
+    mark_rebuild_pending("c1")
+    assert read_failed_sections("c1") == []
+    assert json.loads(path.read_text(encoding="utf-8"))["failed_sections"] == ["未知章节（第1块）"]
+    m.export_json("c1", [], [], failed_sections=["真失败（第2块）"])
+    assert not (tmp_path / "course_c1_topics.pending").exists()
+    assert read_failed_sections("c1") == ["真失败（第2块）"]
+
+
+def test_clear_failed_sections_missing_file_is_noop(tmp_path, monkeypatch):
+    from core.memory import course_topic_builder as m
+
+    monkeypatch.setattr(m, "JSON_DIR", tmp_path)
+    mark_rebuild_pending("no_such")
+    assert read_failed_sections("no_such") == []
+    clear_rebuild_pending("no_such")
+    assert read_failed_sections("no_such") == []
+
+
+# ---------------------------------------------------------------------------
+# 构建进度旁路文件（pending 空标记升级 JSON）：queued → extracting → finalizing →
+# 导出删除；失败写 error；worker 硬死没人写 error 时靠 ts 派生 stalled
+# ---------------------------------------------------------------------------
+
+def test_build_status_lifecycle(tmp_path, monkeypatch):
+    """入队 → 抽取 → 导出全链：GET 的 build 字段逐态可读，导出后归 None。"""
+    from core.memory import course_topic_builder as m
+
+    monkeypatch.setattr(m, "JSON_DIR", tmp_path)
+    assert m.read_build_status("c1") is None  # 无文件 = 无进行中构建
+    m.mark_rebuild_pending("c1")
+    assert m.read_build_status("c1")["status"] == "queued"
+    m.write_build_progress("c1", status="extracting", done=2, total=5, section="第3章")
+    st = m.read_build_status("c1")
+    assert (st["status"], st["done"], st["total"], st["section"]) == ("extracting", 2, 5, "第3章")
+    assert isinstance(st.get("ts"), (int, float))  # stalled 判定依据在读侧透出
+    m.export_json("c1", [], [])  # 成功导出删 pending → 构建结束
+    assert m.read_build_status("c1") is None
+
+
+def test_build_status_stalled_and_error(tmp_path, monkeypatch):
+    """extracting 超 15 分钟无更新改报 stalled（worker 硬死兜底）；error 是终态不改写。"""
+    import time as _time
+
+    from core.memory import course_topic_builder as m
+
+    monkeypatch.setattr(m, "JSON_DIR", tmp_path)
+    pending = tmp_path / "course_c1_topics.pending"
+    pending.write_text(json.dumps({
+        "status": "extracting", "done": 1, "total": 9, "ts": _time.time() - 901,
+    }), encoding="utf-8")
+    st = m.read_build_status("c1")
+    assert st["status"] == "stalled" and st["done"] == 1 and st["total"] == 9
+    pending.write_text(json.dumps({
+        "status": "queued", "ts": _time.time() - 901,
+    }), encoding="utf-8")
+    assert m.read_build_status("c1")["status"] == "stalled"  # 排队卡死同样提示
+    pending.write_text(json.dumps({
+        "status": "error", "error": "boom", "ts": _time.time() - 901,
+    }), encoding="utf-8")
+    st = m.read_build_status("c1")
+    assert st["status"] == "error" and st["error"] == "boom"
+    pending.write_text("{写到一半被读", encoding="utf-8")
+    assert m.read_build_status("c1") is None  # 损坏容错：纯展示字段不打断 GET
+
+
+@pytest.mark.asyncio
+async def test_extract_writes_block_progress(tmp_path, monkeypatch):
+    """抽取循环逐块写进度：total 抽前预计算，done 含失败块（已处理≠已成功），收尾 finalizing。"""
+    from core.memory import course_topic_builder as m
+
+    monkeypatch.setattr(m, "JSON_DIR", tmp_path)
+    writes: list[dict] = []
+    real_write = m.write_build_progress
+    monkeypatch.setattr(m, "write_build_progress", lambda cid, **f: (
+        writes.append(f), real_write(cid, **f),
+    )[1])
+    chunks = [
+        {"text": "本章教旧点。", "section": "第1章", "order_idx": 0},
+        {"text": "失败块正文。", "section": "第2章", "order_idx": 1},
+        {"text": "基于旧点教新点。", "section": "第2章", "order_idx": 2},
+    ]
+    reply1 = {"topics": [{"label": "旧点", "definition": "d"}], "edges": []}
+    reply2 = {"topics": [{"label": "新点", "definition": "d2"}], "edges": []}
+    llm = _fake_llm([
+        json.dumps(reply1, ensure_ascii=False),
+        "崩", "还崩",
+        json.dumps(reply2, ensure_ascii=False),
+    ])
+    topics, _, meta = await m.extract_graph_from_chunks(
+        "c1", chunks, llm, "m", gleaning=0, max_chars_per_call=3,  # 逐 chunk 独立成块
+    )
+    assert len(topics) == 2 and meta["failed_sections"] == ["第2章（第1块）"]
+    # 每块开抽前写一帧（done=已完成块数），全块处理完写 finalizing（done=total）
+    assert [(w["status"], w["done"], w["total"], w.get("section")) for w in writes] == [
+        ("extracting", 0, 3, "第1章"),
+        ("extracting", 1, 3, "第2章"),
+        ("extracting", 2, 3, "第2章"),
+        ("finalizing", 3, 3, None),
+    ]
+    st = m.read_build_status("c1")
+    assert st["status"] == "finalizing" and st["done"] == 3 and st["total"] == 3
+
+
+@pytest.mark.asyncio
+async def test_build_failure_writes_error_status(tmp_path, monkeypatch):
+    """构建失败（如切块审计缺失）写 error 进度而非删 pending——教师端能看到真实原因，
+    且 pending 存在使 read_failed_sections 不回显上一轮的陈旧失败章节。"""
+    from core.memory import course_topic_builder as m
+
+    monkeypatch.setattr(m, "JSON_DIR", tmp_path)
+
+    def _raise(cid):
+        raise FileNotFoundError("没有摄入切块审计 JSON")
+
+    monkeypatch.setattr(m, "load_course_chunks", _raise)
+    db = SimpleNamespace(execute=AsyncMock(return_value=SimpleNamespace(scalar_one=lambda: 0)))
+    with pytest.raises(FileNotFoundError):
+        await m.build_topic_graph("c1", db)
+    st = m.read_build_status("c1")
+    assert st["status"] == "error" and "切块审计" in st["error"]
+    assert m.read_failed_sections("c1") == []  # 陈旧失败不回显
+
+
+@pytest.mark.asyncio
+async def test_topic_graph_payload_carries_build(tmp_path, monkeypatch):
+    """GET topic-graph 的 build 字段直通 read_build_status（teacher/admin 共用一份投影）。"""
+    from api.kb_indexing import get_topic_graph_payload
+    from core.memory import course_topic_builder as m
+    from core.memory import course_topic_store as store
+
+    monkeypatch.setattr(m, "JSON_DIR", tmp_path)
+    monkeypatch.setattr(store, "fetch_course_topics", AsyncMock(return_value=[]))
+    monkeypatch.setattr(store, "fetch_course_edges", AsyncMock(return_value=[]))
+    assert (await get_topic_graph_payload(None, "c1"))["build"] is None
+    m.mark_rebuild_pending("c1")
+    payload = await get_topic_graph_payload(None, "c1")
+    assert payload["build"]["status"] == "queued"
+    assert payload["failed_sections"] == []

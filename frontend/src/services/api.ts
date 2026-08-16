@@ -462,6 +462,16 @@ export interface TeacherTopicEdge {
   evidence?: string | null
 }
 
+/** 主题图构建进度（后端 pending 旁路文件投影；有进行中构建或失败遗留时才有值） */
+export interface TopicGraphBuild {
+  /** queued=已入队 extracting=逐块抽取 finalizing=去重入库 stalled=超时无进展 error=失败 */
+  status: 'queued' | 'extracting' | 'finalizing' | 'stalled' | 'error'
+  done?: number
+  total?: number
+  section?: string
+  error?: string
+}
+
 export interface TeacherTopicGraph {
   course_id: string
   topic_count: number
@@ -469,6 +479,7 @@ export interface TeacherTopicGraph {
   topics: TeacherTopic[]
   edges: TeacherTopicEdge[]
   failed_sections?: string[]
+  build?: TopicGraphBuild | null
 }
 
 export async function deleteGraphNode(nodeId: string): Promise<GraphsResponse> {
