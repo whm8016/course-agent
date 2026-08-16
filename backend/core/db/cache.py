@@ -27,6 +27,11 @@ def _get_pool() -> aioredis.Redis:
             REDIS_URL,
             decode_responses=True,
             socket_connect_timeout=2,
+            # 命令执行超时（对齐 core/leader.py 的选主客户端）：只设连接超时的话，
+            # 网络分区时已建立的连接上命令会无限挂死——索引锁续约协程卡住 → TTL
+            # 衰减被偷锁 → 双写。本池无阻塞读（blpop 在 reply_channel 自建客户端上），
+            # 3s 对本地 Redis 的小命令绰绰有余。
+            socket_timeout=3,
         )
     return _pool
 

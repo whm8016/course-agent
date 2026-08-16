@@ -86,6 +86,10 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     restart: unless-stopped
+    # SIGTERM 停机宽限：ARQ handle_sig 会 cancel 在跑任务 → job finally 里释放索引锁。
+    # compose 默认只给 10s，大任务清理慢会被 SIGKILL 硬杀、只能等锁租约自然过期；
+    # 60s 覆盖优雅释放（SIGKILL/OOM 兜底仍靠租约 TTL + 死锁偷取）。
+    stop_grace_period: 60s
     env_file:
       - ./backend/.env
     environment:

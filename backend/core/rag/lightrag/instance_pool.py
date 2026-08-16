@@ -17,6 +17,8 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
+from redis.exceptions import LockNotOwnedError
+
 from settings import get_settings
 LIGHTRAG_LRU_CAPACITY = get_settings().lightrag_lru_capacity_per_worker
 LIGHTRAG_MAX_ASYNC = get_settings().lightrag.max_async
@@ -644,33 +646,101 @@ async def purge_course_workspace(course_id: str) -> None:
 
 
 # 分布式索引锁：跨 worker 进程互斥（asyncio.Lock 只在单进程内有效，多容器/多进程
-# 部署下护不住）。TTL + 续约守护：索引可达数小时，靠 renew_task 反复 extend 防止
-# 锁过期被别的 worker 抢走；持有者崩溃则 TTL 到期自动释放，不留死锁。
-_INDEX_DLOCK_TTL = 3600  # 单次续约周期 1 小时
+# 部署下护不住）。租约语义（与 core/leader.py 同族，对标 Redisson 看门狗）：
+#   - 续约用 reacquire() 把 TTL 拨回 ttl（重置而非累加——extend() 是往剩余时间上加，
+#     长任务会把 TTL 滚到远超标称值，进程被杀后残留窗口同倍放大）；
+#   - 持有者崩溃（SIGKILL/OOM；SIGTERM 走 ARQ cancel → job finally → release）后
+#     TTL 自然过期，不留死锁；
+#   - acquire 撞锁时不干等 TTL：若锁剩余 PTTL 已低于阈值（持有者多个续约周期没续，
+#     大概率已死），原子偷锁后重试一次。阈值只在「马上要自然过期」时才允许偷，
+#     绝不提前偷 1h 长租约——索引锁是正确性锁（双写 ainsert 产重复文档），且下游
+#     （LightRAG 文件/pgvector）没有 fencing token，误偷无法拒写。
+_INDEX_DLOCK_TTL = 3600  # 默认租约 1 小时（抗 Redis 长时间抖动），实际存活靠续约维持
 _INDEX_DLOCK_PREFIX = "indexing:dlock:"
+_INDEX_DLOCK_RENEW_INTERVAL = 30  # 续约节奏上限（秒）；短租约按 ttl/3
 
 
-async def acquire_index_dlock(course_id: str, backend: str = "lightrag"):
+# 原子偷锁：GET==观察值（还是刚才看到的那把锁，没被第三个进程换走/重置）且 PTTL
+# 仍低于阈值（持有者在 GET 与本脚本之间没续上）才 DEL。双条件绑成一次原子操作，
+# 关掉「读到低 TTL → 持有者恰好续约 → 误删活人的锁」的 TOCTOU（同 leader.py 的
+# CAS 续约思路）。
+_STEAL_SCRIPT = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    local t = redis.call('pttl', KEYS[1])
+    if t > 0 and t <= tonumber(ARGV[2]) then
+        return redis.call('del', KEYS[1])
+    end
+end
+return 0
+"""
+
+
+async def _steal_stale_dlock(redis, course_id: str, backend: str, ttl: int) -> bool:
+    """偷「持有者已停续约、即将自然过期」的死锁。返回 True=已删除，可重试 acquire。
+
+    判死标准：PTTL ≤ min(120s, ttl/4)。活持有者每 ≤30s 把 PTTL 拨回 ttl（1h 租约恒
+    >3570s），永远碰不到阈值；SIGKILL 后要等 TTL 自然掉进阈值才可偷——相当于只在
+    「本来马上就要过期」时提前 ≤2 分钟接管，不改变长租约的保护窗口。
+    """
+    key = f"{_INDEX_DLOCK_PREFIX}{course_id}:{backend}"
+    threshold_ms = min(120_000, ttl * 1000 // 4)
+    try:
+        value = await redis.get(key)
+        pttl = await redis.pttl(key)
+        if value is None or pttl is None or pttl <= 0 or pttl > threshold_ms:
+            return False  # 锁没了/无过期（异常态不偷）/活得好好的
+        stolen = await redis.eval(_STEAL_SCRIPT, 1, key, value, threshold_ms)
+        if stolen:
+            logger.warning(
+                "偷取疑似死锁 course=%s backend=%s pttl=%sms threshold=%sms",
+                course_id, backend, pttl, threshold_ms,
+            )
+            return True
+        return False  # GET 与 EVAL 之间持有者续上了/被人换走，双条件拦下
+    except Exception:
+        # 偷锁只是接管加速，失败不影响正确性（跳过语义照旧，锁最终自然过期）
+        logger.debug("死锁偷取检查失败 course=%s backend=%s", course_id, backend, exc_info=True)
+        return False
+
+
+async def acquire_index_dlock(
+    course_id: str, backend: str = "lightrag", *, ttl: int = _INDEX_DLOCK_TTL,
+):
     """获取 (course, backend) 级 Redis 分布式锁。返回 (lock, renew_task)；被占返回 (None, None)。
 
     key 含 backend：同一课程 lightrag 与 pgvector 两套索引可并行构建（互不阻塞），但同一
     后端同一课程仍互斥（防 ainsert/delete 并发写同一份 store 产生重复/损坏）。
+    ttl：租约时长（秒）。持有期间每 min(ttl/3, 30s) 用 reacquire() 拨回 ttl；持有者崩溃
+    后最长 ttl 秒自然过期（撞上「续约停滞」的死锁会提前偷取，见 _steal_stale_dlock）。
     """
     from core.db.cache import _get_pool
     redis = _get_pool()
     lock = redis.lock(
-        f"{_INDEX_DLOCK_PREFIX}{course_id}:{backend}", timeout=_INDEX_DLOCK_TTL
+        f"{_INDEX_DLOCK_PREFIX}{course_id}:{backend}", timeout=ttl
     )
     if not await lock.acquire(blocking=False):
-        return None, None
+        if not await _steal_stale_dlock(redis, course_id, backend, ttl):
+            return None, None
+        if not await lock.acquire(blocking=False):
+            return None, None  # 偷到锁后又被别的进程抢先，照旧跳过
 
     async def _renew() -> None:
         try:
             while True:
-                await asyncio.sleep(_INDEX_DLOCK_TTL / 3)
+                await asyncio.sleep(min(ttl / 3, _INDEX_DLOCK_RENEW_INTERVAL))
                 try:
-                    await lock.extend(_INDEX_DLOCK_TTL)
+                    await lock.reacquire()
+                except LockNotOwnedError:
+                    # 锁已不归本任务（Redis 长断超 ttl 自然过期/被偷）。互斥已破但
+                    # 无法从这里中止 job，只能 ERROR 留痕供排查；续约循环随之退出。
+                    logger.error(
+                        "索引锁已丢失（续约期间过期/被偷）course=%s backend=%s，"
+                        "本任务可能与其他任务并发写同一 store",
+                        course_id, backend,
+                    )
+                    return
                 except Exception:
+                    # Redis 暂不可达：TTL 继续衰减，恢复后下一轮拨回；持续断超 ttl 才丢锁
                     logger.warning(
                         "索引锁续约失败 course=%s backend=%s", course_id, backend, exc_info=True
                     )

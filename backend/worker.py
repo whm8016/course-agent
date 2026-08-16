@@ -176,12 +176,22 @@ async def build_course_topic_graph(ctx, course_id: str, force: bool = False) -> 
     from core.observability import bind_context, log_flow
     from core.rag.lightrag import acquire_index_dlock, release_index_dlock
 
-    # 独立锁：backend=topic_graph 与 lightrag/pgvector 索引锁 key 不同，互不阻塞
-    lock, renew = await acquire_index_dlock(course_id, "topic_graph")
+    # 独立锁：backend=topic_graph 与 lightrag/pgvector 索引锁 key 不同，互不阻塞。
+    # 主题图 20min 级但锁是"租约"不是"占坑"：ttl=3min + 每 ≤30s reacquire 拨回，
+    # worker 被 SIGKILL/compose recreate 杀死后最多 3min 自然过期（SIGTERM 走
+    # ARQ cancel → finally 释放，零残留），重建容器后界面很快恢复可重建。
+    lock, renew = await acquire_index_dlock(course_id, "topic_graph", ttl=180)
     if lock is None:
+        ttl = None
+        try:
+            from core.db.cache import _get_pool
+            from core.rag.lightrag.instance_pool import _INDEX_DLOCK_PREFIX
+            ttl = await _get_pool().ttl(f"{_INDEX_DLOCK_PREFIX}{course_id}:topic_graph")
+        except Exception:
+            pass
         logger.warning(
-            "课程 %s 的主题图构建任务已在运行（分布式锁），跳过本次 job_id=%s",
-            course_id, ctx.get("job_id"),
+            "课程 %s 的主题图构建任务已在运行（分布式锁），跳过本次 job_id=%s lock_ttl=%s",
+            course_id, ctx.get("job_id"), ttl,
         )
         return
     try:
