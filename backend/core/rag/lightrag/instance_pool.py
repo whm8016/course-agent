@@ -657,19 +657,17 @@ _INDEX_DLOCK_TTL = 60  # 租约（秒）。续约维持下的实际保护窗口 
 _INDEX_DLOCK_PREFIX = "indexing:dlock:"
 
 
-async def acquire_index_dlock(
-    course_id: str, backend: str = "lightrag", *, ttl: int = _INDEX_DLOCK_TTL,
-):
+async def acquire_index_dlock(course_id: str, backend: str = "lightrag"):
     """获取 (course, backend) 级 Redis 分布式锁。返回 (lock, renew_task)；被占返回 (None, None)。
 
     key 含 backend：同一课程 lightrag 与 pgvector 两套索引可并行构建（互不阻塞），但同一
     后端同一课程仍互斥（防 ainsert/delete 并发写同一份 store 产生重复/损坏）。
-    ttl：租约时长（秒），持有期间每 ttl/3 续约拨回；持有者崩溃后最长 ttl 秒自然过期。
+    租约 _INDEX_DLOCK_TTL（60s），持有期间每 ttl/3 续约拨回；持有者崩溃后最长 60s 自然过期。
     """
     from core.db.cache import _get_pool
     redis = _get_pool()
     lock = redis.lock(
-        f"{_INDEX_DLOCK_PREFIX}{course_id}:{backend}", timeout=ttl
+        f"{_INDEX_DLOCK_PREFIX}{course_id}:{backend}", timeout=_INDEX_DLOCK_TTL
     )
     if not await lock.acquire(blocking=False):
         return None, None
@@ -677,7 +675,7 @@ async def acquire_index_dlock(
     async def _renew() -> None:
         try:
             while True:
-                await asyncio.sleep(ttl / 3)
+                await asyncio.sleep(_INDEX_DLOCK_TTL / 3)
                 try:
                     await lock.reacquire()
                 except LockNotOwnedError:

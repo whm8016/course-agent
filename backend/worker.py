@@ -182,16 +182,12 @@ async def build_course_topic_graph(ctx, course_id: str, force: bool = False) -> 
     # 后点重建最多 1 分钟就能抢到，不再整段跳过。
     lock, renew = await acquire_index_dlock(course_id, "topic_graph")
     if lock is None:
-        ttl = None
-        try:
-            from core.db.cache import _get_pool
-            from core.rag.lightrag.instance_pool import _INDEX_DLOCK_PREFIX
-            ttl = await _get_pool().ttl(f"{_INDEX_DLOCK_PREFIX}{course_id}:topic_graph")
-        except Exception:
-            pass
+        # 不查锁 TTL 做诊断：看门狗语义下活持有者的 PTTL 恒被 20s 续约拨回（40~60s），
+        # 字段无信息量，还得让调用方拼锁的内部 key。持有者若已崩溃，锁 ≤60s 自灭。
         logger.warning(
-            "课程 %s 的主题图构建任务已在运行（分布式锁），跳过本次 job_id=%s lock_ttl=%s",
-            course_id, ctx.get("job_id"), ttl,
+            "课程 %s 的主题图构建任务已在运行（分布式锁），跳过本次 job_id=%s；"
+            "持有者若已崩溃，锁最多 60s 自然过期，稍后重试即可",
+            course_id, ctx.get("job_id"),
         )
         return
     try:

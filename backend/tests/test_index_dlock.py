@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 
+import pytest
 from redis.exceptions import LockNotOwnedError
 
 from core.rag.lightrag.instance_pool import (
@@ -51,13 +52,9 @@ class FakeLock:
         ent["pttl"] = self.timeout * 1000  # 重置回 timeout（不是累加）
         return True
 
-    async def extend(self, additional_time: float) -> bool:
-        # 真实语义是往剩余 TTL 上加（会滚雪球）；测试只断言它不该再被调用
+    async def extend(self, additional_time: float) -> bool:  # noqa: ARG002
+        # 只当 spy 用：断言生产代码不会退回 extend 累加续约（会滚雪球）
         self.extend_calls += 1
-        ent = self._store.get(self.name)
-        if not ent or ent["value"] != self.token:
-            raise LockNotOwnedError("not owned")
-        ent["pttl"] += additional_time * 1000
         return True
 
     async def release(self) -> bool:
@@ -78,47 +75,48 @@ class FakeRedis:
         return FakeLock(self.store, name, timeout)
 
 
-class _FakePoolPatch:
-    """monkeypatch core.db.cache._get_pool 返回 FakeRedis。"""
+@pytest.fixture
+def fake_redis(monkeypatch):
+    """monkeypatch core.db.cache._get_pool 返回 FakeRedis（锁实现的延迟导入处）。"""
+    fake = FakeRedis()
+    monkeypatch.setattr("core.db.cache._get_pool", lambda: fake)
+    return fake
 
-    def __init__(self, monkeypatch):
-        fake = FakeRedis()
-        monkeypatch.setattr("core.db.cache._get_pool", lambda: fake)
-        self.fake = fake
 
-
-async def test_free_lock_acquired_with_full_default_lease(monkeypatch):
+async def test_free_lock_acquired_with_full_default_lease(fake_redis):
     """空锁直接拿到：默认租约 60s，acquire 即写满 TTL；release 摘牌并取消续约。"""
-    fake = _FakePoolPatch(monkeypatch).fake
     assert _INDEX_DLOCK_TTL == 60  # 钉死租约数字：崩溃后别人最多等 60s
 
     lock, renew = await acquire_index_dlock("c1", "lightrag")
     assert lock is not None and renew is not None
-    assert fake.store[_KEY]["value"] == lock.token
-    assert fake.store[_KEY]["pttl"] == 60_000
+    assert fake_redis.store[_KEY]["value"] == lock.token
+    assert fake_redis.store[_KEY]["pttl"] == 60_000
 
     await release_index_dlock(lock, renew)
-    assert _KEY not in fake.store
+    assert _KEY not in fake_redis.store
     assert renew.cancelled() or renew.done()
 
 
-async def test_held_lock_returns_none_and_never_touches_it(monkeypatch):
+async def test_held_lock_returns_none_and_never_touches_it(fake_redis):
     """被占（无论活人还是刚死残留）→ (None, None) 跳过；短租约下死锁 ≤60s 自灭，无需偷。"""
-    fake = _FakePoolPatch(monkeypatch).fake
-    fake.store[_KEY] = {"value": "other-worker-token", "pttl": 55_000}
+    fake_redis.store[_KEY] = {"value": "other-worker-token", "pttl": 55_000}
     lock, renew = await acquire_index_dlock("c1", "lightrag")
     assert lock is None and renew is None
-    assert fake.store[_KEY] == {"value": "other-worker-token", "pttl": 55_000}  # 纹丝不动
+    assert fake_redis.store[_KEY] == {"value": "other-worker-token", "pttl": 55_000}  # 纹丝不动
 
 
-async def test_renew_uses_reacquire_at_ttl_third_interval(monkeypatch):
+async def test_renew_uses_reacquire_at_ttl_third_interval(fake_redis, monkeypatch):
     """续约走 reacquire()（TTL 重置不滚雪球）且不碰 extend；节奏 = ttl/3（60s 租约 → 20s）。"""
-    fake = _FakePoolPatch(monkeypatch).fake
     real_sleep = asyncio.sleep
     intervals: list[float] = []
+    calls = 0
 
     async def fast_sleep(t):
+        nonlocal calls
+        calls += 1
         intervals.append(t)
+        if calls >= 3:
+            await real_sleep(30)  # 跑满 3 轮后停车等 release 的 cancel，消除忙转
         await real_sleep(0)  # 立即让出控制权，推进 renew 循环
 
     monkeypatch.setattr("core.rag.lightrag.instance_pool.asyncio.sleep", fast_sleep)
@@ -127,14 +125,13 @@ async def test_renew_uses_reacquire_at_ttl_third_interval(monkeypatch):
     await real_sleep(0.02)  # 让 renew 循环跑若干轮（快进，不真等 20s）
     assert lock.reacquire_calls >= 1
     assert lock.extend_calls == 0
-    assert fake.store[_KEY]["pttl"] == 60_000  # 重置回租约值，不是累加后的 80s/100s/...
+    assert fake_redis.store[_KEY]["pttl"] == 60_000  # 重置回租约值，不是累加后的 80s/100s/...
     await release_index_dlock(lock, renew)
     assert intervals and all(t == 20 for t in intervals)
 
 
-async def test_renew_exits_when_lock_lost(monkeypatch):
+async def test_renew_exits_when_lock_lost(fake_redis, monkeypatch):
     """丢锁（Redis 断超租约被别人抢走）→ LockNotOwnedError → ERROR 留痕并退出循环。"""
-    _FakePoolPatch(monkeypatch)
     real_sleep = asyncio.sleep
 
     async def fast_sleep(t):  # noqa: ARG001
@@ -143,7 +140,7 @@ async def test_renew_exits_when_lock_lost(monkeypatch):
     monkeypatch.setattr("core.rag.lightrag.instance_pool.asyncio.sleep", fast_sleep)
 
     lock, renew = await acquire_index_dlock("c1", "lightrag")
-    lock._store[_KEY]["value"] = "someone-else"  # 锁被换走（租约过期被抢）
+    fake_redis.store[_KEY]["value"] = "someone-else"  # 锁被换走（租约过期被抢）
     await real_sleep(0.02)
     assert renew.done()  # 续约循环退出，不再空转
     assert lock.reacquire_calls == 1
