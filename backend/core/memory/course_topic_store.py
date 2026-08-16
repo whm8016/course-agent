@@ -77,27 +77,20 @@ async def resolve_topic_id(label: str, course_id: str, db) -> str | None:
     return m.get(_norm_label(label))
 
 
-async def get_prereq_predecessors(topic_id: str, course_id: str, db) -> set[str]:
-    """从 ``course_topic_edge`` 表递归回溯 topic_id 的全部（直接+间接）前置主题。
+# 先修类关系（单一真相源）：闭包回溯只认这两类边。防未来往同表加 related /
+# corequisite 等非「必须先学」边后被当先修用（test_proactive 有行为护栏）。
+PREREQ_RELATIONS = ("prerequisite", "prerequisite_inferred")
 
-    一次拉全边内存 BFS（非每节点一次 round-trip），与 ``stitch_cases.prereq_predecessors``
-    （内存图版）同算法：沿 prerequisite / prerequisite_inferred 边从 dst 回溯到 src（显式
-    relation 过滤——防未来往同表加 related 等非先修边后被当成「必须先学」）。门控用前置
-    闭包去掉 matched 后 ∩ 高 risk 掌握度找未问的前置缺口。
+
+def prereq_closure(topic_id: str, prereq_pairs) -> set[str]:
+    """沿 (src, dst) 先修对回溯 topic_id 的全部（直接+间接）先修（纯函数，无 IO）。
+
+    闭包 BFS 的单一实现：DB 路径（``get_prereq_predecessors``）与离线快照路径
+    （``eval_memory.stitch_cases_table_e``，表E评测零 DB）共用——评测口径与生产
+    门控逐位一致靠这一处，不再靠两份 docstring 互指。
     """
-    from core.db.database import CourseTopicEdge
-    from sqlalchemy import select
-
-    rows = (
-        await db.execute(
-            select(CourseTopicEdge.src_topic_id, CourseTopicEdge.dst_topic_id).where(
-                CourseTopicEdge.course_id == course_id,
-                CourseTopicEdge.relation.in_(("prerequisite", "prerequisite_inferred")),
-            )
-        )
-    ).all()
     adj: dict[str, list[str]] = {}
-    for src, dst in rows:
+    for src, dst in prereq_pairs:
         adj.setdefault(dst, []).append(src)
     preds: set[str] = set()
     frontier = [topic_id]
@@ -107,6 +100,27 @@ async def get_prereq_predecessors(topic_id: str, course_id: str, db) -> set[str]
                 preds.add(src)
                 frontier.append(src)
     return preds
+
+
+async def get_prereq_predecessors(topic_id: str, course_id: str, db) -> set[str]:
+    """从 ``course_topic_edge`` 表递归回溯 topic_id 的全部（直接+间接）前置主题。
+
+    一次拉全边内存 BFS（非每节点一次 round-trip）：沿先修类边（``PREREQ_RELATIONS``）
+    从 dst 回溯到 src，BFS 核心在 ``prereq_closure``（与离线评测共用）。门控用前置
+    闭包去掉 matched 后 ∩ 高 risk 掌握度找未问的前置缺口。
+    """
+    from core.db.database import CourseTopicEdge
+    from sqlalchemy import select
+
+    rows = (
+        await db.execute(
+            select(CourseTopicEdge.src_topic_id, CourseTopicEdge.dst_topic_id).where(
+                CourseTopicEdge.course_id == course_id,
+                CourseTopicEdge.relation.in_(PREREQ_RELATIONS),
+            )
+        )
+    ).all()
+    return prereq_closure(topic_id, ((src, dst) for src, dst in rows))
 
 
 async def fetch_course_topics(db, course_id: str) -> list:
@@ -166,6 +180,6 @@ def align_mastery_rows(topic_map: dict[str, str], rows) -> dict[str, object]:
 
 __all__ = [
     "get_course_topic_map", "topic_map_from_rows", "resolve_topic_id",
-    "get_prereq_predecessors", "fetch_course_topics", "fetch_course_edges",
-    "align_mastery_rows",
+    "PREREQ_RELATIONS", "prereq_closure", "get_prereq_predecessors",
+    "fetch_course_topics", "fetch_course_edges", "align_mastery_rows",
 ]

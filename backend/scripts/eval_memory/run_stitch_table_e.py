@@ -96,12 +96,10 @@ def _llm_vote(runs: list[dict]) -> dict:
     应为此付出打扰率代价，不替它遮掩。全失败 → 记 failed 不入混淆矩阵。"""
     valid = [r["stitch"] for r in runs if not r.get("failed")]
     if not valid:
-        return {"stitch": None, "failed": True, "all_agree": None}
-    # 过半 True；平票（偶数有效票各半）偏向 True——过度提醒者应为打扰率付出代价
+        return {"stitch": None, "all_agree": None}
     stitch = sum(valid) * 2 >= len(valid)
     return {
         "stitch": bool(stitch),
-        "failed": False,
         "all_agree": len(set(valid)) == 1,
     }
 
@@ -118,24 +116,15 @@ def _metrics(tp: int, fn: int, fp: int, tn: int) -> dict:
 
 
 async def run(with_llm: bool = False) -> dict:
-    from core.memory.proactive import decide_stitch
+    from .stitch_cases_table_e import STITCH_CASES, gate_decide, load_graph
 
-    from .stitch_cases_table_e import (
-        NOW, STITCH_CASES, build_mastery_map, load_graph, prereq_predecessors,
-    )
-
-    graph = load_graph()
-    edges = graph["edges"]
+    edges = load_graph()["edges"]
     arms = list(ZERO_LLM_ARMS) + (["llm_self"] if with_llm else [])
     stats = {a: {"tp": 0, "fn": 0, "fp": 0, "tn": 0} for a in arms}
     rows: list[dict] = []
 
     for c in STITCH_CASES:
-        matched = c["matched_topic"]
-        closure = prereq_predecessors(matched, edges) if matched else set()
-        brief = decide_stitch(
-            matched, closure, build_mastery_map(c), set(c["error_repeated"]), now=NOW,
-        )
+        brief = gate_decide(c, edges)
         gold = c["gold"]["stitch"]
         row = {
             "id": c["id"], "label": c["label"], "teacher_rule": c["teacher_rule"],
@@ -190,11 +179,11 @@ def _markdown_table(summary: dict) -> str:
     head = "| 臂 | 均衡准确率 | 打扰率 | 漏提醒率 | LLM调用/例 | 自一致率 |\n|---|---|---|---|---|---|"
     lines = []
     for arm, m in summary["arms"].items():
-        sc = m.get("self_consistency", "—")
+        sc = m.get("self_consistency")
         lines.append(
             f"| {arm} | {m['balanced_accuracy']:.4f} | "
             f"{m['interruption_rate']:.0%} | {m['miss_rate']:.0%} | "
-            f"{m['llm_calls_per_case']} | {sc if sc != '—' else '—'} |"
+            f"{m['llm_calls_per_case']} | {sc if sc is not None else '—'} |"
         )
     return head + "\n" + "\n".join(lines)
 

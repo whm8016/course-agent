@@ -5,8 +5,10 @@
 依赖、可复现、零 LLM 臂可进 CI。抽取逻辑换版后重跑本脚本刷新快照即可。
 
 快照确定性排序（topics 按 topic_id、edges 按 src,dst），不含时间戳，git diff 友好。
-``_v2`` 对应课文锚定抽取（193 主题 / 225 边，prerequisite + prerequisite_inferred）；
-旧 ``data/course_topics/course_mycourse_topics.json``（34 主题）是旧抽取遗产，不动。
+``_v2`` 对应课文锚定抽取（193 主题 / 225 边，prerequisite + prerequisite_inferred）。
+与 ``data/course_topics/course_mycourse_topics.json`` 的关系：那是 builder 重建时自动
+刷新的全量产物（含 embedding/definition/evidence），本快照是评测用的精简投影（仅
+topic_id/label/src/dst/relation），手动重跑刷新——评测绑定提交内的快照保证可复现。
 
 Usage（backend 目录）:
     python -m scripts.eval_memory.export_graph_snapshot
@@ -17,6 +19,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 
 os.environ.setdefault("SECURITY__JWT_SECRET", "test-secret-pytest-only-32chars!!")
 os.environ.setdefault("ENVIRONMENT", "development")
@@ -30,19 +33,13 @@ SNAPSHOT_PATH = "graph_mycourse_v2.json"  # 与本脚本同目录（scripts/eval
 
 
 async def _export() -> dict:
-    from sqlalchemy import select
-
-    from core.db.database import AsyncSessionLocal, CourseTopic, CourseTopicEdge, close_db
+    from core.db.database import AsyncSessionLocal, close_db
+    from core.memory.course_topic_store import fetch_course_edges, fetch_course_topics
 
     async with AsyncSessionLocal() as db:
-        topics = (
-            (await db.execute(select(CourseTopic).where(CourseTopic.course_id == COURSE_ID)))
-            .scalars().all()
-        )
-        edges = (
-            (await db.execute(select(CourseTopicEdge).where(CourseTopicEdge.course_id == COURSE_ID)))
-            .scalars().all()
-        )
+        # fetch_* 是两查询的单一真相源（显式列、不拉 embedding 大列）
+        topics = await fetch_course_topics(db, COURSE_ID)
+        edges = await fetch_course_edges(db, COURSE_ID)
     await close_db()
 
     snapshot = {
@@ -64,8 +61,6 @@ async def _export() -> dict:
 
 
 def main() -> None:
-    from pathlib import Path
-
     snapshot = asyncio.run(_export())
     out = Path(__file__).resolve().parent / SNAPSHOT_PATH
     out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -8,19 +8,15 @@ from __future__ import annotations
 
 from scripts.eval_memory.run_stitch_table_e import ZERO_LLM_ARMS, run
 from scripts.eval_memory.stitch_cases_table_e import (
-    NOW, STITCH_CASES, build_mastery_map, load_graph, prereq_predecessors,
+    STITCH_CASES, gate_decide, load_graph, prereq_predecessors,
 )
+
+_EDGES = load_graph()["edges"]
 
 
 def _gate_decide(case: dict):
-    from core.memory.proactive import decide_stitch
-
-    graph = load_graph()
-    matched = case["matched_topic"]
-    closure = prereq_predecessors(matched, graph["edges"]) if matched else set()
-    return decide_stitch(
-        matched, closure, build_mastery_map(case), set(case["error_repeated"]), now=NOW,
-    )
+    """与 runner 同一条决策管线（gate_decide 单一来源，测试=评测口径）。"""
+    return gate_decide(case, _EDGES)
 
 
 # ── 用例完整性：档案引用的主题必须都在快照图里 ─────────────────────────────
@@ -58,13 +54,12 @@ def test_cases_reference_real_graph_topics():
 
 
 def test_closure_samples():
-    """闭包抽验（与 DB 口径同源）：锚点对的真实先修关系。"""
-    edges = load_graph()["edges"]
-    assert prereq_predecessors("叠加定理", edges) >= {"欧姆定律", "基尔霍夫电流定律", "电阻串并联电路"}
-    assert prereq_predecessors("戴维南等效电路", edges) == {"含源一端口网络", "戴维南定理"}
-    assert prereq_predecessors("示波器垂直系统设置", edges) == {"示波器的使用"}
-    assert prereq_predecessors("元件的伏安特性的测试", edges) == set()  # 根主题
-    assert "示波器光标测量" not in prereq_predecessors("示波器垂直系统设置", edges)  # 仪器兄弟非先修
+    """闭包抽验（BFS 核心与生产 get_prereq_predecessors 共用 prereq_closure）：锚点先修。"""
+    assert prereq_predecessors("叠加定理", _EDGES) >= {"欧姆定律", "基尔霍夫电流定律", "电阻串并联电路"}
+    assert prereq_predecessors("戴维南等效电路", _EDGES) == {"含源一端口网络", "戴维南定理"}
+    assert prereq_predecessors("示波器垂直系统设置", _EDGES) == {"示波器的使用"}
+    assert prereq_predecessors("元件的伏安特性的测试", _EDGES) == set()  # 根主题
+    assert "示波器光标测量" not in prereq_predecessors("示波器垂直系统设置", _EDGES)  # 仪器兄弟非先修
 
 
 # ── 防自证：门控与教师金标必须存在真实偏离 ──────────────────────────────────
@@ -106,9 +101,9 @@ def test_gate_not_perfect_and_baselines_anchor():
 def test_gate_agrees_on_remaining_cases():
     """除冷却两例外，门控与其余 25 例金标一致（偏离只发生在设计争议处）。"""
     mismatches = {
-        c["id"]: (c["gold"]["stitch"], _gate_decide(c).should_stitch)
+        c["id"]: (c["gold"]["stitch"], pred.should_stitch)
         for c in STITCH_CASES
-        if _gate_decide(c).should_stitch != c["gold"]["stitch"]
+        if (pred := _gate_decide(c)).should_stitch != c["gold"]["stitch"]
     }
     assert mismatches == {"cooldown_1h": (True, False), "cooldown_20h": (True, False)}, (
         f"偏离面变了（新增/丢失偏离例）：{mismatches}——若金标或门控口径有意变更，"

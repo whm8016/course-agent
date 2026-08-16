@@ -40,8 +40,6 @@ NOW = 1_800_000_000.0
 
 _SNAPSHOT = Path(__file__).resolve().parent / "graph_mycourse_v2.json"
 
-# 评测边界内注：matched_topic 是档案给定值（S_t 匹配层不在表E评测范围）；
-
 
 def load_graph() -> dict:
     """快照图（确定性）：{topics: [{topic_id,label}], edges: [{src,dst,relation}]}。"""
@@ -49,35 +47,42 @@ def load_graph() -> dict:
 
 
 def prereq_predecessors(topic_id: str, edges: list[dict]) -> set[str]:
-    """沿 prerequisite / prerequisite_inferred 边回溯全部先修（闭包）。
+    """快照边 → 全部先修闭包。BFS 核心与关系过滤复用
+    ``course_topic_store.prereq_closure`` / ``PREREQ_RELATIONS``（与生产门控
+    同一实现，评测口径不靠 docstring 互指维持）。"""
+    from core.memory.course_topic_store import PREREQ_RELATIONS, prereq_closure
 
-    与 ``course_topic_store.get_prereq_predecessors`` 同口径（关系过滤防未来
-    非 先修边混入）；快照上本地计算，评测零 DB。
+    return prereq_closure(
+        topic_id,
+        ((e["src"], e["dst"]) for e in edges if e["relation"] in PREREQ_RELATIONS),
+    )
+
+
+def gate_decide(case: dict, edges: list[dict]):
+    """case → 门控决策一条龙（闭包 + 档案构建 + decide_stitch）。
+
+    runner 与测试共用同一管线——评测测的与跑的必然是同一个决策路径。
     """
-    preds_of: dict[str, list[str]] = {}
-    for e in edges:
-        if e["relation"] in ("prerequisite", "prerequisite_inferred"):
-            preds_of.setdefault(e["dst"], []).append(e["src"])
-    seen: set[str] = set()
-    frontier = [topic_id]
-    while frontier:
-        cur = frontier.pop()
-        for src in preds_of.get(cur, []):
-            if src not in seen:
-                seen.add(src)
-                frontier.append(src)
-    return seen
+    from core.memory.proactive import decide_stitch
+
+    matched = case["matched_topic"]
+    closure = prereq_predecessors(matched, edges) if matched else set()
+    return decide_stitch(
+        matched, closure, build_mastery_map(case), set(case["error_repeated"]), now=NOW,
+    )
 
 
 def build_mastery_map(case: dict) -> dict[str, dict]:
     """case 档案 → decide_stitch 的 mastery_map（真实折叠 + 遗忘实算）。
 
-    theta/risk 由 ``fold_observations`` 折 levels（不手拍）；p_forget 按
-    days_since_last 实算（S=5，与 ``_read_mastery`` 同口径）；b_topic 仅进
-    logit/risk（不进入闸判据）；last_stitched_at 折成固定时钟 NOW 的时间戳。
+    theta 由 ``fold_observations`` 折 levels（不手拍）；risk/logit 与生产读侧
+    ``proactive._read_mastery`` 同口径（b 进 risk/logit，不进入闸判据）；p_forget
+    按 days_since_last 实算（默认强度 S=5）；last_stitched_at 折成固定时钟 NOW。
+    字段集对齐 _read_mastery / scorer._gate_mastery_map 的 map 形状（label 便于
+    调试）；decide_stitch 只读 risk/theta/p_forget/last_stitched_at（.get 默认）。
     """
     from core.memory.mastery import forget_prob
-    from core.memory.mastery_state import LEVEL_OUTCOME, W_JUDGE, fold_observations
+    from core.memory.mastery_state import LEVEL_OUTCOME, W_JUDGE, fold_observations, sigmoid
 
     out: dict[str, dict] = {}
     for m in case["mastery"]:
@@ -88,10 +93,10 @@ def build_mastery_map(case: dict) -> dict[str, dict]:
         s = fold_observations(obs)
         b = m.get("b_topic", 0.0)
         entry = {
-            "risk": round(s.risk, 4),
+            "risk": round(1.0 - sigmoid(s.theta - b), 4),
             "theta": round(s.theta, 4),
             "logit": round(s.theta - b, 4),
-            "p_forget": forget_prob(m["days_since_last"], 5.0),
+            "p_forget": forget_prob(m["days_since_last"]),
             "observation_count": s.n_obs,
             "label": m.get("label", m["topic_id"]),
             "last_stitched_at": (
