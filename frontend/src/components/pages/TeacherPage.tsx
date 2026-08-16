@@ -75,6 +75,10 @@ export default function TeacherPage({ user, onBack }: Props) {
   const [error, setError] = useState('')
   const [joinCodeInput, setJoinCodeInput] = useState('')
   const [joiningCourse, setJoiningCourse] = useState(false)
+  // 悬浮入课卡收起状态：记住到 localStorage，刷新后不再挡在右下角
+  const [joinCardHidden, setJoinCardHidden] = useState(
+    () => localStorage.getItem('teacher_join_card_hidden') === '1',
+  )
 
   // Analytics state
   const [overview, setOverview] = useState<OverviewData | null>(null)
@@ -791,26 +795,50 @@ export default function TeacherPage({ user, onBack }: Props) {
         </div>
       )}
 
-      {/* 学生用课程码入课（浮动） */}
-      <div className="fixed bottom-6 right-6 bg-surface rounded-[var(--radius-lg)] shadow-xl border border-line p-4 w-72 z-40">
-        <p className="text-xs font-semibold text-ink-soft mb-2">用课程码加入课程</p>
-        <form onSubmit={joinByCourseCode} className="flex gap-2">
-          <input
-            value={joinCodeInput}
-            onChange={e => setJoinCodeInput(e.target.value.toUpperCase())}
-            className="flex-1 rounded-[var(--radius)] border border-line px-3 py-2 text-sm font-mono focus:outline-none focus:border-ink transition"
-            placeholder="XXXXXXXX"
-            maxLength={16}
-          />
-          <button
-            type="submit"
-            disabled={joiningCourse}
-            className="px-3 py-2 bg-accent text-white text-sm rounded-[var(--radius)] hover:bg-accent-2 disabled:opacity-50 transition"
-          >
-            加入
-          </button>
-        </form>
-      </div>
+      {/* 学生用课程码入课（浮动，可收起） */}
+      {joinCardHidden ? (
+        <button
+          onClick={() => {
+            setJoinCardHidden(false)
+            localStorage.removeItem('teacher_join_card_hidden')
+          }}
+          className="fixed bottom-6 right-6 z-40 bg-surface border border-line rounded-full shadow-xl px-4 py-2 text-xs font-semibold text-ink-soft hover:text-ink hover:border-ink/40 transition"
+        >
+          ＋ 加入课程
+        </button>
+      ) : (
+        <div className="fixed bottom-6 right-6 bg-surface rounded-[var(--radius-lg)] shadow-xl border border-line p-4 w-72 z-40">
+          <div className="flex items-center justify-between mb-2">
+            <p className="text-xs font-semibold text-ink-soft">用课程码加入课程</p>
+            <button
+              onClick={() => {
+                setJoinCardHidden(true)
+                localStorage.setItem('teacher_join_card_hidden', '1')
+              }}
+              className="text-muted hover:text-ink-soft text-lg leading-none"
+              title="收起"
+            >
+              ✕
+            </button>
+          </div>
+          <form onSubmit={joinByCourseCode} className="flex gap-2">
+            <input
+              value={joinCodeInput}
+              onChange={e => setJoinCodeInput(e.target.value.toUpperCase())}
+              className="flex-1 rounded-[var(--radius)] border border-line px-3 py-2 text-sm font-mono focus:outline-none focus:border-ink transition"
+              placeholder="XXXXXXXX"
+              maxLength={16}
+            />
+            <button
+              type="submit"
+              disabled={joiningCourse}
+              className="px-3 py-2 bg-accent text-white text-sm rounded-[var(--radius)] hover:bg-accent-2 disabled:opacity-50 transition"
+            >
+              加入
+            </button>
+          </form>
+        </div>
+      )}
     </div>
   )
 }
