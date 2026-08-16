@@ -1,0 +1,1905 @@
+{
+ "course_id": "mycourse",
+ "note": "表E评测图源快照；runner 不连 DB，重抽取后重跑 export 刷新",
+ "topics": [
+  {
+   "topic_id": "cmos电压控制旋钮",
+   "label": "CMOS电压控制旋钮"
+  },
+  {
+   "topic_id": "duty和inv参数控制输出波形周期对称性",
+   "label": "DUTY和INV参数控制输出波形周期对称性"
+  },
+  {
+   "topic_id": "l1c1与c2串联谐振频率",
+   "label": "L1C1与C2串联谐振频率"
+  },
+  {
+   "topic_id": "l1c1并联谐振频率",
+   "label": "L1C1并联谐振频率"
+  },
+  {
+   "topic_id": "menu菜单界面",
+   "label": "MENU菜单界面"
+  },
+  {
+   "topic_id": "offset直流偏移控制",
+   "label": "OFFSET直流偏移控制"
+  },
+  {
+   "topic_id": "output输出端子",
+   "label": "OUTPUT输出端子"
+  },
+  {
+   "topic_id": "r1与r2串联后与r3并联的电路",
+   "label": "r1与r2串联后与r3并联的电路"
+  },
+  {
+   "topic_id": "rc低通滤波器电路",
+   "label": "RC低通滤波器电路"
+  },
+  {
+   "topic_id": "rc微分电路",
+   "label": "RC微分电路"
+  },
+  {
+   "topic_id": "rc正弦波振荡器",
+   "label": "RC正弦波振荡器"
+  },
+  {
+   "topic_id": "rc电路两个r两个c",
+   "label": "RC电路（两个R两个C）"
+  },
+  {
+   "topic_id": "rc电路方波响应",
+   "label": "RC电路方波响应"
+  },
+  {
+   "topic_id": "rc电路方波响应对比实验",
+   "label": "RC电路方波响应对比实验"
+  },
+  {
+   "topic_id": "rc网络的频率特性",
+   "label": "RC网络的频率特性"
+  },
+  {
+   "topic_id": "rlc串联电路图",
+   "label": "RLC串联电路图"
+  },
+  {
+   "topic_id": "rlc串联电路衰减振荡过渡过程",
+   "label": "RLC串联电路衰减振荡过渡过程"
+  },
+  {
+   "topic_id": "rlc串联电路非振荡过渡过程",
+   "label": "RLC串联电路非振荡过渡过程"
+  },
+  {
+   "topic_id": "rlc并联电路临界参数",
+   "label": "RLC并联电路临界参数"
+  },
+  {
+   "topic_id": "t型电阻网络",
+   "label": "T型电阻网络"
+  },
+  {
+   "topic_id": "vcf输入端",
+   "label": "VCF输入端"
+  },
+  {
+   "topic_id": "万用表的使用",
+   "label": "万用表的使用"
+  },
+  {
+   "topic_id": "三端变阻器的应用",
+   "label": "三端变阻器的应用"
+  },
+  {
+   "topic_id": "三端变阻器的研究",
+   "label": "三端变阻器的研究"
+  },
+  {
+   "topic_id": "两次电压测量法",
+   "label": "两次电压测量法"
+  },
+  {
+   "topic_id": "串联并联混合电路",
+   "label": "串联-并联混合电路"
+  },
+  {
+   "topic_id": "主要技术指标电压输出",
+   "label": "主要技术指标（电压输出）"
+  },
+  {
+   "topic_id": "二端口网络的t型等效电路",
+   "label": "二端口网络的T型等效电路"
+  },
+  {
+   "topic_id": "二端口网络的研究",
+   "label": "二端口网络的研究"
+  },
+  {
+   "topic_id": "二阶无源滤波电路",
+   "label": "二阶无源滤波电路"
+  },
+  {
+   "topic_id": "互易二端口网络的参数关系",
+   "label": "互易二端口网络的参数关系"
+  },
+  {
+   "topic_id": "交替触发",
+   "label": "交替触发"
+  },
+  {
+   "topic_id": "交流电路图121",
+   "label": "交流电路图12.1"
+  },
+  {
+   "topic_id": "交流电路图122",
+   "label": "交流电路图12.2"
+  },
+  {
+   "topic_id": "交流电路实验",
+   "label": "交流电路实验"
+  },
+  {
+   "topic_id": "仪器使用方法电源与波形选择",
+   "label": "仪器使用方法（电源与波形选择）"
+  },
+  {
+   "topic_id": "伏安法测定电阻交流阻抗",
+   "label": "伏安法测定电阻交流阻抗"
+  },
+  {
+   "topic_id": "传输参数的实验测定方法",
+   "label": "传输参数的实验测定方法"
+  },
+  {
+   "topic_id": "信号发生器使用注意事项",
+   "label": "信号发生器使用注意事项"
+  },
+  {
+   "topic_id": "信号发生器功能参数说明",
+   "label": "信号发生器功能参数说明"
+  },
+  {
+   "topic_id": "信号发生器操作步骤",
+   "label": "信号发生器操作步骤"
+  },
+  {
+   "topic_id": "信号发生器操作步骤开启电源与波形选择",
+   "label": "信号发生器操作步骤（开启电源与波形选择）"
+  },
+  {
+   "topic_id": "信号发生器面板功能",
+   "label": "信号发生器面板功能"
+  },
+  {
+   "topic_id": "元件的伏安特性的测试",
+   "label": "元件的伏安特性的测试"
+  },
+  {
+   "topic_id": "元器件识别",
+   "label": "元器件识别"
+  },
+  {
+   "topic_id": "函数信号发生器gfg90160",
+   "label": "函数信号发生器GFG-90160"
+  },
+  {
+   "topic_id": "函数信号发生器的使用",
+   "label": "函数信号发生器的使用"
+  },
+  {
+   "topic_id": "函数信号发生器输出端不允许短路",
+   "label": "函数信号发生器输出端不允许短路"
+  },
+  {
+   "topic_id": "函数发生器功能说明",
+   "label": "函数发生器功能说明"
+  },
+  {
+   "topic_id": "分压器与可变电阻接法的选用原则",
+   "label": "分压器与可变电阻接法的选用原则"
+  },
+  {
+   "topic_id": "分压器的调压特性",
+   "label": "分压器的调压特性"
+  },
+  {
+   "topic_id": "分压器调压特性的技术要求",
+   "label": "分压器调压特性的技术要求"
+  },
+  {
+   "topic_id": "半导体二极管的单向性",
+   "label": "半导体二极管的单向性"
+  },
+  {
+   "topic_id": "半导体二极管的反向特性",
+   "label": "半导体二极管的反向特性"
+  },
+  {
+   "topic_id": "半导体二极管的正向特性",
+   "label": "半导体二极管的正向特性"
+  },
+  {
+   "topic_id": "单通道和双通道信号观测",
+   "label": "单通道和双通道信号观测"
+  },
+  {
+   "topic_id": "去源加电压法",
+   "label": "去源加电压法"
+  },
+  {
+   "topic_id": "双t网络",
+   "label": "双T网络"
+  },
+  {
+   "topic_id": "双t网络的幅频特性",
+   "label": "双T网络的幅频特性"
+  },
+  {
+   "topic_id": "双t网络的相频特性",
+   "label": "双T网络的相频特性"
+  },
+  {
+   "topic_id": "变量u随时间t变化函数图像",
+   "label": "变量u随时间t变化函数图像"
+  },
+  {
+   "topic_id": "变阻器分压时的容量计算",
+   "label": "变阻器分压时的容量计算"
+  },
+  {
+   "topic_id": "叠加定理",
+   "label": "叠加定理"
+  },
+  {
+   "topic_id": "叠加定理不能直接计算功率",
+   "label": "叠加定理不能直接计算功率"
+  },
+  {
+   "topic_id": "含源一端口网络",
+   "label": "含源一端口网络"
+  },
+  {
+   "topic_id": "在坐标纸上手工定量画波形",
+   "label": "在坐标纸上手工定量画波形"
+  },
+  {
+   "topic_id": "基尔霍夫定律验证方法",
+   "label": "基尔霍夫定律验证方法"
+  },
+  {
+   "topic_id": "基尔霍夫电流定律",
+   "label": "基尔霍夫电流定律"
+  },
+  {
+   "topic_id": "外特性",
+   "label": "外特性"
+  },
+  {
+   "topic_id": "实时采样方式",
+   "label": "实时采样方式"
+  },
+  {
+   "topic_id": "实际电压源的伏安特性",
+   "label": "实际电压源的伏安特性"
+  },
+  {
+   "topic_id": "实验数据曲线绘制方法",
+   "label": "实验数据曲线绘制方法"
+  },
+  {
+   "topic_id": "实验方法确定c1",
+   "label": "实验方法确定C1"
+  },
+  {
+   "topic_id": "实验误差分析",
+   "label": "实验误差分析"
+  },
+  {
+   "topic_id": "容抗",
+   "label": "容抗"
+  },
+  {
+   "topic_id": "对称二端口网络的参数关系",
+   "label": "对称二端口网络的参数关系"
+  },
+  {
+   "topic_id": "对称桥式交流电路",
+   "label": "对称桥式交流电路"
+  },
+  {
+   "topic_id": "峰值检测方式",
+   "label": "峰值检测方式"
+  },
+  {
+   "topic_id": "常用电子仪器原理与使用",
+   "label": "常用电子仪器原理与使用"
+  },
+  {
+   "topic_id": "平均采样方式",
+   "label": "平均采样方式"
+  },
+  {
+   "topic_id": "并联谐振",
+   "label": "并联谐振"
+  },
+  {
+   "topic_id": "开路电压的测量方法",
+   "label": "开路电压的测量方法"
+  },
+  {
+   "topic_id": "开路电压短路电流法",
+   "label": "开路电压短路电流法"
+  },
+  {
+   "topic_id": "微分电路的相关知识",
+   "label": "微分电路的相关知识"
+  },
+  {
+   "topic_id": "微分电路输出电压与电容电压对时间的导数成正比",
+   "label": "微分电路输出电压与电容电压对时间的导数成正比"
+  },
+  {
+   "topic_id": "感抗",
+   "label": "感抗"
+  },
+  {
+   "topic_id": "戴维南定理",
+   "label": "戴维南定理"
+  },
+  {
+   "topic_id": "戴维南等效电路",
+   "label": "戴维南等效电路"
+  },
+  {
+   "topic_id": "手动模式",
+   "label": "手动模式"
+  },
+  {
+   "topic_id": "数字万用表测量二极管及判断电路连通",
+   "label": "数字万用表测量二极管及判断电路连通"
+  },
+  {
+   "topic_id": "数字万用表测量电阻电容值",
+   "label": "数字万用表测量电阻电容值"
+  },
+  {
+   "topic_id": "数字万用表测量直流电压电流",
+   "label": "数字万用表测量直流电压电流"
+  },
+  {
+   "topic_id": "数字万用表量档选择",
+   "label": "数字万用表量档选择"
+  },
+  {
+   "topic_id": "数学运算界面",
+   "label": "数学运算界面"
+  },
+  {
+   "topic_id": "数学运算菜单说明",
+   "label": "数学运算菜单说明"
+  },
+  {
+   "topic_id": "文氏电路",
+   "label": "文氏电路"
+  },
+  {
+   "topic_id": "文氏电路的幅频特性",
+   "label": "文氏电路的幅频特性"
+  },
+  {
+   "topic_id": "文氏电路的相频特性",
+   "label": "文氏电路的相频特性"
+  },
+  {
+   "topic_id": "斜率触发",
+   "label": "斜率触发"
+  },
+  {
+   "topic_id": "斜率触发菜单",
+   "label": "斜率触发菜单"
+  },
+  {
+   "topic_id": "方波输入与rc电路输出电压",
+   "label": "方波输入与RC电路输出电压"
+  },
+  {
+   "topic_id": "无源线性二端口网络的传输参数",
+   "label": "无源线性二端口网络的传输参数"
+  },
+  {
+   "topic_id": "桥式rc电路",
+   "label": "桥式RC电路"
+  },
+  {
+   "topic_id": "桥式电路",
+   "label": "桥式电路"
+  },
+  {
+   "topic_id": "欧姆定律",
+   "label": "欧姆定律"
+  },
+  {
+   "topic_id": "正弦波信号的输入和输出信号观察",
+   "label": "正弦波信号的输入和输出信号观察"
+  },
+  {
+   "topic_id": "毫伏表的使用",
+   "label": "毫伏表的使用"
+  },
+  {
+   "topic_id": "水平系统设置菜单",
+   "label": "水平系统设置菜单"
+  },
+  {
+   "topic_id": "测量结果的记录与处理",
+   "label": "测量结果的记录与处理"
+  },
+  {
+   "topic_id": "混联电路图23",
+   "label": "混联电路图2.3"
+  },
+  {
+   "topic_id": "滤波器实验",
+   "label": "滤波器实验"
+  },
+  {
+   "topic_id": "滤波器性能分析",
+   "label": "滤波器性能分析"
+  },
+  {
+   "topic_id": "滤波器设计",
+   "label": "滤波器设计"
+  },
+  {
+   "topic_id": "独立源单独作用",
+   "label": "独立源单独作用"
+  },
+  {
+   "topic_id": "理想电压源的伏安特性",
+   "label": "理想电压源的伏安特性"
+  },
+  {
+   "topic_id": "用交流毫伏表测量电流",
+   "label": "用交流毫伏表测量电流"
+  },
+  {
+   "topic_id": "用双踪法测量两个信号的相位差",
+   "label": "用双踪法测量两个信号的相位差"
+  },
+  {
+   "topic_id": "用椭圆法测量两个信号的相位差",
+   "label": "用椭圆法测量两个信号的相位差"
+  },
+  {
+   "topic_id": "用示波器观察李萨育图形测定频率",
+   "label": "用示波器观察李萨育图形测定频率"
+  },
+  {
+   "topic_id": "用示波器观察电路过渡过程的方法",
+   "label": "用示波器观察电路过渡过程的方法"
+  },
+  {
+   "topic_id": "电压源伏安特性曲线",
+   "label": "电压源伏安特性曲线"
+  },
+  {
+   "topic_id": "电压表和电流表测量电阻的接法选择",
+   "label": "电压表和电流表测量电阻的接法选择"
+  },
+  {
+   "topic_id": "电压表接法选择方法",
+   "label": "电压表接法选择方法"
+  },
+  {
+   "topic_id": "电压输出技术参数",
+   "label": "电压输出技术参数"
+  },
+  {
+   "topic_id": "电子测量方法",
+   "label": "电子测量方法"
+  },
+  {
+   "topic_id": "电容元件电流超前于电压",
+   "label": "电容元件电流超前于电压"
+  },
+  {
+   "topic_id": "电容元件隔断直流作用",
+   "label": "电容元件隔断直流作用"
+  },
+  {
+   "topic_id": "电容参数的计算",
+   "label": "电容参数的计算"
+  },
+  {
+   "topic_id": "电感元件低通高阻性质",
+   "label": "电感元件低通高阻性质"
+  },
+  {
+   "topic_id": "电感元件电流滞后于电压",
+   "label": "电感元件电流滞后于电压"
+  },
+  {
+   "topic_id": "电感参数的计算",
+   "label": "电感参数的计算"
+  },
+  {
+   "topic_id": "电流参考方向",
+   "label": "电流参考方向"
+  },
+  {
+   "topic_id": "电流表的正确使用",
+   "label": "电流表的正确使用"
+  },
+  {
+   "topic_id": "电路图21和图22",
+   "label": "电路图2.1和图2.2"
+  },
+  {
+   "topic_id": "电路虚拟地的概念",
+   "label": "电路虚拟地的概念"
+  },
+  {
+   "topic_id": "电路过渡过程的研究",
+   "label": "电路过渡过程的研究"
+  },
+  {
+   "topic_id": "电阻串并联电路",
+   "label": "电阻串并联电路"
+  },
+  {
+   "topic_id": "电阻元件的交流伏安特性",
+   "label": "电阻元件的交流伏安特性"
+  },
+  {
+   "topic_id": "直接测量法",
+   "label": "直接测量法"
+  },
+  {
+   "topic_id": "直流电路图41和图42",
+   "label": "直流电路图4.1和图4.2"
+  },
+  {
+   "topic_id": "直流电路图两个电源",
+   "label": "直流电路图（两个电源）"
+  },
+  {
+   "topic_id": "直流稳压电源的使用",
+   "label": "直流稳压电源的使用"
+  },
+  {
+   "topic_id": "矩形波电压模拟直流接通与短路",
+   "label": "矩形波电压模拟直流接通与短路"
+  },
+  {
+   "topic_id": "示波器光标测量",
+   "label": "示波器光标测量"
+  },
+  {
+   "topic_id": "示波器垂直系统设置",
+   "label": "示波器垂直系统设置"
+  },
+  {
+   "topic_id": "示波器屏幕截图",
+   "label": "示波器屏幕截图"
+  },
+  {
+   "topic_id": "示波器控制面板功能区域",
+   "label": "示波器控制面板功能区域"
+  },
+  {
+   "topic_id": "示波器校准信号检查",
+   "label": "示波器校准信号检查"
+  },
+  {
+   "topic_id": "示波器水平系统设置",
+   "label": "示波器水平系统设置"
+  },
+  {
+   "topic_id": "示波器测信号频率和幅值",
+   "label": "示波器测信号频率和幅值"
+  },
+  {
+   "topic_id": "示波器的使用",
+   "label": "示波器的使用"
+  },
+  {
+   "topic_id": "示波器自动测量",
+   "label": "示波器自动测量"
+  },
+  {
+   "topic_id": "示波器触发系统设置",
+   "label": "示波器触发系统设置"
+  },
+  {
+   "topic_id": "示波器采样系统设置",
+   "label": "示波器采样系统设置"
+  },
+  {
+   "topic_id": "积分电路的相关知识",
+   "label": "积分电路的相关知识"
+  },
+  {
+   "topic_id": "积分电路输出电压与电阻电压对时间的积分成正比",
+   "label": "积分电路输出电压与电阻电压对时间的积分成正比"
+  },
+  {
+   "topic_id": "等效参数的测量方法及注意事项",
+   "label": "等效参数的测量方法及注意事项"
+  },
+  {
+   "topic_id": "等效电阻的测量方法",
+   "label": "等效电阻的测量方法"
+  },
+  {
+   "topic_id": "等效直流电阻电路图",
+   "label": "等效直流电阻电路图"
+  },
+  {
+   "topic_id": "等效采样方式",
+   "label": "等效采样方式"
+  },
+  {
+   "topic_id": "系统频率响应幅频与相频特性",
+   "label": "系统频率响应幅频与相频特性"
+  },
+  {
+   "topic_id": "线性与非线性伏安特性曲线",
+   "label": "线性与非线性伏安特性曲线"
+  },
+  {
+   "topic_id": "线性电路",
+   "label": "线性电路"
+  },
+  {
+   "topic_id": "线性电阻元件的伏安特性",
+   "label": "线性电阻元件的伏安特性"
+  },
+  {
+   "topic_id": "线性非时变电容",
+   "label": "线性非时变电容"
+  },
+  {
+   "topic_id": "线性非时变电感",
+   "label": "线性非时变电感"
+  },
+  {
+   "topic_id": "线性非时变电阻",
+   "label": "线性非时变电阻"
+  },
+  {
+   "topic_id": "绝对误差",
+   "label": "绝对误差"
+  },
+  {
+   "topic_id": "脉冲输出",
+   "label": "脉冲输出"
+  },
+  {
+   "topic_id": "脉宽触发",
+   "label": "脉宽触发"
+  },
+  {
+   "topic_id": "自动测量功能按键",
+   "label": "自动测量功能按键"
+  },
+  {
+   "topic_id": "自动测量模式",
+   "label": "自动测量模式"
+  },
+  {
+   "topic_id": "虚拟仿真软件的使用",
+   "label": "虚拟仿真软件的使用"
+  },
+  {
+   "topic_id": "补偿法",
+   "label": "补偿法"
+  },
+  {
+   "topic_id": "视频触发",
+   "label": "视频触发"
+  },
+  {
+   "topic_id": "触发电平与触发方式设置",
+   "label": "触发电平与触发方式设置"
+  },
+  {
+   "topic_id": "触发设置界面",
+   "label": "触发设置界面"
+  },
+  {
+   "topic_id": "误差分析方法",
+   "label": "误差分析方法"
+  },
+  {
+   "topic_id": "调压特性曲线绘制方法",
+   "label": "调压特性曲线绘制方法"
+  },
+  {
+   "topic_id": "输出衰减与振幅调整旋钮",
+   "label": "输出衰减与振幅调整旋钮"
+  },
+  {
+   "topic_id": "边沿触发",
+   "label": "边沿触发"
+  },
+  {
+   "topic_id": "边沿触发菜单",
+   "label": "边沿触发菜单"
+  },
+  {
+   "topic_id": "边沿触发菜单附表31",
+   "label": "边沿触发菜单附表3-1"
+  },
+  {
+   "topic_id": "追踪模式",
+   "label": "追踪模式"
+  },
+  {
+   "topic_id": "通道设置菜单",
+   "label": "通道设置菜单"
+  },
+  {
+   "topic_id": "通道设置菜单附表11",
+   "label": "通道设置菜单附表1-1"
+  },
+  {
+   "topic_id": "采样功能设置菜单",
+   "label": "采样功能设置菜单"
+  },
+  {
+   "topic_id": "采样设置按键",
+   "label": "采样设置按键"
+  },
+  {
+   "topic_id": "阻抗与频率的关系",
+   "label": "阻抗与频率的关系"
+  },
+  {
+   "topic_id": "非正弦电源",
+   "label": "非正弦电源"
+  },
+  {
+   "topic_id": "非线性电阻元件的伏安特性",
+   "label": "非线性电阻元件的伏安特性"
+  },
+  {
+   "topic_id": "频率计技术参数",
+   "label": "频率计技术参数"
+  },
+  {
+   "topic_id": "验证基尔霍夫电流定律",
+   "label": "验证基尔霍夫电流定律"
+  }
+ ],
+ "edges": [
+  {
+   "src": "rc微分电路",
+   "dst": "微分电路输出电压与电容电压对时间的导数成正比",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "rc微分电路",
+   "dst": "用示波器观察电路过渡过程的方法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "rc微分电路",
+   "dst": "矩形波电压模拟直流接通与短路",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "rc微分电路",
+   "dst": "积分电路输出电压与电阻电压对时间的积分成正比",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "rlc串联电路衰减振荡过渡过程",
+   "dst": "rlc串联电路非振荡过渡过程",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "rlc串联电路衰减振荡过渡过程",
+   "dst": "rlc并联电路临界参数",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "rlc串联电路非振荡过渡过程",
+   "dst": "rlc并联电路临界参数",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "万用表的使用",
+   "dst": "数字万用表测量二极管及判断电路连通",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "万用表的使用",
+   "dst": "数字万用表测量电阻电容值",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "万用表的使用",
+   "dst": "数字万用表量档选择",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "万用表的使用",
+   "dst": "电压表和电流表测量电阻的接法选择",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "万用表的使用",
+   "dst": "电压表接法选择方法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "三端变阻器的应用",
+   "dst": "分压器与可变电阻接法的选用原则",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "三端变阻器的应用",
+   "dst": "分压器的调压特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "三端变阻器的应用",
+   "dst": "分压器调压特性的技术要求",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "三端变阻器的应用",
+   "dst": "变阻器分压时的容量计算",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "cmos电压控制旋钮",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "duty和inv参数控制输出波形周期对称性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "offset直流偏移控制",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "output输出端子",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "vcf输入端",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "主要技术指标电压输出",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "信号发生器使用注意事项",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "信号发生器操作步骤",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "信号发生器操作步骤开启电源与波形选择",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "电压输出技术参数",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "脉冲输出",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "信号发生器面板功能",
+   "dst": "输出衰减与振幅调整旋钮",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "元器件识别",
+   "dst": "等效参数的测量方法及注意事项",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "函数信号发生器的使用",
+   "dst": "函数信号发生器输出端不允许短路",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "分压器的调压特性",
+   "dst": "分压器调压特性的技术要求",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "分压器的调压特性",
+   "dst": "变阻器分压时的容量计算",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "半导体二极管的单向性",
+   "dst": "半导体二极管的反向特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "半导体二极管的单向性",
+   "dst": "半导体二极管的正向特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "双t网络",
+   "dst": "双t网络的幅频特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "双t网络",
+   "dst": "双t网络的相频特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "叠加定理",
+   "dst": "分压器的调压特性",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "叠加定理",
+   "dst": "分压器调压特性的技术要求",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "叠加定理",
+   "dst": "变阻器分压时的容量计算",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "叠加定理",
+   "dst": "叠加定理不能直接计算功率",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "叠加定理",
+   "dst": "实验误差分析",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "叠加定理",
+   "dst": "独立源单独作用",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "叠加定理",
+   "dst": "线性电路",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "含源一端口网络",
+   "dst": "两次电压测量法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "含源一端口网络",
+   "dst": "传输参数的实验测定方法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "含源一端口网络",
+   "dst": "去源加电压法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "含源一端口网络",
+   "dst": "外特性",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "含源一端口网络",
+   "dst": "开路电压的测量方法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "含源一端口网络",
+   "dst": "开路电压短路电流法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "含源一端口网络",
+   "dst": "戴维南定理",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "含源一端口网络",
+   "dst": "戴维南等效电路",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "含源一端口网络",
+   "dst": "直接测量法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "含源一端口网络",
+   "dst": "等效电阻的测量方法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "含源一端口网络",
+   "dst": "补偿法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "基尔霍夫电流定律",
+   "dst": "分压器的调压特性",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "基尔霍夫电流定律",
+   "dst": "分压器调压特性的技术要求",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "基尔霍夫电流定律",
+   "dst": "变阻器分压时的容量计算",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "基尔霍夫电流定律",
+   "dst": "叠加定理",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "基尔霍夫电流定律",
+   "dst": "叠加定理不能直接计算功率",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "基尔霍夫电流定律",
+   "dst": "实验误差分析",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "基尔霍夫电流定律",
+   "dst": "独立源单独作用",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "基尔霍夫电流定律",
+   "dst": "电流参考方向",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "基尔霍夫电流定律",
+   "dst": "线性电路",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "基尔霍夫电流定律",
+   "dst": "验证基尔霍夫电流定律",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "容抗",
+   "dst": "电容元件隔断直流作用",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "容抗",
+   "dst": "电感元件低通高阻性质",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "并联谐振",
+   "dst": "l1c1与c2串联谐振频率",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "并联谐振",
+   "dst": "l1c1并联谐振频率",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "并联谐振",
+   "dst": "实验方法确定c1",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "并联谐振",
+   "dst": "滤波器设计",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "开路电压的测量方法",
+   "dst": "传输参数的实验测定方法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "开路电压的测量方法",
+   "dst": "直接测量法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "开路电压的测量方法",
+   "dst": "补偿法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "感抗",
+   "dst": "电感元件低通高阻性质",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "戴维南定理",
+   "dst": "两次电压测量法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "戴维南定理",
+   "dst": "传输参数的实验测定方法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "戴维南定理",
+   "dst": "去源加电压法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "戴维南定理",
+   "dst": "外特性",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "戴维南定理",
+   "dst": "开路电压的测量方法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "戴维南定理",
+   "dst": "开路电压短路电流法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "戴维南定理",
+   "dst": "戴维南等效电路",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "戴维南定理",
+   "dst": "直接测量法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "戴维南定理",
+   "dst": "等效电阻的测量方法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "戴维南定理",
+   "dst": "补偿法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "戴维南等效电路",
+   "dst": "外特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "数字万用表测量直流电压电流",
+   "dst": "万用表的使用",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "数字万用表测量直流电压电流",
+   "dst": "伏安法测定电阻交流阻抗",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "数字万用表测量直流电压电流",
+   "dst": "数字万用表测量二极管及判断电路连通",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "数字万用表测量直流电压电流",
+   "dst": "数字万用表测量电阻电容值",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "数字万用表测量直流电压电流",
+   "dst": "数字万用表量档选择",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "数字万用表测量直流电压电流",
+   "dst": "电压表和电流表测量电阻的接法选择",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "数字万用表测量直流电压电流",
+   "dst": "电压表接法选择方法",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "文氏电路",
+   "dst": "rc正弦波振荡器",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "文氏电路",
+   "dst": "文氏电路的幅频特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "文氏电路",
+   "dst": "文氏电路的相频特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "无源线性二端口网络的传输参数",
+   "dst": "二端口网络的t型等效电路",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "伏安法测定电阻交流阻抗",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "分压器的调压特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "分压器调压特性的技术要求",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "变阻器分压时的容量计算",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "叠加定理",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "叠加定理不能直接计算功率",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "基尔霍夫电流定律",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "实验误差分析",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "独立源单独作用",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "电流参考方向",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "电阻串并联电路",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "线性电路",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "欧姆定律",
+   "dst": "验证基尔霍夫电流定律",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "用示波器观察李萨育图形测定频率",
+   "dst": "文氏电路的相频特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "用示波器观察电路过渡过程的方法",
+   "dst": "矩形波电压模拟直流接通与短路",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "电压表和电流表测量电阻的接法选择",
+   "dst": "电压表接法选择方法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "电压输出技术参数",
+   "dst": "主要技术指标电压输出",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "电子测量方法",
+   "dst": "测量结果的记录与处理",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电子测量方法",
+   "dst": "误差分析方法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "电流参考方向",
+   "dst": "分压器的调压特性",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流参考方向",
+   "dst": "分压器调压特性的技术要求",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流参考方向",
+   "dst": "变阻器分压时的容量计算",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流参考方向",
+   "dst": "叠加定理",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "电流参考方向",
+   "dst": "叠加定理不能直接计算功率",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流参考方向",
+   "dst": "实验误差分析",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流参考方向",
+   "dst": "独立源单独作用",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流参考方向",
+   "dst": "线性电路",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "分压器的调压特性",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "分压器调压特性的技术要求",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "变阻器分压时的容量计算",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "叠加定理",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "叠加定理不能直接计算功率",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "基尔霍夫电流定律",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "实验误差分析",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "独立源单独作用",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "电流参考方向",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "电阻串并联电路",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "线性电路",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电流表的正确使用",
+   "dst": "验证基尔霍夫电流定律",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电路虚拟地的概念",
+   "dst": "微分电路的相关知识",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "电路虚拟地的概念",
+   "dst": "积分电路的相关知识",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "电阻串并联电路",
+   "dst": "分压器的调压特性",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电阻串并联电路",
+   "dst": "分压器调压特性的技术要求",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电阻串并联电路",
+   "dst": "变阻器分压时的容量计算",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电阻串并联电路",
+   "dst": "叠加定理",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电阻串并联电路",
+   "dst": "叠加定理不能直接计算功率",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电阻串并联电路",
+   "dst": "基尔霍夫电流定律",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "电阻串并联电路",
+   "dst": "实验误差分析",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电阻串并联电路",
+   "dst": "独立源单独作用",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电阻串并联电路",
+   "dst": "电流参考方向",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电阻串并联电路",
+   "dst": "线性电路",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "电阻串并联电路",
+   "dst": "验证基尔霍夫电流定律",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "直流稳压电源的使用",
+   "dst": "实际电压源的伏安特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "直流稳压电源的使用",
+   "dst": "理想电压源的伏安特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器光标测量",
+   "dst": "手动模式",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器光标测量",
+   "dst": "自动测量模式",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器光标测量",
+   "dst": "追踪模式",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "手动模式",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "数学运算界面",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "斜率触发菜单",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "水平系统设置菜单",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "示波器光标测量",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "自动测量功能按键",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "自动测量模式",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "触发电平与触发方式设置",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "触发设置界面",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "边沿触发菜单",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "边沿触发菜单附表31",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "追踪模式",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "通道设置菜单",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "通道设置菜单附表11",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器控制面板功能区域",
+   "dst": "采样功能设置菜单",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "交替触发",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "单通道和双通道信号观测",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "在坐标纸上手工定量画波形",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "实时采样方式",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "峰值检测方式",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "平均采样方式",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "微分电路的相关知识",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "手动模式",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "斜率触发",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "正弦波信号的输入和输出信号观察",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "用双踪法测量两个信号的相位差",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "用椭圆法测量两个信号的相位差",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "示波器光标测量",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "示波器垂直系统设置",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "示波器校准信号检查",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "示波器水平系统设置",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "示波器测信号频率和幅值",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "示波器自动测量",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "示波器触发系统设置",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "示波器采样系统设置",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "积分电路的相关知识",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "等效采样方式",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "脉宽触发",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "自动测量模式",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "视频触发",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "边沿触发",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器的使用",
+   "dst": "追踪模式",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "示波器触发系统设置",
+   "dst": "交替触发",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器触发系统设置",
+   "dst": "斜率触发",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器触发系统设置",
+   "dst": "脉宽触发",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器触发系统设置",
+   "dst": "视频触发",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器触发系统设置",
+   "dst": "边沿触发",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器采样系统设置",
+   "dst": "实时采样方式",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器采样系统设置",
+   "dst": "峰值检测方式",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器采样系统设置",
+   "dst": "平均采样方式",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "示波器采样系统设置",
+   "dst": "等效采样方式",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "等效电阻的测量方法",
+   "dst": "两次电压测量法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "等效电阻的测量方法",
+   "dst": "传输参数的实验测定方法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "等效电阻的测量方法",
+   "dst": "去源加电压法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "等效电阻的测量方法",
+   "dst": "开路电压短路电流法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "线性电路",
+   "dst": "分压器的调压特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "线性电路",
+   "dst": "分压器调压特性的技术要求",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "线性电路",
+   "dst": "变阻器分压时的容量计算",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "线性电阻元件的伏安特性",
+   "dst": "半导体二极管的单向性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "线性电阻元件的伏安特性",
+   "dst": "半导体二极管的反向特性",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "线性电阻元件的伏安特性",
+   "dst": "半导体二极管的正向特性",
+   "relation": "prerequisite_inferred"
+  },
+  {
+   "src": "线性电阻元件的伏安特性",
+   "dst": "电阻元件的交流伏安特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "线性电阻元件的伏安特性",
+   "dst": "非线性电阻元件的伏安特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "线性非时变电容",
+   "dst": "电阻元件的交流伏安特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "线性非时变电感",
+   "dst": "电阻元件的交流伏安特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "线性非时变电阻",
+   "dst": "电阻元件的交流伏安特性",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "虚拟仿真软件的使用",
+   "dst": "等效参数的测量方法及注意事项",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "误差分析方法",
+   "dst": "测量结果的记录与处理",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "调压特性曲线绘制方法",
+   "dst": "实验数据曲线绘制方法",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "边沿触发菜单",
+   "dst": "边沿触发菜单附表31",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "通道设置菜单",
+   "dst": "通道设置菜单附表11",
+   "relation": "prerequisite"
+  },
+  {
+   "src": "非正弦电源",
+   "dst": "滤波器设计",
+   "relation": "prerequisite"
+  }
+ ]
+}
