@@ -47,9 +47,8 @@ def load_graph() -> dict:
 
 
 def prereq_predecessors(topic_id: str, edges: list[dict]) -> set[str]:
-    """快照边 → 全部先修闭包。BFS 核心与关系过滤复用
-    ``course_topic_store.prereq_closure`` / ``PREREQ_RELATIONS``（与生产门控
-    同一实现，评测口径不靠 docstring 互指维持）。"""
+    """快照边 → 先修闭包（复用 ``course_topic_store.prereq_closure``，关系过滤
+    ``PREREQ_RELATIONS``——口径的单一陈述见该函数 docstring）。"""
     from core.memory.course_topic_store import PREREQ_RELATIONS, prereq_closure
 
     return prereq_closure(
@@ -75,14 +74,16 @@ def gate_decide(case: dict, edges: list[dict]):
 def build_mastery_map(case: dict) -> dict[str, dict]:
     """case 档案 → decide_stitch 的 mastery_map（真实折叠 + 遗忘实算）。
 
-    theta 由 ``fold_observations`` 折 levels（不手拍）；risk/logit 与生产读侧
-    ``proactive._read_mastery`` 同口径（b 进 risk/logit，不进入闸判据）；p_forget
-    按 days_since_last 实算（默认强度 S=5）；last_stitched_at 折成固定时钟 NOW。
+    theta 由 ``fold_observations`` 折 levels（不手拍）；risk 复用 ``FoldState.risk``
+    属性（b 进 risk/logit，不进入闸判据，与生产读侧同公式同源）；p_forget 按
+    days_since_last 实算（默认强度 S=5）；last_stitched_at 折成固定时钟 NOW。
     字段集对齐 _read_mastery / scorer._gate_mastery_map 的 map 形状（label 便于
     调试）；decide_stitch 只读 risk/theta/p_forget/last_stitched_at（.get 默认）。
     """
+    from dataclasses import replace
+
     from core.memory.mastery import forget_prob
-    from core.memory.mastery_state import LEVEL_OUTCOME, W_JUDGE, fold_observations, sigmoid
+    from core.memory.mastery_state import LEVEL_OUTCOME, W_JUDGE, fold_observations
 
     out: dict[str, dict] = {}
     for m in case["mastery"]:
@@ -93,7 +94,7 @@ def build_mastery_map(case: dict) -> dict[str, dict]:
         s = fold_observations(obs)
         b = m.get("b_topic", 0.0)
         entry = {
-            "risk": round(1.0 - sigmoid(s.theta - b), 4),
+            "risk": round(replace(s, b_topic=b).risk, 4),
             "theta": round(s.theta, 4),
             "logit": round(s.theta - b, 4),
             "p_forget": forget_prob(m["days_since_last"]),

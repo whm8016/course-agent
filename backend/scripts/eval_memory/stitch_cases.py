@@ -45,17 +45,13 @@ PREREQ_EDGES: list[tuple[str, str]] = [
 def prereq_predecessors(topic_id: str) -> set[str]:
     """沿 PREREQ_EDGES 递归回溯 topic_id 的全部（直接+间接）前置主题。
 
-    纯函数、可单测；门控与评测共用，保证「前置闭包」口径一致。
+    BFS 核心复用 ``course_topic_store.prereq_closure``（PREREQ_EDGES 本就是
+    (src, dst) 对且人工标注为先修专用、无 relation 维度）——CI 评测与生产
+    门控的闭包计算同实现。
     """
-    preds: set[str] = set()
-    frontier = [topic_id]
-    while frontier:
-        cur = frontier.pop()
-        for src, dst in PREREQ_EDGES:
-            if dst == cur and src not in preds:
-                preds.add(src)
-                frontier.append(src)
-    return preds
+    from core.memory.course_topic_store import prereq_closure
+
+    return prereq_closure(topic_id, PREREQ_EDGES)
 
 
 # ---- 学生 case：掌握度状态 + 错题复发 + 本轮提问 + 提问命中主题 + gold ----

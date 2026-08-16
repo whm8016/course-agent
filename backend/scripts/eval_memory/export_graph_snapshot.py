@@ -37,7 +37,6 @@ async def _export() -> dict:
     from core.memory.course_topic_store import fetch_course_edges, fetch_course_topics
 
     async with AsyncSessionLocal() as db:
-        # fetch_* 是两查询的单一真相源（显式列、不拉 embedding 大列）
         topics = await fetch_course_topics(db, COURSE_ID)
         edges = await fetch_course_edges(db, COURSE_ID)
     await close_db()

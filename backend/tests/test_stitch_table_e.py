@@ -54,7 +54,7 @@ def test_cases_reference_real_graph_topics():
 
 
 def test_closure_samples():
-    """闭包抽验（BFS 核心与生产 get_prereq_predecessors 共用 prereq_closure）：锚点先修。"""
+    """闭包抽验：锚点主题的真实先修关系。"""
     assert prereq_predecessors("叠加定理", _EDGES) >= {"欧姆定律", "基尔霍夫电流定律", "电阻串并联电路"}
     assert prereq_predecessors("戴维南等效电路", _EDGES) == {"含源一端口网络", "戴维南定理"}
     assert prereq_predecessors("示波器垂直系统设置", _EDGES) == {"示波器的使用"}

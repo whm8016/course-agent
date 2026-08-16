@@ -93,7 +93,7 @@ async def _llm_decide_once(case: dict) -> dict:
 
 def _llm_vote(runs: list[dict]) -> dict:
     """多数票决策 + 自一致标记。平票（有效票各半）偏向 stitch=True——过度提醒者
-    应为此付出打扰率代价，不替它遮掩。全失败 → 记 failed 不入混淆矩阵。"""
+    应为此付出打扰率代价，不替它遮掩。全失败 → stitch=None 不入混淆矩阵。"""
     valid = [r["stitch"] for r in runs if not r.get("failed")]
     if not valid:
         return {"stitch": None, "all_agree": None}

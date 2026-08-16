@@ -5,8 +5,8 @@ id-align：把 ``knowledge_mastery`` 的 label/kp_id 对齐到 ``course_topic.to
 曾是 entity_id 或 label 哈希，与 topic_id 不一致）。
 
 门控（``core.memory.proactive.decide_stitch``）经本层读主题图：前置闭包回溯用
-``get_prereq_predecessors``，运行时版与 ``scripts.eval_memory.stitch_cases.prereq_predecessors``
-（内存图版）同语义，保证 CI 与运行时口径一致。
+``get_prereq_predecessors``（BFS 核心在 ``prereq_closure``，DB 路径与离线评测
+路径共用同一实现）。
 """
 from __future__ import annotations
 
