@@ -393,8 +393,17 @@ export async function fetchGraphs(): Promise<GraphsResponse> {
 }
 
 // ---------------------------------------------------------------------------
-// 课程主题图（学生端：知识点 + 先修边 + 我的掌握度着色数据）
+// 课程主题图（教师/学生两视图共享基底；数据源同 course_topic / course_topic_edge 表）
 // ---------------------------------------------------------------------------
+
+/** 主题共同字段（教师视图 +safety_weight；学生视图 +my 掌握度） */
+export interface TopicBase {
+  topic_id: string
+  label: string
+  definition: string
+  source_section: string
+  order_idx: number
+}
 
 export interface MyTopicMastery {
   theta: number
@@ -405,18 +414,15 @@ export interface MyTopicMastery {
   weak: boolean
 }
 
-export interface StudentTopic {
-  topic_id: string
-  label: string
-  definition: string
-  source_section: string
-  order_idx: number
+export interface StudentTopic extends TopicBase {
   my: MyTopicMastery | null
 }
 
 export interface StudentTopicEdge {
   src: string
   dst: string
+  /** "prerequisite"=LLM 直接判定；"prerequisite_inferred"=传递闭包推断 */
+  relation: string
   confidence: number
 }
 
@@ -435,6 +441,28 @@ export async function fetchStudentTopicGraph(courseId: string): Promise<StudentT
   checkUnauthorized(res)
   if (!res.ok) throw new Error(await readErrorMessage(res))
   return res.json()
+}
+
+// 教师端类型（fetch 调用留在 KbDetailPanel——apiBase 需按 teacher/admin 参数化）
+export interface TeacherTopic extends TopicBase {
+  safety_weight: number
+}
+
+export interface TeacherTopicEdge {
+  src: string
+  dst: string
+  relation: string
+  confidence: number
+  verified_by?: string | null
+}
+
+export interface TeacherTopicGraph {
+  course_id: string
+  topic_count: number
+  edge_count: number
+  topics: TeacherTopic[]
+  edges: TeacherTopicEdge[]
+  failed_sections?: string[]
 }
 
 export async function deleteGraphNode(nodeId: string): Promise<GraphsResponse> {

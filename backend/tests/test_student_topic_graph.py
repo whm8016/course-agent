@@ -32,10 +32,9 @@ async def _register_student(client) -> tuple[dict, str]:
 
 
 @pytest.mark.asyncio
-async def test_student_topic_graph_denied_without_enrollment(client, course_with_code):
+async def test_student_topic_graph_denied_without_enrollment(client, course_with_code, auth_headers):
     course_id = course_with_code["course_id"]
-    headers, _ = await _register_student(client)
-    r = await client.get(f"/api/courses/{course_id}/topic-graph/me", headers=headers)
+    r = await client.get(f"/api/courses/{course_id}/topic-graph/me", headers=auth_headers)
     assert r.status_code == 403, r.text
 
 

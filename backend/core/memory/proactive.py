@@ -92,9 +92,11 @@ def decide_stitch(
     Args:
         matched_topic: 问句命中的主题（S_t），None = unknown。
         prereq_closure: matched 的全部前置主题（course_topic_store.get_prereq_predecessors 算）。
-        mastery_map: {topic_id: {risk, p_forget, theta, logit, label, observation_count}}，
-            门控唯一学情数据源。theta 是入闸判据（<= weak_margin）；logit = theta -
-            b_topic 只供 risk/p_need 派生（班级难度不决定谁能入闸）。
+        mastery_map: {topic_id: {risk, p_forget, theta, logit, label, observation_count,
+            safety_weight}}，门控唯一学情数据源。theta 是入闸判据（<= weak_margin）；
+            logit = theta - b_topic 只供 risk/p_need 派生（班级难度不决定谁能入闸）。
+            safety_weight 是教师标注的任务风险因子（默认 1.0），乘进 p_need——
+            0=该主题永不因它预警、>1=更想预警（漏报代价更高，如通电操作类）。
         error_repeated: 反复出错的 topic_id 集（mastery_observation 同主题 poor 计数 ≥2 派生）。
         now: cooldown 判定的当前时间戳（调用方传入，保持纯函数可单测；None=用 time.time）。
             冷却时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带，见 _read_mastery）。
@@ -107,7 +109,8 @@ def decide_stitch(
         C2 问到了但提旧错 = matched ∈ error_repeated
 
     决策：证据按 max(p_need) 选取（复发臂与前置臂同口径竞争），p_need >= τ 过闸即
-    输出完整简报（两档：过/不过，无 light 中间档）。
+    输出完整简报（两档：过/不过，无 light 中间档）。p_need 钳 [0,1]（safety_weight
+    乘进来可能超 1，τ 恒 <1，超 1 等价必过闸）。
     """
     # 1. unknown 直接不拼（问句没命中任何课程主题）
     if matched_topic is None:
@@ -149,6 +152,16 @@ def decide_stitch(
         )
         if rec > p_need:
             p_need, evidence, reason = rec, matched_topic, "recurrence"
+    # 教师标注的任务风险因子（safety_weight，默认 1.0）乘进 p_need：教师端 PATCH
+    # 接口由此真正生效（此前只存不读是假开关）。0=永不因它预警；>1 放大过闸概率。
+    # 钳 [0,1]：p_need 是概率语义，τ 恒 <1，乘超后钳 1 即必过闸。
+    if evidence is not None:
+        sw = mastery_map.get(evidence, {}).get("safety_weight", 1.0)
+        try:
+            sw = max(0.0, float(sw))
+        except (TypeError, ValueError):
+            sw = 1.0
+        p_need = min(1.0, p_need * sw)
 
     # 5. cooldown：证据主题 24h 内实际拼过 → 直接沉默（防过载；AIED N=81 依据）。
     #    时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带）。
@@ -207,14 +220,14 @@ async def stitch_for_turn(
     # 5. 决策（口径见 decide_stitch docstring）
     brief = decide_stitch(matched_topic, closure, mastery_map, error_repeated)
 
-    # 6. 应拼则填简报文本（frozen dataclass 用 replace，免手工抄字段）+ 回写 cooldown 戳
-    #    戳按行主键回写（legacy 行 kp_id 是旧 hash，按 topic_id 更新 0 命中冷却失效）。
+    # 6. 应拼则填简报文本（frozen dataclass 用 replace，免手工抄字段）。
+    #    cooldown 戳不在此写——拼上下文发生在模型调用前，模型失败会白烧 24h 冷却；
+    #    调用方（pipeline_common）把 (user, course, evidence_topic) 塞进 ctx.metadata，
+    #    回合成功后由 turn_runtime 落盘（见 commit_stitch_cooldown）。
     #    matched_topic 一并带出（第一路主题过滤用，silent 时也带）。
     if brief.should_stitch and brief.evidence_topic:
         ev = mastery_map.get(brief.evidence_topic, {})
         label = ev.get("label") or brief.evidence_topic
-        if ev.get("row_id"):
-            await _mark_stitched(db, ev["row_id"])
         text = (
             f"## 学情提示（跨会话，未问亦带）\n该生在「{label}」偏薄弱"
             f"（{ev.get('observation_count', '?')}次观测），本轮涉及其前置/相关内容，请留意诊断。"
@@ -223,12 +236,72 @@ async def stitch_for_turn(
     return replace(brief, matched_topic=matched_topic)
 
 
-async def _mark_stitched(db, row_id: str) -> None:
-    """实际拼出简报后回写 last_stitched_at（cooldown 的写入端）。失败非致命。
+async def commit_stitch_cooldown(db, user_id: str, course_id: str, topic_id: str) -> None:
+    """回合成功后落盘 cooldown 戳（不依赖 mastery 行是否已存在）。
 
-    按行主键更新（非 kp_id==topic_id）——legacy 行 kp_id 是旧 hash，按 topic_id
-    条件 UPDATE 命中 0 行，last_stitched_at 永远为空，冷却失效。rowcount==0 时
-    warning 不静默（行可能被并发删除）。
+    旧写入端在拼上下文时就回写 row_id——两个洞：①模型调用失败也烧掉 24h 冷却；
+    ②C2 复发证据来自观测日志，若该 (user, course, topic) 还没有 mastery 行则没有
+    row_id，冷却不写、每轮重复拼。本函数按 (user, course, kp_id) upsert：无行时
+    建占位行（theta=0/n_obs=0，观测折叠时会被覆盖），写 last_stitched_at。
+    失败非致命——冷却丢一次只导致多拼一轮简报。
+    """
+    from core.db.database import KnowledgeMastery
+    from sqlalchemy import select, update
+
+    now = time.time()
+    try:
+        row = (
+            (
+                await db.execute(
+                    select(KnowledgeMastery).where(
+                        KnowledgeMastery.user_id == user_id,
+                        KnowledgeMastery.course_id == course_id,
+                        KnowledgeMastery.kp_id == topic_id,
+                    )
+                )
+            )
+            .scalars()
+            .first()
+        )
+        if row is None:
+            # 占位行：uq (user, course, kp_id) 并发冲突时退回 UPDATE
+            try:
+                db.add(
+                    KnowledgeMastery(
+                        user_id=user_id, course_id=course_id, kp_id=topic_id,
+                        label=topic_id, last_stitched_at=now,
+                    )
+                )
+                await db.commit()
+                return
+            except Exception:
+                await db.rollback()
+        result = await db.execute(
+            update(KnowledgeMastery)
+            .where(
+                KnowledgeMastery.user_id == user_id,
+                KnowledgeMastery.course_id == course_id,
+                KnowledgeMastery.kp_id == topic_id,
+            )
+            .values(last_stitched_at=now)
+        )
+        if result.rowcount != 1:
+            logger.warning(
+                "[stitch] cooldown 落盘命中 %d 行（期望 1）user=%s course=%s topic=%s",
+                result.rowcount, user_id, course_id, topic_id,
+            )
+        await db.commit()
+    except Exception as exc:
+        logger.warning("[stitch] cooldown 落盘失败（非致命）：%s", exc)
+        await db.rollback()
+
+
+async def _mark_stitched(db, row_id: str) -> None:
+    """（已弃用路径）按行主键回写 last_stitched_at。保留供旧调用方/评测脚本。
+
+    生产写入口已改为 commit_stitch_cooldown（回合成功后按 (user, course, kp_id)
+    upsert）。按行主键更新（非 kp_id==topic_id）——legacy 行 kp_id 是旧 hash，
+    按 topic_id 条件 UPDATE 命中 0 行，last_stitched_at 永远为空，冷却失效。
     """
     from core.db.database import KnowledgeMastery
     from sqlalchemy import update
@@ -299,7 +372,6 @@ async def _read_mastery(
     - 遗忘口径（MemoryBank）不变：p_forget = 1 - exp(-t/S)。
     """
     from core.db.database import CourseTopic, KnowledgeMastery
-    from core.memory.course_topic_store import _norm_label
     from core.memory.mastery import forget_prob
     from core.memory.mastery_state import sigmoid
     from sqlalchemy import select
@@ -316,28 +388,36 @@ async def _read_mastery(
         .scalars()
         .all()
     )
-    # 题目难度（全班共享）一次取齐，行内不存（单一真相源在 course_topic）
+    # id-align：单一真相源在 course_topic_store.align_mastery_rows（学生端着色共调）
+    from core.memory.course_topic_store import align_mastery_rows
+
+    aligned = align_mastery_rows(topic_map, rows)
+
+    # 题目难度 + safety_weight（全班共享）按**对齐后**的 tid 取齐（旧 bug：tids_hint 用
+    # 原始 kp_id，legacy 哈希 id 查不到 → b=0，班级难度对旧行失效）。行内不存
+    # （单一真相源在 course_topic）。
     b_map: dict[str, float] = {}
-    tids_hint = {r.kp_id for r in rows if r.kp_id}
-    if tids_hint:
+    sw_map: dict[str, float] = {}
+    tids_aligned = {tid for tid, _r in aligned}
+    if tids_aligned:
         b_rows = (
             await db.execute(
-                select(CourseTopic.topic_id, CourseTopic.difficulty_b).where(
+                select(
+                    CourseTopic.topic_id,
+                    CourseTopic.difficulty_b,
+                    CourseTopic.safety_weight,
+                ).where(
                     CourseTopic.course_id == course_id,
-                    CourseTopic.topic_id.in_(tids_hint),
+                    CourseTopic.topic_id.in_(tids_aligned),
                 )
             )
         ).all()
-        b_map = {t: float(b or 0.0) for t, b in b_rows}
+        b_map = {t: float(b or 0.0) for t, b, _sw in b_rows}
+        sw_map = {t: float(sw if sw is not None else 1.0) for t, _b, sw in b_rows}
 
     now = time.time()
     out: dict[str, dict] = {}
-    # id-align：只信任落在 course_topic.topic_id 集内的 kp_id，其余走 label 归一化对齐。
-    topic_ids = set(topic_map.values())
-    for r in rows:
-        tid = r.kp_id if r.kp_id in topic_ids else topic_map.get(_norm_label(r.label))
-        if not tid:
-            continue
+    for tid, r in aligned:
         b = b_map.get(tid, 0.0)
         # risk 按折叠状态重算（不读旧列——旧行可能是 delta 累加口径的历史值）；
         # theta 为 0 且无观测的行（历史遗留）等于无信息先验 risk=0.5
@@ -346,7 +426,7 @@ async def _read_mastery(
         age_days = max(0.0, (now - (r.last_observed_at or now)) / 86400.0)
         out[tid] = {
             # 行主键：legacy 行 kp_id 是旧 hash（靠 label 对齐进 map），_mark_stitched
-            # 按 kp_id==topic_id 更新会 0 命中 → 冷却永不生效（每轮重复拼）。回写走主键。
+            # 按 kp_id==topic_id 更新会 0 命中 → 冷却永不失效（每轮重复拼）。回写走主键。
             "row_id": r.id,
             "risk": round(risk, 4),
             "theta": round(r.theta or 0.0, 4),
@@ -356,6 +436,8 @@ async def _read_mastery(
             "label": r.label,
             "observation_count": r.observation_count or 1,
             "last_stitched_at": r.last_stitched_at,
+            # 教师标注任务风险因子（默认 1.0），decide_stitch 乘进 p_need（教师 PATCH 真生效）
+            "safety_weight": sw_map.get(tid, 1.0),
         }
     return out
 
@@ -392,4 +474,9 @@ async def _read_error_repeated(
     return {tid for tid, _cnt in rows if tid in valid}
 
 
-__all__ = ["StitchBrief", "decide_stitch", "stitch_for_turn"]
+__all__ = [
+    "StitchBrief",
+    "decide_stitch",
+    "stitch_for_turn",
+    "commit_stitch_cooldown",
+]

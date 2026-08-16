@@ -14,9 +14,9 @@ unknown 不拼），故本模块不给关闭 embedding 的选项——能建索�
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -57,6 +57,34 @@ def export_json(
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info("[course_topics] JSON 导出 → %s（%d 主题 %d 边）", out, len(topics), len(edges))
     return out
+
+
+# 读侧缓存：GET 主题图每次都要 failed_sections，但 artifact 含 embedding 可达数百 KB——
+# (path, mtime_ns) 缓存使未变化的构建零重读；重建后 mtime 变化自动失效。
+_failed_sections_cache: dict[str, tuple[int, list[str]]] = {}
+
+
+def read_failed_sections(course_id: str) -> list[str]:
+    """读回构建时落盘的抽取失败章节（与 export_json 同模块——文件名契约单一真相源）。
+
+    文件缺失 / 解析失败 / 字段缺失一律返回 []：纯展示字段，不因 IO 问题打断 GET。
+    """
+    path = JSON_DIR / f"course_{course_id}_topics.json"
+    try:
+        mtime = path.stat().st_mtime_ns
+    except OSError:
+        return []
+    cached = _failed_sections_cache.get(str(path))
+    if cached and cached[0] == mtime:
+        return cached[1]
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        failed = data.get("failed_sections") if isinstance(data, dict) else None
+        result = [str(s) for s in failed] if isinstance(failed, list) else []
+    except Exception:
+        result = []
+    _failed_sections_cache[str(path)] = (mtime, result)
+    return result
 
 
 # -------------------- from-chunks 离线抽取（有课程库数据时跑）--------------------
@@ -116,10 +144,12 @@ _EDGE_SCORE_MIN = 0.5
 async def _llm_json(
     llm, model: str, prompt: str, track: dict[str, str] | None = None
 ) -> dict | None:
+    from core.llm.json_extract import extract_json_from_llm
+
     for attempt in (1, 2):  # 网络抖动/JSON 偶发崩：重试一次，两试皆败返回 None
         try:
             # deepseek-v4-pro 等 reasoning 模型先吐 reasoning_content 再吐 content；
-            # max_tokens 太小会被 reasoning 占满→content 空(finish=length)→json.loads 崩。
+            # max_tokens 太小会被 reasoning 占满→content 空(finish=length)。
             resp = await llm.chat.completions.create(
                 model=model, messages=[{"role": "user", "content": prompt}],
                 temperature=0.1, max_tokens=4096, stream=False,
@@ -129,10 +159,11 @@ async def _llm_json(
                 from core.analytics.token_usage import track_llm_response
 
                 await track_llm_response(resp, model=model, mode="topic_build", **track)
-            raw = (resp.choices[0].message.content or "").strip()
-            raw = re.sub(r"^```json\s*", "", raw)
-            raw = re.sub(r"\s*```$", "", raw)
-            return json.loads(raw)
+            # 围栏/前后噪声/尾逗号容错走全库单一真相源（judge/question/research 同款）
+            data = extract_json_from_llm(resp.choices[0].message.content or "")
+            if data:
+                return data
+            logger.warning("[course_topics] LLM 输出非 JSON（第 %d 次）", attempt)
         except Exception as exc:
             logger.warning("[course_topics] LLM 抽取失败（第 %d 次）：%s", attempt, exc)
     return None
@@ -195,16 +226,24 @@ async def extract_topics_from_chunks(
                 label = str(t.get("label") or "").strip()
                 if not label:
                     continue
-                emb = await _aget_embed(embed_model, f"{label}：{t.get('definition','')}")
                 topics.append({
                     "topic_id": "",  # 合并去重后定（label 归一 + embedding 相似）
                     "label": label,
                     "definition": str(t.get("definition") or "").strip(),
                     "source_section": sec,
                     "order_idx": order,
-                    "embedding": emb,
+                    "embedding": None,  # 批量 gather 后回填
                 })
                 order += 1
+    # embedding 逐条并发（_aget_embed 自吞异常返 None，gather 不互相拖垮）——
+    # 串行逐个 await 数十次网络往返会白占 worker 槽位
+    if topics and embed_model is not None:
+        embs = await asyncio.gather(*(
+            _aget_embed(embed_model, f"{t['label']}：{t['definition']}")
+            for t in topics
+        ))
+        for t, emb in zip(topics, embs):
+            t["embedding"] = emb
     if failed_sections:
         logger.warning("[course_topics] course=%s %d 块抽取失败：%s",
                        course_id, len(failed_sections), "; ".join(failed_sections))
@@ -259,17 +298,20 @@ def build_edge_candidates(topics: list[dict], k: int = 10) -> list[tuple[int, in
 
     n = len(topics)
     pair_set: set[tuple[int, int]] = set()
-    has_emb = [bool(t.get("embedding")) for t in topics]
+    # 半矩阵一次算一对（余弦对称），范数预计算一遍——O(n²) dot + O(n) 范数
+    sims: list[list[float]] = [[0.0] * n for _ in range(n)]
     for i in range(n):
-        if has_emb[i]:
-            sims = sorted(
-                (
-                    (cosine(topics[i]["embedding"], topics[j]["embedding"]), j)
-                    for j in range(n) if j != i and has_emb[j]
-                ),
-                reverse=True,
-            )
-            for _, j in sims[:k]:
+        if not topics[i].get("embedding"):
+            continue
+        for j in range(i + 1, n):
+            if not topics[j].get("embedding"):
+                continue
+            s = cosine(topics[i]["embedding"], topics[j]["embedding"])
+            sims[i][j] = sims[j][i] = s
+    for i in range(n):
+        if topics[i].get("embedding"):
+            top = sorted((sims[i][j], j) for j in range(n) if j != i and topics[j].get("embedding"))
+            for _, j in top[-k:]:  # 取 top-k（sorted 升序，末 k 个即最大）
                 pair_set.add((i, j) if i < j else (j, i))
         else:
             sec = topics[i].get("source_section")
@@ -283,11 +325,11 @@ def build_edge_candidates(topics: list[dict], k: int = 10) -> list[tuple[int, in
     return sorted(pair_set)
 
 
-def _mk_edge(topics: list[dict], src_i: int, dst_i: int, confidence: float) -> dict:
+def _mk_edge(src_id: str, dst_id: str, confidence: float, relation: str = "prerequisite") -> dict:
     """构造一条前置边 dict（src=前置，dst=被前置——门控回溯方向契约）。"""
     return {
-        "src": topics[src_i]["topic_id"], "dst": topics[dst_i]["topic_id"],
-        "relation": "prerequisite", "confidence": round(float(confidence), 4),
+        "src": src_id, "dst": dst_id,
+        "relation": relation, "confidence": round(float(confidence), 4),
     }
 
 
@@ -305,11 +347,10 @@ async def judge_pairs_batch(
     """
     if not pairs:
         return [], []
-    sections: list[str] = []
-    for t in topics:
-        sec = t.get("source_section") or "未知章节"
-        if sec not in sections:
-            sections.append(sec)
+    sections = list(dict.fromkeys(
+        t.get("source_section") or "未知章节" for t in topics
+    ))
+    sections_summary = " → ".join(sections)
 
     edges: list[dict] = []
     uncertain: list[tuple[int, int]] = []
@@ -326,7 +367,7 @@ async def judge_pairs_batch(
         data = await _llm_json(
             llm, model,
             _JUDGE_PREREQ_BATCH_PROMPT.format(
-                sections_summary=" → ".join(sections),
+                sections_summary=sections_summary,
                 pairs_json=json.dumps(pairs_payload, ensure_ascii=False),
             ),
             track={"course_id": course_id},
@@ -351,9 +392,9 @@ async def judge_pairs_batch(
                 score = 0.0
             if direction in ("forward", "reverse") and score >= _EDGE_SCORE_MIN:
                 if direction == "forward":
-                    edges.append(_mk_edge(topics, i, j, score))
+                    edges.append(_mk_edge(topics[i]["topic_id"], topics[j]["topic_id"], score))
                 else:
-                    edges.append(_mk_edge(topics, j, i, score))
+                    edges.append(_mk_edge(topics[j]["topic_id"], topics[i]["topic_id"], score))
             elif direction == "uncertain":
                 uncertain.append((i, j))
     return edges, uncertain
@@ -367,7 +408,7 @@ def break_cycles(edges: list[dict]) -> list[dict]:
     删最低置信边保留最可信结构。顺序契约：须在 close_transitive 之前调用
     （DAG 上做闭包才不引环）。纯函数、可单测。
     """
-    remaining = [dict(e) for e in edges]
+    remaining = list(edges)  # 只 list 拷贝（remove 用），边 dict 本身不改
     while True:
         adj: dict[str, list[str]] = {}
         for e in remaining:
@@ -413,6 +454,8 @@ def close_transitive(edges: list[dict]) -> list[dict]:
 
     门控读侧（get_prereq_predecessors）本就 BFS 算全闭包，运行时预警效果等价；
     此步主要服务学生端可视化（远距离前置直接可见）与教师 safety_weight 标注粒度。
+    推断边 relation="prerequisite_inferred" 与 LLM 直接判定的 "prerequisite" 区分
+    （前端"直接前置"/教师核对须过滤推断边，confidence 语义也不同：|score| vs 路径 min）。
     已有直接边不覆盖（LLM 直接判定优先）。须在 break_cycles 之后调用。纯函数、可单测。
     """
     adj: dict[str, list[tuple[str, float]]] = {}
@@ -434,10 +477,7 @@ def close_transitive(edges: list[dict]) -> list[dict]:
                 stack.append((nxt, min(conf, c2)))
         for dst, conf in reach.items():
             if (start, dst) not in existing:
-                added.append({
-                    "src": start, "dst": dst,
-                    "relation": "prerequisite", "confidence": round(conf, 4),
-                })
+                added.append(_mk_edge(start, dst, conf, relation="prerequisite_inferred"))
     return edges + added
 
 

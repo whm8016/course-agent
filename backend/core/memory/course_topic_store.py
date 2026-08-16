@@ -98,4 +98,61 @@ async def get_prereq_predecessors(topic_id: str, course_id: str, db) -> set[str]
     return preds
 
 
-__all__ = ["get_course_topic_map", "resolve_topic_id", "get_prereq_predecessors"]
+async def fetch_course_topics(db, course_id: str) -> list:
+    """主题行查询（教师/学生两个 GET payload 的单一真相源）。
+
+    显式列查询不含 ``embedding``——1024 维 JSON 列视图层无用，全列取回白拉数百 KB。
+    返回 Row 对象（属性访问与 ORM 实体一致）。
+    """
+    from core.db.database import CourseTopic
+    from sqlalchemy import select
+
+    return (
+        await db.execute(
+            select(
+                CourseTopic.topic_id, CourseTopic.label, CourseTopic.definition,
+                CourseTopic.source_section, CourseTopic.order_idx,
+                CourseTopic.safety_weight, CourseTopic.difficulty_b,
+            )
+            .where(CourseTopic.course_id == course_id)
+            .order_by(CourseTopic.order_idx)
+        )
+    ).all()
+
+
+async def fetch_course_edges(db, course_id: str) -> list:
+    """先修边行查询（同上，两 payload 共用）。"""
+    from core.db.database import CourseTopicEdge
+    from sqlalchemy import select
+
+    return (
+        await db.execute(
+            select(
+                CourseTopicEdge.src_topic_id, CourseTopicEdge.dst_topic_id,
+                CourseTopicEdge.relation, CourseTopicEdge.confidence,
+                CourseTopicEdge.verified_by,
+            ).where(CourseTopicEdge.course_id == course_id)
+        )
+    ).all()
+
+
+def align_mastery_rows(topic_map: dict[str, str], rows) -> list[tuple[str, object]]:
+    """mastery 行对齐到 topic_id：kp_id 直接命中，legacy 哈希 id 走 label 归一兜底。
+
+    id-align 的单一真相源——门控读侧（proactive._read_mastery）与学生端着色
+    （api.kb_indexing 学生 payload）共调，保证"门控判 weak / 图谱标红"两侧同口径；
+    对齐规则演进只改此处。
+    """
+    topic_ids = set(topic_map.values())
+    aligned: list[tuple[str, object]] = []
+    for r in rows:
+        tid = r.kp_id if r.kp_id in topic_ids else topic_map.get(_norm_label(r.label))
+        if tid:
+            aligned.append((tid, r))
+    return aligned
+
+
+__all__ = [
+    "get_course_topic_map", "resolve_topic_id", "get_prereq_predecessors",
+    "fetch_course_topics", "fetch_course_edges", "align_mastery_rows",
+]

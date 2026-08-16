@@ -35,16 +35,49 @@ function getRadius(node: GraphNode): number {
   return 14 + importance * 12
 }
 
+// ── 文件内共享 helper（力导向 / course 分层 DAG 两套绘制共用）────────────────
+
+interface HiDpiCanvas {
+  ctx: CanvasRenderingContext2D
+  cw: number
+  ch: number
+}
+
+function setupHiDpiCanvas(canvas: HTMLCanvasElement): HiDpiCanvas {
+  canvas.width = canvas.offsetWidth * devicePixelRatio
+  canvas.height = canvas.offsetHeight * devicePixelRatio
+  const ctx = canvas.getContext('2d')!
+  ctx.scale(devicePixelRatio, devicePixelRatio)
+  return { ctx, cw: canvas.offsetWidth, ch: canvas.offsetHeight }
+}
+
+function hitTest<N extends { x: number; y: number; radius: number }>(
+  nodes: N[], x: number, y: number,
+): N | undefined {
+  return nodes.find(n => {
+    const dx = n.x - x, dy = n.y - y
+    return dx * dx + dy * dy <= n.radius * n.radius
+  })
+}
+
+function drawNodeLabel(ctx: CanvasRenderingContext2D, label: string, x: number, y: number, radius: number) {
+  ctx.fillStyle = '#5C615F' // ink-soft
+  ctx.font = '11px sans-serif'
+  ctx.textAlign = 'center'
+  const text = label.length > 6 ? label.slice(0, 6) + '…' : label
+  ctx.fillText(text, x, y + radius + 14)
+}
+
 // ── 课程先修图谱（第三 tab）：静态分层 DAG，不跑力导向 ────────────────────────
 
 interface CourseNode extends StudentTopic {
   x: number
   y: number
-  layer: number
   radius: number
 }
 
-/** 拓扑分层：layer(n) = 1 + max(layer(直接前置))，无前置归第 0 层（学习起点）。 */
+/** 拓扑分层：layer(n) = 1 + max(layer(前置))，无前置归第 0 层（学习起点）。
+    推断边（闭包补的）与直接边一起参与分层——推断边是可达性的重复表达，不改变层号。 */
 function assignLayers(topics: StudentTopic[], edges: StudentTopicEdge[]): Map<string, number> {
   const preds = new Map<string, string[]>()
   for (const e of edges) {
@@ -86,7 +119,7 @@ function layoutCourseGraph(
   for (const [l, group] of byLayer) {
     group.forEach((t, i) => {
       nodes.push({
-        ...t, layer: l,
+        ...t,
         x: (l + 0.5) * (cw / (maxLayer + 1)),
         y: (i + 0.5) * (ch / group.length),
         radius: 16,
@@ -115,12 +148,13 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
   const nodesRef = useRef<CanvasNode[]>([])
   const edgesRef = useRef<{ source: string; target: string }[]>([])
 
-  // 课程先修图谱（course tab）：课程选择 + 学生视角主题图 + 选中节点
+  // 课程先修图谱（course tab）：课程选择 + 学生视角主题图 + 选中节点 id
+  // （选中主题对象由 topicById 派生——state 不存布局快照，图重绘后无 stale）
   const [courses, setCourses] = useState<{ id: string; name: string }[]>([])
   const [courseId, setCourseId] = useState('')
   const [courseGraph, setCourseGraph] = useState<StudentTopicGraph | null>(null)
   const [courseLoading, setCourseLoading] = useState(false)
-  const [selectedTopic, setSelectedTopic] = useState<CourseNode | null>(null)
+  const [selectedTopicId, setSelectedTopicId] = useState<string | null>(null)
   const courseNodesRef = useRef<CourseNode[]>([])
 
   const loadData = useCallback(async () => {
@@ -146,12 +180,7 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
       nodesRef.current = []
       return
     }
-    canvas.width = canvas.offsetWidth * devicePixelRatio
-    canvas.height = canvas.offsetHeight * devicePixelRatio
-    const ctx = canvas.getContext('2d')!
-    ctx.scale(devicePixelRatio, devicePixelRatio)
-    const cw = canvas.offsetWidth
-    const ch = canvas.offsetHeight
+    const { ctx, cw, ch } = setupHiDpiCanvas(canvas)
 
     const nodes: CanvasNode[] = currentGraph.nodes.map((n) => ({
       ...n,
@@ -238,11 +267,7 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
         ctx.lineWidth = selected?.id === node.id ? 3 : 2
         ctx.stroke()
 
-        ctx.fillStyle = '#5C615F' // ink-soft
-        ctx.font = '11px sans-serif'
-        ctx.textAlign = 'center'
-        const label = node.label.length > 6 ? node.label.slice(0, 6) + '…' : node.label
-        ctx.fillText(label, node.x, node.y + node.radius + 14)
+        drawNodeLabel(ctx, node.label, node.x, node.y, node.radius)
       }
 
       if (frame < 200) {
@@ -266,7 +291,8 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
   }, [activeTab, courses.length])
 
   useEffect(() => {
-    if (activeTab !== 'course' || !courseId) return
+    // 同课程数据不重拉（数据只在教师重建后变化）；切 tab 往返零请求零闪烁
+    if (activeTab !== 'course' || !courseId || courseGraph?.course_id === courseId) return
     let cancelled = false
     setCourseLoading(true)
     fetchStudentTopicGraph(courseId)
@@ -274,7 +300,7 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
       .catch(() => { if (!cancelled) setCourseGraph(null) })
       .finally(() => { if (!cancelled) setCourseLoading(false) })
     return () => { cancelled = true }
-  }, [activeTab, courseId])
+  }, [activeTab, courseId, courseGraph?.course_id])
 
   // course tab：静态分层 DAG 单次绘制（选中节点变化时重绘高亮邻接）
   useEffect(() => {
@@ -283,21 +309,18 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
       courseNodesRef.current = []
       return
     }
-    canvas.width = canvas.offsetWidth * devicePixelRatio
-    canvas.height = canvas.offsetHeight * devicePixelRatio
-    const ctx = canvas.getContext('2d')!
-    ctx.scale(devicePixelRatio, devicePixelRatio)
-    const cw = canvas.offsetWidth
-    const ch = canvas.offsetHeight
-
+    const { ctx, cw, ch } = setupHiDpiCanvas(canvas)
     const nodes = layoutCourseGraph(courseGraph.topics, courseGraph.edges, cw, ch)
     courseNodesRef.current = nodes
     const nodeMap = new Map(nodes.map(n => [n.topic_id, n]))
+    // 只画 LLM 直接判定的边（推断边是可达性重复表达，画出来徒增交叉线；
+    // 分层仍用全部边——层号不受推断边影响）
+    const directEdges = courseGraph.edges.filter(e => e.relation !== 'prerequisite_inferred')
 
-    const selId = selectedTopic?.topic_id
+    const selId = selectedTopicId
     const adjIds = new Set<string>()
     if (selId) {
-      for (const e of courseGraph.edges) {
+      for (const e of directEdges) {
         if (e.dst === selId) adjIds.add(e.src)
         if (e.src === selId) adjIds.add(e.dst)
       }
@@ -305,7 +328,7 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
 
     ctx.clearRect(0, 0, cw, ch)
     // 先修边：src（前置，左层）→ dst（被前置，右层），dst 端箭头
-    for (const e of courseGraph.edges) {
+    for (const e of directEdges) {
       const a = nodeMap.get(e.src), b = nodeMap.get(e.dst)
       if (!a || !b) continue
       const hl = selId != null && (e.src === selId || e.dst === selId)
@@ -340,24 +363,20 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
       ctx.strokeStyle = selId === n.topic_id ? '#2F3437' : (adjIds.has(n.topic_id) ? '#1F6C9F' : '#FFFFFF')
       ctx.lineWidth = selId === n.topic_id ? 3 : 2
       ctx.stroke()
-
-      ctx.fillStyle = '#5C615F' // ink-soft
-      ctx.font = '11px sans-serif'
-      ctx.textAlign = 'center'
-      const label = n.label.length > 6 ? n.label.slice(0, 6) + '…' : n.label
-      ctx.fillText(label, n.x, n.y + n.radius + 14)
+      drawNodeLabel(ctx, n.label, n.x, n.y, n.radius)
     }
-  }, [activeTab, courseGraph, selectedTopic])
+  }, [activeTab, courseGraph, selectedTopicId])
 
-  // 侧栏「直接前置」列表（含各自薄弱红点）
+  // 侧栏选中主题（由 id 派生）与「直接前置」列表（含各自薄弱红点）
   const topicById = useMemo(
     () => new Map((courseGraph?.topics ?? []).map(t => [t.topic_id, t])),
     [courseGraph],
   )
+  const selectedTopic = selectedTopicId ? (topicById.get(selectedTopicId) ?? null) : null
   const directPrereqs = useMemo(() => {
     if (!courseGraph || !selectedTopic) return []
     return courseGraph.edges
-      .filter(e => e.dst === selectedTopic.topic_id)
+      .filter(e => e.dst === selectedTopic.topic_id && e.relation !== 'prerequisite_inferred')
       .map(e => topicById.get(e.src))
       .filter((t): t is StudentTopic => !!t)
   }, [courseGraph, selectedTopic, topicById])
@@ -367,18 +386,10 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
     const x = e.clientX - rect.left
     const y = e.clientY - rect.top
     if (activeTab === 'course') {
-      const hit = courseNodesRef.current.find(n => {
-        const dx = n.x - x, dy = n.y - y
-        return dx * dx + dy * dy <= n.radius * n.radius
-      })
-      setSelectedTopic(hit ?? null)
+      setSelectedTopicId(hitTest(courseNodesRef.current, x, y)?.topic_id ?? null)
       return
     }
-    const hit = nodesRef.current.find(n => {
-      const dx = n.x - x, dy = n.y - y
-      return dx * dx + dy * dy <= n.radius * n.radius
-    })
-    setSelected(hit || null)
+    setSelected(hitTest(nodesRef.current, x, y) || null)
   }
 
   const handleDelete = async () => {
@@ -399,7 +410,7 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
           {activeTab === 'course' && courses.length > 0 && (
             <select
               value={courseId}
-              onChange={e => { setCourseId(e.target.value); setSelectedTopic(null) }}
+              onChange={e => { setCourseId(e.target.value); setSelectedTopicId(null) }}
               className="text-sm bg-surface-2 text-ink rounded-[var(--radius)] px-2 py-1 border border-line max-w-[180px]"
             >
               {courses.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
@@ -414,7 +425,7 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
             className={`px-3 py-1 rounded-[var(--radius)] text-sm transition ${activeTab === 'error' ? 'bg-danger-fg text-white' : 'bg-surface-2 text-ink-soft hover:text-ink'}`}
           >错题图谱</button>
           <button
-            onClick={() => { setActiveTab('course'); setSelected(null); setSelectedTopic(null) }}
+            onClick={() => { setActiveTab('course'); setSelected(null); setSelectedTopicId(null) }}
             className={`px-3 py-1 rounded-[var(--radius)] text-sm transition ${activeTab === 'course' ? 'bg-info-fg text-white' : 'bg-surface-2 text-ink-soft hover:text-ink'}`}
           >课程先修图谱</button>
         </div>

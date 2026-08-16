@@ -9,7 +9,6 @@ admin 与 teacher 入口只保留各自的权限校验（_get_kb_or_404 / _get_o
 """
 from __future__ import annotations
 
-import json
 import logging
 import time
 from pathlib import Path
@@ -19,7 +18,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.courses import invalidate_courses_cache
-from core.db.database import CourseTopic, CourseTopicEdge, KBFile, KbBuild, KnowledgeBase
+from core.db.database import CourseTopic, KBFile, KbBuild, KnowledgeBase
 
 logger = logging.getLogger(__name__)
 
@@ -176,22 +175,11 @@ async def trigger_topic_graph_build(
 
 
 def _read_failed_sections(course_id: str) -> list[str]:
-    """容错读取构建时落盘的抽取失败章节（JSON artifact 投影，见 export_json）。
+    """构建时落盘的抽取失败章节（读写收口在 builder.read_failed_sections——文件名
+    契约单一真相源，mtime 缓存未变化的构建零重读）。缺失/解析失败降级 []。"""
+    from core.memory.course_topic_builder import read_failed_sections
 
-    文件缺失 / 解析失败 / 字段缺失一律返回 []——纯展示字段，不因 IO 问题打断 GET；
-    teacher/admin GET 的主题图有洞时教师据此判断是否重建。
-    """
-    try:
-        from core.memory.course_topic_builder import JSON_DIR
-
-        path = JSON_DIR / f"course_{course_id}_topics.json"
-        if not path.exists():
-            return []
-        data = json.loads(path.read_text(encoding="utf-8"))
-        failed = data.get("failed_sections") if isinstance(data, dict) else None
-        return [str(s) for s in failed] if isinstance(failed, list) else []
-    except Exception:
-        return []
+    return read_failed_sections(course_id)
 
 
 async def get_topic_graph_payload(db: AsyncSession, course_id: str) -> dict:
@@ -200,30 +188,22 @@ async def get_topic_graph_payload(db: AsyncSession, course_id: str) -> dict:
     权限校验由各端点自行完成（teacher 用 _get_owned_kb、admin 用 _get_kb_or_404）后调用本函数，
     故查询逻辑在此单一真相源，避免两端各写一份漂移。
     """
+    from core.memory.course_topic_store import fetch_course_edges, fetch_course_topics
+
     topics = [
         {
             "topic_id": r.topic_id, "label": r.label, "definition": r.definition,
             "source_section": r.source_section, "order_idx": r.order_idx,
-            "safety_weight": r.safety_weight, "difficulty_b": r.difficulty_b,
+            "safety_weight": r.safety_weight,
         }
-        for r in (
-            await db.execute(
-                select(CourseTopic)
-                .where(CourseTopic.course_id == course_id)
-                .order_by(CourseTopic.order_idx)
-            )
-        ).scalars()
+        for r in await fetch_course_topics(db, course_id)
     ]
     edges = [
         {
             "src": r.src_topic_id, "dst": r.dst_topic_id, "relation": r.relation,
             "confidence": r.confidence, "verified_by": r.verified_by,
         }
-        for r in (
-            await db.execute(
-                select(CourseTopicEdge).where(CourseTopicEdge.course_id == course_id)
-            )
-        ).scalars()
+        for r in await fetch_course_edges(db, course_id)
     ]
     return {
         "course_id": course_id,
@@ -238,28 +218,23 @@ async def get_topic_graph_payload(db: AsyncSession, course_id: str) -> dict:
 async def get_student_topic_graph_payload(db: AsyncSession, course_id: str, user_id: str) -> dict:
     """学生视角课程主题图：主题 + 先修边 + 「我的掌握度」着色数据。
 
-    - ``my.weak`` 后端算好（theta <= WEAK_MARGIN，与门控 C1 入闸同口径），前端零阈值逻辑。
-    - mastery 对齐与 ``proactive._read_mastery`` 同规则：kp_id 直接命中 topic_id，
-      历史 kp_id 行经 label 归一兜底（id-align，见 course_topic_store 模块头）。
+    - ``my.weak`` 与 risk 与门控**同口径**：weak = theta <= WEAK_MARGIN（C1 入闸判据），
+      risk = 1 - sigmoid(theta - b_topic) 按折叠状态重算（不读存储列——旧行可能是
+      delta 累加口径的历史值，见 ``proactive._read_mastery`` 同款注释）。
+    - mastery 对齐走 ``course_topic_store.align_mastery_rows``（与门控同一单一真相源）。
+    - 边投影带 relation（"prerequisite"=直接，"prerequisite_inferred"=闭包推断）。
     - 不投影 embedding / safety_weight（学生端无用且体积大）。
     - 未构建课程返回空列表而非 404——学生无法自行触发构建，前端显示空态即可。
     """
     from core.db.database import KnowledgeMastery
-    from core.memory.course_topic_store import _norm_label
+    from core.memory.course_topic_store import (
+        align_mastery_rows, fetch_course_edges, fetch_course_topics, get_course_topic_map,
+    )
+    from core.memory.mastery_state import sigmoid
     from core.memory.proactive import WEAK_MARGIN
 
-    topic_rows = (
-        await db.execute(
-            select(CourseTopic)
-            .where(CourseTopic.course_id == course_id)
-            .order_by(CourseTopic.order_idx)
-        )
-    ).scalars().all()
-    edge_rows = (
-        await db.execute(
-            select(CourseTopicEdge).where(CourseTopicEdge.course_id == course_id)
-        )
-    ).scalars().all()
+    topic_rows = await fetch_course_topics(db, course_id)
+    edge_rows = await fetch_course_edges(db, course_id)
     mastery_rows = (
         await db.execute(
             select(KnowledgeMastery).where(
@@ -269,29 +244,33 @@ async def get_student_topic_graph_payload(db: AsyncSession, course_id: str, user
         )
     ).scalars().all()
 
-    # id-align：直接命中优先，label 归一兜底（与门控读侧同口径）
-    tid_set = {r.topic_id for r in topic_rows}
-    label_map = {_norm_label(r.label): r.topic_id for r in topic_rows if r.label}
-    my_by_tid: dict[str, KnowledgeMastery] = {}
-    for m in mastery_rows:
-        tid = m.kp_id if m.kp_id in tid_set else label_map.get(_norm_label(m.label))
-        if tid:
-            my_by_tid[tid] = m
+    # label_norm→topic_id 走 get_course_topic_map（归一口径单一真相源，免手动 import 私有 _norm_label）
+    my_by_tid = {
+        tid: r for tid, r in align_mastery_rows(
+            await get_course_topic_map(course_id, db), mastery_rows,
+        )
+    }
+    b_map = {r.topic_id: float(r.difficulty_b or 0.0) for r in topic_rows}
 
     topics = [
         {
             "topic_id": r.topic_id, "label": r.label, "definition": r.definition,
             "source_section": r.source_section, "order_idx": r.order_idx,
             "my": None if (m := my_by_tid.get(r.topic_id)) is None else {
-                "theta": m.theta, "risk": m.risk, "mastery": m.mastery,
+                "theta": m.theta,
+                "risk": round(1.0 - sigmoid((m.theta or 0.0) - b_map.get(r.topic_id, 0.0)), 4),
+                "mastery": m.mastery,
                 "observation_count": m.observation_count,
-                "weak": bool(m.theta <= WEAK_MARGIN),
+                "weak": bool((m.theta or 0.0) <= WEAK_MARGIN),
             },
         }
         for r in topic_rows
     ]
     edges = [
-        {"src": r.src_topic_id, "dst": r.dst_topic_id, "confidence": r.confidence}
+        {
+            "src": r.src_topic_id, "dst": r.dst_topic_id, "relation": r.relation,
+            "confidence": r.confidence,
+        }
         for r in edge_rows
     ]
     return {

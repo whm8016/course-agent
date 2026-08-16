@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { authHeaders } from '../../services/auth'
+import { type TeacherTopicGraph } from '../../services/api'
 import { STATUS_LABEL, STATUS_COLOR, formatBytes, formatTime } from './kbUtils'
 
 // ── 共享类型 ─────────────────────────────────────────────────────────────────
@@ -50,34 +51,6 @@ export interface KbBuild {
   token_estimate: number
   error_msg: string
   updated_at: number
-}
-
-// ── 课程主题图（GET/POST {apiBase}/{course_id}/topic-graph）──────────────────
-
-export interface TgTopic {
-  topic_id: string
-  label: string
-  definition: string
-  source_section: string
-  order_idx: number
-  safety_weight: number
-}
-
-export interface TgEdge {
-  src: string
-  dst: string
-  relation: string
-  confidence: number
-  verified_by?: string | null
-}
-
-export interface TopicGraphPayload {
-  course_id: string
-  topic_count: number
-  edge_count: number
-  topics: TgTopic[]
-  edges: TgEdge[]
-  failed_sections?: string[]
 }
 
 // STATUS_LABEL / STATUS_COLOR / formatBytes / formatTime 已移至 ./kbUtils（避免 react-refresh 冲突）
@@ -191,17 +164,23 @@ export default function KbDetailPanel({
   const requestConfirm = (state: ConfirmState) => setConfirmState(state)
 
   // ── 课程主题图（教师端：构建/重建 + 核对 + safety_weight 标注）────────────
-  const [topicGraph, setTopicGraph] = useState<TopicGraphPayload | null>(null)
+  const [topicGraph, setTopicGraph] = useState<TeacherTopicGraph | null>(null)
   const [tgLoading, setTgLoading] = useState(false)
   const [tgBuilding, setTgBuilding] = useState(false)
   const [tgError, setTgError] = useState('')
   const [swEdit, setSwEdit] = useState<{ tid: string; value: string } | null>(null)
 
+  // topic_id→主题 Map（边列表渲染 O(1) 查 label/章节，避免每边两次 O(n) find）
+  const topicById = useMemo(
+    () => new Map((topicGraph?.topics ?? []).map(t => [t.topic_id, t] as const)),
+    [topicGraph],
+  )
+
   const loadTopicGraph = async () => {
     setTgLoading(true)
     setTgError('')
     try {
-      setTopicGraph(await apiFetch(`${apiBase}/${kb.course_id}/topic-graph`) as TopicGraphPayload)
+      setTopicGraph(await apiFetch(`${apiBase}/${kb.course_id}/topic-graph`) as TeacherTopicGraph)
     } catch (e) {
       setTgError(e instanceof Error ? e.message : String(e))
     }
@@ -687,15 +666,18 @@ export default function KbDetailPanel({
               <summary className="text-[11px] text-muted cursor-pointer">先修边（{topicGraph.edge_count}，A → B 表示 A 是 B 的前置）</summary>
               <div className="mt-1 border border-line rounded-[var(--radius)] divide-y divide-line max-h-48 overflow-y-auto">
                 {topicGraph.edges.map((e, i) => {
-                  const tOf = (tid: string) => topicGraph.topics.find(t => t.topic_id === tid)
-                  const s = tOf(e.src), d = tOf(e.dst)
+                  const s = topicById.get(e.src), d = topicById.get(e.dst)
                   const cross = !!s && !!d && s.source_section !== d.source_section
+                  const inferred = e.relation === 'prerequisite_inferred'
                   return (
                     <div key={`${e.src}-${e.dst}-${i}`} className="flex items-center gap-2 px-2 py-1 text-xs">
                       <span className="truncate flex-1 text-ink-soft">
                         <span className="text-ink">{s?.label ?? e.src}</span> → {d?.label ?? e.dst}
                       </span>
-                      {cross && (
+                      {inferred && (
+                        <span className="shrink-0 text-[10px] px-1 py-0.5 rounded text-muted bg-canvas" title="传递闭包推断边（非 LLM 直接判定，置信为路径最小值）">推断</span>
+                      )}
+                      {cross && !inferred && (
                         <span className="shrink-0 text-[10px] px-1 py-0.5 rounded text-info-fg bg-info-bg" title="跨章节先修（重建后重点核对）">跨章</span>
                       )}
                       <span className="shrink-0 text-muted font-mono">{e.confidence?.toFixed(2)}</span>
