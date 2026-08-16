@@ -40,7 +40,7 @@ logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s | %(me
 logger = logging.getLogger(__name__)
 
 
-async def probe(chunks_path: str, max_chars: int, model: str | None = None, gleaning: int = 1) -> None:
+async def probe(chunks_path: str, max_chars: int, model: str | None = None, gleaning: int | None = None) -> None:
     from core.db.database import init_db
     from core.llm.llm import client as llm
     from settings import get_settings
@@ -48,6 +48,9 @@ async def probe(chunks_path: str, max_chars: int, model: str | None = None, glea
     await init_db()
     s = get_settings()
     model = model or s.course_topic.extract_model or s.llm.text_model
+    # gleaning 默认跟 settings 走（与 model 同模式）：probe 测的就是生产形态，
+    # 部署侧改默认这里不该漂移
+    gleaning = s.course_topic.gleaning if gleaning is None else gleaning
 
     raw = json.loads(Path(chunks_path).read_text(encoding="utf-8"))
     chunks = raw.get("chunks") if isinstance(raw, dict) else raw
@@ -111,7 +114,7 @@ def main() -> None:
     p.add_argument("--chunks", required=True, help="适配后的切块审计 JSON 路径")
     p.add_argument("--max-chars", type=int, default=5000, help="单次调用喂给 LLM 的章节字符上限")
     p.add_argument("--model", help="覆盖 extract_model（默认 deepseek-v4-flash）")
-    p.add_argument("--gleaning", type=int, default=1, help="补抽轮数（默认 1，0 关闭——对半省调用费）")
+    p.add_argument("--gleaning", type=int, help="补抽轮数（默认取 settings.course_topic.gleaning，0 关闭——对半省调用费）")
     args = p.parse_args()
     asyncio.run(probe(args.chunks, args.max_chars, args.model, args.gleaning))
 

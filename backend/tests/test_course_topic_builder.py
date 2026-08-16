@@ -283,8 +283,8 @@ def test_assemble_edges_stats_and_cycle():
     by = {(e["src"], e["dst"]): e for e in edges}
     assert set(by) == {("A", "B"), ("B", "C"), ("A", "C")}
     assert by[("A", "C")]["relation"] == "prerequisite_inferred"
-    assert by[("A", "B")].get("evidence") == "原句1"
-    assert "evidence" not in by[("A", "C")]  # 推断边无证据键
+    assert by[("A", "B")]["evidence"] == "原句1"
+    assert by[("A", "C")]["evidence"] is None  # 推断边无证据（键恒存在，值为 None）
     # 跨章口径只数直接边：仅 B→C 一条（在闭包后数会被推断边 A→C 虚高到 2）
     assert stats == {
         "text_mined_edges": 3, "edges_dropped_invalid": 2,
@@ -354,16 +354,14 @@ async def test_llm_json_two_failures_return_none():
 
 @pytest.mark.asyncio
 async def test_llm_json_transport_error_returns_none():
-    # 传输层异常经 with_retry_and_circuit 包装成 LLMRetryError：不可重试错误立即抛、
-    # 外层再给一次机会，两试皆败返 None（不向上抛——上层记 failed_section）
+    # 传输层异常经 with_retry_and_circuit 包装成 LLMRetryError：不可重试错误一波即弃、
+    # 不再发第二波（熔断打开时重试必失败），返回 None（不向上抛——上层记 failed_section）
     from core.llm.reliability import get_llm_circuit_breaker
 
     breaker = get_llm_circuit_breaker("topic_build")
     breaker.reset()  # 模块级注册表跨测试共享，进出都复位防污染
-    llm = SimpleNamespace()
-    llm.chat = SimpleNamespace()
-    llm.chat.completions = SimpleNamespace()
+    llm = _fake_llm([])
     llm.chat.completions.create = AsyncMock(side_effect=ValueError("bad api key"))
     assert await _llm_json(llm, "m", "prompt") is None
-    assert llm.chat.completions.create.await_count == 2
+    assert llm.chat.completions.create.await_count == 1
     breaker.reset()

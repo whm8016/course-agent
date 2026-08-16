@@ -158,7 +158,7 @@ _GLEANING_PROMPT = """---Role---
 输出严格 JSON（无围栏）：
 {{"topics": [{{"label": "知识点名", "definition": "一句话定义"}}], "edges": [{{"src": "前置点", "dst": "后继点", "strength": 0.8, "evidence": "原文句"}}]}}"""
 
-# 补抽轮数由 settings.course_topic.gleaning 控制（默认 1，0 关闭）；此值为无配置时的兜底
+# 库函数签名默认（直接调用方/probe 不传时用）；部署级默认在 settings.course_topic.gleaning
 _DEFAULT_GLEANING = 1
 # strength 缺失/不可解析时的兜底置信（GraphRAG _process_result 对 weight 解析失败兜底同款）
 _DEFAULT_STRENGTH = 0.75
@@ -173,10 +173,11 @@ async def _llm_json(
 ) -> dict | None:
     """LLM → JSON：传输层走 ``with_retry_and_circuit``（指数退避+熔断），解析层自重试一次。
 
-    网络抖动/限流由可靠性层兜（可重试异常自动退避重试）；200-但非 JSON 由外层再试一次；
-    两试皆败（含 ``CircuitOpenError``/``LLMRetryError``）返回 None——上层记 failed_section
-    或丢该轮 gleaning，不向上抛。专属熔断器名 ``topic_build``：后台课程级构建失败不烧
-    对话主链路的 default 熔断器（vision_describe 同款思路）。
+    网络抖动/限流由可靠性层兜（可重试异常自动退避重试一整波）；传输整波耗尽/熔断打开
+    即返回 None（不再发第二波——外层重试只会翻倍退避时长，熔断打开时更是必失败）；
+    200-但非 JSON 由外层再试一次。返回 None 后上层记 failed_section 或丢该轮 gleaning，
+    不向上抛。专属熔断器名 ``topic_build``：后台课程级构建失败不烧对话主链路的
+    default 熔断器（vision_describe 同款思路）。
     """
     from core.llm.json_extract import extract_json_from_llm
     from core.llm.reliability import (
@@ -188,7 +189,8 @@ async def _llm_json(
     )
 
     breaker = get_llm_circuit_breaker("topic_build")
-    for attempt in (1, 2):  # 非 JSON 重试一次；传输失败由可靠性层内部重试后在此再给一次
+    retry_config = RetryConfig()
+    for attempt in (1, 2):  # 200-但非 JSON：重试一次
         try:
             # deepseek-v4-pro 等 reasoning 模型先吐 reasoning_content 再吐 content；
             # max_tokens 太小会被 reasoning 占满→content 空(finish=length)。
@@ -196,11 +198,11 @@ async def _llm_json(
                 llm.chat.completions.create,
                 model=model, messages=[{"role": "user", "content": prompt}],
                 temperature=0.1, max_tokens=4096, stream=False,
-                retry_config=RetryConfig(), circuit_breaker=breaker,
+                retry_config=retry_config, circuit_breaker=breaker,
             )
         except (CircuitOpenError, LLMRetryError) as exc:
-            logger.warning("[course_topics] LLM 传输失败（第 %d 次）：%s", attempt, exc)
-            continue
+            logger.warning("[course_topics] LLM 传输失败（可靠性层整波耗尽，放弃本块）：%s", exc)
+            return None
         try:
             if track is not None:
                 # 用量埋点：主题图抽取是 ARQ 后台课程级调用（无 user），逐次记
@@ -323,7 +325,6 @@ async def extract_block_graph(
     """
     from core.memory.course_topic_store import _norm_label
 
-    rounds: list[tuple[list[dict], list[dict]]] = []
     data = await _llm_json(
         llm, model,
         f"章节：{sec}\n\n{text}\n\n" + _EXTRACT_BLOCK_PROMPT.format(known_list=_render_known(known, [])),
@@ -331,34 +332,30 @@ async def extract_block_graph(
     )
     if data is None:
         return None
-    rounds.append(_parse_reply(data))
-    for _ in range(max(int(gleaning), 0)):
-        so_far = [t for r in rounds for t in r[0]]
-        so_far_labels = [t["label"] for t in so_far]
-        first_round = json.dumps(
-            {"topics": so_far, "edges": [e for r in rounds for e in r[1]]},
-            ensure_ascii=False,
-        )
+    all_topics, raw_edges = _parse_reply(data)
+    for _ in range(gleaning):
+        first_round = json.dumps({"topics": all_topics, "edges": raw_edges}, ensure_ascii=False)
         gdata = await _llm_json(
             llm, model,
             f"章节：{sec}\n\n{text}\n\n" + _GLEANING_PROMPT.format(
-                first_round=first_round, known_list=_render_known(known, so_far_labels),
+                first_round=first_round,
+                known_list=_render_known(known, [t["label"] for t in all_topics]),
             ),
             track={"course_id": course_id},
         )
         if gdata is None:
             break  # 补抽失败不废首轮——gleaning 是增益不是依赖
-        rounds.append(_parse_reply(gdata))
+        gt, ge = _parse_reply(gdata)
+        all_topics += gt
+        raw_edges += ge
 
     block_topics: list[dict] = []
     block_norms = set(known)  # 主题去重也含旧点：同点跨块重复出现不重复成节点
-    for topics_round, _ in rounds:
-        for t in topics_round:
-            n = _norm_label(t["label"])
-            if n and n not in block_norms:
-                block_norms.add(n)
-                block_topics.append(t)
-    raw_edges = [e for _, es in rounds for e in es]
+    for t in all_topics:
+        n = _norm_label(t["label"])
+        if n and n not in block_norms:
+            block_norms.add(n)
+            block_topics.append(t)
     valid_edges, dropped = _validate_block_edges(raw_edges, text, block_norms)
     return block_topics, valid_edges, dropped
 
@@ -483,22 +480,21 @@ def _mk_edge(
 ) -> dict:
     """构造一条前置边 dict（src=前置，dst=被前置——门控回溯方向契约）。
 
-    evidence 非空才落键：课文锚定边带原文引句，闭包推断边/seed 边无该键（= 无证据）。
+    evidence 恒有键：课文锚定边带原文引句，闭包推断边/seed 边为 None（无证据）——
+    消费方统一 ``e["evidence"]`` 直取，不区分键缺失与 None。
     """
-    edge = {
+    return {
         "src": src_id, "dst": dst_id,
         "relation": relation, "confidence": round(float(confidence), 4),
+        "evidence": evidence or None,
     }
-    if evidence:
-        edge["evidence"] = evidence
-    return edge
 
 
 def _edge_better(a: dict, b: dict) -> bool:
     """同 (src,dst) 重复边取舍：置信高者优先；置信打平时有证据者优先。纯函数。"""
     if a["confidence"] != b["confidence"]:
         return a["confidence"] > b["confidence"]
-    return bool(a.get("evidence")) and not b.get("evidence")
+    return bool(a["evidence"]) and not b["evidence"]
 
 
 def finalize_edges(raw_edges: list[dict], alias: dict[str, str]) -> tuple[list[dict], int]:
@@ -608,7 +604,7 @@ def close_transitive(edges: list[dict]) -> list[dict]:
 
 def assemble_edges(
     raw_edges: list[dict], alias: dict[str, str], topics: list[dict],
-    *, dropped_invalid: int = 0,
+    *, dropped_invalid: int,
 ) -> tuple[list[dict], dict]:
     """课文边 → 入库边：重映射去重 → 删环 → 闭包 → stats。纯函数、无 LLM。
 
@@ -720,7 +716,7 @@ async def build_topic_graph(course_id: str, db, *, force: bool = False) -> dict:
     from settings import get_settings
     s = get_settings()
     model = s.course_topic.extract_model or s.llm.text_model
-    gleaning = getattr(s.course_topic, "gleaning", _DEFAULT_GLEANING)
+    gleaning = s.course_topic.gleaning
     logger.info(
         "[course_topics] build_topic_graph course=%s model=%s chunks=%d force=%s gleaning=%s",
         course_id, model, len(chunks), force, gleaning,
@@ -751,7 +747,7 @@ async def build_topic_graph(course_id: str, db, *, force: bool = False) -> dict:
         db.add(CourseTopicEdge(
             course_id=course_id, src_topic_id=e["src"], dst_topic_id=e["dst"],
             relation=e["relation"], confidence=e["confidence"],
-            evidence=e.get("evidence"),
+            evidence=e["evidence"],
         ))
     await db.commit()
     export_json(
