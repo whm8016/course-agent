@@ -41,8 +41,8 @@ def export_json(
     """导出课程级 JSON artifact（表真相源的投影，供评测复现/教师核对/论文附录）。
 
     failed_sections / stats 为本次构建的抽取失败章节与边统计——GET payload 经
-    ``api.kb_indexing._read_failed_sections`` 容错读回展示给教师（不加表列：展示
-    字段不值一次迁移）。旧调用方（scripts/build_course_topics.py）不传则落空默认。
+    ``read_failed_sections``（本模块，mtime 缓存）容错读回展示给教师（不加表列：
+    展示字段不值一次迁移）。旧调用方（scripts/build_course_topics.py）不传则落空默认。
     """
     JSON_DIR.mkdir(parents=True, exist_ok=True)
     out = JSON_DIR / f"course_{course_id}_topics.json"
@@ -139,6 +139,10 @@ _JUDGE_PREREQ_BATCH_PROMPT = """---Role---
 _BATCH_SIZE = 8
 # 建边最低置信：|score| < 0.5 不建（旧实现 0.6 偏严；配四分类+uncertain 复判放宽到 0.5）
 _EDGE_SCORE_MIN = 0.5
+# embedding 并发上限（照 consolidation._JUDGE_CONCURRENCY 模式——全仓 fan-out 都有 cap）。
+# 裸 gather 在大课程数百主题时一次打满嵌入端点，429 风暴被 _aget_embed 吞成 None →
+# 静默产出 embedding 全 NULL 的残废图（门控永远匹配不上），限流才能看见。
+_EMBED_CONCURRENCY = 8
 
 
 async def _llm_json(
@@ -235,13 +239,16 @@ async def extract_topics_from_chunks(
                     "embedding": None,  # 批量 gather 后回填
                 })
                 order += 1
-    # embedding 逐条并发（_aget_embed 自吞异常返 None，gather 不互相拖垮）——
-    # 串行逐个 await 数十次网络往返会白占 worker 槽位
+    # embedding 并发（_aget_embed 自吞异常返 None，单条失败不拖垮整批）——
+    # 串行逐个 await 数十次网络往返会白占 worker 槽位；Semaphore 限流防嵌入端点 429
     if topics and embed_model is not None:
-        embs = await asyncio.gather(*(
-            _aget_embed(embed_model, f"{t['label']}：{t['definition']}")
-            for t in topics
-        ))
+        sem = asyncio.Semaphore(_EMBED_CONCURRENCY)
+
+        async def _embed_one(t: dict) -> list[float] | None:
+            async with sem:
+                return await _aget_embed(embed_model, f"{t['label']}：{t['definition']}")
+
+        embs = await asyncio.gather(*(_embed_one(t) for t in topics))
         for t, emb in zip(topics, embs):
             t["embedding"] = emb
     if failed_sections:
@@ -298,7 +305,7 @@ def build_edge_candidates(topics: list[dict], k: int = 10) -> list[tuple[int, in
 
     n = len(topics)
     pair_set: set[tuple[int, int]] = set()
-    # 半矩阵一次算一对（余弦对称），范数预计算一遍——O(n²) dot + O(n) 范数
+    # 半矩阵一次算一对（余弦对称）——每对一次 cosine 调用（含双方范数），较全矩阵省一半
     sims: list[list[float]] = [[0.0] * n for _ in range(n)]
     for i in range(n):
         if not topics[i].get("embedding"):

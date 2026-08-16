@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
 import {
-  fetchCourses, fetchGraphs, deleteGraphNode, fetchStudentTopicGraph,
+  fetchCourses, fetchGraphs, deleteGraphNode, fetchStudentTopicGraph, INFERRED_RELATION,
   type GraphNode, type GraphData, type GraphsResponse,
   type StudentTopic, type StudentTopicEdge, type StudentTopicGraph,
 } from '../../services/api'
@@ -315,7 +315,7 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
     const nodeMap = new Map(nodes.map(n => [n.topic_id, n]))
     // 只画 LLM 直接判定的边（推断边是可达性重复表达，画出来徒增交叉线；
     // 分层仍用全部边——层号不受推断边影响）
-    const directEdges = courseGraph.edges.filter(e => e.relation !== 'prerequisite_inferred')
+    const directEdges = courseGraph.edges.filter(e => e.relation !== INFERRED_RELATION)
 
     const selId = selectedTopicId
     const adjIds = new Set<string>()
@@ -376,7 +376,7 @@ export default function GraphPage({ onBack }: { onBack: () => void }) {
   const directPrereqs = useMemo(() => {
     if (!courseGraph || !selectedTopic) return []
     return courseGraph.edges
-      .filter(e => e.dst === selectedTopic.topic_id && e.relation !== 'prerequisite_inferred')
+      .filter(e => e.dst === selectedTopic.topic_id && e.relation !== INFERRED_RELATION)
       .map(e => topicById.get(e.src))
       .filter((t): t is StudentTopic => !!t)
   }, [courseGraph, selectedTopic, topicById])

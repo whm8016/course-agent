@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { authHeaders } from '../../services/auth'
-import { type TeacherTopicGraph } from '../../services/api'
+import { INFERRED_RELATION, type TeacherTopicGraph } from '../../services/api'
 import { STATUS_LABEL, STATUS_COLOR, formatBytes, formatTime } from './kbUtils'
 
 // ── 共享类型 ─────────────────────────────────────────────────────────────────
@@ -668,7 +668,7 @@ export default function KbDetailPanel({
                 {topicGraph.edges.map((e, i) => {
                   const s = topicById.get(e.src), d = topicById.get(e.dst)
                   const cross = !!s && !!d && s.source_section !== d.source_section
-                  const inferred = e.relation === 'prerequisite_inferred'
+                  const inferred = e.relation === INFERRED_RELATION
                   return (
                     <div key={`${e.src}-${e.dst}-${i}`} className="flex items-center gap-2 px-2 py-1 text-xs">
                       <span className="truncate flex-1 text-ink-soft">

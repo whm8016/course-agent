@@ -174,20 +174,13 @@ async def trigger_topic_graph_build(
     }
 
 
-def _read_failed_sections(course_id: str) -> list[str]:
-    """构建时落盘的抽取失败章节（读写收口在 builder.read_failed_sections——文件名
-    契约单一真相源，mtime 缓存未变化的构建零重读）。缺失/解析失败降级 []。"""
-    from core.memory.course_topic_builder import read_failed_sections
-
-    return read_failed_sections(course_id)
-
-
 async def get_topic_graph_payload(db: AsyncSession, course_id: str) -> dict:
     """读取课程主题图（主题/边列表）供 teacher/admin GET 端点核对。投影口径与 export_json 一致。
 
     权限校验由各端点自行完成（teacher 用 _get_owned_kb、admin 用 _get_kb_or_404）后调用本函数，
     故查询逻辑在此单一真相源，避免两端各写一份漂移。
     """
+    from core.memory.course_topic_builder import read_failed_sections
     from core.memory.course_topic_store import fetch_course_edges, fetch_course_topics
 
     topics = [
@@ -211,7 +204,7 @@ async def get_topic_graph_payload(db: AsyncSession, course_id: str) -> dict:
         "edge_count": len(edges),
         "topics": topics,
         "edges": edges,
-        "failed_sections": _read_failed_sections(course_id),
+        "failed_sections": read_failed_sections(course_id),
     }
 
 
@@ -228,7 +221,7 @@ async def get_student_topic_graph_payload(db: AsyncSession, course_id: str, user
     """
     from core.db.database import KnowledgeMastery
     from core.memory.course_topic_store import (
-        align_mastery_rows, fetch_course_edges, fetch_course_topics, get_course_topic_map,
+        align_mastery_rows, fetch_course_edges, fetch_course_topics, topic_map_from_rows,
     )
     from core.memory.mastery_state import sigmoid
     from core.memory.proactive import WEAK_MARGIN
@@ -244,12 +237,9 @@ async def get_student_topic_graph_payload(db: AsyncSession, course_id: str, user
         )
     ).scalars().all()
 
-    # label_norm→topic_id 走 get_course_topic_map（归一口径单一真相源，免手动 import 私有 _norm_label）
-    my_by_tid = {
-        tid: r for tid, r in align_mastery_rows(
-            await get_course_topic_map(course_id, db), mastery_rows,
-        )
-    }
+    # label_norm→topic_id 从已取的 topic_rows 本地构建（topic_map_from_rows——归一口径
+    # 单一真相源、零额外查询，且 map 与行集同源，无 force 重建提交窗口内的 skew）
+    my_by_tid = align_mastery_rows(topic_map_from_rows(topic_rows), mastery_rows)
     b_map = {r.topic_id: float(r.difficulty_b or 0.0) for r in topic_rows}
 
     topics = [

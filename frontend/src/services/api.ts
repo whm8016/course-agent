@@ -418,11 +418,15 @@ export interface StudentTopic extends TopicBase {
   my: MyTopicMastery | null
 }
 
+/** 先修边 relation 值：直接判定 vs 传递闭包推断（前端过滤/徽章用，typo 编译期即炸） */
+export const INFERRED_RELATION = 'prerequisite_inferred' as const
+
+export type TopicEdgeRelation = 'prerequisite' | typeof INFERRED_RELATION
+
 export interface StudentTopicEdge {
   src: string
   dst: string
-  /** "prerequisite"=LLM 直接判定；"prerequisite_inferred"=传递闭包推断 */
-  relation: string
+  relation: TopicEdgeRelation
   confidence: number
 }
 
@@ -451,7 +455,7 @@ export interface TeacherTopic extends TopicBase {
 export interface TeacherTopicEdge {
   src: string
   dst: string
-  relation: string
+  relation: TopicEdgeRelation
   confidence: number
   verified_by?: string | null
 }

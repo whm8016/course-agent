@@ -43,6 +43,15 @@ def cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
+def topic_map_from_rows(rows) -> dict[str, str]:
+    """从已取的 topic 行构建 ``label_norm -> topic_id``（get_course_topic_map 的零查询版）。
+
+    供已持有 topic 行的调用方（如学生 payload 的 fetch_course_topics 结果）本地构建，
+    免为归一口径再发一次同表查询；归一化仍走 _norm_label（单一真相源）。
+    """
+    return {_norm_label(r.label): r.topic_id for r in rows if r.label}
+
+
 async def get_course_topic_map(course_id: str, db) -> dict[str, str]:
     """course_id 的 ``label_norm -> topic_id`` 映射。门控用此把 mastery 的 label 对齐到 topic_id。"""
     from core.db.database import CourseTopic
@@ -55,7 +64,7 @@ async def get_course_topic_map(course_id: str, db) -> dict[str, str]:
             )
         )
     ).all()
-    return {_norm_label(label): tid for tid, label in rows if label}
+    return topic_map_from_rows(rows)
 
 
 async def resolve_topic_id(label: str, course_id: str, db) -> str | None:
@@ -136,23 +145,25 @@ async def fetch_course_edges(db, course_id: str) -> list:
     ).all()
 
 
-def align_mastery_rows(topic_map: dict[str, str], rows) -> list[tuple[str, object]]:
+def align_mastery_rows(topic_map: dict[str, str], rows) -> dict[str, object]:
     """mastery 行对齐到 topic_id：kp_id 直接命中，legacy 哈希 id 走 label 归一兜底。
 
     id-align 的单一真相源——门控读侧（proactive._read_mastery）与学生端着色
     （api.kb_indexing 学生 payload）共调，保证"门控判 weak / 图谱标红"两侧同口径；
-    对齐规则演进只改此处。
+    对齐规则演进只改此处。返回 {topic_id: mastery行}，同 tid 多行时后行覆盖（last-wins，
+    与两调用方原先的循环覆盖语义一致）。
     """
     topic_ids = set(topic_map.values())
-    aligned: list[tuple[str, object]] = []
+    aligned: dict[str, object] = {}
     for r in rows:
         tid = r.kp_id if r.kp_id in topic_ids else topic_map.get(_norm_label(r.label))
         if tid:
-            aligned.append((tid, r))
+            aligned[tid] = r
     return aligned
 
 
 __all__ = [
-    "get_course_topic_map", "resolve_topic_id", "get_prereq_predecessors",
-    "fetch_course_topics", "fetch_course_edges", "align_mastery_rows",
+    "get_course_topic_map", "topic_map_from_rows", "resolve_topic_id",
+    "get_prereq_predecessors", "fetch_course_topics", "fetch_course_edges",
+    "align_mastery_rows",
 ]

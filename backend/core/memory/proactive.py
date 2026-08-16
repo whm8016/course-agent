@@ -372,6 +372,7 @@ async def _read_mastery(
     - 遗忘口径（MemoryBank）不变：p_forget = 1 - exp(-t/S)。
     """
     from core.db.database import CourseTopic, KnowledgeMastery
+    from core.memory.course_topic_store import align_mastery_rows
     from core.memory.mastery import forget_prob
     from core.memory.mastery_state import sigmoid
     from sqlalchemy import select
@@ -389,8 +390,6 @@ async def _read_mastery(
         .all()
     )
     # id-align：单一真相源在 course_topic_store.align_mastery_rows（学生端着色共调）
-    from core.memory.course_topic_store import align_mastery_rows
-
     aligned = align_mastery_rows(topic_map, rows)
 
     # 题目难度 + safety_weight（全班共享）按**对齐后**的 tid 取齐（旧 bug：tids_hint 用
@@ -398,7 +397,7 @@ async def _read_mastery(
     # （单一真相源在 course_topic）。
     b_map: dict[str, float] = {}
     sw_map: dict[str, float] = {}
-    tids_aligned = {tid for tid, _r in aligned}
+    tids_aligned = set(aligned)
     if tids_aligned:
         b_rows = (
             await db.execute(
@@ -417,7 +416,7 @@ async def _read_mastery(
 
     now = time.time()
     out: dict[str, dict] = {}
-    for tid, r in aligned:
+    for tid, r in aligned.items():
         b = b_map.get(tid, 0.0)
         # risk 按折叠状态重算（不读旧列——旧行可能是 delta 累加口径的历史值）；
         # theta 为 0 且无观测的行（历史遗留）等于无信息先验 risk=0.5
