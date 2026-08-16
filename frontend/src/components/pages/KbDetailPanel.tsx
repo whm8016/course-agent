@@ -124,6 +124,18 @@ function ConfirmDialog({
 
 // ── 组件 ─────────────────────────────────────────────────────────────────────
 
+/** 进度条（本文件三处共用：索引总进度 / 双后端卡片 / 主题图构建），轨道样式按位传 */
+function ProgressBar({ pct, trackClass }: { pct: number; trackClass: string }) {
+  return (
+    <div className={`rounded-full overflow-hidden ${trackClass}`}>
+      <div
+        className="h-full bg-accent rounded-full transition-all duration-700"
+        style={{ width: `${pct}%` }}
+      />
+    </div>
+  )
+}
+
 interface Props {
   kb: KB
   /**
@@ -171,8 +183,6 @@ export default function KbDetailPanel({
   const [topicGraph, setTopicGraph] = useState<TeacherTopicGraph | null>(null)
   const [tgLoading, setTgLoading] = useState(false)
   const [tgBuilding, setTgBuilding] = useState(false)
-  const [tgQueued, setTgQueued] = useState(false)
-  const [tgPoll, setTgPoll] = useState(false)
   const [tgError, setTgError] = useState('')
   const [swEdit, setSwEdit] = useState<{ tid: string; value: string } | null>(null)
   const courseIdRef = useRef(kb.course_id)
@@ -186,33 +196,34 @@ export default function KbDetailPanel({
     [topicGraph],
   )
 
-  // 后端 pending 文件投影的构建进度（null = 无进行中构建）
+  // 后端 pending 文件投影的构建进度（null = 无进行中构建）。tgPoll/tgBusy/tgStatusUI
+  // 全部由它派生——非终态在跑就轮询并锁按钮，无独立状态可漂移
   const tgBuild = topicGraph?.build ?? null
-  // 构建在跑（含排队/收尾）时锁按钮：防双击入队两个 job 抢同一份 pending/旧图
-  const tgBusy = tgBuilding || tgQueued
+  const tgPoll = !!tgBuild && tgBuild.status !== 'error'
+  const tgBusy = tgBuilding
     || (tgBuild != null && tgBuild.status !== 'error' && tgBuild.status !== 'stalled')
+  const tgStatusUI = tgBuilding || tgBuild != null
 
-  const loadTopicGraph = async () => {
+  const loadTopicGraph = async (silent = false) => {
     const gen = ++tgFetchGen.current
-    setTgLoading(true)
+    // 轮询走 silent：不翻 tgLoading，否则每 5s 徽章闪一次「加载中…」
+    if (!silent) setTgLoading(true)
     setTgError('')
     try {
       const data = await apiFetch(`${apiBase}/${kb.course_id}/topic-graph`) as TeacherTopicGraph
       if (gen !== tgFetchGen.current) return
       setTopicGraph(data)
-      setTgQueued(false)
-      // build 字段驱动轮询：非终态构建在跑 → 保持 5s 一拍；上一拍在建设一拍消失 → 完成
+      // 上一拍在建设一拍消失 = 完成（tgWasBuildingRef 做边沿检测；stalled 保持轮询等恢复）
       const active = !!data.build && data.build.status !== 'error'
       if (tgWasBuildingRef.current && !data.build) {
         toast.success(`主题图构建完成：${data.topic_count} 主题 / ${data.edge_count} 边`)
       }
       tgWasBuildingRef.current = active
-      setTgPoll(active)
     } catch (e) {
       if (gen !== tgFetchGen.current) return
       setTgError(e instanceof Error ? e.message : String(e))
     }
-    if (gen === tgFetchGen.current) setTgLoading(false)
+    if (gen === tgFetchGen.current && !silent) setTgLoading(false)
   }
 
   const handleBuildTopicGraph = async (force: boolean) => {
@@ -225,9 +236,10 @@ export default function KbDetailPanel({
     try {
       await apiFetch(`${apiBase}/${courseId}/topic-graph${force ? '?force=true' : ''}`, { method: 'POST' })
       if (courseIdRef.current !== courseId) return
-      setTgQueued(true)
       toast.info('构建任务已提交，正在跟踪进度…')
-      void loadTopicGraph()  // 立即查一拍拿 queued 状态，不等第一个 5s 间隔
+      // await 立即查一拍拿 queued/extracting（不等第一个 5s 间隔）；往返窗口由
+      // tgBuilding（finally 里翻回 false）盖住，无需独立的「已入队」状态
+      await loadTopicGraph()
     } catch (e) {
       if (courseIdRef.current !== courseId) return
       const msg = e instanceof Error ? e.message : String(e)
@@ -258,12 +270,12 @@ export default function KbDetailPanel({
     }
   }
 
-  // 面板按 course_id 生命周期加载（切换课程详情时重查）
+  // 面板按 course_id 生命周期加载（切换课程详情时重查）；先清旧图防上一课程的
+  // 图/进度在新课程上闪现（tgPoll 随 tgBuild=null 立即失效，旧轮询即停）
   useEffect(() => {
-    setTgQueued(false)
     setTgBuilding(false)
     setTgError('')
-    setTgPoll(false)
+    setTopicGraph(null)
     tgWasBuildingRef.current = false
     setConfirmState(null)
     void loadTopicGraph()
@@ -273,7 +285,7 @@ export default function KbDetailPanel({
   // 完成/失败即停。刷新页面后挂载首查发现 build 也能接上，进度不因刷新丢失。
   useEffect(() => {
     if (!tgPoll) return
-    const t = setInterval(() => { void loadTopicGraph() }, 5_000)
+    const t = setInterval(() => { void loadTopicGraph(true) }, 5_000)
     return () => clearInterval(t)
   }, [tgPoll])
 
@@ -466,12 +478,7 @@ export default function KbDetailPanel({
         {kb.status === 'indexing' && (
           <div className="mt-4 space-y-2">
             <div className="flex items-center gap-2">
-              <div className="flex-1 h-2 bg-surface-2 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-accent rounded-full transition-all duration-700"
-                  style={{ width: `${kb.progress}%` }}
-                />
-              </div>
+              <ProgressBar pct={kb.progress} trackClass="flex-1 h-2 bg-surface-2" />
               <span className="text-xs font-medium text-ink w-9 text-right shrink-0">
                 {kb.progress}%
               </span>
@@ -570,9 +577,7 @@ export default function KbDetailPanel({
                 </div>
                 {isIndexing && b && (
                   <div className="mb-1.5">
-                    <div className="h-1.5 bg-line/60 rounded-full overflow-hidden">
-                      <div className="h-full bg-accent transition-all" style={{ width: `${b.progress || 0}%` }} />
-                    </div>
+                    <ProgressBar pct={b.progress || 0} trackClass="h-1.5 bg-line/60" />
                     <div className="text-xs text-muted mt-1 truncate">{b.progress_msg || '索引中…'}</div>
                   </div>
                 )}
@@ -683,13 +688,10 @@ export default function KbDetailPanel({
             )}
           </div>
         </div>
-        {(tgBuilding || tgQueued || tgBuild) && (
+        {tgStatusUI && (
           <div className="mb-1.5 space-y-1.5">
             {tgBuilding && (
               <div className="text-xs text-warn-fg">正在提交重建任务…</div>
-            )}
-            {!tgBuilding && !tgBuild && tgQueued && (
-              <div className="text-xs text-warn-fg">构建任务已提交后台…</div>
             )}
             {tgBuild?.status === 'queued' && (
               <div className="text-xs text-warn-fg">已入队，等待后台开始构建…</div>
@@ -697,12 +699,10 @@ export default function KbDetailPanel({
             {(tgBuild?.status === 'extracting' || tgBuild?.status === 'finalizing') && (
               <div>
                 <div className="flex items-center gap-2">
-                  <div className="flex-1 h-2 bg-surface-2 rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-accent rounded-full transition-all duration-700"
-                      style={{ width: `${tgBuild.total ? Math.round(((tgBuild.done ?? 0) / tgBuild.total) * 100) : 0}%` }}
-                    />
-                  </div>
+                  <ProgressBar
+                    pct={tgBuild.total ? Math.round(((tgBuild.done ?? 0) / tgBuild.total) * 100) : 0}
+                    trackClass="flex-1 h-2 bg-surface-2"
+                  />
                   <span className="text-xs text-muted shrink-0 w-12 text-right">
                     {tgBuild.done ?? 0}/{tgBuild.total ?? 0} 块
                   </span>
@@ -716,7 +716,7 @@ export default function KbDetailPanel({
             )}
             {tgBuild?.status === 'stalled' && (
               <div className="text-xs text-warn-fg bg-warn-bg px-2 py-1 rounded-[var(--radius)]">
-                构建进度超过 15 分钟无更新，疑似中断——可点击「重建」重试
+                构建进度长时间无更新，疑似中断——可点击「重建」重试
               </div>
             )}
             {tgBuild?.status === 'error' && (
@@ -727,7 +727,7 @@ export default function KbDetailPanel({
           </div>
         )}
         {tgError && <div className="text-xs text-danger-fg mb-1.5">{tgError}</div>}
-        {!(tgBuilding || tgQueued || tgBuild) && topicGraph && (topicGraph.failed_sections?.length ?? 0) > 0 && (
+        {!tgStatusUI && topicGraph && (topicGraph.failed_sections?.length ?? 0) > 0 && (
           <div className="text-xs text-warn-fg bg-warn-bg px-2 py-1 rounded-[var(--radius)] mb-1.5">
             抽取失败：{topicGraph.failed_sections!.join('；')}
           </div>

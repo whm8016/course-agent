@@ -117,6 +117,16 @@ async function flush() {
   await act(async () => { await vi.advanceTimersByTimeAsync(0) })
 }
 
+/** 重建流程走到进度首拍：挂载首查 → 点重建 → 确认 → POST+立即查一拍落地 */
+async function startRebuild() {
+  renderPanel()
+  await flush()
+  // fireEvent 而非 userEvent：userEvent 内部 delay 依赖计时器，fake timers 下挂死
+  fireEvent.click(screen.getByRole('button', { name: '重建' }))
+  fireEvent.click(screen.getByRole('button', { name: '确认重建' }))
+  await flush()
+}
+
 describe('课程主题图重建', () => {
   it('点击重建弹出确认框（挂在 document.body，不被滚动容器裁掉）', async () => {
     const user = userEvent.setup()
@@ -141,12 +151,7 @@ describe('课程主题图重建', () => {
       { ...GRAPH, build: { status: 'extracting', done: 2, total: 5, section: '第3章' } },
       { ...GRAPH, build: null },                                       // 完成一拍
     ]
-    renderPanel()
-    await flush()
-    // fireEvent 而非 userEvent：userEvent 内部 delay 依赖计时器，fake timers 下挂死
-    fireEvent.click(screen.getByRole('button', { name: '重建' }))
-    fireEvent.click(screen.getByRole('button', { name: '确认重建' }))
-    await flush()
+    await startRebuild()
 
     const posts = vi.mocked(global.fetch).mock.calls.filter((c) => !isGet(c))
     expect(String(posts[0][0])).toContain('/api/teacher/courses/c1/topic-graph?force=true')
@@ -172,11 +177,7 @@ describe('课程主题图重建', () => {
       { ...GRAPH },
       { ...GRAPH, build: { status: 'error', error: '没有摄入切块审计 JSON' } },
     ]
-    renderPanel()
-    await flush()
-    fireEvent.click(screen.getByRole('button', { name: '重建' }))
-    fireEvent.click(screen.getByRole('button', { name: '确认重建' }))
-    await flush()
+    await startRebuild()
 
     expect(screen.getByText(/构建失败：没有摄入切块审计 JSON/)).toBeInTheDocument()
     expect(toast.success).not.toHaveBeenCalled()
