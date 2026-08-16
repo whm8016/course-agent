@@ -283,8 +283,8 @@ def test_027_creates_course_faq():
         assert "ix_course_faq_course_id" in idx
 
 
-def test_migration_chain_head_is_033():
-    """033 被识别为唯一 head，且 down_revision 链回 base（链不断、无分叉）。
+def test_migration_chain_head_is_034():
+    """034 被识别为唯一 head，且 down_revision 链回 base（链不断、无分叉）。
 
     防止 revision/down_revision 写错导致 alembic 不识别或多 head。ScriptDirectory
     只解析 versions 目录，不连 DB、不 exec env.py，故无需 settings/env 配置。
@@ -294,7 +294,7 @@ def test_migration_chain_head_is_033():
 
     cfg = Config(str(VERSIONS.parent.parent / "alembic.ini"))
     script = ScriptDirectory.from_config(cfg)
-    assert script.get_heads() == ["033"]
+    assert script.get_heads() == ["034"]
 
     revisions = [r.revision for r in script.walk_revisions()]
     # head 能倒走回 base，证明链完整（025→024→023→022→021→020→019→018→017→016→015→…→001）

@@ -669,11 +669,13 @@ class CourseTopic(Base):
 class CourseTopicEdge(Base):
     """课程结构层：主题间先修边（prerequisite 唯一事实源），全班共享。
 
-    建库时离线抽取：embedding top-k 语义候选对上批量四分类判定（forward/reverse/none/
-    uncertain），uncertain 复判一次、仍不确定则弃；直接边删环成 DAG 后补传递闭包。
-    门控沿先修类边（prerequisite / prerequisite_inferred）回溯前置闭包，找未掌握的
-    前置缺口。与 ``users.knowledge_graph`` 的区别：那是每生对话现编的图（仪表盘展示 +
-    error ``repeated`` 来源），本表是全班一致、可审计的课程结构。verified_by 标教师已核对。
+    建库时离线抽取：每块讲义一次同抽「新主题 + 课文明示的先修边」，边端点须在
+    「已抽主题全局闭集」内（旧点可当端点不重复成节点，跨章「在 X 的基础上」由此
+    捕获）；evidence 为讲义原句子串（教师核对锚点），闭包推断边无 evidence。
+    直接边删环成 DAG 后补传递闭包。门控沿先修类边（prerequisite / prerequisite_inferred）
+    回溯前置闭包，找未掌握的前置缺口。与 ``users.knowledge_graph`` 的区别：那是每生
+    对话现编的图（仪表盘展示 + error ``repeated`` 来源），本表是全班一致、可审计的
+    课程结构。verified_by 标教师已核对。
     """
 
     __tablename__ = "course_topic_edge"
@@ -682,9 +684,10 @@ class CourseTopicEdge(Base):
     course_id = Column(String(64), nullable=False, default="")
     src_topic_id = Column(String(64), nullable=False)  # 前置（学 dst 前应先掌握 src）
     dst_topic_id = Column(String(64), nullable=False)
-    relation = Column(String(32), nullable=False, default="prerequisite")  # prerequisite=LLM 直接判定 / prerequisite_inferred=闭包推断
+    relation = Column(String(32), nullable=False, default="prerequisite")  # prerequisite=课文锚定直接边 / prerequisite_inferred=闭包推断
     confidence = Column(Float, nullable=False, default=1.0)
     verified_by = Column(String(64), nullable=True)  # 教师审计标记，NULL=未审
+    evidence = Column(Text, nullable=True)  # 课文锚定边的讲义原句（子串校验过），推断边/判定边为 NULL
 
     __table_args__ = (
         UniqueConstraint(

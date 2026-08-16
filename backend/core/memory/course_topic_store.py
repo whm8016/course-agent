@@ -141,7 +141,7 @@ async def fetch_course_edges(db, course_id: str) -> list:
             select(
                 CourseTopicEdge.src_topic_id, CourseTopicEdge.dst_topic_id,
                 CourseTopicEdge.relation, CourseTopicEdge.confidence,
-                CourseTopicEdge.verified_by,
+                CourseTopicEdge.verified_by, CourseTopicEdge.evidence,
             ).where(CourseTopicEdge.course_id == course_id)
         )
     ).all()

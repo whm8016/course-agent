@@ -195,6 +195,7 @@ async def get_topic_graph_payload(db: AsyncSession, course_id: str) -> dict:
         {
             "src": r.src_topic_id, "dst": r.dst_topic_id, "relation": r.relation,
             "confidence": r.confidence, "verified_by": r.verified_by,
+            "evidence": r.evidence,  # 课文锚定边的讲义原句（教师核对锚点；推断边为 None）
         }
         for r in await fetch_course_edges(db, course_id)
     ]

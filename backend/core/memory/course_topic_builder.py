@@ -1,8 +1,15 @@
-"""课程主题图构建器（生产路径）：从讲义切块抽主题 + 前置边，灌 course_topic 表。
+"""课程主题图构建器（生产路径）：从讲义切块同抽「主题 + 课文锚定先修边」，灌 course_topic 表。
 
 从 ``scripts/build_course_topics.py`` 下沉而来——生产代码（worker/API）不能 import scripts/
 （脚本顶部有 import 期 env setdefault 副作用）。抽取逻辑的单一真相源在此，脚本的 from-chunks
 分支与 probe 都改调本模块，避免脚本/生产两份抽取逻辑漂移。
+
+抽取主循环对齐 LightRAG ``operate.extract_entities`` / KGGen ``steps/_2_get_relations``：
+- 原文随行：主题与边从同一块讲义文本一次抽出，边带原文引句（evidence）
+- 闭集端点（KGGen ``parse_relations_response`` 口径）：边端点 = 本块新主题 ∪ 前面块已抽出的
+  主题——旧点可当端点但不重复成节点，跨章「在 X 的基础上」这类最有证据的边由此而来
+- 抽完再去重：merge_synonymous 归并后经别名表把边端点重映射到规范 topic_id
+不做「语义 top-k 候选 + 两两判定」——已废弃（凭标签猜边无证据根基）。
 
 核心入口：
 - ``load_course_chunks(course_id)``：定位摄入审计 latest.json，解析章节前缀成 [{text,section,order_idx}]
@@ -17,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -89,56 +97,71 @@ def read_failed_sections(course_id: str) -> list[str]:
 
 # -------------------- from-chunks 离线抽取（有课程库数据时跑）--------------------
 
-_EXTRACT_TOPICS_PROMPT = """---Role---
-你是课程知识图谱专家，负责从课程讲义文本中抽取可考核的知识点。
+_EXTRACT_BLOCK_PROMPT = """---Role---
+你是课程知识图谱专家，负责从课程讲义文本中抽取可考核的知识点及其先修关系。
 
 ---Goal---
-抽出本节讲义中实际教学的知识点（KC），每个给一句话定义。
+抽出本块讲义中新教的知识点（KC），以及文本中明示的先修依赖。
 
 ---Instructions---
+【知识点 topics】
 1. 粒度锚定：一个知识点 = 可单独考核的最小知识单元。
    - 正例：「戴维南等效」「三端变阻器的连接方式」「一阶RC电路的零输入响应」
    - 反例：「电路」「实验」「基本理论」（过宽不可考核，禁止输出这类泛化词）
 2. label 必须逐字使用讲义中出现的原词——不翻译、不改写、不缩写、不自行概括。
 3. 共指消解：讲义中「本章」「该定理」「它」等指代，在输出里解析为所指知识点的完整名称。
-4. 只抽本节确实教的内容；没有明确知识点返回空数组；宁少勿凑数，不编造。
-5. 输出严格 JSON（无 markdown 围栏、无任何其他文字）：
-{"topics": [{"label": "知识点名", "definition": "一句话定义"}]}"""
+4. topics 只收本块**新教**的知识点；「已有知识点清单」里的旧点不要再输出进 topics；
+   没有新知识点返回空数组；宁少勿凑数，不编造。
 
-_JUDGE_PREREQ_BATCH_PROMPT = """---Role---
-你是课程结构分析专家，判定知识点之间的先修关系（学 B 之前应先掌握 A，则 A 是 B 的前置）。
+【先修边 edges】
+5. 只抽文本中**明示**的先修依赖——「在X的基础上」「复习/回顾X」「由X推导」「需先掌握X」
+   「利用X求Y」这类讲义亲口写出的依赖。凭常识猜测、文本没写的不要输出。
+6. 每条边 src=前置知识点，dst=依赖它的知识点；strength ∈ [0,1] 表示依赖的明确程度；
+   evidence 逐字摘抄块原文中体现该依赖的句子（只抄一句，不改写、不拼接）。
+7. 边的两端可以是本块新教的知识点，也可以是「已有知识点清单」中的旧点——如第 5 章写
+   「在元件伏安特性的基础上测等效内阻」，src 用清单里的「元件伏安特性」。两端都不在
+   清单、也不在本块新点里的，不要输出该边。
+8. 不确定是不是先修关系的不要输出（宁漏勿错）。
 
----Goal---
-对 ---Pairs--- 中每一对知识点 (A, B)，判断 A 与 B 的直接先修方向。
-
----Instructions---
-1. 每对输出 direction 四选一：
-   - "forward"：A 是 B 的直接前置（掌握 A 显著有助于理解 B，B 的教学默认学生已会 A）
-   - "reverse"：B 是 A 的直接前置
-   - "none"：无直接先修关系（含：仅相关但可并行学、互不依赖）
-   - "uncertain"：说不清（先修关系微妙、专家也会有分歧的情形）
-2. 同时输出 score ∈ [-1, 1]：+1 = 强烈认为 A 前置 B；-1 = 强烈认为 B 前置 A；0 = 无关系/说不清。
-3. 非对称互斥：若 A 前置 B，则 B 不得前置 A。若两个方向看起来都成立，说明二者并非
-   直接先修（可并行学习），direction 取 "none"。
-4. 讲义章节顺序（下方标注）仅是参考证据，不是判据——跨章知识点之间同样可能存在先修
-   关系（如第 2 章的「元件伏安特性」是第 5 章「等效内阻测量」的前置）。
-5. 判据是知识内容本身的依赖关系，不是字面相似。
-6. 输出严格 JSON（无围栏）：{{"pairs": [{{"id": <原样返回输入id>, "direction": "...", "score": 0.0}}]}}
-   id 原样返回输入的 id，不要重编号、不要漏。
-
----Pairs---
-课程章节顺序：{sections_summary}
-
-候选对：
-{pairs_json}
+---已有知识点清单---
+{known_list}
 
 ---Output---
-输出 JSON："""
+输出严格 JSON（无 markdown 围栏、无任何其他文字）：
+{{"topics": [{{"label": "知识点名", "definition": "一句话定义"}}], "edges": [{{"src": "前置点", "dst": "后继点", "strength": 0.8, "evidence": "原文句"}}]}}"""
 
-# 批量判定 8 对/批（Batch Prompting, arXiv:2301.08721：6-10 样本/批成本降 ~5x 性能持平）
-_BATCH_SIZE = 8
-# 建边最低置信：|score| < 0.5 不建（旧实现 0.6 偏严；配四分类+uncertain 复判放宽到 0.5）
-_EDGE_SCORE_MIN = 0.5
+# gleaning 补抽（LightRAG extract_entities 固定单次模式）：首轮解析成功后追加「只补遗漏」
+# 一轮。单消息调用没有第一轮的对话历史，规则须自包含重述（不能写「规则与第一轮相同」），
+# 否则模型只凭 Goal 一句话自由发挥。带原文与第一轮结果，避免凭空重复输出。
+_GLEANING_PROMPT = """---Role---
+你是课程知识图谱专家，正在复查同一块讲义的知识点+先修边抽取结果。
+
+---Goal---
+只补抽第一轮**遗漏**的知识点与先修边，不重复、不改写第一轮已有条目；没有遗漏返回空。
+
+---Instructions---
+【知识点 topics】
+- 只收本块讲义中**新教**的可考核知识点（可单独考核的最小知识单元）；label 逐字用讲义原词；
+  「已有知识点清单」里的旧点不进 topics；泛化词（「电路」「实验」）不收。
+【先修边 edges】
+- 只抽文本**明示**的先修依赖（「在X的基础上」「复习X」「由X推导」等写法）；src=前置，
+  dst=后继；strength ∈ [0,1]；evidence 逐字摘抄块原文一句；两端须在本块新点或清单旧点内。
+- 没有遗漏就返回空：{{"topics": [], "edges": []}}
+
+---第一轮结果---
+{first_round}
+
+---已有知识点清单---
+{known_list}
+
+---Output---
+输出严格 JSON（无围栏）：
+{{"topics": [{{"label": "知识点名", "definition": "一句话定义"}}], "edges": [{{"src": "前置点", "dst": "后继点", "strength": 0.8, "evidence": "原文句"}}]}}"""
+
+# 补抽轮数由 settings.course_topic.gleaning 控制（默认 1，0 关闭）；此值为无配置时的兜底
+_DEFAULT_GLEANING = 1
+# strength 缺失/不可解析时的兜底置信（GraphRAG _process_result 对 weight 解析失败兜底同款）
+_DEFAULT_STRENGTH = 0.75
 # embedding 并发上限（照 consolidation._JUDGE_CONCURRENCY 模式——全仓 fan-out 都有 cap）。
 # 裸 gather 在大课程数百主题时一次打满嵌入端点，429 风暴被 _aget_embed 吞成 None →
 # 静默产出 embedding 全 NULL 的残废图（门控永远匹配不上），限流才能看见。
@@ -148,16 +171,37 @@ _EMBED_CONCURRENCY = 8
 async def _llm_json(
     llm, model: str, prompt: str, track: dict[str, str] | None = None
 ) -> dict | None:
-    from core.llm.json_extract import extract_json_from_llm
+    """LLM → JSON：传输层走 ``with_retry_and_circuit``（指数退避+熔断），解析层自重试一次。
 
-    for attempt in (1, 2):  # 网络抖动/JSON 偶发崩：重试一次，两试皆败返回 None
+    网络抖动/限流由可靠性层兜（可重试异常自动退避重试）；200-但非 JSON 由外层再试一次；
+    两试皆败（含 ``CircuitOpenError``/``LLMRetryError``）返回 None——上层记 failed_section
+    或丢该轮 gleaning，不向上抛。专属熔断器名 ``topic_build``：后台课程级构建失败不烧
+    对话主链路的 default 熔断器（vision_describe 同款思路）。
+    """
+    from core.llm.json_extract import extract_json_from_llm
+    from core.llm.reliability import (
+        CircuitOpenError,
+        LLMRetryError,
+        RetryConfig,
+        get_llm_circuit_breaker,
+        with_retry_and_circuit,
+    )
+
+    breaker = get_llm_circuit_breaker("topic_build")
+    for attempt in (1, 2):  # 非 JSON 重试一次；传输失败由可靠性层内部重试后在此再给一次
         try:
             # deepseek-v4-pro 等 reasoning 模型先吐 reasoning_content 再吐 content；
             # max_tokens 太小会被 reasoning 占满→content 空(finish=length)。
-            resp = await llm.chat.completions.create(
+            resp = await with_retry_and_circuit(
+                llm.chat.completions.create,
                 model=model, messages=[{"role": "user", "content": prompt}],
                 temperature=0.1, max_tokens=4096, stream=False,
+                retry_config=RetryConfig(), circuit_breaker=breaker,
             )
+        except (CircuitOpenError, LLMRetryError) as exc:
+            logger.warning("[course_topics] LLM 传输失败（第 %d 次）：%s", attempt, exc)
+            continue
+        try:
             if track is not None:
                 # 用量埋点：主题图抽取是 ARQ 后台课程级调用（无 user），逐次记
                 from core.analytics.token_usage import track_llm_response
@@ -165,11 +209,12 @@ async def _llm_json(
                 await track_llm_response(resp, model=model, mode="topic_build", **track)
             # 围栏/前后噪声/尾逗号容错走全库单一真相源（judge/question/research 同款）
             data = extract_json_from_llm(resp.choices[0].message.content or "")
-            if data:
-                return data
-            logger.warning("[course_topics] LLM 输出非 JSON（第 %d 次）", attempt)
-        except Exception as exc:
-            logger.warning("[course_topics] LLM 抽取失败（第 %d 次）：%s", attempt, exc)
+        except Exception as exc:  # 埋点/解析偶发崩不废整轮——按本次失败重试
+            logger.warning("[course_topics] 响应处理失败（第 %d 次）：%s", attempt, exc)
+            continue
+        if data:
+            return data
+        logger.warning("[course_topics] LLM 输出非 JSON（第 %d 次）", attempt)
     return None
 
 
@@ -195,19 +240,144 @@ def _pack_blocks(group: list[dict], max_chars_per_call: int) -> list[list[dict]]
     return blocks
 
 
-async def extract_topics_from_chunks(
+def _parse_reply(data) -> tuple[list[dict], list[dict]]:
+    """解析一轮块抽取回复的原始 topics / edges（只做字段清洗，不做校验）。纯函数。"""
+    topics: list[dict] = []
+    edges: list[dict] = []
+    if not isinstance(data, dict):
+        return topics, edges
+    for t in data.get("topics", []) or []:
+        if not isinstance(t, dict):
+            continue
+        label = str(t.get("label") or "").strip()
+        if label:
+            topics.append({
+                "label": label,
+                "definition": str(t.get("definition") or "").strip(),
+            })
+    for e in data.get("edges", []) or []:
+        if not isinstance(e, dict):
+            continue
+        src = str(e.get("src") or "").strip()
+        dst = str(e.get("dst") or "").strip()
+        if src and dst:
+            edges.append({
+                "src": src, "dst": dst,
+                "strength": e.get("strength"),
+                "evidence": str(e.get("evidence") or "").strip(),
+            })
+    return topics, edges
+
+
+def _validate_block_edges(
+    raw_edges: list[dict], text: str, closed_norm: set[str],
+) -> tuple[list[dict], int]:
+    """块内边统一校验：闭集端点 + 引句子串 + strength 钳位。纯函数。
+
+    闭集 = 前面块已抽主题 ∪ 本块全部轮次新主题（KGGen ``parse_relations_response``
+    口径：已抽实体表；旧点合法当端点，未知端点丢边计数）。evidence 非本块原文子串 →
+    置空保留边（端点错=硬伤丢边，引句差=软伤去引句——judge._validate 的 verbatim 思路）。
+    """
+    from core.memory.course_topic_store import _norm_label
+
+    out: list[dict] = []
+    dropped = 0
+    for e in raw_edges:
+        if _norm_label(e["src"]) not in closed_norm or _norm_label(e["dst"]) not in closed_norm:
+            dropped += 1
+            logger.warning("[course_topics] 边端点不在闭集，丢弃：%s → %s", e["src"], e["dst"])
+            continue
+        try:
+            conf = min(max(float(e["strength"]), 0.0), 1.0)
+            if math.isnan(conf):  # NaN 钻得过 min/max 钳位（json.loads 收裸 NaN 字面量）
+                raise ValueError("strength is NaN")
+        except (TypeError, ValueError):
+            conf = _DEFAULT_STRENGTH
+        ev = e["evidence"]
+        if ev and ev not in text:
+            ev = ""
+        out.append({
+            "src_label": e["src"], "dst_label": e["dst"],
+            "confidence": conf, "evidence": ev,
+        })
+    return out, dropped
+
+
+def _render_known(known: dict[str, str], extra_labels: list[str]) -> str:
+    """渲染 prompt 的「已有知识点清单」；空清单给占位说明（第一块）。"""
+    labels = list(known.values()) + list(extra_labels)
+    if not labels:
+        return "（暂无——本块是第一块）"
+    return "\n".join(f"- {l}" for l in labels)
+
+
+async def extract_block_graph(
+    course_id: str, sec: str, text: str, known: dict[str, str], llm, model: str,
+    *, gleaning: int = _DEFAULT_GLEANING,
+) -> tuple[list[dict], list[dict], int] | None:
+    """单块抽取：新主题 + 课文锚定先修边。返回 None = 两试皆败（上层记 failed_section）。
+
+    known: 归一 label → 原始 label，前面块累积的全局闭集——旧点可当边端点但不重复成
+    节点，跨章先修边（「在 X 的基础上」）由此而来。多轮（首轮 + gleaning）的边对
+    「known ∪ 本块全部新主题」统一校验：round1 的边可引用 round2 才补抽出的点。
+    """
+    from core.memory.course_topic_store import _norm_label
+
+    rounds: list[tuple[list[dict], list[dict]]] = []
+    data = await _llm_json(
+        llm, model,
+        f"章节：{sec}\n\n{text}\n\n" + _EXTRACT_BLOCK_PROMPT.format(known_list=_render_known(known, [])),
+        track={"course_id": course_id},
+    )
+    if data is None:
+        return None
+    rounds.append(_parse_reply(data))
+    for _ in range(max(int(gleaning), 0)):
+        so_far = [t for r in rounds for t in r[0]]
+        so_far_labels = [t["label"] for t in so_far]
+        first_round = json.dumps(
+            {"topics": so_far, "edges": [e for r in rounds for e in r[1]]},
+            ensure_ascii=False,
+        )
+        gdata = await _llm_json(
+            llm, model,
+            f"章节：{sec}\n\n{text}\n\n" + _GLEANING_PROMPT.format(
+                first_round=first_round, known_list=_render_known(known, so_far_labels),
+            ),
+            track={"course_id": course_id},
+        )
+        if gdata is None:
+            break  # 补抽失败不废首轮——gleaning 是增益不是依赖
+        rounds.append(_parse_reply(gdata))
+
+    block_topics: list[dict] = []
+    block_norms = set(known)  # 主题去重也含旧点：同点跨块重复出现不重复成节点
+    for topics_round, _ in rounds:
+        for t in topics_round:
+            n = _norm_label(t["label"])
+            if n and n not in block_norms:
+                block_norms.add(n)
+                block_topics.append(t)
+    raw_edges = [e for _, es in rounds for e in es]
+    valid_edges, dropped = _validate_block_edges(raw_edges, text, block_norms)
+    return block_topics, valid_edges, dropped
+
+
+async def extract_graph_from_chunks(
     course_id: str, chunks: list[dict], llm, model: str, embed_model=None,
-    max_chars_per_call: int = 5000,
-) -> tuple[list[dict], list[str]]:
-    """从讲义 chunk 按「章节」聚合抽主题。chunk: {text, section, order_idx}。
+    max_chars_per_call: int = 5000, gleaning: int = _DEFAULT_GLEANING,
+) -> tuple[list[dict], list[dict], dict]:
+    """从讲义 chunk 按章节聚合抽「主题 + 课文锚定先修边」。chunk: {text, section, order_idx}。
 
-    一章内按 chunk 边界分块（每块 <= max_chars_per_call 字符），每块独立问一次 LLM，
-    跨块重复主题交给 merge_synonymous 去重。单 chunk 不截断、章节超长也不丢内容。
-    max_chars_per_call 权衡：太大→reasoning 模型输出预算(4096)被推理占满→content 截断；
-    太小→调用次数多、跨块重复多。默认 5000（probe 实测可调）。
+    块顺序 = 章节首现序 → 章内 chunk 序（讲义阅读序）：已抽清单随块累积，后面块的边
+    可以引用前面块的点。一章内按 chunk 边界分块（每块 <= max_chars_per_call 字符），
+    单 chunk 不截断。max_chars_per_call 权衡：太大→reasoning 模型输出预算(4096)被推理
+    占满→content 截断；太小→调用次数多、跨块重复多。默认 5000（probe 实测可调）。
 
-    返回 (topics, failed_sections)：重试后仍抽取失败的块记入 failed_sections
-    （"章节名（第n块）"），随 GET payload 暴露给教师——主题图有洞时教师可见可重试。
+    返回 (topics, raw_edges, meta)：topics 待 merge_synonymous 去重定 topic_id；
+    raw_edges 端点是 label，merge 后经别名表重映射成 topic_id；meta 含
+    failed_sections（两试皆败的块，"章节名（第n块）"，随 GET payload 暴露给教师）
+    与 edges_dropped_invalid（闭集校验丢边数）。
     """
     by_section: dict[str, list[dict]] = {}
     for ck in chunks:
@@ -215,30 +385,36 @@ async def extract_topics_from_chunks(
         by_section.setdefault(sec, []).append(ck)
 
     topics: list[dict] = []
+    raw_edges: list[dict] = []
     failed_sections: list[str] = []
+    dropped_invalid = 0
+    known: dict[str, str] = {}  # 归一 label → label：全局闭集，随块累积
     order = 0
+    from core.memory.course_topic_store import _norm_label
+
     for sec, group in by_section.items():
         for bi, block in enumerate(_pack_blocks(group, max_chars_per_call), 1):
             text = "\n".join(ck["text"] for ck in block)
-            data = await _llm_json(
-                llm, model, f"章节：{sec}\n\n{text}\n\n{_EXTRACT_TOPICS_PROMPT}",
-                track={"course_id": course_id},
+            res = await extract_block_graph(
+                course_id, sec, text, known, llm, model, gleaning=gleaning,
             )
-            if data is None:
+            if res is None:
                 failed_sections.append(f"{sec}（第{bi}块）")
-            for t in (data or {}).get("topics", []) if isinstance(data, dict) else []:
-                label = str(t.get("label") or "").strip()
-                if not label:
-                    continue
+                continue
+            block_topics, block_edges, dropped = res
+            dropped_invalid += dropped
+            for t in block_topics:
                 topics.append({
                     "topic_id": "",  # 合并去重后定（label 归一 + embedding 相似）
-                    "label": label,
-                    "definition": str(t.get("definition") or "").strip(),
+                    "label": t["label"],
+                    "definition": t["definition"],
                     "source_section": sec,
                     "order_idx": order,
                     "embedding": None,  # 批量 gather 后回填
                 })
                 order += 1
+                known[_norm_label(t["label"])] = t["label"]
+            raw_edges.extend(block_edges)
     # embedding 并发（_aget_embed 自吞异常返 None，单条失败不拖垮整批）——
     # 串行逐个 await 数十次网络往返会白占 worker 槽位；Semaphore 限流防嵌入端点 429
     if topics and embed_model is not None:
@@ -254,19 +430,27 @@ async def extract_topics_from_chunks(
     if failed_sections:
         logger.warning("[course_topics] course=%s %d 块抽取失败：%s",
                        course_id, len(failed_sections), "; ".join(failed_sections))
-    return topics, failed_sections
+    return topics, raw_edges, {
+        "failed_sections": failed_sections,
+        "edges_dropped_invalid": dropped_invalid,
+    }
 
 
-def merge_synonymous(topics: list[dict], sim_threshold: float = 0.88) -> list[dict]:
+def merge_synonymous(
+    topics: list[dict], sim_threshold: float = 0.88
+) -> tuple[list[dict], dict[str, str]]:
     """合并同义主题：label 字符串归一 + embedding 余弦相似度去重。
 
     保留 order_idx 最小者，定义取较长者，embedding 取非空者（首个为 NULL 而重复项
     有值时用重复项的——NULL 进表后 _match_topic 直接淘汰，该主题永远匹配不上）。
+    返回 (merged, alias)：alias 把每个输入 label 的归一形式映射到最终 topic_id——
+    课文边端点是抽取时的原始 label，去重后须经别名表重映射到规范 topic_id。
     纯函数、可单测。归一化与余弦复用 course_topic_store（与门控读出侧同口径）。
     """
     from core.memory.course_topic_store import _norm_label, cosine
 
     merged: list[dict] = []
+    norm_to_idx: dict[str, int] = {}
     seen: list[tuple[str, list[float]]] = []
     for t in sorted(topics, key=lambda x: x["order_idx"]):
         n = _norm_label(t["label"])
@@ -281,153 +465,64 @@ def merge_synonymous(topics: list[dict], sim_threshold: float = 0.88) -> list[di
             if not merged[dup]["embedding"] and t["embedding"]:
                 merged[dup]["embedding"] = t["embedding"]
                 seen[dup] = (seen[dup][0], t["embedding"])
+            norm_to_idx[n] = dup
             continue
+        norm_to_idx[n] = len(merged)
         seen.append((n, t["embedding"] or []))
         merged.append(t)
     for i, t in enumerate(merged):
         t["order_idx"] = i
         t["topic_id"] = _norm_label(t["label"])[:32] or f"topic{i}"
-    return merged
+    alias = {n: merged[i]["topic_id"] for n, i in norm_to_idx.items()}
+    return merged, alias
 
 
-def build_edge_candidates(topics: list[dict], k: int = 10) -> list[tuple[int, int]]:
-    """生成前置判定候选对：embedding 余弦 top-k 相似主题（无向，无顺序/章节约束）。
+def _mk_edge(
+    src_id: str, dst_id: str, confidence: float,
+    relation: str = "prerequisite", evidence: str | None = None,
+) -> dict:
+    """构造一条前置边 dict（src=前置，dst=被前置——门控回溯方向契约）。
 
-    语义相关是先修的必要条件——ACE（JEDM 2024）实测语义排序候选 recall 0.684 vs
-    随机 0.385，真实课程图直接先修边仅占全部组合 5-15%；先修对几乎必然语义相近，
-    用相似度预筛把 LLM 判定集中在高概率区。取代旧「order 差 ≤3」硬窗口（跨章边
-    全丢）；讲义顺序不再当过滤器，只作判定 prompt 里的参考证据（Auto-Req 协议）。
-
-    embedding 缺失（网络抖动置 NULL）的主题退回「同章全部 + order 差 ≤3」保底，
-    防零候选。返回去重排序后的 (i, j) 索引对（i < j）。纯函数、可单测。
+    evidence 非空才落键：课文锚定边带原文引句，闭包推断边/seed 边无该键（= 无证据）。
     """
-    from core.memory.course_topic_store import cosine
-
-    n = len(topics)
-    pair_set: set[tuple[int, int]] = set()
-    # 半矩阵一次算一对（余弦对称）——每对一次 cosine 调用（含双方范数），较全矩阵省一半
-    sims: list[list[float]] = [[0.0] * n for _ in range(n)]
-    for i in range(n):
-        if not topics[i].get("embedding"):
-            continue
-        for j in range(i + 1, n):
-            if not topics[j].get("embedding"):
-                continue
-            s = cosine(topics[i]["embedding"], topics[j]["embedding"])
-            sims[i][j] = sims[j][i] = s
-    for i in range(n):
-        if topics[i].get("embedding"):
-            top = sorted((sims[i][j], j) for j in range(n) if j != i and topics[j].get("embedding"))
-            for _, j in top[-k:]:  # 取 top-k（sorted 升序，末 k 个即最大）
-                pair_set.add((i, j) if i < j else (j, i))
-        else:
-            sec = topics[i].get("source_section")
-            for j in range(n):
-                if j == i:
-                    continue
-                same_sec = topics[j].get("source_section") == sec
-                near = abs(topics[i]["order_idx"] - topics[j]["order_idx"]) <= 3
-                if same_sec or near:
-                    pair_set.add((i, j) if i < j else (j, i))
-    return sorted(pair_set)
-
-
-def _mk_edge(src_id: str, dst_id: str, confidence: float, relation: str = "prerequisite") -> dict:
-    """构造一条前置边 dict（src=前置，dst=被前置——门控回溯方向契约）。"""
-    return {
+    edge = {
         "src": src_id, "dst": dst_id,
         "relation": relation, "confidence": round(float(confidence), 4),
     }
+    if evidence:
+        edge["evidence"] = evidence
+    return edge
 
 
-async def judge_pairs_batch(
-    course_id: str, pairs: list[tuple[int, int]], topics: list[dict], llm, model: str,
-) -> tuple[list[dict], list[tuple[int, int]]]:
-    """批量四分类判定候选对，返回 (edges, uncertain_pairs)。
+def _edge_better(a: dict, b: dict) -> bool:
+    """同 (src,dst) 重复边取舍：置信高者优先；置信打平时有证据者优先。纯函数。"""
+    if a["confidence"] != b["confidence"]:
+        return a["confidence"] > b["confidence"]
+    return bool(a.get("evidence")) and not b.get("evidence")
 
-    direction=forward → src=A；reverse → src/dst 翻转（LLM 可判出讲义顺序与先修
-    顺序相反的情形，旧实现方向被讲义顺序锁死）；confidence=|score|（arXiv:2504.08856
-    的非对称分数设计：一个数字同时编码方向与置信，配四分类主判据防两头点头）。
 
-    逐项容错：缺 id / 非法 direction / score 不可解析 / 方向与分数符号矛盾（prompt
-    语义 forward⟺正分、reverse⟺负分，矛盾即模型自相矛盾）→ 该项按 uncertain 处理
-    （留给上层复判），不整批失败。direction=none 或 |score| < _EDGE_SCORE_MIN 是明确
-    低置信，有意丢弃（宁漏勿错）。
+def finalize_edges(raw_edges: list[dict], alias: dict[str, str]) -> tuple[list[dict], int]:
+    """课文边 label → topic_id：别名重映射、自环剔除、(src,dst) 去重。纯函数。
+
+    自环 = 重映射后 src==dst（两写法合并成同一主题）。方向冲突（不同块对同一对点
+    给出相反方向）不在此仲裁——两个方向都保留，交给 break_cycles 删环删低置信边。
+    返回 (edges, dropped)；dropped 含重映射失败（闭集校验后理论上不发生，防御性计数）。
     """
-    if not pairs:
-        return [], []
-    sections = list(dict.fromkeys(
-        t.get("source_section") or "未知章节" for t in topics
-    ))
-    sections_summary = " → ".join(sections)
+    from core.memory.course_topic_store import _norm_label
 
-    edges: list[dict] = []
-    uncertain: list[tuple[int, int]] = []
-    for lo in range(0, len(pairs), _BATCH_SIZE):
-        batch = pairs[lo:lo + _BATCH_SIZE]
-        pairs_payload = [
-            {
-                "id": nid,
-                "a": {"label": topics[i]["label"], "section": topics[i].get("source_section", "")},
-                "b": {"label": topics[j]["label"], "section": topics[j].get("source_section", "")},
-            }
-            for nid, (i, j) in enumerate(batch)
-        ]
-        data = await _llm_json(
-            llm, model,
-            _JUDGE_PREREQ_BATCH_PROMPT.format(
-                sections_summary=sections_summary,
-                pairs_json=json.dumps(pairs_payload, ensure_ascii=False),
-            ),
-            track={"course_id": course_id},
-        )
-        by_id: dict[int, dict] = {}
-        for item in (data or {}).get("pairs", []) if isinstance(data, dict) else []:
-            if isinstance(item, dict):
-                try:
-                    by_id[int(item.get("id"))] = item
-                except (TypeError, ValueError):
-                    continue
-        for nid, (i, j) in enumerate(batch):
-            item = by_id.get(nid)
-            if item is None:
-                logger.warning("[course_topics] 批量判定缺 id=%d（转复判）", nid)
-                uncertain.append((i, j))
-                continue
-            direction = str(item.get("direction") or "").strip().lower()
-            if direction == "none":
-                continue  # 明确无关系：有意丢弃（宁漏勿错）
-            if direction == "uncertain":
-                uncertain.append((i, j))
-                continue
-            if direction not in ("forward", "reverse"):
-                logger.warning(
-                    "[course_topics] 判定 id=%d 非法 direction=%r（转复判）",
-                    nid, item.get("direction"),
-                )
-                uncertain.append((i, j))
-                continue
-            try:
-                score = float(item.get("score") or 0.0)
-            except (TypeError, ValueError):
-                logger.warning(
-                    "[course_topics] 判定 id=%d score 不可解析 %r（转复判）",
-                    nid, item.get("score"),
-                )
-                uncertain.append((i, j))
-                continue
-            # 方向与符号矛盾（forward 配负分 / reverse 配正分）= 模型自相矛盾，
-            # 不可信 direction，转复判
-            if (direction == "forward" and score < 0) or (direction == "reverse" and score > 0):
-                uncertain.append((i, j))
-                continue
-            score = abs(score)
-            if score >= _EDGE_SCORE_MIN:
-                if direction == "forward":
-                    edges.append(_mk_edge(topics[i]["topic_id"], topics[j]["topic_id"], score))
-                else:
-                    edges.append(_mk_edge(topics[j]["topic_id"], topics[i]["topic_id"], score))
-    return edges, uncertain
+    by_pair: dict[tuple[str, str], dict] = {}
+    dropped = 0
+    for e in raw_edges:
+        src = alias.get(_norm_label(e["src_label"]))
+        dst = alias.get(_norm_label(e["dst_label"]))
+        if not src or not dst or src == dst:
+            dropped += 1
+            continue
+        edge = _mk_edge(src, dst, e["confidence"], evidence=e["evidence"] or None)
+        cur = by_pair.get((src, dst))
+        if cur is None or _edge_better(edge, cur):
+            by_pair[(src, dst)] = edge
+    return list(by_pair.values()), dropped
 
 
 def break_cycles(edges: list[dict]) -> list[dict]:
@@ -511,43 +606,35 @@ def close_transitive(edges: list[dict]) -> list[dict]:
     return edges + added
 
 
-async def extract_prereq_edges(
-    course_id: str, topics: list[dict], llm, model: str
+def assemble_edges(
+    raw_edges: list[dict], alias: dict[str, str], topics: list[dict],
+    *, dropped_invalid: int = 0,
 ) -> tuple[list[dict], dict]:
-    """抽前置边：embedding top-k 语义候选 → 批量四分类 → uncertain 复判 → 删环 → 闭包。
+    """课文边 → 入库边：重映射去重 → 删环 → 闭包 → stats。纯函数、无 LLM。
 
-    取代旧「order 差 ≤3 逐对判定」——旧窗口跨章边系统性丢失（真实课程 32 边跨章仅
-    3 条，门控 4 正例 0/4 no_candidate）。返回 (edges, stats)；stats 记候选数/直接边/
-    复判/删环/闭包补边/跨章边数（跨章边数是本修复的核心验收指标）。
+    边全部来自课文锚定抽取（不做两两判定）。stats 五键：
+    - text_mined_edges：过闭集校验与去重后的直接边数
+    - edges_dropped_invalid：块级闭集丢边 + 重映射/自环丢边（质量信号：闭集对不上多
+      说明模型端点写法漂移，可观察调 prompt）
+    - cycle_broken / transitive_added：删环数 / 闭包补边数
+    - cross_section_edges：跨章直接边数（验收口径只数直接边——推断边经 fan-in/fan-out
+      抬高指标，且推断跨章边必伴随直接跨章边，只数直接边不损失「0→正」检出能力）
     """
-    pairs = build_edge_candidates(topics)
-    direct, uncertain = await judge_pairs_batch(course_id, pairs, topics, llm, model)
-    rechecked: list[dict] = []
-    if uncertain:
-        logger.info("[course_topics] 复判 %d 个 uncertain 对", len(uncertain))
-        rechecked, still = await judge_pairs_batch(course_id, uncertain, topics, llm, model)
-        if still:
-            logger.info("[course_topics] %d 对复判仍 uncertain，弃（宁漏勿错）", len(still))
-        direct = direct + rechecked
-
+    direct, finalize_dropped = finalize_edges(raw_edges, alias)
     acyclic = break_cycles(direct)
     closed = close_transitive(acyclic)
     sec_of = {t["topic_id"]: t.get("source_section") for t in topics}
-    # 跨章验收口径只数直接边：推断边经 fan-in/fan-out 抬高指标（1 条直接跨章可生多条
-    # 跨章推断边）；且推断跨章边必伴随直接跨章边（路径必经直接跨章段），只数直接边
-    # 不损失「0→正」的检出能力
     cross = sum(1 for e in acyclic if sec_of.get(e["src"]) != sec_of.get(e["dst"]))
     stats = {
-        "candidates": len(pairs),
-        "direct_edges": len(direct) - len(rechecked),
-        "rechecked_edges": len(rechecked),
+        "text_mined_edges": len(direct),
+        "edges_dropped_invalid": dropped_invalid + finalize_dropped,
         "cycle_broken": len(direct) - len(acyclic),
         "transitive_added": len(closed) - len(acyclic),
         "cross_section_edges": cross,
     }
     logger.info(
-        "[course_topics] 前置边 course=%s：候选 %d → 直接 %d + 复判 %d → 删环 %d → 闭包 +%d → 总 %d（跨章 %d）",
-        course_id, stats["candidates"], stats["direct_edges"], stats["rechecked_edges"],
+        "[course_topics] 前置边：课文锚定 %d（闭集/自环弃 %d）→ 删环 %d → 闭包 +%d → 总 %d（跨章 %d）",
+        stats["text_mined_edges"], stats["edges_dropped_invalid"],
         stats["cycle_broken"], stats["transitive_added"], len(closed), cross,
     )
     return closed, stats
@@ -633,16 +720,26 @@ async def build_topic_graph(course_id: str, db, *, force: bool = False) -> dict:
     from settings import get_settings
     s = get_settings()
     model = s.course_topic.extract_model or s.llm.text_model
+    gleaning = getattr(s.course_topic, "gleaning", _DEFAULT_GLEANING)
     logger.info(
-        "[course_topics] build_topic_graph course=%s model=%s chunks=%d force=%s",
-        course_id, model, len(chunks), force,
+        "[course_topics] build_topic_graph course=%s model=%s chunks=%d force=%s gleaning=%s",
+        course_id, model, len(chunks), force, gleaning,
     )
 
-    topics, failed_sections = await extract_topics_from_chunks(
-        course_id, chunks, llm, model, embed_model
+    topics, raw_edges, meta = await extract_graph_from_chunks(
+        course_id, chunks, llm, model, embed_model, gleaning=gleaning,
     )
-    topics = merge_synonymous(topics)
-    edges, edge_stats = await extract_prereq_edges(course_id, topics, llm, model)
+    if not topics:
+        # 全量失败保护：所有块两试皆败（坏 key / 持续限流熔断）时 force 已删旧图——
+        # 不 commit 空图冒充 built；raise 让 worker deadletter，事务回滚保住旧图。
+        # 部分失败不算（topics 非空），教师经 failed_sections 可见可重试。
+        raise RuntimeError(
+            f"course={course_id} 全部块抽取失败（{len(chunks)} chunks，LLM 不可用？），不落空图"
+        )
+    topics, alias = merge_synonymous(topics)
+    edges, edge_stats = assemble_edges(
+        raw_edges, alias, topics, dropped_invalid=meta["edges_dropped_invalid"],
+    )
 
     for t in topics:
         db.add(CourseTopic(
@@ -654,13 +751,17 @@ async def build_topic_graph(course_id: str, db, *, force: bool = False) -> dict:
         db.add(CourseTopicEdge(
             course_id=course_id, src_topic_id=e["src"], dst_topic_id=e["dst"],
             relation=e["relation"], confidence=e["confidence"],
+            evidence=e.get("evidence"),
         ))
     await db.commit()
-    export_json(course_id, topics, edges, failed_sections=failed_sections, stats=edge_stats)
+    export_json(
+        course_id, topics, edges,
+        failed_sections=meta["failed_sections"], stats=edge_stats,
+    )
     logger.info("[course_topics] build_topic_graph done course=%s %d主题 %d边", course_id, len(topics), len(edges))
     return {
         "status": "built", "course_id": course_id,
         "topics": len(topics), "edges": len(edges),
         "cross_section_edges": edge_stats["cross_section_edges"],
-        "failed_sections": failed_sections,
+        "failed_sections": meta["failed_sections"],
     }

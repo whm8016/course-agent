@@ -1,12 +1,15 @@
 """course_topic_builder 抽取链单测（纯函数 + mock LLM，零真实调用）。
 
-覆盖跨章先修边修复的四件套：
-- build_edge_candidates：embedding top-k 语义候选（取代 order 差 ≤3 硬窗口）
-- judge_pairs_batch：批量四分类判定（forward/reverse/none/uncertain + score）
-  + 逐项容错契约（缺 id / 非法 direction / score 不可解析 / 方向符号矛盾 → 复判）
-- extract_prereq_edges：整链编排 stats（跨章边数只数直接边）
+课文锚定边主循环（对齐 LightRAG extract_entities / KGGen get_relations）：
+- _parse_reply：块回复原始解析（topics/edges 字段清洗）
+- _validate_block_edges：闭集端点（全局已抽主题，旧点合法当端点）+ 引句子串 + strength 钳位
+- extract_block_graph：单块多轮（首轮+gleaning）汇总、统一校验、两试皆败返 None
+- extract_graph_from_chunks：块序闭集累积（跨章边来源）、failed_sections、dropped 计数
+- merge_synonymous：去重 + 别名表（归一 label → topic_id，边端点重映射依据）
+- finalize_edges：别名重映射 / 自环剔除 / (src,dst) 去重取高置信（有证据优先）
+- assemble_edges：删环 → 闭包 → stats 五键（跨章口径只数直接边）
 - break_cycles / close_transitive：DAG 保证与传递闭包
-- 次级修复：merge 保留非 NULL embedding / _llm_json 重试 / failed_sections 记录
+- 次级：_llm_json 契约（非 JSON 重试一次 / 传输失败吞 LLMRetryError 返 None）
 """
 from __future__ import annotations
 
@@ -18,12 +21,14 @@ import pytest
 
 from core.memory.course_topic_builder import (
     _llm_json,
+    _parse_reply,
+    _validate_block_edges,
+    assemble_edges,
     break_cycles,
-    build_edge_candidates,
     close_transitive,
-    extract_prereq_edges,
-    extract_topics_from_chunks,
-    judge_pairs_batch,
+    extract_block_graph,
+    extract_graph_from_chunks,
+    finalize_edges,
     merge_synonymous,
 )
 
@@ -49,132 +54,240 @@ def _topic(label: str, emb=None, sec="第1章", order=0):
 
 
 # ---------------------------------------------------------------------------
-# build_edge_candidates：语义 top-k 预筛
+# _parse_reply：块回复原始解析
 # ---------------------------------------------------------------------------
 
-def test_build_edge_candidates_topk_prefers_similar():
-    # 两簇向量（簇内余弦 ~1.0，簇间 ~0）：高相似对必入选、零相似对不入选。
-    # 注：k 是数量不是阈值——b 簇只有 2 个主题时 b1 的 top-2 会溢出到 a 簇末位
-    # （小课程自然退化为近全配对，成本可接受，设计内行为）。
-    a1, a2, a3 = [1.0, 0.0], [1.0, 0.0], [0.9, 0.1]
-    b1, b2 = [0.0, 1.0], [0.0, 1.0]
-    topics = [
-        _topic("a1", a1), _topic("a2", a2), _topic("a3", a3, order=1),
-        _topic("b1", b1), _topic("b2", b2, sec="第9章", order=2),
-    ]
-    pairs = build_edge_candidates(topics, k=2)
-    assert (0, 1) in pairs and (3, 4) in pairs   # 余弦 1.0 的对必互为 top-1
-    # a1/a2 与 b 簇余弦 0.0：不进彼此候选（各自 top-2 全在簇内）
-    for banned in ((0, 3), (0, 4), (1, 3), (1, 4)):
-        assert banned not in pairs
-    # 无向去重：每对只出现一次且 i < j
-    assert all(i < j for i, j in pairs)
-    assert len(pairs) == len(set(pairs))
+def test_parse_reply_filters_and_cleans():
+    data = {
+        "topics": [
+            {"label": " 戴维南等效 ", "definition": " 等效电源定理 "},
+            {"label": "", "definition": "空 label 丢"},
+            "junk",
+        ],
+        "edges": [
+            {"src": "元件伏安特性", "dst": "等效内阻测量", "strength": 0.9, "evidence": " 原句 "},
+            {"src": "", "dst": "等效内阻测量", "strength": 0.5, "evidence": "x"},  # 缺 src 丢
+            {"src": "只有src"},                                                   # 缺 dst 丢
+        ],
+    }
+    topics, edges = _parse_reply(data)
+    assert topics == [{"label": "戴维南等效", "definition": "等效电源定理"}]
+    assert edges == [{
+        "src": "元件伏安特性", "dst": "等效内阻测量",
+        "strength": 0.9, "evidence": "原句",
+    }]
 
 
-def test_build_edge_candidates_k_truncates():
-    # 5 个全相似主题，k=2 → 每主题最多 2 候选，总对数受控
-    topics = [_topic(f"t{i}", [1.0, float(i) / 100]) for i in range(5)]
-    pairs = build_edge_candidates(topics, k=2)
-    assert len(pairs) <= 5 * 2 // 2 + 2  # 上界粗检（去重后更少）
-
-
-def test_build_edge_candidates_none_embedding_falls_back_to_window():
-    # 无 embedding 的主题退回「同章全部 + order 差 ≤3」保底，不零候选
-    topics = [
-        _topic("x", None, sec="第1章", order=0),
-        _topic("same_sec", [1.0, 0.0], sec="第1章", order=1),
-        _topic("far_other", [0.0, 1.0], sec="第8章", order=10),
-    ]
-    pairs = build_edge_candidates(topics, k=1)
-    assert (0, 1) in pairs          # 同章保底
-    assert (0, 2) not in pairs      # 跨章且 order 差 >3：降级窗口不含
+def test_parse_reply_non_dict_returns_empty():
+    assert _parse_reply(None) == ([], [])
+    assert _parse_reply(["列表不合法"]) == ([], [])
 
 
 # ---------------------------------------------------------------------------
-# judge_pairs_batch：批量四分类
+# _validate_block_edges：闭集端点 + 引句子串 + strength 钳位
+# ---------------------------------------------------------------------------
+
+def test_validate_block_edges_closed_set_and_evidence():
+    # 闭集 = 已抽旧点 ∪ 本块新点：旧点（跨章）合法当端点，未知端点丢边计数
+    closed = {"元件伏安特性", "等效内阻测量"}
+    text = "在元件伏安特性的基础上测量等效内阻。"
+    raw = [
+        {"src": "元件伏安特性", "dst": "等效内阻测量", "strength": 0.9,
+         "evidence": "在元件伏安特性的基础上测量等效内阻"},          # 全合法
+        {"src": "不存在点", "dst": "等效内阻测量", "strength": 0.8, "evidence": "x"},  # 闭集外 → 丢
+        {"src": "等效内阻测量", "dst": "元件伏安特性", "strength": "崩",
+         "evidence": "编造的引句"},                                   # 端点合法；strength 兜底；引句非子串 → 置空
+        {"src": "等效内阻测量", "dst": "元件伏安特性", "strength": 1.7, "evidence": ""},  # 钳位到 1.0
+        {"src": "元件伏安特性", "dst": "等效内阻测量", "strength": float("nan"), "evidence": ""},  # NaN 钻不过钳位 → 兜底
+    ]
+    out, dropped = _validate_block_edges(raw, text, closed)
+    assert dropped == 1
+    assert len(out) == 4
+    assert out[0] == {"src_label": "元件伏安特性", "dst_label": "等效内阻测量",
+                      "confidence": 0.9, "evidence": "在元件伏安特性的基础上测量等效内阻"}
+    assert out[1]["confidence"] == 0.75 and out[1]["evidence"] == ""  # 软伤：去引句留边
+    assert out[2]["confidence"] == 1.0
+    assert out[3]["confidence"] == 0.75  # NaN 若入库会把教师面板 JSON 打成非法字面量
+
+
+# ---------------------------------------------------------------------------
+# extract_block_graph：单块抽取（首轮 + gleaning 统一校验）
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_judge_pairs_batch_parse():
-    topics = [
-        _topic("A", sec="第1章"), _topic("B", sec="第5章"),
-        _topic("C", sec="第2章"), _topic("D", sec="第6章"),
-        _topic("E", sec="第3章"),
-    ]
-    # 5 对一批：forward / reverse / none / uncertain / score 不足
-    reply = json.dumps({"pairs": [
-        {"id": 0, "direction": "forward", "score": 0.9},   # A 前置 B
-        {"id": 1, "direction": "reverse", "score": -0.8},  # D 前置 C（翻转）
-        {"id": 2, "direction": "none", "score": 0.1},
-        {"id": 3, "direction": "uncertain", "score": 0.2},
-        {"id": 4, "direction": "forward", "score": 0.3},   # 分数不足不建边
-    ]}, ensure_ascii=False)
-    llm = _fake_llm([reply])
-    edges, uncertain = await judge_pairs_batch("c1", [(0, 1), (2, 3), (1, 2), (3, 4), (0, 4)], topics, llm, "m")
-    assert [(e["src"], e["dst"]) for e in edges] == [("A", "B"), ("D", "C")]
-    assert all(e["relation"] == "prerequisite" for e in edges)
-    assert edges[0]["confidence"] == pytest.approx(0.9)
-    assert uncertain == [(3, 4)]
+async def test_extract_block_graph_merges_gleaning():
+    known = {"旧点": "旧点"}
+    text = "基于旧点讲新点。补抽点推出新点。"
+    reply1 = {"topics": [{"label": "新点", "definition": "d"}],
+              "edges": [{"src": "旧点", "dst": "新点", "strength": 0.8, "evidence": "基于旧点讲新点"}]}
+    reply2 = {"topics": [{"label": "补抽点", "definition": "d2"}, {"label": "新点", "definition": "重复"}],
+              "edges": [{"src": "补抽点", "dst": "新点", "strength": 0.7, "evidence": "补抽点推出新点"}]}
+    llm = _fake_llm([json.dumps(reply1, ensure_ascii=False), json.dumps(reply2, ensure_ascii=False)])
+    topics, edges, dropped = await extract_block_graph(
+        "c1", "第2章", text, known, llm, "m", gleaning=1,
+    )
+    # gleaning 补抽并入；重复「新点」与旧点「旧点」不进新主题
+    assert [t["label"] for t in topics] == ["新点", "补抽点"]
+    assert dropped == 0
+    assert [(e["src_label"], e["dst_label"]) for e in edges] == [("旧点", "新点"), ("补抽点", "新点")]
 
 
 @pytest.mark.asyncio
-async def test_judge_pairs_batch_missing_id_goes_uncertain():
-    topics = [_topic("A"), _topic("B")]
-    llm = _fake_llm([json.dumps({"pairs": [{"id": 9, "direction": "forward", "score": 0.9}]})])
-    edges, uncertain = await judge_pairs_batch("c1", [(0, 1)], topics, llm, "m")
+async def test_extract_block_graph_round1_edge_to_gleaning_topic():
+    # 统一校验契约：round1 的边可引用 round2 才补抽出的点（闭集 = known ∪ 全部轮次新主题）
+    text = "讲新点。由铺垫点推出新点。"
+    reply1 = {"topics": [{"label": "新点", "definition": "d"}],
+              "edges": [{"src": "铺垫点", "dst": "新点", "strength": 0.8, "evidence": "由铺垫点推出新点"}]}
+    reply2 = {"topics": [{"label": "铺垫点", "definition": "d2"}], "edges": []}
+    llm = _fake_llm([json.dumps(reply1, ensure_ascii=False), json.dumps(reply2, ensure_ascii=False)])
+    topics, edges, dropped = await extract_block_graph("c1", "第1章", text, {}, llm, "m", gleaning=1)
+    assert [t["label"] for t in topics] == ["新点", "铺垫点"]
+    assert dropped == 0
+    assert [(e["src_label"], e["dst_label"]) for e in edges] == [("铺垫点", "新点")]
+
+
+@pytest.mark.asyncio
+async def test_extract_block_graph_gleaning_failure_keeps_first_round():
+    text = "讲新点。"
+    reply1 = {"topics": [{"label": "新点", "definition": "d"}], "edges": []}
+    llm = _fake_llm([json.dumps(reply1, ensure_ascii=False), "崩", "还崩"])
+    topics, edges, dropped = await extract_block_graph(
+        "c1", "第1章", text, {}, llm, "m", gleaning=1,
+    )
+    assert [t["label"] for t in topics] == ["新点"]
     assert edges == []
-    assert uncertain == [(0, 1)]
 
 
 @pytest.mark.asyncio
-async def test_judge_pairs_batch_malformed_goes_uncertain():
-    # 注释契约：非法 direction / score 不可解析 → uncertain 复判，不静默丢；
-    # prompt 语义 forward⟺正分 / reverse⟺负分，方向与符号矛盾 = 模型自相矛盾 →
-    # 不可信 direction，同转复判；none 为明确否定，有意丢弃
-    topics = [_topic("A"), _topic("B"), _topic("C"), _topic("D"), _topic("E")]
-    reply = json.dumps({"pairs": [
-        {"id": 0, "direction": "fwd", "score": 0.9},       # 非法方向
-        {"id": 1, "direction": "forward", "score": "崩"},   # score 不可解析
-        {"id": 2, "direction": "forward", "score": -0.8},   # forward 配负分：矛盾
-        {"id": 3, "direction": "none", "score": 0.9},       # none：有意丢弃
-        {"id": 4, "direction": "reverse", "score": 0.8},    # reverse 配正分：矛盾
-    ]}, ensure_ascii=False)
-    llm = _fake_llm([reply])
-    edges, uncertain = await judge_pairs_batch(
-        "c1", [(0, 1), (1, 2), (2, 3), (3, 4), (0, 4)], topics, llm, "m")
-    assert edges == []
-    assert uncertain == [(0, 1), (1, 2), (2, 3), (0, 4)]
+async def test_extract_block_graph_all_fail_returns_none():
+    llm = _fake_llm(["崩", "还崩"])
+    assert await extract_block_graph("c1", "第1章", "文本", {}, llm, "m", gleaning=0) is None
 
 
 # ---------------------------------------------------------------------------
-# extract_prereq_edges：整链编排（候选 → 判定 → 复判 → 删环 → 闭包 → stats）
+# extract_graph_from_chunks：块序闭集累积（跨章边来源）+ failed_sections
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_extract_prereq_edges_orchestration():
-    # 3 主题全配对成候选；首轮 A-C uncertain 转复判返回 reverse 建边 C→A，与 A→B、
-    # B→C 成环 → 删最低置信 C→A；闭包补 A→C（prerequisite_inferred）。
-    # 跨章验收口径只数直接边：仅 B→C 一条（在 closed 上数会被推断边 A→C 虚高到 2）
-    topics = [
-        _topic("A", [1.0, 0.0], sec="第1章", order=0),
-        _topic("B", [1.0, 0.0], sec="第1章", order=1),
-        _topic("C", [0.0, 1.0], sec="第5章", order=2),
+async def test_extract_graph_accumulates_known_across_sections():
+    # 第1章抽「旧点」；第2章的边以「旧点」为 src（跨章先修：靠全局闭集合法）；
+    # 第3章两试皆败 → failed_sections
+    chunks = [
+        {"text": "本章教旧点。", "section": "第1章", "order_idx": 0},
+        {"text": "基于旧点，本章教新点。", "section": "第2章", "order_idx": 1},
+        {"text": "失败章正文。", "section": "第3章", "order_idx": 2},
     ]
+    reply1 = {"topics": [{"label": "旧点", "definition": "d"}], "edges": []}
+    reply2 = {"topics": [{"label": "新点", "definition": "d2"}],
+              "edges": [{"src": "旧点", "dst": "新点", "strength": 0.9, "evidence": "基于旧点，本章教新点"}]}
     llm = _fake_llm([
-        json.dumps({"pairs": [
-            {"id": 0, "direction": "forward", "score": 0.9},    # A→B（同章）
-            {"id": 1, "direction": "uncertain", "score": 0.2},   # A-C 转复判
-            {"id": 2, "direction": "forward", "score": 0.8},    # B→C（跨章）
-        ]}),
-        json.dumps({"pairs": [{"id": 0, "direction": "reverse", "score": -0.7}]}),  # 复判 C→A
+        json.dumps(reply1, ensure_ascii=False),
+        json.dumps(reply2, ensure_ascii=False),
+        "崩", "还崩",
     ])
-    edges, stats = await extract_prereq_edges("c1", topics, llm, "m")
+    topics, raw_edges, meta = await extract_graph_from_chunks(
+        "c1", chunks, llm, "m", gleaning=0,
+    )
+    assert [t["label"] for t in topics] == ["旧点", "新点"]
+    assert [(e["src_label"], e["dst_label"]) for e in raw_edges] == [("旧点", "新点")]
+    assert raw_edges[0]["evidence"] == "基于旧点，本章教新点"
+    assert meta["failed_sections"] == ["第3章（第1块）"]
+    assert meta["edges_dropped_invalid"] == 0
+
+
+# ---------------------------------------------------------------------------
+# merge_synonymous：去重 + 别名表
+# ---------------------------------------------------------------------------
+
+def test_merge_synonymous_keeps_nonnull_embedding():
+    topics = [
+        _topic("戴维南等效", None, order=0),
+        _topic("戴维南等效", [0.1, 0.2], order=1),
+    ]
+    merged, alias = merge_synonymous(topics)
+    assert len(merged) == 1
+    assert merged[0]["embedding"] == [0.1, 0.2]
+    # 两个重复写法都映射到同一 topic_id（边端点重映射依据）
+    assert alias["戴维南等效"] == merged[0]["topic_id"]
+
+
+def test_merge_synonymous_label_dedup_and_reindex():
+    topics = [
+        _topic("伏安特性", order=0), _topic("Other", order=1), _topic("伏安特性", order=2),
+    ]
+    merged, alias = merge_synonymous(topics)
+    assert [t["label"] for t in merged] == ["伏安特性", "Other"]
+    assert [t["order_idx"] for t in merged] == [0, 1]
+    assert alias["伏安特性"] == merged[0]["topic_id"]
+    assert alias["other"] == merged[1]["topic_id"]
+
+
+# ---------------------------------------------------------------------------
+# finalize_edges：别名重映射 / 自环剔除 / (src,dst) 去重
+# ---------------------------------------------------------------------------
+
+def test_finalize_edges_remap_dedup_selfloop():
+    alias = {"a": "a", "b": "b", "a写法2": "a"}  # 「a写法2」并入规范点 a
+    raw_edges = [
+        {"src_label": "A", "dst_label": "B", "confidence": 0.7, "evidence": ""},
+        {"src_label": "A写法2", "dst_label": "B", "confidence": 0.9, "evidence": ""},  # 同 (a,b) 取高置信
+        {"src_label": "A", "dst_label": "A写法2", "confidence": 0.8, "evidence": ""},  # 重映射后自环 → 丢
+    ]
+    edges, dropped = finalize_edges(raw_edges, alias)
+    assert dropped == 1
+    assert [(e["src"], e["dst"], e["confidence"]) for e in edges] == [("a", "b", 0.9)]
+
+
+def test_finalize_edges_tie_prefers_evidence():
+    alias = {"a": "a", "b": "b"}
+    raw_edges = [
+        {"src_label": "A", "dst_label": "B", "confidence": 0.8, "evidence": ""},
+        {"src_label": "A", "dst_label": "B", "confidence": 0.8, "evidence": "讲义原句"},
+    ]
+    edges, dropped = finalize_edges(raw_edges, alias)
+    assert dropped == 0
+    assert len(edges) == 1
+    assert edges[0].get("evidence") == "讲义原句"
+
+
+def test_finalize_edges_direction_conflict_both_kept():
+    # 不同块给出相反方向：不在此仲裁，留给 break_cycles 删环删低置信边
+    alias = {"a": "a", "b": "b"}
+    raw_edges = [
+        {"src_label": "A", "dst_label": "B", "confidence": 0.9, "evidence": ""},
+        {"src_label": "B", "dst_label": "A", "confidence": 0.3, "evidence": ""},
+    ]
+    edges, dropped = finalize_edges(raw_edges, alias)
+    assert dropped == 0
+    assert {(e["src"], e["dst"]) for e in edges} == {("a", "b"), ("b", "a")}
+
+
+# ---------------------------------------------------------------------------
+# assemble_edges：删环 → 闭包 → stats 五键
+# ---------------------------------------------------------------------------
+
+def test_assemble_edges_stats_and_cycle():
+    # a→b、b→c（跨章）与 c→a 成环 → 删低置信 c→a；闭包补 a→c（prerequisite_inferred）
+    topics = [
+        _topic("A", sec="第1章", order=0),
+        _topic("B", sec="第1章", order=1),
+        _topic("C", sec="第5章", order=2),
+    ]
+    alias = {"a": "A", "b": "B", "c": "C"}
+    raw_edges = [
+        {"src_label": "A", "dst_label": "B", "confidence": 0.9, "evidence": "原句1"},
+        {"src_label": "B", "dst_label": "C", "confidence": 0.8, "evidence": "原句2"},
+        {"src_label": "C", "dst_label": "A", "confidence": 0.3, "evidence": ""},
+    ]
+    edges, stats = assemble_edges(raw_edges, alias, topics, dropped_invalid=2)
     by = {(e["src"], e["dst"]): e for e in edges}
     assert set(by) == {("A", "B"), ("B", "C"), ("A", "C")}
     assert by[("A", "C")]["relation"] == "prerequisite_inferred"
+    assert by[("A", "B")].get("evidence") == "原句1"
+    assert "evidence" not in by[("A", "C")]  # 推断边无证据键
+    # 跨章口径只数直接边：仅 B→C 一条（在闭包后数会被推断边 A→C 虚高到 2）
     assert stats == {
-        "candidates": 3, "direct_edges": 2, "rechecked_edges": 1,
+        "text_mined_edges": 3, "edges_dropped_invalid": 2,
         "cycle_broken": 1, "transitive_added": 1, "cross_section_edges": 1,
     }
 
@@ -212,7 +325,7 @@ def test_close_transitive_fills_and_keeps_direct():
 
 def test_close_transitive_direct_edge_not_upgraded():
     # A→C 已有直接边 0.5，经 B 的路径 min(0.9,0.8)=0.8 更高——直接边不被覆盖
-    # （LLM 直接判定优先于传递推断）
+    # （课文直接边优先于传递推断）
     edges = [_e("A", "B", 0.9), _e("B", "C", 0.8), _e("A", "C", 0.5)]
     out = close_transitive(edges)
     by = {(e["src"], e["dst"]): e["confidence"] for e in out}
@@ -221,27 +334,8 @@ def test_close_transitive_direct_edge_not_upgraded():
 
 
 # ---------------------------------------------------------------------------
-# 次级修复：merge / _llm_json 重试 / failed_sections
+# _llm_json 契约
 # ---------------------------------------------------------------------------
-
-def test_merge_synonymous_keeps_nonnull_embedding():
-    topics = [
-        _topic("戴维南等效", None, order=0),
-        _topic("戴维南等效", [0.1, 0.2], order=1),
-    ]
-    merged = merge_synonymous(topics)
-    assert len(merged) == 1
-    assert merged[0]["embedding"] == [0.1, 0.2]
-
-
-def test_merge_synonymous_label_dedup_and_reindex():
-    topics = [
-        _topic("伏安特性", order=0), _topic("Other", order=1), _topic("伏安特性", order=2),
-    ]
-    merged = merge_synonymous(topics)
-    assert [t["label"] for t in merged] == ["伏安特性", "Other"]
-    assert [t["order_idx"] for t in merged] == [0, 1]
-
 
 @pytest.mark.asyncio
 async def test_llm_json_retries_once_then_succeeds():
@@ -259,15 +353,17 @@ async def test_llm_json_two_failures_return_none():
 
 
 @pytest.mark.asyncio
-async def test_extract_topics_returns_failed_sections():
-    chunks = [
-        {"text": "戴维南等效的正文", "section": "第1章", "order_idx": 0},
-        {"text": "另一章正文", "section": "第2章", "order_idx": 1},
-    ]
-    llm = _fake_llm([
-        '{"topics": [{"label": "戴维南等效", "definition": "等效电源定理"}]}',
-        "彻底崩", "还是崩",   # 第 2 章两试皆败
-    ])
-    topics, failed = await extract_topics_from_chunks("c1", chunks, llm, "m")
-    assert [t["label"] for t in topics] == ["戴维南等效"]
-    assert failed == ["第2章（第1块）"]
+async def test_llm_json_transport_error_returns_none():
+    # 传输层异常经 with_retry_and_circuit 包装成 LLMRetryError：不可重试错误立即抛、
+    # 外层再给一次机会，两试皆败返 None（不向上抛——上层记 failed_section）
+    from core.llm.reliability import get_llm_circuit_breaker
+
+    breaker = get_llm_circuit_breaker("topic_build")
+    breaker.reset()  # 模块级注册表跨测试共享，进出都复位防污染
+    llm = SimpleNamespace()
+    llm.chat = SimpleNamespace()
+    llm.chat.completions = SimpleNamespace()
+    llm.chat.completions.create = AsyncMock(side_effect=ValueError("bad api key"))
+    assert await _llm_json(llm, "m", "prompt") is None
+    assert llm.chat.completions.create.await_count == 2
+    breaker.reset()

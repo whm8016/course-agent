@@ -702,6 +702,10 @@ class CourseTopicConfig(BaseModel):
 
     extract_model: str = "deepseek-v4-flash"
 
+    # gleaning 补抽轮数（LightRAG extract_entities 模式）：每块首轮解析成功后追加
+    # 「只补遗漏」轮，0 关闭。每 +1 轮 ≈ 块抽取调用量翻倍，质量收益递减，默认 1。
+    gleaning: int = 1
+
 
 class Mem0Config(BaseModel):
     """Mem0 记忆：矛盾检测 / 跳过模式 / 批量刷新。"""

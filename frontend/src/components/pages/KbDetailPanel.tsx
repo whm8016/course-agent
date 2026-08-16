@@ -671,7 +671,7 @@ export default function KbDetailPanel({
                   const inferred = e.relation === INFERRED_RELATION
                   return (
                     <div key={`${e.src}-${e.dst}-${i}`} className="flex items-center gap-2 px-2 py-1 text-xs">
-                      <span className="truncate flex-1 text-ink-soft">
+                      <span className="truncate flex-1 text-ink-soft" title={e.evidence ?? undefined}>
                         <span className="text-ink">{s?.label ?? e.src}</span> → {d?.label ?? e.dst}
                       </span>
                       {inferred && (

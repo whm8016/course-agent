@@ -458,6 +458,8 @@ export interface TeacherTopicEdge {
   relation: TopicEdgeRelation
   confidence: number
   verified_by?: string | null
+  /** 课文锚定边的讲义原句（子串校验过，悬停核对用）；闭包推断边为 null */
+  evidence?: string | null
 }
 
 export interface TeacherTopicGraph {
