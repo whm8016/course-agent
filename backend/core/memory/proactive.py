@@ -10,7 +10,7 @@
 
 数据层约束（id-align）：门控**只读** ``knowledge_mastery``（经 ``course_topic_store``
 对齐 topic_id；risk/logit 由 mastery_state 折叠状态派生）与 ``mastery_observation``
-（C2 复发 = 同主题 poor 计数 ≥ 2，30 天窗）。**禁止**读 ``users.knowledge_graph`` /
+（C2 复发 = 同主题 poor 计数 ≥ 1，30 天窗）。**禁止**读 ``users.knowledge_graph`` /
 ``users.error_graph``——那是仪表盘展示层，非门控数据源（error_graph 的自由标签哈希
 节点数不准「同一个错又犯」，见 plan §3f）。
 
@@ -41,16 +41,21 @@ logger = logging.getLogger(__name__)
 UNKNOWN_THRESHOLD = 0.55
 
 # C1 入闸判据（plan §3e，口径改 theta）：theta <= WEAK_MARGIN。
-# 语义锚点 =「同一主题至少 2 次判 poor」（Elo 折叠下 1 次 poor ≈ -0.30、2 次 ≈ -0.54，
-# 本值取 logit(0.4) ≈ -0.4055，恰等价 risk >= 0.6，便于换算成人能读的概率）。
+# 语义锚点 =「同一主题至少 1 次判 poor」（2026-08-18 由 2 次下调：判定观测常摊到
+# 兄弟主题上，凑两次等于把真缺口挡在门外；live 表E 12 个漏提里 ≈8 个死在这）。
+# Elo 折叠（W_JUDGE=0.6）下 1 次 poor：b=0 → θ≈-0.30、b=0.5 → θ≈-0.2265，均 <= 本值；
+# 本值取 logit(0.45) ≈ -0.2007，恰等价 risk >= 0.55，便于换算成人能读的概率。
+# 不入闸的边界：fair-only（b∈[-0.5,0.5] 折完 θ >= -0.0735）、单次 W_RULE 观测
+# （b=0 → -0.15）——低信源仍需两次；2 次 poor（≈-0.54）维持入闸不变。
 # 不比 theta - b：b 是班级难度，一旦非零，一个 fair、theta≈0 的学生会被班级难度
 # 直接拖过闸——把「该生薄弱」改写成「这题班里难」，与门控原意冲突。b 只进
 # risk = 1 - sigmoid(theta - b)（影响已入闸候选的 p_need 排序），不决定谁能入闸。
 # 纪律：不写死就算完——test_mastery_state 由 fold_observations 实算夹出此值须落在
-# 1 次与 2 次 poor 之间；W_JUDGE 变了测试会红，强制重定常量。
-WEAK_MARGIN = -0.4055
+# 1 次 poor 与 fair-only 之间；W_JUDGE 变了测试会红，强制重定常量。
+WEAK_MARGIN = -0.2007
 
-# C2 复发：观测日志中同主题 poor 计数（30 天窗，与 p_forget S0=5 量级相称，进 eval 扫）
+# C2 复发：观测日志中同主题 poor 计数（30 天窗，与 p_forget S0=5 量级相称，进 eval 扫）。
+# 计数门槛 ≥1（与 WEAK_MARGIN 的「一次薄弱即管」同语义；2026-08-18 由 ≥2 下调）
 RECURRENCE_WINDOW_DAYS = 30
 
 DEFAULT_C_FA = 1.0
@@ -97,7 +102,7 @@ def decide_stitch(
             logit = theta - b_topic 只供 risk/p_need 派生（班级难度不决定谁能入闸）。
             safety_weight 是教师标注的任务风险因子（默认 1.0），乘进 p_need——
             0=该主题永不因它预警、>1=更想预警（漏报代价更高，如通电操作类）。
-        error_repeated: 反复出错的 topic_id 集（mastery_observation 同主题 poor 计数 ≥2 派生）。
+        error_repeated: 反复出错的 topic_id 集（mastery_observation 同主题 poor 计数 ≥1 派生）。
         now: cooldown 判定的当前时间戳（调用方传入，保持纯函数可单测；None=用 time.time）。
             冷却时间戳读 mastery_map[evidence]["last_stitched_at"]（行上自带，见 _read_mastery）。
         c_fa / c_fn: 误报/漏报代价。τ 由公式实算（单一真相源），默认 1:3 下的
@@ -117,7 +122,7 @@ def decide_stitch(
         return StitchBrief(False, None, "unknown", 0.0, 1.0)
 
     # 2. C1 前置缺口：前置闭包（不含 matched）里薄弱的（theta 判据，plan §3e：
-    #    比 risk 不比被 sigmoid 压扁的概率；「至少两次判 poor」的语义锚点；不用
+    #    比 risk 不比被 sigmoid 压扁的概率；「至少一次判 poor」的语义锚点；不用
     #    theta - b——班级难度不决定谁能入闸，b 只影响入闸后的 risk/p_need）
     prereq_gaps = [
         (tid, mastery_map[tid])
@@ -449,7 +454,7 @@ async def _read_error_repeated(
     user_id: str, course_id: str, db, topic_map: dict[str, str],
     *, now: float | None = None,
 ) -> set[str]:
-    """C2 复发：观测日志中同主题 poor 计数 ≥ 2（30 天窗）派生（plan §3f）。
+    """C2 复发：观测日志中同主题 poor 计数 ≥ 1（30 天窗）派生（plan §3f）。
 
     不再读 users.error_graph——节点 id 是对 LLM 自由标签哈希的，同一错误换个说法
     就是新节点，error_count 永远 1；且门控读仪表盘数据违反数据层约束。观测日志的
@@ -471,7 +476,7 @@ async def _read_error_repeated(
                 MasteryObservation.created_at >= cutoff,
             )
             .group_by(MasteryObservation.topic_id)
-            .having(func.count() >= 2)
+            .having(func.count() >= 1)
         )
     ).all()
     valid = set(topic_map.values())

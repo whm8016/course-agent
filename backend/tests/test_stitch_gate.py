@@ -4,8 +4,9 @@
 τ = C_FA/(C_FA + p_need·C_FN)，C_FA=1/C_FN=3 的代数正解即 p_need >= 0.434
 （p_need >= 1/(1+3·p_need)）——门槛不随轮变化。
 
-阶段D 改动：C1 候选判据从 risk >= 0.5 换 theta 空间（theta <= WEAK_MARGIN≈-0.4055，
-等价「至少两次判 poor」；不用 theta - b——班级难度不决定谁能入闸）。测试 mastery_map
+阶段D 改动：C1 候选判据从 risk >= 0.5 换 theta 空间（theta <= WEAK_MARGIN≈-0.2007，
+等价「至少一次判 poor」——2026-08-18 由两次下调，判定观测常摊到兄弟主题上凑不满
+两次；不用 theta - b——班级难度不决定谁能入闸）。测试 mastery_map
 用真实折叠器（fold_observations）算出的状态，不再手拍 0.9。
 """
 import time
@@ -83,7 +84,7 @@ def test_recurrence_floor_beats_threshold():
     assert brief.p_need >= 0.7
 
 
-# ── 阶段D 回归：fair 不入闸 / 1次poor不入闸 / 2次poor入闸 ────────────────────
+# ── 阶段D 回归：fair 不入闸 / 1次poor入闸 / 2次poor入闸 ────────────────────
 
 
 def test_one_fair_not_candidate():
@@ -93,11 +94,12 @@ def test_one_fair_not_candidate():
     assert brief.reason == "no_candidate"
 
 
-def test_one_poor_not_candidate_two_poor_is():
-    """语义锚点：1 次 poor 不入闸（theta -0.30 > WEAK_MARGIN -0.4055），
-    2 次 poor 入闸（theta -0.54 <= WEAK_MARGIN）。"""
+def test_one_poor_is_candidate_and_fires_when_old():
+    """语义锚点（2026-08-18 下调后）：1 次 poor 即入闸（theta -0.30 <= WEAK_MARGIN
+    -0.2007）；p_forget=1（久未练）时 p_need≈0.57 > 0.434 应拼。2 次 poor 同样入闸。"""
     one = decide_stitch("kcl", _PREREQ, _folded_map(["poor"]), set())
-    assert one.reason == "no_candidate"
+    assert one.reason == "prereq_gap"
+    assert one.should_stitch is True
     two = decide_stitch("kcl", _PREREQ, _folded_map(["poor", "poor"]), set())
     # 入闸为候选：p_forget=1 时 p_need≈0.63 > 0.434 应拼
     assert two.reason == "prereq_gap"
@@ -321,6 +323,6 @@ def test_class_difficulty_not_drags_fair_student_into_gate():
 
 
 def test_weak_margin_is_negative_and_meaningful():
-    """口径锚：WEAK_MARGIN ≈ logit(0.4) ≈ -0.4055（等价 risk >= 0.6）。"""
+    """口径锚：WEAK_MARGIN ≈ logit(0.45) ≈ -0.2007（等价 risk >= 0.55）。"""
     import math
-    assert math.isclose(WEAK_MARGIN, math.log(0.4 / 0.6), abs_tol=1e-4)
+    assert math.isclose(WEAK_MARGIN, math.log(0.45 / 0.55), abs_tol=1e-4)

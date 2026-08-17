@@ -2,8 +2,8 @@
 
 关键纪律：
 - 折叠顺序相关（近期证据权重大）是预期行为，测试防「优化成顺序无关」；
-- WEAK_MARGIN 必须由 fold_observations 实算夹出（1 次 poor 不入闸、2 次入闸），
-  weight 变了此测试会红，强制重扫常量（plan §3e）。
+- WEAK_MARGIN 必须由 fold_observations 实算夹出（1 次 poor 入闸、fair-only 不入闸；
+  2026-08-18 由「2 次入闸」下调），weight 变了此测试会红，强制重扫常量（plan §3e）。
 
 难度侧（b）已从 fold_observations 拆出（plan「班级难度估计修复」）：题目难度由
 fold_class_difficulty 独占（每人各自 theta 对共享 b，日频 cron 全班重折）。
@@ -14,8 +14,9 @@ from core.memory.mastery_state import (
     A_U,
     B_RATE_U,
     K_FLOOR,
-    W_QUIZ,
     W_JUDGE,
+    W_QUIZ,
+    W_RULE,
     FoldState,
     elo_update,
     fold_class_difficulty,
@@ -248,40 +249,52 @@ def _weak_margin_from_proactive() -> float:
     return WEAK_MARGIN
 
 
-def test_weak_margin_sandwiched_between_1_and_2_poor():
-    """WEAK_MARGIN 必须落在 1 次 poor 与 2 次 poor 的 theta 之间：
-    1 次不入闸、2 次入闸（「至少两次判 poor」语义锚点）。weight 改了这里会红。"""
+def test_weak_margin_sandwiched_between_fair_and_1_poor():
+    """WEAK_MARGIN 必须落在 fair-only 与 1 次 poor 的 theta 之间：
+    1 次判 poor 即入闸、fair 不入闸（2026-08-18 由「2 次入闸」下调后的语义锚点）。
+    weight 改了这里会红。"""
     m = _weak_margin_from_proactive()
+    fair = fold_observations([_fair_obs()]).theta
     one = fold_observations([_poor(1.0, 0)]).theta
-    two = fold_observations([_poor(1.0, 0), _poor(2.0, 1)]).theta
-    assert one > m > two, (
-        f"WEAK_MARGIN={m} 未夹在 1次poor({one:.4f}) 与 2次poor({two:.4f}) 之间——"
+    assert one < m < fair, (
+        f"WEAK_MARGIN={m} 未夹在 1次poor({one:.4f}) 与 fair({fair:.4f}) 之间——"
         "weight 调整后须重定常量（plan §3e）"
     )
 
 
-def test_weak_margin_equivalent_risk_ge_06():
-    """口径锚：WEAK_MARGIN = logit(0.4) ≈ -0.4055（等价 risk >= 0.6，便于人读）。"""
+def test_weak_margin_keeps_single_rule_poor_out():
+    """低信源边界：单次 W_RULE 观测（theta≈-0.15）不入闸——规则观测要凑两次；
+    而单次 W_JUDGE 判定（-0.30）一次即入。"""
     m = _weak_margin_from_proactive()
-    assert math.isclose(m, math.log(0.4 / 0.6), abs_tol=1e-4)
+    rule_one = fold_observations(
+        [{"created_at": 1.0, "outcome": 0.0, "weight": W_RULE, "source": "rule"}]
+    ).theta
+    assert m < rule_one, f"单次 rule-poor theta={rule_one:.4f} 不应越过 WEAK_MARGIN={m}"
+
+
+def test_weak_margin_equivalent_risk_ge_055():
+    """口径锚：WEAK_MARGIN = logit(0.45) ≈ -0.2007（等价 risk >= 0.55，便于人读）。"""
+    m = _weak_margin_from_proactive()
+    assert math.isclose(m, math.log(0.45 / 0.55), abs_tol=1e-4)
 
 
 def test_fair_lands_far_from_margin():
     """1 次 fair 观测 theta≈0，远离 WEAK_MARGIN（不会被误判成前置缺口）。"""
     m = _weak_margin_from_proactive()
     fair = fold_observations([_fair_obs()]).theta
-    assert fair > m + 0.3
+    assert fair > m + 0.15
 
 
 def test_c1_anchor_unaffected_by_class_difficulty():
-    """C1 锚点：b 取 0 和 0.5 两种，1 次 poor 的 theta 仍高于 WEAK_MARGIN、
-    2 次仍低于——入闸比 theta 不比 theta-b，班级难度拖不动「该生薄弱」语义。"""
+    """C1 锚点：b 取 0 和 0.5 两种，1 次 poor 的 theta 仍低于 WEAK_MARGIN（入闸，
+    2026-08-18 口径）、fair 仍高于——入闸比 theta 不比 theta-b，班级难度拖不动
+    「该生薄弱」语义。"""
     m = _weak_margin_from_proactive()
     for b in (0.0, 0.5):
         one = fold_observations([_poor(1.0, 0)], FoldState(b_topic=b)).theta
-        two = fold_observations([_poor(1.0, 0), _poor(2.0, 1)], FoldState(b_topic=b)).theta
-        assert one > m, f"b={b}：1 次 poor 被拖过闸（theta={one:.4f}）"
-        assert two < m, f"b={b}：2 次 poor 反而没入闸（theta={two:.4f}）"
+        fair = fold_observations([_fair_obs()], FoldState(b_topic=b)).theta
+        assert one < m, f"b={b}：1 次 poor 没入闸（theta={one:.4f}）"
+        assert fair > m, f"b={b}：1 次 fair 被拖过闸（theta={fair:.4f}）"
 
 
 def _fair_obs() -> dict:

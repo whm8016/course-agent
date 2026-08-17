@@ -173,7 +173,8 @@ async def get_mastery_context(
 
     # 薄弱点：衰减后 effective_risk 高优先；risk<0.5 的不算薄弱
     # 注意：此 0.5 是**仪表盘排序口径**，与门控的 WEAK_MARGIN（logit 空间，plan §3e）
-    # 故意不同源——门控判据是「至少两次判 poor」的语义锚点，这里只是看板筛选线。
+    # 故意不同源——门控判据是「至少一次判 poor」的语义锚点（2026-08-18 由两次下调），
+    # 这里只是看板筛选线。
     # 勿"顺手统一"：把门控判据拉回 0.5 会把表现平平（fair）误判成前置缺口。
     scored.sort(key=lambda x: -x[1])
     weak = [(r, eff) for (r, eff) in scored if r.risk >= 0.5][:top_n]
