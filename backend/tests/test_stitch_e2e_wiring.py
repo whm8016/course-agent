@@ -39,7 +39,7 @@ async def patched_embed(monkeypatch):
     query_to_emb = {c["query"]: emb_by_topic.get(c["matched_topic"]) for c in STITCH_CASES}
     fake = _FakeEmbed(query_to_emb, dim)
     monkeypatch.setattr("core.rag.llamaindex.pg_store._embed_model", fake)
-    yield fake
+    yield
 
 
 async def test_stitch_e2e_full_wiring(patched_embed):
@@ -55,7 +55,6 @@ async def test_stitch_e2e_full_wiring(patched_embed):
     assert arms["always"]["balanced_accuracy"] == 0.5
     # 匹配机制：桩向量与自身余弦恰为 1（导出已断言 round 后向量唯一，无平局可翻）
     assert summary["match_misses"] == 0
-    assert all(r["match_ok"] for r in summary["details"])
     # 冷却机制：复发臂（p_need floor 0.7 与 b 无关）下 cooldown_1h/20h 必被冷却压住
     by_id = {r["id"]: r for r in summary["details"]}
     for cid in ("cooldown_1h", "cooldown_20h"):

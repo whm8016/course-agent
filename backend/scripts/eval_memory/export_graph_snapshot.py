@@ -1,4 +1,4 @@
-"""导出表E评测图快照（确定性图源，两份、两个层级）。
+"""导出表E评测图快照（确定性图源，三份、三个层级）。
 
 - ``graph_mycourse_v2.json``：精简投影（topic_id/label + 边），决策层离线 runner
   （``run_stitch_table_e``）与 CI 闭包断言用。从 DB 导出，**只在 ``--refresh-v2``
@@ -125,8 +125,9 @@ async def _export_v3() -> dict:
     }
 
 
-async def _export_v2() -> dict:
-    """v2 刷新（DB → 精简投影）。默认不跑——动它等于换评测世界，需连带重审案例。"""
+async def _fetch_course_graph() -> tuple[list, list]:
+    """DB → (topics, edges)。v2 刷新与 live 直出共用同一查询源（单一真相源在
+    ``course_topic_store.fetch_*``），两个 DB 快照的取数口径永不漂移。"""
     from core.db.database import AsyncSessionLocal, close_db
     from core.memory.course_topic_store import fetch_course_edges, fetch_course_topics
 
@@ -134,6 +135,23 @@ async def _export_v2() -> dict:
         topics = await fetch_course_topics(db, COURSE_ID)
         edges = await fetch_course_edges(db, COURSE_ID)
     await close_db()
+    return topics, edges
+
+
+def _edges_payload(edges) -> list[dict]:
+    """边投影 + 确定性排序（v2 与 live 同一份，防两快照边口径各自漂移）。"""
+    return sorted(
+        (
+            {"src": e.src_topic_id, "dst": e.dst_topic_id, "relation": e.relation}
+            for e in edges
+        ),
+        key=lambda x: (x["src"], x["dst"]),
+    )
+
+
+async def _export_v2() -> dict:
+    """v2 刷新（DB → 精简投影）。默认不跑——动它等于换评测世界，需连带重审案例。"""
+    topics, edges = await _fetch_course_graph()
     return {
         "course_id": COURSE_ID,
         "note": "表E评测图源快照；runner 不连 DB，重抽取后重跑 export --refresh-v2 刷新",
@@ -141,26 +159,14 @@ async def _export_v2() -> dict:
             ({"topic_id": t.topic_id, "label": t.label} for t in topics),
             key=lambda x: x["topic_id"],
         ),
-        "edges": sorted(
-            (
-                {"src": e.src_topic_id, "dst": e.dst_topic_id, "relation": e.relation}
-                for e in edges
-            ),
-            key=lambda x: (x["src"], x["dst"]),
-        ),
+        "edges": _edges_payload(edges),
     }
 
 
 async def _export_live() -> dict:
-    """现网库图直出（live 全栈层的案例锚定图）：fetch_course_topics/edges 同一查询源，
-    含现网 difficulty_b / safety_weight（neg_class_hard 用现网真 b，全班 b=0 则如实记）。"""
-    from core.db.database import AsyncSessionLocal, close_db
-    from core.memory.course_topic_store import fetch_course_edges, fetch_course_topics
-
-    async with AsyncSessionLocal() as db:
-        topics = await fetch_course_topics(db, COURSE_ID)
-        edges = await fetch_course_edges(db, COURSE_ID)
-    await close_db()
+    """现网库图直出（live 全栈层的案例锚定图），含现网 difficulty_b / safety_weight
+    （neg_class_hard 用现网真 b，全班 b=0 则如实记）。"""
+    topics, edges = await _fetch_course_graph()
     return {
         "course_id": COURSE_ID,
         "note": "现网库图快照（live 全栈评测锚定图）；重抽取后重跑 export --live 刷新",
@@ -175,14 +181,18 @@ async def _export_live() -> dict:
             ),
             key=lambda x: x["topic_id"],
         ),
-        "edges": sorted(
-            (
-                {"src": e.src_topic_id, "dst": e.dst_topic_id, "relation": e.relation}
-                for e in edges
-            ),
-            key=lambda x: (x["src"], x["dst"]),
-        ),
+        "edges": _edges_payload(edges),
     }
+
+
+def _write_snapshot(snapshot: dict, name: str, tag: str) -> None:
+    """确定性落盘（indent=1 + ensure_ascii=False，git diff 友好）+ 一行日志。"""
+    out = Path(__file__).resolve().parent / name
+    out.write_text(json.dumps(snapshot, ensure_ascii=False, indent=1), encoding="utf-8")
+    logger.info(
+        "[export_graph] %s: %d topics / %d edges -> %s",
+        tag, len(snapshot["topics"]), len(snapshot["edges"]), out,
+    )
 
 
 def main() -> None:
@@ -197,35 +207,17 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    base = Path(__file__).resolve().parent
     if args.live:
-        live = asyncio.run(_export_live())
-        out = base / SNAPSHOT_PATH_LIVE
-        out.write_text(json.dumps(live, ensure_ascii=False, indent=1), encoding="utf-8")
-        logger.info(
-            "[export_graph] live: %d topics / %d edges -> %s",
-            len(live["topics"]), len(live["edges"]), out,
-        )
+        if args.refresh_v2:
+            raise SystemExit("--live 与 --refresh-v2 不组合：live 只导现网图快照（不动 v2/v3）")
+        _write_snapshot(asyncio.run(_export_live()), SNAPSHOT_PATH_LIVE, "live")
         return
 
-    base = Path(__file__).resolve().parent
     if args.refresh_v2:
         # 先刷 v2 再导 v3：v3 从磁盘上的 v2 构建，顺序反了会让 v3 停在旧图
         # （v2 新、v3 旧——离线层与 e2e 层各读一份不同源的图）
-        v2 = asyncio.run(_export_v2())
-        out = base / SNAPSHOT_PATH
-        out.write_text(json.dumps(v2, ensure_ascii=False, indent=1), encoding="utf-8")
-        logger.info(
-            "[export_graph] v2: %d topics / %d edges -> %s",
-            len(v2["topics"]), len(v2["edges"]), out,
-        )
-    v3 = asyncio.run(_export_v3())
-    out = base / SNAPSHOT_PATH_V3
-    out.write_text(json.dumps(v3, ensure_ascii=False, indent=1), encoding="utf-8")
-    logger.info(
-        "[export_graph] v3: %d topics / %d edges -> %s",
-        len(v3["topics"]), len(v3["edges"]), out,
-    )
+        _write_snapshot(asyncio.run(_export_v2()), SNAPSHOT_PATH, "v2")
+    _write_snapshot(asyncio.run(_export_v3()), SNAPSHOT_PATH_V3, "v3")
 
 
 if __name__ == "__main__":

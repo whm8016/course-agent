@@ -8,9 +8,11 @@ Usage（backend 目录，需 EMBEDDING__API_KEY——问句要真实向量化）
 - **入口是生产读侧** ``core.memory.proactive.stitch_for_turn``：问句只有一句中文，
   matched_topic 由 ``_match_topic`` 拿 course_topic.embedding 真最近邻算出（旧 e2e
   把 case 的 matched_topic 塞回 decide_stitch，匹配这步是假的——已删）；
-- **构造侧直写生产读的字段**：mastery_observation.created_at（30 天复发窗）、
-  knowledge_mastery.last_observed_at（遗忘）/ last_stitched_at（冷却）/ theta
-  （fold_observations 真实折出，b 用快照真难度，列集对齐 consolidation 生产 INSERT）；
+- **构造侧走生产写侧的 override 注入口**：观测追加 + theta 全量重折 +
+  knowledge_mastery upsert 全部经 ``consolidation._write_mastery_observations``
+  （source/weight/created_at 注入，quiz_observe 同款）——列集/round/strength 语义
+  单源在生产，评测侧永不漂移；唯一非生产字段 last_stitched_at（commit_stitch_cooldown
+  独占）单独 UPDATE；
 - **发问侧只传 query + 冻结 now**（case_now）：遗忘/复发/冷却全部由管道自己比
   「现在」算出，出题人不再预折 p_forget、预写 error_repeated。
 
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -48,15 +51,17 @@ logger = logging.getLogger(__name__)
 # 档案构造单一真相源（与离线 build_mastery_map 同一份）：env 预置之后再导入，
 # stitch_cases_table_e 模块级无 core 依赖，此处安全
 from .stitch_cases_table_e import (  # noqa: E402
-    STITCH_CASES, case_now, entry_last_stitched_at, entry_observations, fold_entry,
+    STITCH_CASES, case_now, entry_last_stitched_at, entry_observations,
 )
 
 _SNAPSHOT_V3 = Path(__file__).resolve().parent / "graph_mycourse_v3_emb.json"
 
 
+@functools.lru_cache(maxsize=1)
 def load_graph_embedded() -> dict:
     """v3 快照（e2e 图源）：{course_id, topics:[{topic_id,label,difficulty_b,
-    safety_weight,embedding}], edges:[{src,dst,relation}]}。"""
+    safety_weight,embedding}], edges:[{src,dst,relation}]}。3MB JSON 进程内只解析
+    一次（快照进程内不可变；wiring 测试同进程多次跑 run() 不重复付费）。"""
     if not _SNAPSHOT_V3.exists():
         raise SystemExit(
             f"缺 {_SNAPSHOT_V3.name}——先跑 "
@@ -81,14 +86,14 @@ async def _probe_embed() -> None:
 
 
 async def _ensure_user(db, user_id: str) -> None:
-    """FK 需要（knowledge_mastery / mastery_observation 都挂 users.id）。"""
+    """FK 需要（knowledge_mastery / mastery_observation 都挂 users.id）。
+    只 add 不 commit——由调用方事务兜底（写观测的生产写侧自带 commit）。"""
     from core.db.database import User
     from sqlalchemy import select
 
     row = (await db.execute(select(User).where(User.id == user_id))).scalars().first()
     if row is None:
         db.add(User(id=user_id, username=user_id, password_hash="seed", role="student"))
-        await db.commit()
 
 
 async def _seed_graph(db, snapshot: dict) -> None:
@@ -99,34 +104,40 @@ async def _seed_graph(db, snapshot: dict) -> None:
     course_id = snapshot["course_id"]
     await db.execute(delete(CourseTopicEdge).where(CourseTopicEdge.course_id == course_id))
     await db.execute(delete(CourseTopic).where(CourseTopic.course_id == course_id))
-    for t in snapshot["topics"]:
-        db.add(CourseTopic(
+    db.add_all([
+        CourseTopic(
             course_id=course_id, topic_id=t["topic_id"], label=t["label"],
             embedding=t["embedding"],
             safety_weight=t.get("safety_weight", 1.0),
             difficulty_b=t.get("difficulty_b", 0.0),
-        ))
-    for e in snapshot["edges"]:
-        db.add(CourseTopicEdge(
+        )
+        for t in snapshot["topics"]
+    ])
+    db.add_all([
+        CourseTopicEdge(
             course_id=course_id, src_topic_id=e["src"], dst_topic_id=e["dst"],
             relation=e["relation"],
-        ))
+        )
+        for e in snapshot["edges"]
+    ])
     await db.commit()
 
 
-async def _seed_case(
-    db, course_id: str, user_id: str, case: dict, b_map: dict[str, float]
-) -> None:
-    """种生产读侧消费的痕迹（幂等）：观测日志 + 掌握度行（真实折叠）。
+async def _seed_case(db, course_id: str, user_id: str, case: dict) -> None:
+    """种生产读侧消费的痕迹（幂等）：走**生产写侧** ``consolidation.
+    _write_mastery_observations`` 的 override 注入口（created_at 逐条注入，
+    quiz_observe 同款）——观测追加 + 按库内日志全量重折 + knowledge_mastery
+    upsert 的列集/round/strength 语义单源在生产，评测侧手抄列集永不漂移（旧手抄
+    版就漂移过 strength：生产 good 批次 6.0，手抄恒 5.0）。唯一非生产字段
+    last_stitched_at（commit_stitch_cooldown 独占）单独 UPDATE 如实隔离。
 
-    列集对齐 consolidation 生产 INSERT（mastery/risk round 4、theta round 6、
-    n_obs=observation_count）；theta 从快照真难度 b 起折（生产同 regime）。旧 e2e
-    的 episodes→consolidate（mock match_topics/judge）已删——判定面不是门控的
-    评测对象，观测直落即「真学生留下的痕迹」。
+    逐条观测一次调用（一次调用共享一个 created_at），按 entry_observations 的
+    升序喂入——写侧 last_observed_at「单调不回退」的语义自然成立。
     """
     from core.db.database import KnowledgeMastery, MasteryObservation
-    from core.memory.mastery_state import W_JUDGE
-    from sqlalchemy import delete
+    from core.memory.consolidation import _write_mastery_observations
+    from core.memory.judge import Judgement
+    from sqlalchemy import delete, update
 
     await db.execute(delete(MasteryObservation).where(
         MasteryObservation.user_id == user_id,
@@ -139,26 +150,26 @@ async def _seed_case(
     await _ensure_user(db, user_id)
 
     for m in case["mastery"]:
-        obs = entry_observations(case, m)
-        for o in obs:
-            db.add(MasteryObservation(
-                user_id=user_id, course_id=course_id, topic_id=m["topic_id"],
-                source="llm_judge", outcome=o["outcome"], weight=W_JUDGE,
-                confidence=0.9, evidence_quote=case["query"],
-                created_at=o["created_at"],
-            ))
-        state = fold_entry(case, m, b_topic=b_map.get(m["topic_id"], 0.0))
-        db.add(KnowledgeMastery(
-            user_id=user_id, course_id=course_id, kp_id=m["topic_id"],
-            label=m.get("label", m["topic_id"]),
-            mastery=round(state.mastery, 4), risk=round(state.risk, 4),
-            observation_count=state.n_obs,
-            first_observed_at=min(o["created_at"] for o in obs),
-            last_observed_at=max(o["created_at"] for o in obs),
-            theta=round(state.theta, 6), n_obs=state.n_obs,
-            strength=5.0,  # 不模拟 teacher_affirm 的 +1（案例不建这个场景）
-            last_stitched_at=entry_last_stitched_at(case, m),
-        ))
+        # zip 同序（entry_observations 按 levels 升序构造），lv 供判定等级、
+        # o["created_at"] 供拨钟——judgement 的 level/outcome 映射留在生产写侧
+        for lv, o in zip(m["levels"], entry_observations(case, m)):
+            await _write_mastery_observations(
+                db, user_id, course_id,
+                [Judgement(m["topic_id"], lv, 0.9, case["query"])],
+                [],
+                created_at_override=o["created_at"],
+            )
+        ls = entry_last_stitched_at(case, m)
+        if ls is not None:
+            await db.execute(
+                update(KnowledgeMastery)
+                .where(
+                    KnowledgeMastery.user_id == user_id,
+                    KnowledgeMastery.course_id == course_id,
+                    KnowledgeMastery.kp_id == m["topic_id"],
+                )
+                .values(last_stitched_at=ls)
+            )
     await db.commit()
 
 
@@ -190,7 +201,6 @@ async def run() -> dict:
 
     snapshot = load_graph_embedded()
     course_id = snapshot["course_id"]
-    b_map = {t["topic_id"]: t.get("difficulty_b", 0.0) for t in snapshot["topics"]}
     stats = {a: {"tp": 0, "fn": 0, "fp": 0, "tn": 0} for a in ZERO_LLM_ARMS}
     rows: list[dict] = []
 
@@ -204,7 +214,7 @@ async def run() -> dict:
 
             for i, c in enumerate(STITCH_CASES):
                 user_id = f"e2e_{i:02d}"  # users.id String(32)；用 case id 拼会超长
-                await _seed_case(db, course_id, user_id, c, b_map)
+                await _seed_case(db, course_id, user_id, c)
                 await _assert_emergent_error_repeated(db, course_id, user_id, topic_map, c)
 
                 # 发问侧只做一件事：丢问句 + 冻结 now。matched/error_repeated/p_forget
@@ -231,8 +241,8 @@ async def run() -> dict:
                         gold and not brief.should_stitch and brief.reason == "cooldown"
                     ),
                 }
-                for arm, pred in (
-                    ("never", False), ("always", True), ("gate", brief.should_stitch),
+                for arm, pred in zip(
+                    ZERO_LLM_ARMS, (False, True, brief.should_stitch),
                 ):
                     s = stats[arm]
                     if gold and pred:

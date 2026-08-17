@@ -39,10 +39,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:  # 仅类型注解用，运行时零 core 依赖（模块级保持纯数据可导入）
-    from core.memory.mastery_state import FoldState
 
 # 固定时钟：冷却/遗忘判定确定性可测（decide_stitch 的 now 参数）
 NOW = 1_800_000_000.0
@@ -109,17 +105,6 @@ def entry_last_stitched_at(case: dict, m: dict) -> float | None:
     return case_now(case) - m["last_stitched_hours_ago"] * 3600
 
 
-def fold_entry(case: dict, m: dict, b_topic: float | None = None) -> "FoldState":
-    """真实折叠（与生产 consolidation 同 regime：b≠0 从 b 起折）。b_topic=None 用
-    case 的 b_topic（离线默认 0）；e2e 传快照真难度。"""
-    from core.memory.mastery_state import FoldState, fold_observations
-
-    return fold_observations(
-        entry_observations(case, m),
-        FoldState(b_topic=m.get("b_topic", 0.0) if b_topic is None else b_topic),
-    )
-
-
 def gate_decide(case: dict, edges: list[dict]):
     """case → 门控决策一条龙（闭包 + 档案构建 + decide_stitch）。
 
@@ -139,20 +124,22 @@ def gate_decide(case: dict, edges: list[dict]):
 def build_mastery_map(case: dict) -> dict[str, dict]:
     """case 档案 → decide_stitch 的 mastery_map（真实折叠 + 遗忘实算）。
 
-    折叠/冷却戳走 entry_observations/fold_entry/entry_last_stitched_at（与 e2e
-    落库同一构造源）；p_forget 按「决策钟 - 最后观测时刻」实算（同 _read_mastery
-    的 age 口径），对无 now 键的旧例与 days_since_last 直传逐位一致。b≠0 时 theta
-    与生产同 regime（从 b 起折，consolidation.py 同款 init，非 b=0 折完读时补减）；
-    b 只进 risk/logit 不进入闸判据（theta 空间）。字段集对齐 _read_mastery /
-    scorer._gate_mastery_map 的 map 形状（label 便于调试）；decide_stitch 只读
-    risk/theta/p_forget/last_stitched_at（.get 默认）。
+    观测/冷却戳走 entry_observations/entry_last_stitched_at（与 e2e 落库同一
+    构造源；e2e 侧 theta 由生产写侧 consolidation._write_mastery_observations
+    从库内观测全量重折，这里离线直折同一份 obs，两侧同 regime）。p_forget 按
+    「决策钟 - 最后观测时刻」实算（同 _read_mastery 的 age 口径），对无 now 键的
+    旧例与 days_since_last 直传逐位一致。b≠0 时从 b 起折（consolidation 同款
+    init，非 b=0 折完读时补减）；b 只进 risk/logit 不进入闸判据（theta 空间）。
+    字段集对齐 _read_mastery / scorer._gate_mastery_map 的 map 形状（label 便于
+    调试）；decide_stitch 只读 risk/theta/p_forget/last_stitched_at（.get 默认）。
     """
     from core.memory.mastery import forget_prob
+    from core.memory.mastery_state import FoldState, fold_observations
 
     out: dict[str, dict] = {}
     for m in case["mastery"]:
         obs = entry_observations(case, m)
-        s = fold_entry(case, m)
+        s = fold_observations(obs, FoldState(b_topic=m.get("b_topic", 0.0)))
         age_days = (case_now(case) - max(o["created_at"] for o in obs)) / 86400.0
         out[m["topic_id"]] = {
             "risk": round(s.risk, 4),
