@@ -183,13 +183,16 @@ def decide_stitch(
 
 
 async def stitch_for_turn(
-    query: str, user_id: str, course_id: str, db
+    query: str, user_id: str, course_id: str, db, *, now: float | None = None
 ) -> StitchBrief:
     """运行时包装：算 S_t + 读 mastery/error + 调 decide_stitch。
 
     embed_model 在内部解析（get_embed_model 单例，失败 fail-safe 不拼），调用方无需关心。
     matched_topic 经 embedding 最近邻；无 embedding（course_topic 未灌 embedding 或不可用）
     → fail-safe 返回不拼，不阻塞回答。
+
+    now: 时钟注入口径（评测用冻结钟保证可复现），None=各读侧自己取 time.time()
+    （生产默认）。遗忘（age_days）、30 天复发窗、冷却比较统一走同一戳。
     """
     from dataclasses import replace
 
@@ -214,11 +217,11 @@ async def stitch_for_turn(
     topic_map = await get_course_topic_map(course_id, db)
 
     # 3/4. mastery + error repeated（topic_map 本地对齐，无逐行 DB 查询）
-    mastery_map = await _read_mastery(user_id, course_id, db, topic_map)
-    error_repeated = await _read_error_repeated(user_id, course_id, db, topic_map)
+    mastery_map = await _read_mastery(user_id, course_id, db, topic_map, now=now)
+    error_repeated = await _read_error_repeated(user_id, course_id, db, topic_map, now=now)
 
     # 5. 决策（口径见 decide_stitch docstring）
-    brief = decide_stitch(matched_topic, closure, mastery_map, error_repeated)
+    brief = decide_stitch(matched_topic, closure, mastery_map, error_repeated, now=now)
 
     # 6. 应拼则填简报文本（frozen dataclass 用 replace，免手工抄字段）。
     #    cooldown 戳不在此写——拼上下文发生在模型调用前，模型失败会白烧 24h 冷却；
@@ -356,7 +359,8 @@ async def _match_topic(query: str, course_id: str, db, embed_model) -> tuple[str
 
 
 async def _read_mastery(
-    user_id: str, course_id: str, db, topic_map: dict[str, str]
+    user_id: str, course_id: str, db, topic_map: dict[str, str],
+    *, now: float | None = None,
 ) -> dict[str, dict]:
     """读 knowledge_mastery → {topic_id: {risk, p_forget, logit, label, ...}}。
 
@@ -414,7 +418,7 @@ async def _read_mastery(
         b_map = {t: float(b or 0.0) for t, b, _sw in b_rows}
         sw_map = {t: float(sw if sw is not None else 1.0) for t, _b, sw in b_rows}
 
-    now = time.time()
+    now = time.time() if now is None else now
     out: dict[str, dict] = {}
     for tid, r in aligned.items():
         b = b_map.get(tid, 0.0)
@@ -442,7 +446,8 @@ async def _read_mastery(
 
 
 async def _read_error_repeated(
-    user_id: str, course_id: str, db, topic_map: dict[str, str]
+    user_id: str, course_id: str, db, topic_map: dict[str, str],
+    *, now: float | None = None,
 ) -> set[str]:
     """C2 复发：观测日志中同主题 poor 计数 ≥ 2（30 天窗）派生（plan §3f）。
 
@@ -455,7 +460,7 @@ async def _read_error_repeated(
     from core.memory.mastery_state import POOR_OUTCOME_MAX
     from sqlalchemy import func, select
 
-    cutoff = time.time() - RECURRENCE_WINDOW_DAYS * 86400
+    cutoff = (time.time() if now is None else now) - RECURRENCE_WINDOW_DAYS * 86400
     rows = (
         await db.execute(
             select(MasteryObservation.topic_id, func.count())

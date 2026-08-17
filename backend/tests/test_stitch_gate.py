@@ -132,6 +132,41 @@ def test_cooldown_expires_after_24h():
     assert brief.should_stitch is True
 
 
+# ── safety_weight 乘子（教师 PATCH 真生效，不再是假开关） ────────────────────
+
+
+def test_safety_weight_zero_silences_topic():
+    """safety_weight=0 → p_need 归零，below_tau：教师标 0 = 该主题永不因它预警。"""
+    m = _folded_map(["poor", "poor"])
+    m["ohm"]["p_forget"] = 1.0
+    m["ohm"]["safety_weight"] = 0.0
+    brief = decide_stitch("kcl", _PREREQ, m, set())
+    assert brief.should_stitch is False
+    assert brief.reason == "below_tau"
+    assert brief.p_need == 0.0
+
+
+def test_safety_weight_amplifies_marginal_topic():
+    """below_tau 边缘候选 × safety_weight 3 → 过闸（漏报代价更高的安全关键主题）。"""
+    m = _folded_map(["poor", "poor"])
+    m["ohm"]["p_forget"] = 0.5  # p_need ≈ 0.63*0.5 ≈ 0.32 < 0.434（below_tau）
+    brief_no_sw = decide_stitch("kcl", _PREREQ, m, set())
+    assert brief_no_sw.reason == "below_tau"
+
+    m["ohm"]["safety_weight"] = 3.0
+    brief = decide_stitch("kcl", _PREREQ, m, set())
+    assert brief.should_stitch is True
+    assert brief.p_need == min(1.0, brief_no_sw.p_need * 3.0)
+
+
+def test_safety_weight_default_one_unchanged():
+    """无 safety_weight 键（旧调用方/未标注）→ 默认 1.0，决策与原来逐位一致。"""
+    m = _folded_map(["poor", "poor"])
+    m["ohm"]["p_forget"] = 0.05
+    brief = decide_stitch("kcl", _PREREQ, m, set())
+    assert brief.reason == "below_tau"  # 与 test_two_poor_old_observation 同参同果
+
+
 # ── P0-3：legacy 行冷却按主键回写 ──────────────────────────────────────────
 
 
@@ -208,6 +243,60 @@ async def test_read_mastery_carries_row_id():
     out = await _read_mastery("u1", "c1", _DB(), topic_map)
     assert "ohm" in out
     assert out["ohm"]["row_id"] == "row-kp:ab12cd34ef56"
+
+
+async def test_read_mastery_queries_difficulty_with_aligned_tid():
+    """b/safety_weight 查询必须用对齐后的 tid（旧 bug：tids_hint 用原始 kp_id，
+    legacy 哈希 id 在 course_topic 查不到 → b 恒 0，班级难度对旧行失效）。"""
+    from core.memory.proactive import _read_mastery
+
+    class _Row:
+        def __init__(self, kp_id, label):
+            self.id = f"row-{kp_id}"
+            self.kp_id = kp_id
+            self.label = label
+            self.theta = -0.6
+            self.last_observed_at = None
+            self.strength = 5.0
+            self.observation_count = 2
+            self.last_stitched_at = None
+
+    class _Scalars:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _Res:
+        def __init__(self, scalars):
+            self._scalars = scalars
+
+        def scalars(self):
+            return self._scalars
+
+    legacy_rows = [_Row("kp:legacy-hash-1", "欧姆定律")]  # kp_id 是旧 hash，靠 label 对齐
+    b_row = ("ohm", 0.5, 2.0)  # (topic_id, difficulty_b, safety_weight)
+    calls = {"n": 0}
+    captured: dict = {}
+
+    class _DB:
+        async def execute(self, q):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _Res(_Scalars(legacy_rows))
+            captured["compiled"] = str(q.compile(compile_kwargs={"literal_binds": True}))
+            return _Scalars([b_row])
+
+    topic_map = {"欧姆定律": "ohm"}
+    out = await _read_mastery("u1", "c1", _DB(), topic_map)
+
+    # 第二次查询（b/sw）的 IN 列表必须含对齐后的 topic_id，绝不含 legacy 哈希 kp_id
+    assert "ohm" in captured["compiled"]
+    assert "kp:legacy-hash-1" not in captured["compiled"]
+    # b/sw 按 tid 生效进 map（旧行不再恒 b=0）
+    assert out["ohm"]["logit"] == round(-0.6 - 0.5, 4)
+    assert out["ohm"]["safety_weight"] == 2.0
 
 
 def test_no_stitch_history_no_cooldown():

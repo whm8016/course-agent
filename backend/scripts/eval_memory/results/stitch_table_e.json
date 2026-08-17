@@ -1,21 +1,21 @@
 {
   "suite": "table_e",
-  "cases": 27,
+  "cases": 30,
   "arms": {
     "never": {
       "tp": 0,
-      "fn": 16,
+      "fn": 18,
       "fp": 0,
-      "tn": 11,
+      "tn": 12,
       "balanced_accuracy": 0.5,
       "interruption_rate": 0.0,
       "miss_rate": 1.0,
       "llm_calls_per_case": 0
     },
     "always": {
-      "tp": 16,
+      "tp": 18,
       "fn": 0,
-      "fp": 11,
+      "fp": 12,
       "tn": 0,
       "balanced_accuracy": 0.5,
       "interruption_rate": 1.0,
@@ -23,13 +23,13 @@
       "llm_calls_per_case": 0
     },
     "gate": {
-      "tp": 14,
-      "fn": 2,
+      "tp": 15,
+      "fn": 3,
       "fp": 0,
-      "tn": 11,
-      "balanced_accuracy": 0.9375,
+      "tn": 12,
+      "balanced_accuracy": 0.9167,
       "interruption_rate": 0.0,
-      "miss_rate": 0.125,
+      "miss_rate": 0.1667,
       "llm_calls_per_case": 0
     }
   },
@@ -436,6 +436,51 @@
         "reason": "no_candidate",
         "p_need": 0.0,
         "tau": 1.0,
+        "evidence": null
+      }
+    },
+    {
+      "id": "clock_day1_silent",
+      "label": "时钟三态：刚练过一天（保鲜期内，沉默）",
+      "teacher_rule": "昨天刚练过，还在保鲜期，先别打扰",
+      "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
+      "gold_stitch": false,
+      "gold_evidence": null,
+      "gate": {
+        "stitch": false,
+        "reason": "below_tau",
+        "p_need": 0.1147,
+        "tau": 0.744,
+        "evidence": null
+      }
+    },
+    {
+      "id": "clock_day28_stitch",
+      "label": "时钟三态：同一档案四周后（生疏了，该提）",
+      "teacher_rule": "同一个档案，四周后还卡在叠加定理，地基早该提了",
+      "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
+      "gold_stitch": true,
+      "gold_evidence": "欧姆定律",
+      "gate": {
+        "stitch": true,
+        "reason": "prereq_gap",
+        "p_need": 0.6303,
+        "tau": 0.3459,
+        "evidence": "欧姆定律"
+      }
+    },
+    {
+      "id": "clock_day28_cooldown",
+      "label": "时钟三态：四周后且一小时前刚提醒过（冷却，门控沉默是设计争议）",
+      "teacher_rule": "一小时前刚提醒过同一件事；门控按防打扰沉默（争议预定漏提醒，同 cooldown 两例口径）",
+      "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
+      "gold_stitch": true,
+      "gold_evidence": "欧姆定律",
+      "gate": {
+        "stitch": false,
+        "reason": "cooldown",
+        "p_need": 0.6303,
+        "tau": 0.0,
         "evidence": null
       }
     }

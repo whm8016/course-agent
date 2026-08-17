@@ -66,11 +66,18 @@ async def record_episode(
     assistant_msg: str,
     mode: str = "",
     tools_used=(),
+    created_at: float | None = None,
 ) -> bool:
     """记录一轮原始对话到 episodic 表（L3 outbox）。
 
     幂等：(session_id, turn_id) 唯一约束 → 同一 turn 重放只写一次（IntegrityError 视为已存在）。
     保留所有实质内容（含纯噪声「好的」——靠 importance 降权，巩固时跳过）；仅完全空消息跳过。
+
+    created_at：可选时间注入（评测拨钟用，TimeProvider 口径）。None=不传该列，
+    走列默认 time.time()（线上行为不变——显式传 None 会被 SQLAlchemy 当 NULL
+    写入触发 NOT NULL，故按「键缺省」而非「传 None」实现）。巩固写观测已按
+    episode.created_at 取对话发生时刻（consolidation._write_mastery_observations），
+    拨钟无需再改写路径。
 
     Returns:
         True=新写入；False=跳过（无 user_id / 完全空 / 重复 turn）。
@@ -88,6 +95,9 @@ async def record_episode(
 
     from core.db.database import AsyncSessionLocal, MemoryEpisode
 
+    row_kwargs: dict = {}
+    if created_at is not None:
+        row_kwargs["created_at"] = created_at
     try:
         async with AsyncSessionLocal() as db:
             db.add(
@@ -101,6 +111,7 @@ async def record_episode(
                     assistant_msg=assistant_msg or "",
                     importance=importance,
                     status="pending",
+                    **row_kwargs,
                 )
             )
             await db.commit()

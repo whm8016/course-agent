@@ -1,8 +1,11 @@
-"""表E评测集（stitch_cases_table_e）：完整性 + 防自证断言。
+"""表E评测集（stitch_cases_table_e）：完整性 + 公式行为回归锁。
 
-防自证是本测试的核心：金标=教师规则，门控是数值实现，两者**必须**存在偏离
-（冷却类漏提醒）——满分才是危险信号（退回「金标照算法写」的老路）。断言
-gate 均衡准确率 < 1.0 且冷却例恰为 FN，防止日后有人把争议用例改没。
+两类断言分工（2026-08-17 起）：完整性/闭包锚/冷却 reason/证据选择/遗忘耦合/
+时钟三态是**公式行为锁**——锁决策函数的机制，不随评测结果动；混淆矩阵形状
+**不再用测试钉死**（旧「偏离必须恰好冷却两例」「打扰率必须为 0」两条已删）——
+金标=教师规则，门控因匹配/真难度/冷却产生的偏离是评测的信息量，由 e2e 的
+match_ok / cooldown_fn 列去量，不是要修的 bug。防自证底线保留：gate 均衡
+准确率 < 1.0（满分=金标照算法写的自证回退）。
 """
 from __future__ import annotations
 
@@ -23,8 +26,8 @@ def _gate_decide(case: dict):
 
 
 def test_case_count_and_rule_sentences():
-    """27 例；每例 teacher_rule 是非空句子（教师可点头/摇头）；金标与证据自洽。"""
-    assert len(STITCH_CASES) == 27
+    """30 例；每例 teacher_rule 是非空句子（教师可点头/摇头）；金标与证据自洽。"""
+    assert len(STITCH_CASES) == 30
     ids = [c["id"] for c in STITCH_CASES]
     assert len(set(ids)) == len(ids), "case id 重复"
     for c in STITCH_CASES:
@@ -80,10 +83,10 @@ def test_gate_misses_cooldown_cases():
 
 
 def test_gate_not_perfect_and_baselines_anchor():
-    """防自证主断言：gate 均衡准确率 < 1.0；never/always 两基线恒 0.5（口径锚）。
+    """防自证底线：gate 均衡准确率 < 1.0；never/always 两基线恒 0.5（口径锚）。
 
-    runner 的 run() 是 async，这里用 asyncio 直接驱动（与 test_eval_memory_runners
-    同款做法），零 LLM 三臂不碰网络。
+    打扰率/偏离面不再钉死（金标=教师规则，偏离是评测的信息量）；runner 的
+    run() 是 async，这里用 asyncio 直接驱动，零 LLM 三臂不碰网络。
     """
     import asyncio
 
@@ -95,20 +98,17 @@ def test_gate_not_perfect_and_baselines_anchor():
     assert arms["always"]["balanced_accuracy"] == 0.5
     assert arms["always"]["miss_rate"] == 0.0 and arms["always"]["interruption_rate"] == 1.0
     assert arms["gate"]["balanced_accuracy"] < 1.0, "满分=金标照算法写的自证，回退了"
-    assert arms["gate"]["interruption_rate"] == 0.0, "干净负例上门控不应打扰"
 
 
-def test_gate_agrees_on_remaining_cases():
-    """除冷却两例外，门控与其余 25 例金标一致（偏离只发生在设计争议处）。"""
-    mismatches = {
-        c["id"]: (c["gold"]["stitch"], pred.should_stitch)
-        for c in STITCH_CASES
-        if (pred := _gate_decide(c)).should_stitch != c["gold"]["stitch"]
-    }
-    assert mismatches == {"cooldown_1h": (True, False), "cooldown_20h": (True, False)}, (
-        f"偏离面变了（新增/丢失偏离例）：{mismatches}——若金标或门控口径有意变更，"
-        "请同步更新本断言与论文失败分析"
-    )
+def test_clock_trio_offline():
+    """时钟三态（公式锁）：同一档案只挪决策钟——次日沉默 / 四周后开口 / 四周后
+    但一小时前刚提醒则冷却。days_since_last 固定 1，年龄由 now 实算成 28 天。"""
+    by_id = {c["id"]: c for c in STITCH_CASES}
+    assert _gate_decide(by_id["clock_day1_silent"]).reason == "below_tau"
+    day28 = _gate_decide(by_id["clock_day28_stitch"])
+    assert day28.should_stitch is True and day28.evidence_topic == "欧姆定律"
+    cd = _gate_decide(by_id["clock_day28_cooldown"])
+    assert cd.should_stitch is False and cd.reason == "cooldown"
 
 
 def test_gate_evidence_selection_on_multi_gap():

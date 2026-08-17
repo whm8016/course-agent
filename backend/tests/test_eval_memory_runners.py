@@ -1,4 +1,9 @@
-"""阶段5评测脚本的 CI 冒烟：三臂 e2e + 抽取对比框架可跑、指标合理。"""
+"""阶段5评测脚本的 CI 冒烟：抽取对比框架可跑、指标合理。
+
+旧 test_stitch_e2e_three_arms（裸调旧 run()）已删：run_stitch_e2e 重写为表E
+e2e（stitch_for_turn 全链，需 embedding 凭据），接线自检移至
+tests/test_stitch_e2e_wiring.py（打桩 embed 单例，离线跑同一条 run()）。
+"""
 import pytest
 
 
@@ -9,17 +14,6 @@ async def db():
     await init_db()
     yield
     await close_db()
-
-
-async def test_stitch_e2e_three_arms():
-    from scripts.eval_memory import run_stitch_e2e
-
-    summary = await run_stitch_e2e.run()
-    for arm in ("baseline_none", "baseline_unconditional", "gate"):
-        assert arm in summary
-        assert 0.0 <= summary[arm]["balanced_accuracy"] <= 1.0
-    # 门控臂应显著优于基线（0.5），且不低于 0.75
-    assert summary["gate"]["balanced_accuracy"] >= 0.75
 
 
 async def test_extract_compare_closed_set_arm(db):

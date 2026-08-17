@@ -173,13 +173,24 @@ async def build_common_context_layers(
             from core.memory.proactive import stitch_for_turn
 
             async with AsyncSessionLocal() as db:
+                # 时钟注入口径（评测用）：metadata._eval_now = 「这一轮的今天」。
+                # 暴露轮先巩固再聊下一轮时，墙钟会对着 N 天前的观测提前拼简报、
+                # 污染后续判定输入——评测传该轮 created_at 保证同钟。生产不设此
+                # 键（.get 默认 None=stitch_for_turn 内部各读侧取墙钟，行为不变）。
                 brief = await stitch_for_turn(
-                    ctx.user_message, ctx.user_id, ctx.course_id, db
+                    ctx.user_message, ctx.user_id, ctx.course_id, db,
+                    now=(ctx.metadata or {}).get("_eval_now"),
                 )
                 if not mastery_context:
                     mastery_context = brief.text
                 matched_topic = brief.matched_topic
                 gate_evidence_topic = brief.evidence_topic if brief.should_stitch else None
+                # 待写冷却：拼出简报≠回合成功，模型失败不该烧 24h 冷却。turn_runtime
+                # 在回合产出了 agent_output/result 后才落盘（commit_stitch_cooldown）。
+                if brief.should_stitch and brief.evidence_topic:
+                    (ctx.metadata or {}).setdefault("_pending_stitch_cooldown", {})[
+                        brief.evidence_topic
+                    ] = True
         except Exception:
             logger.exception(
                 "build mastery context failed user=%s course=%s", ctx.user_id, ctx.course_id
@@ -229,7 +240,13 @@ async def build_common_context_layers(
         from core.agentic.context_window import compute_budgets
         # T2 动态层集体裁剪：超预算时按优先级（低->高）整段丢弃最低优先级切片，直到回到预算内。
         # 预算受同一 soft_trigger 驱动（与 enforce 级联同阈值），非旧百分比链。
-        _soft_trigger, _ = compute_budgets(get_settings().llm.text_model)
+        # 预算按**本轮 profile 模型**算（旧 bug：恒用全局 TEXT_MODEL——用户选长窗口/小模型
+        # 时会裁过狠或裁不够）。profile 已在本函数外解析过的场景可由 metadata 直接复用。
+        _turn_model = (metadata.get("_profile_text_model") or "").strip()
+        if not _turn_model:
+            rt = await resolve_profile_runtime(ctx.llm_profile_id, ctx.user_id)
+            _turn_model = rt.text_model or get_settings().llm.text_model
+        _soft_trigger, _ = compute_budgets(_turn_model)
         _t2_budget = max(1, _soft_trigger // _T2_BUDGET_DIVISOR)
         _capped = cap_dynamic_slices(
             {

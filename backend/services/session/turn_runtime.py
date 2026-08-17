@@ -31,6 +31,7 @@ Turn Runtime Manager
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 import uuid
@@ -99,12 +100,22 @@ class TurnRuntimeManager:
         # 否则旧 ContextBuilder + resolve_budget（20% 窗口，逐字节同旧行为）。
         # 埋点：两条分支都记 before/after 计数——之前这里是全哑的，LangSmith 和应用日志都看不到
         # 任何裁剪痕迹，只能靠事后临时脚本翻 ctx.metadata 才能确认真的裁了。
+        # 预算按**本轮 profile 模型**算（旧 bug：恒用全局 TEXT_MODEL——用户选长窗口模型会裁
+        # 过狠、选小模型裁不够）。resolve_profile_runtime 读 DB/Redis 缓存，失败回退 TEXT_MODEL。
+        _turn_model = TEXT_MODEL
+        try:
+            from core.pipeline_common import resolve_profile_runtime
+
+            _rt = await resolve_profile_runtime(context.llm_profile_id, context.user_id)
+            _turn_model = _rt.text_model or TEXT_MODEL
+        except Exception:
+            logger.debug("resolve_profile_runtime failed, fallback TEXT_MODEL", exc_info=True)
         _history_before = len(context.conversation_history)
         if get_settings().context_budget.coordinator_enabled:
             from core.agentic.context_budget import plan_turn
             _plan = plan_turn(
                 history=context.conversation_history,
-                model=TEXT_MODEL,
+                model=_turn_model,
                 session_summary_text=context.session_summary or "",
             )
             context.conversation_history = _plan.keep_history
@@ -121,7 +132,7 @@ class TurnRuntimeManager:
                 "target_input_tokens": _plan.target_input_tokens,
             }
         else:
-            builder = ContextBuilder(max_history_tokens=resolve_budget(TEXT_MODEL))
+            builder = ContextBuilder(max_history_tokens=resolve_budget(_turn_model))
             context.conversation_history = builder.build(context.conversation_history)
             context.metadata["_ctx_pretrim"] = {
                 "coordinator_enabled": False,
@@ -329,6 +340,8 @@ class TurnRuntimeManager:
 
         orchestrator = get_orchestrator()
         answer_parts: list[str] = []
+        result_text_parts: list[str] = []
+        result_metadata: dict = {}
         seq = 0
         first_event_logged = False
         t0 = time.monotonic()
@@ -364,6 +377,22 @@ class TurnRuntimeManager:
                     if event.type == StreamEventType.ANSWER:
                         answer_parts.append(str(event.payload.get("content") or ""))
 
+                    # 收集 result 产物（quiz/research 等能力不产 ANSWER、以 result 收尾）：
+                    # 抽出可写入文本（research 报告 / quiz 题目），否则这两类能力永远不发
+                    # CapabilityCompleteEvent，L3 outbox、巩固触发、L2 压缩全不跑。
+                    if event.type == StreamEventType.RESULT:
+                        report = event.payload.get("report")
+                        if isinstance(report, str) and report.strip():
+                            result_text_parts.append(report)
+                        questions = event.payload.get("questions")
+                        if isinstance(questions, list):
+                            result_text_parts.append(
+                                json.dumps(questions, ensure_ascii=False)
+                            )
+                        meta = event.payload.get("metadata")
+                        if isinstance(meta, dict):
+                            result_metadata.update(meta)
+
                     # fan-out 给所有 subscribe_turn 订阅者
                     await execution.bus.emit(event)
 
@@ -391,6 +420,10 @@ class TurnRuntimeManager:
                 execution.finished_at = time.monotonic()
                 elapsed_total = int((execution.finished_at - t0) * 1000)
                 agent_output = "".join(answer_parts)
+                # quiz/research 等无 ANSWER 的能力：以 result 产物文本替代 agent_output，
+                # 让 CapabilityCompleteEvent（记忆三层）对这些能力也触发。
+                if not agent_output and result_text_parts:
+                    agent_output = "\n\n".join(result_text_parts)
                 status = "ok" if agent_output else "empty"
                 log_flow("turn.complete", turn_id=execution.turn_id,
                          elapsed_ms=elapsed_total, events=seq,
@@ -422,9 +455,34 @@ class TurnRuntimeManager:
                             mode=execution.context.mode or "chat",
                             user_message=execution.context.user_message,
                             agent_output=agent_output,
+                            metadata=result_metadata or {},
                         ))
                     except Exception:
                         logger.warning("TurnRuntime: EventBus publish failed", exc_info=True)
+                    # 学情门控冷却在回合成功后才落盘（拼上下文≠成功；模型失败不烧 24h）。
+                    # 按 (user, course, topic) upsert，不依赖 mastery 行是否已有（C2 复发
+                    # 证据来自观测日志，可能还没折叠出行）。
+                    _pending = (execution.context.metadata or {}).get(
+                        "_pending_stitch_cooldown"
+                    ) or {}
+                    if _pending and execution.context.user_id and execution.context.course_id:
+                        try:
+                            from core.db.database import AsyncSessionLocal
+                            from core.memory.proactive import commit_stitch_cooldown
+
+                            async with AsyncSessionLocal() as db:
+                                for topic_id in _pending:
+                                    await commit_stitch_cooldown(
+                                        db,
+                                        str(execution.context.user_id),
+                                        str(execution.context.course_id),
+                                        str(topic_id),
+                                    )
+                        except Exception:
+                            logger.warning(
+                                "TurnRuntime: stitch cooldown commit failed turn_id=%s",
+                                execution.turn_id, exc_info=True,
+                            )
 
                 # TTL 后清理内存
                 asyncio.create_task(

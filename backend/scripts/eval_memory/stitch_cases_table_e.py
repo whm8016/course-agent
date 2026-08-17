@@ -1,4 +1,4 @@
-r"""表E评测集：门控决策 vs 教师规则金标（mycourse 课文锚定图 v2，27 例）。
+r"""表E评测集：门控决策 vs 教师规则金标（mycourse 课文锚定图 v2，30 例）。
 
 评测对象是 ``core.memory.proactive.decide_stitch`` 的**决策层**（该不该把未问及的
 跨会话学情拼进本轮回答），不含 S_t 问句→主题 embedding 匹配（matched_topic 是档案
@@ -17,9 +17,14 @@ r"""表E评测集：门控决策 vs 教师规则金标（mycourse 课文锚定�
   W_JUDGE=0.6）算 theta/risk——teacher_rule 里的「两次判未掌握」直接映射序列长度。
 - ``days_since_last``：距最后一次判定观测的天数，经 ``forget_prob``（S=5）算 p_forget
   ——「昨天刚练过」「快一个月没练」映射遗忘概率。
-- ``last_stitched_hours_ago``：同证据主题上次实际拼入简报的小时数（冷却判定）。
+- ``last_stitched_hours_ago``：同证据主题上次实际拼入简报的小时数（冷却判定），
+  锚定 **决策钟** case_now——冷却是「本轮前 N 小时」的运行时概念，与种钟解耦。
 - ``b_topic``：班级难度（仅 neg_class_hard，题目难度不决定谁能入闸的回归锚）。
-- ``error_repeated``：近 30 天同主题 poor ≥2 的复发证据（C2 候选口径）。
+- ``error_repeated``：近 30 天同主题 poor ≥2 的复发证据（C2 候选口径）；观测间距
+  由它定——在列 1 天距（≥2 poor 自然落进 30 天窗）、不在 32 天距（窗内至多 1 条），
+  e2e 落库后复发由读侧自己数出、自检对账。
+- 时钟：观测 created_at 锚定**种钟**（模块 NOW）；case 可选 ``now`` 键只挪**决策钟**
+  （七、时钟三态：同档案不同今天），遗忘/复发窗/冷却全由管道按 now 实算。
 
 teacher 权重（safety_weight）用例不收：教师不会真去标（用户决策 2026-08-16），
 金标句子不建立在教师标注场景上。
@@ -34,6 +39,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:  # 仅类型注解用，运行时零 core 依赖（模块级保持纯数据可导入）
+    from core.memory.mastery_state import FoldState
 
 # 固定时钟：冷却/遗忘判定确定性可测（decide_stitch 的 now 参数）
 NOW = 1_800_000_000.0
@@ -57,56 +66,103 @@ def prereq_predecessors(topic_id: str, edges: list[dict]) -> set[str]:
     )
 
 
+def case_now(case: dict) -> float:
+    """case 决定时钟：默认模块 NOW；「时钟三态」例显式覆盖（同档案不同今天）。"""
+    return case.get("now", NOW)
+
+
+def entry_observations(case: dict, m: dict, *, base: float | None = None) -> list[dict]:
+    """mastery 条目 → 观测日志（离线折叠与 e2e 落库共用同一份构造源）。
+
+    时钟约定：观测锚定**种钟**（默认模块 NOW；base 显式覆盖——live 层用运行时
+    墙钟作锚，间距/天数推导仍走这一份单一真相源）——levels[-1] = t_last = 种钟 -
+    days_since_last*86400（最后接触时刻），更早的档按间距往回倒；fold_observations
+    入口自按 created_at 升序排（Elo 顺序相关），相对序不变则折出的 theta 逐位不变。
+    间距按复发口径定：条目在 case.error_repeated → 1 天（≥2 poor 落进 30 天窗，
+    读侧自然数出）；不在 → 窗宽+2=32 天（旧 poor 推出窗外，窗内至多 1 条）。
+    """
+    from core.memory.mastery_state import LEVEL_OUTCOME, W_JUDGE
+    from core.memory.proactive import RECURRENCE_WINDOW_DAYS
+
+    spacing = (
+        86400.0
+        if m["topic_id"] in case.get("error_repeated", [])
+        else (RECURRENCE_WINDOW_DAYS + 2) * 86400.0
+    )
+    t_last = (NOW if base is None else base) - m["days_since_last"] * 86400
+    n = len(m["levels"])
+    return [
+        {
+            "created_at": t_last - (n - 1 - j) * spacing,
+            "outcome": LEVEL_OUTCOME[lv],
+            "weight": W_JUDGE,
+        }
+        for j, lv in enumerate(m["levels"])
+    ]
+
+
+def entry_last_stitched_at(case: dict, m: dict) -> float | None:
+    """冷却戳锚定 case 自己的**决策钟**（「本轮前 N 小时」的运行时概念，与种钟
+    解耦——三态例只挪 now 也能正确演冷却）。"""
+    if "last_stitched_hours_ago" not in m:
+        return None
+    return case_now(case) - m["last_stitched_hours_ago"] * 3600
+
+
+def fold_entry(case: dict, m: dict, b_topic: float | None = None) -> "FoldState":
+    """真实折叠（与生产 consolidation 同 regime：b≠0 从 b 起折）。b_topic=None 用
+    case 的 b_topic（离线默认 0）；e2e 传快照真难度。"""
+    from core.memory.mastery_state import FoldState, fold_observations
+
+    return fold_observations(
+        entry_observations(case, m),
+        FoldState(b_topic=m.get("b_topic", 0.0) if b_topic is None else b_topic),
+    )
+
+
 def gate_decide(case: dict, edges: list[dict]):
     """case → 门控决策一条龙（闭包 + 档案构建 + decide_stitch）。
 
     runner 与测试共用同一管线——评测测的与跑的必然是同一个决策路径。
+    决策钟走 case_now（默认 NOW；三态例显式覆盖）。
     """
     from core.memory.proactive import decide_stitch
 
     matched = case["matched_topic"]
     closure = prereq_predecessors(matched, edges) if matched else set()
     return decide_stitch(
-        matched, closure, build_mastery_map(case), set(case["error_repeated"]), now=NOW,
+        matched, closure, build_mastery_map(case), set(case["error_repeated"]),
+        now=case_now(case),
     )
 
 
 def build_mastery_map(case: dict) -> dict[str, dict]:
     """case 档案 → decide_stitch 的 mastery_map（真实折叠 + 遗忘实算）。
 
-    theta/risk/logit 全由 ``fold_observations(obs, FoldState(b_topic=b))`` 折出——
-    b≠0 时 theta 与生产同 regime（从 b 起折，consolidation.py 同款 init，非
-    b=0 折完读时补减）；b 只进 risk/logit 不进入闸判据（theta 空间）。p_forget
-    按 days_since_last 实算（默认强度 S=5）；last_stitched_at 折成固定时钟 NOW。
-    字段集对齐 _read_mastery / scorer._gate_mastery_map 的 map 形状（label 便于
-    调试）；decide_stitch 只读 risk/theta/p_forget/last_stitched_at（.get 默认）。
+    折叠/冷却戳走 entry_observations/fold_entry/entry_last_stitched_at（与 e2e
+    落库同一构造源）；p_forget 按「决策钟 - 最后观测时刻」实算（同 _read_mastery
+    的 age 口径），对无 now 键的旧例与 days_since_last 直传逐位一致。b≠0 时 theta
+    与生产同 regime（从 b 起折，consolidation.py 同款 init，非 b=0 折完读时补减）；
+    b 只进 risk/logit 不进入闸判据（theta 空间）。字段集对齐 _read_mastery /
+    scorer._gate_mastery_map 的 map 形状（label 便于调试）；decide_stitch 只读
+    risk/theta/p_forget/last_stitched_at（.get 默认）。
     """
     from core.memory.mastery import forget_prob
-    from core.memory.mastery_state import (
-        LEVEL_OUTCOME, W_JUDGE, FoldState, fold_observations,
-    )
 
     out: dict[str, dict] = {}
     for m in case["mastery"]:
-        obs = [
-            {"created_at": float(i), "outcome": LEVEL_OUTCOME[lv], "weight": W_JUDGE}
-            for i, lv in enumerate(m["levels"])
-        ]
-        s = fold_observations(obs, FoldState(b_topic=m.get("b_topic", 0.0)))
-        entry = {
+        obs = entry_observations(case, m)
+        s = fold_entry(case, m)
+        age_days = (case_now(case) - max(o["created_at"] for o in obs)) / 86400.0
+        out[m["topic_id"]] = {
             "risk": round(s.risk, 4),
             "theta": round(s.theta, 4),
             "logit": round(s.logit, 4),
-            "p_forget": forget_prob(m["days_since_last"]),
+            "p_forget": forget_prob(age_days),
             "observation_count": s.n_obs,
             "label": m.get("label", m["topic_id"]),
-            "last_stitched_at": (
-                NOW - m["last_stitched_hours_ago"] * 3600
-                if "last_stitched_hours_ago" in m
-                else None
-            ),
+            "last_stitched_at": entry_last_stitched_at(case, m),
         }
-        out[m["topic_id"]] = entry
     return out
 
 
@@ -460,5 +516,51 @@ STITCH_CASES: list[dict] = [
         "matched_topic": "rc微分电路",
         "teacher_rule": "这轮回答本身就在教这块，不用再叠一层预警",
         "gold": {"stitch": False},
+    },
+    # ===== 七、时钟三态（2026-08-17 补：同档案不同今天，遗忘/冷却由管道按 now 实算）=====
+    # 种子同一份：欧姆定律 2×poor、最后接触在 NOW-1 天、问叠加定理；三例只差
+    # 「今天」是哪天 / 一小时前有没有提醒过。days_since_last 固定 1、只把 now 加
+    # 27 天（day28 例年龄 = 1+27 = 28 天；两边都改成 28 会变 55 天，不许）。
+    {
+        "id": "clock_day1_silent",
+        "label": "时钟三态：刚练过一天（保鲜期内，沉默）",
+        "mastery": [
+            {"topic_id": "欧姆定律", "label": "欧姆定律", "levels": ["poor", "poor"], "days_since_last": 1},
+        ],
+        "error_repeated": [],
+        "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
+        "matched_topic": "叠加定理",
+        "teacher_rule": "昨天刚练过，还在保鲜期，先别打扰",
+        "gold": {"stitch": False},
+    },
+    {
+        "id": "clock_day28_stitch",
+        "label": "时钟三态：同一档案四周后（生疏了，该提）",
+        "mastery": [
+            {"topic_id": "欧姆定律", "label": "欧姆定律", "levels": ["poor", "poor"], "days_since_last": 1},
+        ],
+        "error_repeated": [],
+        "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
+        "matched_topic": "叠加定理",
+        "teacher_rule": "同一个档案，四周后还卡在叠加定理，地基早该提了",
+        "gold": {"stitch": True, "evidence_topic": "欧姆定律"},
+        "now": NOW + 27 * 86400,
+    },
+    {
+        "id": "clock_day28_cooldown",
+        "label": "时钟三态：四周后且一小时前刚提醒过（冷却，门控沉默是设计争议）",
+        "mastery": [
+            {
+                "topic_id": "欧姆定律", "label": "欧姆定律",
+                "levels": ["poor", "poor"], "days_since_last": 1,
+                "last_stitched_hours_ago": 1,
+            },
+        ],
+        "error_repeated": [],
+        "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
+        "matched_topic": "叠加定理",
+        "teacher_rule": "一小时前刚提醒过同一件事；门控按防打扰沉默（争议预定漏提醒，同 cooldown 两例口径）",
+        "gold": {"stitch": True, "evidence_topic": "欧姆定律"},
+        "now": NOW + 27 * 86400,
     },
 ]
