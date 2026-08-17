@@ -115,6 +115,19 @@ def _metrics(tp: int, fn: int, fp: int, tn: int) -> dict:
     }
 
 
+def _bump(stats: dict, arm: str, gold: bool, pred: bool) -> None:
+    """混淆矩阵累加（三层表E runner 共用——同一阶梯复制三份曾致口径漂移）。"""
+    s = stats[arm]
+    if gold and pred:
+        s["tp"] += 1
+    elif gold and not pred:
+        s["fn"] += 1
+    elif not gold and pred:
+        s["fp"] += 1
+    else:
+        s["tn"] += 1
+
+
 async def run(with_llm: bool = False) -> dict:
     from .stitch_cases_table_e import STITCH_CASES, gate_decide, load_graph
 
@@ -149,15 +162,7 @@ async def run(with_llm: bool = False) -> dict:
         for arm, pred in preds.items():
             if pred is None:
                 continue
-            s = stats[arm]
-            if gold and pred:
-                s["tp"] += 1
-            elif gold and not pred:
-                s["fn"] += 1
-            elif not gold and pred:
-                s["fp"] += 1
-            else:
-                s["tn"] += 1
+            _bump(stats, arm, gold, pred)
         rows.append(row)
 
     summary: dict = {"suite": "table_e", "cases": len(STITCH_CASES), "arms": {}}

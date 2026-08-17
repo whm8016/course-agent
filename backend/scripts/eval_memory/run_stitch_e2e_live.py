@@ -73,14 +73,13 @@ _CLOCK_DAYS_MAX = 27
 # 开跑前的现网课内探针问句（检索命中闸）：必须打到讲义块才证明索引挂上了
 _PROBE_QUERY = "线性电阻元件的伏安特性怎么测量？"
 
-# 评测用户的密码哈希（bcrypt 合法格式，口令是随机串——谁也登不进，登录校验走
-# 正常 401 而非非法 hash 触发的 ValueError→500）
-_EVAL_PASSWORD_HASH = "$2b$10$kR9HZHSLq.298U41UnsU4.bZjavDhKwBCVep9jKXbL4OPgPZfQ7f2"
-
 
 def _outcome_level(outcome: float) -> str:
-    """观测 outcome → 等级（LEVEL_OUTCOME 逆映射，poor<=0.25 / good>=0.75 / 其间 fair）。"""
-    if outcome <= 0.25:
+    """观测 outcome → 等级（LEVEL_OUTCOME 逆映射）。poor 阈值复用门控复发同源
+    POOR_OUTCOME_MAX（重定时两侧一起走，不静默分叉）；good>=0.75 无对应常量。"""
+    from core.memory.mastery_state import POOR_OUTCOME_MAX
+
+    if outcome <= POOR_OUTCOME_MAX:
         return "poor"
     return "good" if outcome >= 0.75 else "fair"
 
@@ -118,19 +117,6 @@ async def _probe_retrieval(course_id: str) -> None:
             "先排查 KB/索引再跑，不许默默退化成裸聊"
         )
     logger.info("[live] 检索探针命中 %d 字——索引就绪", len(text))
-
-
-async def _ensure_user(db, user_id: str) -> None:
-    from core.db.database import User
-    from sqlalchemy import select
-
-    row = (await db.execute(select(User).where(User.id == user_id))).scalars().first()
-    if row is None:
-        db.add(User(
-            id=user_id, username=user_id,
-            password_hash=_EVAL_PASSWORD_HASH, role="student",
-        ))
-        await db.commit()
 
 
 async def _cleanup_user(db, user_id: str, course_id: str) -> bool:
@@ -235,9 +221,10 @@ async def _expose_case(
     # 兜底重试：判定超时/超预算的段留 pending，重跑一次（走同一条 judge→观测→折叠路）
     async with AsyncSessionLocal() as db:
         retry = await consolidate(db, user_id, course_id)
-    if retry.get("claimed"):
+    retried = bool(retry.get("claimed"))
+    if retried:
         logger.info("[live] %s 巩固兜底补跑 → %s", case["id"], retry)
-    return turn_logs, (1 if retry.get("claimed") else 0)
+    return turn_logs, int(retried)
 
 
 async def _read_extract(db, user_id: str, course_id: str, case: dict) -> dict:
@@ -267,19 +254,12 @@ async def _read_extract(db, user_id: str, course_id: str, case: dict) -> dict:
     extract_topics = sorted(by_topic)
     detail: dict[str, dict] = {}
     n_ok = 0
-    polluted: list[str] = []
     for m in case["mastery"]:
-        tid = m["topic_id"]
-        got = by_topic.get(tid, [])
-        got_levels = [g["level"] for g in got]
+        got_levels = [g["level"] for g in by_topic.get(m["topic_id"], [])]
         want = m["levels"]
         ok = bool(got_levels) and got_levels[-1] == want[-1]
         n_ok += int(ok)
-        # 观测条数 != 期望档数：多为 ARQ cron 与本 runner 并发巩固重判同段（双写），
-        # 或判定器多判了相邻主题——打偏记列，不从混淆矩阵里剔
-        if len(got_levels) != len(want):
-            polluted.append(tid)
-        detail[tid] = {
+        detail[m["topic_id"]] = {
             "expected": want, "actual": got_levels, "extract_ok": ok,
         }
     return {
@@ -287,7 +267,11 @@ async def _read_extract(db, user_id: str, course_id: str, case: dict) -> dict:
         "extract_detail": detail,
         "extract_ok": n_ok == len(case["mastery"]),
         "extract_ok_count": n_ok,
-        "obs_polluted": polluted,
+        # 观测条数 != 期望档数的主题：多为 ARQ cron 与本 runner 并发巩固重判同段
+        # （双写），或判定器多判/漏判——打偏记列，不从混淆矩阵里剔
+        "obs_polluted": [
+            tid for tid, d in detail.items() if len(d["actual"]) != len(d["expected"])
+        ],
         "n_observations": len(rows),
     }
 
@@ -307,16 +291,15 @@ async def _probe_gate(db, user_id: str, course_id: str, case: dict, base: float)
         }
 
     t0 = time.time()  # 墙钟——commit_stitch_cooldown 落的就是墙钟，探测钟必须同源
+    now2 = t0 + cooldown_hours * 3600.0
     pre = await stitch_for_turn(query, user_id, course_id, db, now=t0)
     committed = False
     if pre.should_stitch and pre.evidence_topic:
         await commit_stitch_cooldown(db, user_id, course_id, pre.evidence_topic)
         committed = True
-    brief = await stitch_for_turn(
-        query, user_id, course_id, db, now=t0 + cooldown_hours * 3600.0
-    )
+    brief = await stitch_for_turn(query, user_id, course_id, db, now=now2)
     return {
-        "now": t0 + cooldown_hours * 3600.0,
+        "now": now2,
         "gate": _gate_fields(brief),
         "cooldown_committed": committed,
         "pre_gate": _gate_fields(pre),
@@ -361,24 +344,21 @@ async def run_check_match() -> dict:
 
 async def run(case_ids: list[str] | None = None) -> dict:
     from core.db.database import AsyncSessionLocal, close_db, init_db
-    from .run_stitch_table_e import ZERO_LLM_ARMS, _metrics
+    from .run_stitch_table_e import ZERO_LLM_ARMS, _bump, _metrics
 
     await _probe_retrieval(COURSE_ID)
-    # ⚠️ 运行前提（不满足会出现间歇性重复观测，结果不可复现）：先停 worker
-    # `docker compose stop worker`。cron_consolidate_memory 每 5 分钟把
-    # created_at 在过去（=全部拨钟 episode）的 pending/processing 当「长期积压/
-    # 崩溃遗留」捞走重判——与本 runner 的同步巩固并发会双写观测（append-only 无
-    # 去重），复发计数/theta 被污染；跑到一半的观测条数异常会落 obs_polluted 列。
+    # ⚠️ 运行前提（机制与后果见头注「全量跑之前」段）：操作员不看源码，warning 再喊一遍
     logger.warning(
         "[live] 运行前提：先 docker compose stop worker 再跑（拨钟 episode 会被 ARQ "
         "cron 当积压重判、双写观测污染复发计数）；跑完 docker compose start worker"
     )
 
-    cases = [c for c in STITCH_CASES_LIVE if not case_ids or c["id"] in case_ids]
+    known = {c["id"] for c in STITCH_CASES_LIVE}
     if case_ids:
-        missing = set(case_ids) - {c["id"] for c in cases}
+        missing = set(case_ids) - known
         if missing:
             raise SystemExit(f"未知 case_id: {sorted(missing)}")
+    selected = set(case_ids) if case_ids else None
 
     wall0 = time.time()
     base = wall0 - _CLOCK_DAYS_MAX * 86400.0  # 见 _CLOCK_DAYS_MAX 注释
@@ -388,7 +368,7 @@ async def run(case_ids: list[str] | None = None) -> dict:
     await init_db()
     try:
         for idx, c in enumerate(STITCH_CASES_LIVE):
-            if c not in cases:
+            if selected is not None and c["id"] not in selected:
                 continue
             user_id = f"lv_{idx:02d}"
             # 每例观测锚：冷却三例锚 wall0（见 _CLOCK_DAYS_MAX 注释），其余锚 base
@@ -399,6 +379,8 @@ async def run(case_ids: list[str] | None = None) -> dict:
             )
             logger.info("[live] === %s (%d/%d) user=%s ===", c["id"], idx + 1, len(STITCH_CASES_LIVE), user_id)
             async with AsyncSessionLocal() as db:
+                from .seed_stitch_personas import _ensure_user
+
                 await _ensure_user(db, user_id)
                 mem0_cleaned = await _cleanup_user(db, user_id, COURSE_ID)
 
@@ -430,27 +412,21 @@ async def run(case_ids: list[str] | None = None) -> dict:
                 "expose_logs": turn_logs,
                 "rag_hit": any("rag" in (t["tools_used"] or []) for t in turn_logs),
                 "consolidate_retry": retry,
-                # 估算：聊天轮数 + 观测数（每段判定 ≈ 1 次判定 LLM）；mem0 persona 抽取
-                # 每 session 再 +1，此处不细分——量级对就行，论文口径看 expose_turns
+                # 估算：聊天轮数 + 观测数。判定 LLM 每段 1 次、每段至多判 3 主题 →
+                # 多主题段时观测数会高估判定次数至多 3×；mem0 persona 每 session +1
+                # 未计——量级对就行，论文口径看 expose_turns
                 "llm_calls": len(turn_logs) + extract["n_observations"],
-                "judge_levels": {tid: d["actual"] for tid, d in extract["extract_detail"].items()},
-                **{k: v for k, v in extract.items() if k != "extract_detail"},
-                "extract_detail": extract["extract_detail"],
             }
+            extract_detail = extract.pop("extract_detail")
+            row["judge_levels"] = {tid: d["actual"] for tid, d in extract_detail.items()}
+            row.update(extract)
+            row["extract_detail"] = extract_detail
             # 具名映射不依赖 ZERO_LLM_ARMS 的元素顺序（对齐 run_stitch_e2e 的
             # /simplify 收敛口径）；stats 键集仍由 ZERO_LLM_ARMS 初始化
             for arm, pred in {
                 "never": False, "always": True, "gate": gate_stitch,
             }.items():
-                s = stats[arm]
-                if gold and pred:
-                    s["tp"] += 1
-                elif gold and not pred:
-                    s["fn"] += 1
-                elif not gold and pred:
-                    s["fp"] += 1
-                else:
-                    s["tn"] += 1
+                _bump(stats, arm, gold, pred)
             rows.append(row)
             logger.info(
                 "[live] %s gold=%s gate=%s(%s) match=%s extract_ok=%s rag_hit=%s",

@@ -191,7 +191,7 @@ async def run() -> dict:
     from core.memory.course_topic_store import get_course_topic_map
     from core.memory.proactive import stitch_for_turn
 
-    from .run_stitch_table_e import ZERO_LLM_ARMS, _metrics
+    from .run_stitch_table_e import ZERO_LLM_ARMS, _bump, _metrics
 
     await _probe_embed()
 
@@ -241,15 +241,7 @@ async def run() -> dict:
                 for arm, pred in {
                     "never": False, "always": True, "gate": brief.should_stitch,
                 }.items():
-                    s = stats[arm]
-                    if gold and pred:
-                        s["tp"] += 1
-                    elif gold and not pred:
-                        s["fn"] += 1
-                    elif not gold and pred:
-                        s["fp"] += 1
-                    else:
-                        s["tn"] += 1
+                    _bump(stats, arm, gold, pred)
                 rows.append(row)
     finally:
         await close_db()

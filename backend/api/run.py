@@ -79,10 +79,11 @@ def _sanitize_client_metadata(raw) -> dict:
     """客户端 metadata 净化：非 dict 归 {}（下游 .get/.setdefault 才不炸）；
     下划线前缀的服务端内部键（_eval_now 可拨门控时钟绕过 24h 冷却、
     _pending_stitch_cooldown 可替任意主题落冷却戳、_timing/_profile_text_model
-    是运行时槽）整批剥离——前端契约只发 count/requirement/sources 等业务键。"""
+    是运行时槽）整批剥离——前端契约只发 count/requirement/sources 等业务键。
+    键恒为 str（唯一调用方吃 json.loads 产物），无需 str() 包一层。"""
     if not isinstance(raw, dict):
         return {}
-    return {k: v for k, v in raw.items() if not str(k).startswith("_")}
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
 @router.websocket("/{capability_name}")

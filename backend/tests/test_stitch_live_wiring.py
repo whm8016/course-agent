@@ -36,30 +36,18 @@ def _mk_ctx(user_id="u-seam", course_id="c-seam", eval_now=object()):
     )
 
 
-async def test_eval_now_passed_to_stitch_for_turn():
-    """设 _eval_now → 原样传给门控（评测与暴露轮同钟）。"""
-    from core.memory.proactive import StitchBrief
-
-    sentinel = 1_786_900_000.0
-    with (
-        patch("core.llm.prompts.get_course_prompt", AsyncMock(return_value="")),
-        patch(
-            "core.memory.proactive.stitch_for_turn",
-            AsyncMock(return_value=StitchBrief(False, None, "unknown", 0.0, 1.0)),
-        ) as mock_stitch,
-        patch(
-            "core.memory.mem0_client.build_memory_context", AsyncMock(return_value="")
-        ),
-    ):
-        from core.pipeline_common import build_common_context_layers
-
-        await build_common_context_layers(_mk_ctx(eval_now=sentinel))
-
-    assert mock_stitch.await_args.kwargs.get("now") == sentinel
-
-
-async def test_no_eval_now_passes_none():
-    """不设 _eval_now（生产路径）→ now=None=门控内部取墙钟，行为不变。"""
+@pytest.mark.parametrize(
+    "eval_now, expected_now",
+    [
+        (1_786_900_000.0, 1_786_900_000.0),  # 设数值键 → 原样传（评测与暴露轮同钟）
+        (None, None),  # 不设键（生产路径）→ 门控内部取墙钟，行为不变
+        ("1.8e9", None),  # ↓ 类型守卫：非数值（bool 是 int 子类也要拒）回墙钟，
+        (True, None),     #   拨钟值进算术会 TypeError、被吞致 mastery 层整轮静默
+        ([1.8e9], None),
+    ],
+)
+async def test_eval_now_passed_to_stitch_for_turn(eval_now, expected_now):
+    """缝 2：pipeline_common 把 metadata._eval_now 传给 stitch_for_turn(now=...)。"""
     from core.memory.proactive import StitchBrief
 
     with (
@@ -74,31 +62,9 @@ async def test_no_eval_now_passes_none():
     ):
         from core.pipeline_common import build_common_context_layers
 
-        await build_common_context_layers(_mk_ctx(eval_now=None))
+        await build_common_context_layers(_mk_ctx(eval_now=eval_now))
 
-    assert mock_stitch.await_args.kwargs.get("now") is None
-
-
-@pytest.mark.parametrize("bad", ["1.8e9", True, [1.8e9]])
-async def test_eval_now_type_guard_rejects_non_numeric(bad):
-    """非数值 _eval_now（调用方可预置任意类型）→ 回墙钟 None，不进算术炸整轮。"""
-    from core.memory.proactive import StitchBrief
-
-    with (
-        patch("core.llm.prompts.get_course_prompt", AsyncMock(return_value="")),
-        patch(
-            "core.memory.proactive.stitch_for_turn",
-            AsyncMock(return_value=StitchBrief(False, None, "unknown", 0.0, 1.0)),
-        ) as mock_stitch,
-        patch(
-            "core.memory.mem0_client.build_memory_context", AsyncMock(return_value="")
-        ),
-    ):
-        from core.pipeline_common import build_common_context_layers
-
-        await build_common_context_layers(_mk_ctx(eval_now=bad))
-
-    assert mock_stitch.await_args.kwargs.get("now") is None
+    assert mock_stitch.await_args.kwargs.get("now") == expected_now
 
 
 def test_ws_entry_strips_underscore_metadata_keys():
@@ -125,6 +91,7 @@ def test_live_cases_match_graph_and_scripts():
     from scripts.eval_memory.stitch_cases_table_e import entry_observations, prereq_predecessors
     from scripts.eval_memory.stitch_cases_table_e_live import STITCH_CASES_LIVE, load_graph_live
     from scripts.eval_memory.stitch_scripts_table_e import SCRIPTS, expose_sessions
+    from core.memory.mastery_state import POOR_OUTCOME_MAX
     from core.memory.proactive import RECURRENCE_WINDOW_DAYS
 
     g = load_graph_live()
@@ -157,7 +124,7 @@ def test_live_cases_match_graph_and_scripts():
         poor_cnt: dict[str, int] = defaultdict(int)
         for m in c["mastery"]:
             for o in entry_observations(c, m, base=base):
-                if o["outcome"] <= 0.25 and o["created_at"] >= now - RECURRENCE_WINDOW_DAYS * 86400:
+                if o["outcome"] <= POOR_OUTCOME_MAX and o["created_at"] >= now - RECURRENCE_WINDOW_DAYS * 86400:
                     poor_cnt[m["topic_id"]] += 1
         emergent = {t for t, n in poor_cnt.items() if n >= 2}
         assert emergent == set(c["error_repeated"]), (
@@ -193,16 +160,16 @@ class _OneHotEmbed:
     def __init__(self, topic_ids: list[str], keyword_map: dict[str, tuple[str, ...]]):
         self._ids = topic_ids
         self._kw = keyword_map
-        self._dim = len(topic_ids)
 
     async def _aget_query_embedding(self, query: str) -> list[float]:
+        dim = len(self._ids)
         idx = next(
             (self._ids.index(t) for t, kws in self._kw.items() if any(k in query for k in kws)),
             None,
         )
         if idx is None:
-            return [0.0] * self._dim
-        return [1.0 if i == idx else 0.0 for i in range(self._dim)]
+            return [0.0] * dim
+        return [1.0 if i == idx else 0.0 for i in range(dim)]
 
 
 @pytest.fixture

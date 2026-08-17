@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 
 RESULTS_DIR = Path(__file__).resolve().parent / "results"
 
+# 评测用户的密码哈希（bcrypt 合法格式，口令是随机串——谁也登不进，登录校验走
+# 正常 401 而非非法 hash 触发的 ValueError→500）。seed 与 live runner 共用。
+EVAL_PASSWORD_HASH = "$2b$10$kR9HZHSLq.298U41UnsU4.bZjavDhKwBCVep9jKXbL4OPgPZfQ7f2"
+
 # user_id / session_id 须 ≤32 字符（memory_episodes FK）
 CASE_USER_IDS: dict[str, str] = {
     "pos_prereq_equiv_r": "ss-01",
@@ -139,6 +143,8 @@ def _json_default(obj: Any) -> Any:
 
 
 async def _ensure_user(db, user_id: str) -> None:
+    """建评测 User 行（幂等）。password 用合法 bcrypt 随机口令哈希——非法 hash 会让
+    登录校验抛 ValueError→500，合法哈希走正常 401。live runner 共用本函数。"""
     from core.db.database import User
     from sqlalchemy import select
 
@@ -148,7 +154,7 @@ async def _ensure_user(db, user_id: str) -> None:
             User(
                 id=user_id,
                 username=user_id,
-                password_hash="seed",
+                password_hash=EVAL_PASSWORD_HASH,
                 role="student",
             )
         )
