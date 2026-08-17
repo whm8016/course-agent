@@ -63,7 +63,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "电阻串并联电路", "label": "电阻串并联电路", "levels": ["poor", "poor"], "days_since_last": 28},
         ],
-        "error_repeated": [],
+        "error_repeated": ["电阻串并联电路"],
         "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
         "matched_topic": "叠加定理",
         "teacher_rule": "叠加要拆成单源单独作用，每一步都在算串并联；串并联两次没掌握又快一个月没练，该提醒",
@@ -75,7 +75,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "戴维南定理", "label": "戴维南定理", "levels": ["poor", "poor", "poor"], "days_since_last": 21},
         ],
-        "error_repeated": [],
+        "error_repeated": ["戴维南定理"],
         "query": "戴维南等效电路怎么求？等效电压和电阻分别怎么算？",
         "matched_topic": "戴维南等效电路",
         "teacher_rule": "这正是要用定理的地方，该提醒",
@@ -87,7 +87,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "三端变阻器的应用", "label": "三端变阻器的应用", "levels": ["poor", "poor"], "days_since_last": 28},
         ],
-        "error_repeated": [],
+        "error_repeated": ["三端变阻器的应用"],
         "query": "分压器的调压特性实验怎么做？滑动端接在哪里？",
         "matched_topic": "分压器的调压特性",
         "teacher_rule": "接法不对调压根本做不下去，该提醒",
@@ -99,7 +99,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "文氏电路", "label": "文氏电路", "levels": ["poor", "poor"], "days_since_last": 21},
         ],
-        "error_repeated": [],
+        "error_repeated": ["文氏电路"],
         "query": "文氏电路的幅频特性怎么测？谐振点怎么找？",
         "matched_topic": "文氏电路的幅频特性",
         "teacher_rule": "该提醒",
@@ -111,7 +111,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "含源一端口网络", "label": "含源一端口网络", "levels": ["poor", "poor"], "days_since_last": 28},
         ],
-        "error_repeated": [],
+        "error_repeated": ["含源一端口网络"],
         "query": "戴维南等效电路的实验怎么验证？",
         "matched_topic": "戴维南等效电路",
         "teacher_rule": "隔着一级的地基也是空的，该提醒",
@@ -123,7 +123,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "万用电表的使用", "label": "万用电表的使用", "levels": ["poor", "poor"], "days_since_last": 28},
         ],
-        "error_repeated": [],
+        "error_repeated": ["万用电表的使用"],
         "query": "等效电阻的测量方法有哪些？万用表要怎么选档？",
         "matched_topic": "等效电阻的测量方法",
         "teacher_rule": "表都不会用，测电阻寸步难行，该提醒",
@@ -135,7 +135,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "rc微分电路", "label": "RC微分电路", "levels": ["poor", "poor"], "days_since_last": 21},
         ],
-        "error_repeated": [],
+        "error_repeated": ["rc微分电路"],
         "query": "怎么用矩形波观察电路的过渡过程？",
         "matched_topic": "用矩形波观察电路过渡过程的方法",
         "teacher_rule": "要观察的现象正是他没掌握的电路产生的，该提醒",
@@ -173,7 +173,7 @@ STITCH_CASES_LIVE: list[dict] = [
             {"topic_id": "叠加定理", "label": "叠加定理", "levels": ["poor", "poor"], "days_since_last": 2},
             {"topic_id": "电阻串并联电路", "label": "电阻串并联电路", "levels": ["poor", "poor"], "days_since_last": 30},
         ],
-        "error_repeated": ["叠加定理"],
+        "error_repeated": ["叠加定理", "电阻串并联电路"],
         "query": "叠加定理拆电源的时候每个源要单独作用，步骤再说一遍？",
         "matched_topic": "叠加定理",
         "teacher_rule": "两头都该提时，先提反复失手的那件",
@@ -186,7 +186,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "电阻串并联电路", "label": "电阻串并联电路", "levels": ["poor", "poor"], "days_since_last": 1},
         ],
-        "error_repeated": [],
+        "error_repeated": ["电阻串并联电路"],
         "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
         "matched_topic": "叠加定理",
         "teacher_rule": "知道他薄弱，但昨天刚在练这块——先别打扰，看这轮表现再说",
@@ -198,7 +198,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "电阻串并联电路", "label": "电阻串并联电路", "levels": ["poor", "poor"], "days_since_last": 7},
         ],
-        "error_repeated": [],
+        "error_repeated": ["电阻串并联电路"],
         "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
         "matched_topic": "叠加定理",
         "teacher_rule": "两次没掌握又隔了一周，差不多该忘了，该提醒",
@@ -210,7 +210,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "电阻串并联电路", "label": "电阻串并联电路", "levels": ["poor", "poor"], "days_since_last": 5},
         ],
-        "error_repeated": [],
+        "error_repeated": ["电阻串并联电路"],
         "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
         "matched_topic": "叠加定理",
         "teacher_rule": "才隔五天，还在保鲜期里，不必主动提",
@@ -265,7 +265,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "电阻串并联电路", "label": "电阻串并联电路", "levels": ["poor", "poor"], "days_since_last": 28},
         ],
-        "error_repeated": [],
+        "error_repeated": ["电阻串并联电路"],
         "query": "实验报告下周五几点交到教务处？",
         "matched_topic": None,
         "teacher_rule": "跟课程内容无关的问题，不插学情",
@@ -277,7 +277,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "并联谐振", "label": "并联谐振", "levels": ["poor", "poor"], "days_since_last": 28},
         ],
-        "error_repeated": [],
+        "error_repeated": ["并联谐振"],
         "query": "元件的伏安特性怎么测试？要接什么仪表？",
         "matched_topic": "元件的伏安特性的测试",
         "teacher_rule": "问的是最基础内容，薄弱的是不相干的章节，不提",
@@ -322,16 +322,18 @@ STITCH_CASES_LIVE: list[dict] = [
         "gold": {"stitch": False},
     },
     {
+        # 2026-08-18 弱线降为「一次判 poor 即入闸」后翻正（原 gold=False）：
+        # 一次失手 + 三周未碰 = 该回头看一眼，不再是"别小题大做"
         "id": "neg_single_poor",
-        "label": "单次失手：串并联只错过一次、三周没碰",
+        "label": "单次失手：串并联错过一次、三周没碰（08-18 口径翻正）",
         "mastery": [
             {"topic_id": "电阻串并联电路", "label": "电阻串并联电路", "levels": ["poor"], "days_since_last": 21},
         ],
-        "error_repeated": [],
+        "error_repeated": ["电阻串并联电路"],
         "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
         "matched_topic": "叠加定理",
-        "teacher_rule": "单次失手不算反复薄弱，别小题大做",
-        "gold": {"stitch": False},
+        "teacher_rule": "错过一次又三周没碰，该回头看一眼",
+        "gold": {"stitch": True, "evidence_topic": "电阻串并联电路"},
     },
     {
         "id": "neg_class_hard",
@@ -351,7 +353,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "示波器光标测量", "label": "示波器光标测量", "levels": ["poor", "poor"], "days_since_last": 28},
         ],
-        "error_repeated": [],
+        "error_repeated": ["示波器光标测量"],
         "query": "示波器通道设置菜单里耦合方式怎么选？探头衰减怎么设置？",
         "matched_topic": "通道设置菜单",
         "teacher_rule": "问哪块补哪块，同一台仪器的兄弟功能不算先修，不提",
@@ -365,7 +367,7 @@ STITCH_CASES_LIVE: list[dict] = [
             {"topic_id": "rc微分电路", "label": "RC微分电路", "levels": ["poor", "poor"], "days_since_last": 30},
             {"topic_id": "rlc串联电路的衰减振荡过渡过程", "label": "RLC串联电路的衰减振荡过渡过程", "levels": ["poor", "poor", "poor"], "days_since_last": 1},
         ],
-        "error_repeated": [],
+        "error_repeated": ["rc微分电路", "rlc串联电路的衰减振荡过渡过程"],
         "query": "用矩形波观察电路过渡过程的实验要怎么做？",
         "matched_topic": "用矩形波观察电路过渡过程的方法",
         "teacher_rule": "两个先修都薄弱，先提快忘掉的那个，正在练的不急",
@@ -378,7 +380,7 @@ STITCH_CASES_LIVE: list[dict] = [
             {"topic_id": "rc微分电路", "label": "RC微分电路", "levels": ["poor", "poor"], "days_since_last": 30},
             {"topic_id": "rlc串联电路的衰减振荡过渡过程", "label": "RLC串联电路的衰减振荡过渡过程", "levels": ["poor", "poor", "poor"], "days_since_last": 30},
         ],
-        "error_repeated": [],
+        "error_repeated": ["rc微分电路", "rlc串联电路的衰减振荡过渡过程"],
         "query": "用矩形波观察电路过渡过程的实验要怎么做？",
         "matched_topic": "用矩形波观察电路过渡过程的方法",
         "teacher_rule": "都久没练，提更薄弱的那个",
@@ -405,7 +407,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "电阻串并联电路", "label": "电阻串并联电路", "levels": ["poor", "poor"], "days_since_last": 1},
         ],
-        "error_repeated": [],
+        "error_repeated": ["电阻串并联电路"],
         "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
         "matched_topic": "叠加定理",
         "teacher_rule": "昨天刚练过，还在保鲜期，先别打扰",
@@ -417,7 +419,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "电阻串并联电路", "label": "电阻串并联电路", "levels": ["poor", "poor"], "days_since_last": 1},
         ],
-        "error_repeated": [],
+        "error_repeated": ["电阻串并联电路"],
         "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
         "matched_topic": "叠加定理",
         "teacher_rule": "同一个档案，四周后还卡在叠加定理，地基早该提了",
@@ -430,7 +432,7 @@ STITCH_CASES_LIVE: list[dict] = [
         "mastery": [
             {"topic_id": "电阻串并联电路", "label": "电阻串并联电路", "levels": ["poor", "poor"], "days_since_last": 1},
         ],
-        "error_repeated": [],
+        "error_repeated": ["电阻串并联电路"],
         "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
         "matched_topic": "叠加定理",
         "teacher_rule": "四周后且一小时前刚提醒过同一件事；门控按防打扰沉默（争议预定漏提醒，同 cooldown 两例口径）",

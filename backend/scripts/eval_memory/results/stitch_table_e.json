@@ -4,18 +4,18 @@
   "arms": {
     "never": {
       "tp": 0,
-      "fn": 18,
+      "fn": 19,
       "fp": 0,
-      "tn": 12,
+      "tn": 11,
       "balanced_accuracy": 0.5,
       "interruption_rate": 0.0,
       "miss_rate": 1.0,
       "llm_calls_per_case": 0
     },
     "always": {
-      "tp": 18,
+      "tp": 19,
       "fn": 0,
-      "fp": 12,
+      "fp": 11,
       "tn": 0,
       "balanced_accuracy": 0.5,
       "interruption_rate": 1.0,
@@ -23,13 +23,13 @@
       "llm_calls_per_case": 0
     },
     "gate": {
-      "tp": 15,
+      "tp": 16,
       "fn": 3,
       "fp": 0,
-      "tn": 12,
-      "balanced_accuracy": 0.9167,
+      "tn": 11,
+      "balanced_accuracy": 0.9211,
       "interruption_rate": 0.0,
-      "miss_rate": 0.1667,
+      "miss_rate": 0.1579,
       "llm_calls_per_case": 0
     }
   },
@@ -351,17 +351,17 @@
     },
     {
       "id": "neg_single_poor",
-      "label": "单次失手：欧姆只错过一次、三周没碰",
-      "teacher_rule": "单次失手不算反复薄弱，别小题大做",
+      "label": "单次失手：欧姆错过一次、三周没碰（08-18 口径翻正）",
+      "teacher_rule": "错过一次又三周没碰，该回头看一眼",
       "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
-      "gold_stitch": false,
-      "gold_evidence": null,
+      "gold_stitch": true,
+      "gold_evidence": "欧姆定律",
       "gate": {
-        "stitch": false,
-        "reason": "no_candidate",
-        "p_need": 0.0,
-        "tau": 1.0,
-        "evidence": null
+        "stitch": true,
+        "reason": "prereq_gap",
+        "p_need": 0.5658,
+        "tau": 0.3707,
+        "evidence": "欧姆定律"
       }
     },
     {
