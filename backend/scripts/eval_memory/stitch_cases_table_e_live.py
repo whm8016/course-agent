@@ -325,7 +325,7 @@ STITCH_CASES_LIVE: list[dict] = [
         # 2026-08-18 弱线降为「一次判 poor 即入闸」后翻正（原 gold=False）：
         # 一次失手 + 三周未碰 = 该回头看一眼，不再是"别小题大做"
         "id": "neg_single_poor",
-        "label": "单次失手：串并联错过一次、三周没碰（08-18 口径翻正）",
+        "label": "单次失手：串并联错过一次、三周没碰",
         "mastery": [
             {"topic_id": "电阻串并联电路", "label": "电阻串并联电路", "levels": ["poor"], "days_since_last": 21},
         ],

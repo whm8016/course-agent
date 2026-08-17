@@ -55,4 +55,3 @@ def test_sparse_observation_displacement_bounded():
         {"created_at": 1.0, "outcome": 0.0, "weight": W_JUDGE}
     ])
     assert s.theta == pytest.approx(-0.30, abs=1e-9)
-    assert s.theta > -0.4055  # 仍高于 WEAK_MARGIN——1 次 poor 不入闸（C1 比 theta）

@@ -20,9 +20,10 @@ r"""表E评测集：门控决策 vs 教师规则金标（mycourse 课文锚定�
 - ``last_stitched_hours_ago``：同证据主题上次实际拼入简报的小时数（冷却判定），
   锚定 **决策钟** case_now——冷却是「本轮前 N 小时」的运行时概念，与种钟解耦。
 - ``b_topic``：班级难度（仅 neg_class_hard，题目难度不决定谁能入闸的回归锚）。
-- ``error_repeated``：近 30 天同主题 poor ≥2 的复发证据（C2 候选口径）；观测间距
-  由它定——在列 1 天距（≥2 poor 自然落进 30 天窗）、不在 32 天距（窗内至多 1 条），
-  e2e 落库后复发由读侧自己数出、自检对账。
+- ``error_repeated``：近 30 天同主题 poor ≥1 的复发证据（C2 候选口径，门槛常量
+  ``proactive.RECURRENCE_MIN_COUNT``）；观测间距由它定——在列 1 天距（poor 自然
+  落进 30 天窗）、不在 32 天距（旧 poor 推出窗外），e2e 落库后复发由读侧自己
+  数出、自检对账。
 - 时钟：观测 created_at 锚定**种钟**（模块 NOW）；case 可选 ``now`` 键只挪**决策钟**
   （七、时钟三态：同档案不同今天），遗忘/复发窗/冷却全由管道按 now 实算。
 
@@ -435,7 +436,7 @@ STITCH_CASES: list[dict] = [
         # 2026-08-18 弱线降为「一次判 poor 即入闸」后翻正（原 gold=False）：
         # 一次失手 + 三周未碰 = 该回头看一眼，不再是"别小题大做"
         "id": "neg_single_poor",
-        "label": "单次失手：欧姆错过一次、三周没碰（08-18 口径翻正）",
+        "label": "单次失手：欧姆错过一次、三周没碰",
         "mastery": [
             {"topic_id": "欧姆定律", "label": "欧姆定律", "levels": ["poor"], "days_since_last": 21},
         ],

@@ -319,10 +319,5 @@ def test_class_difficulty_not_drags_fair_student_into_gate():
     assert brief.reason == "no_candidate"
 
 
-# ── WEAK_MARGIN 与折叠器的耦合纪律（阶段D 落点） ────────────────────────────
-
-
-def test_weak_margin_is_negative_and_meaningful():
-    """口径锚：WEAK_MARGIN ≈ logit(0.45) ≈ -0.2007（等价 risk >= 0.55）。"""
-    import math
-    assert math.isclose(WEAK_MARGIN, math.log(0.45 / 0.55), abs_tol=1e-4)
+# WEAK_MARGIN 的数值口径锚（= logit(0.45)）归 test_mastery_state 独占——那里是
+# 折叠纪律归属地（_weak_margin_from_proactive + sandwich 三连）；此处只测决策行为。

@@ -266,9 +266,7 @@ def test_weak_margin_keeps_single_rule_poor_out():
     """低信源边界：单次 W_RULE 观测（theta≈-0.15）不入闸——规则观测要凑两次；
     而单次 W_JUDGE 判定（-0.30）一次即入。"""
     m = _weak_margin_from_proactive()
-    rule_one = fold_observations(
-        [{"created_at": 1.0, "outcome": 0.0, "weight": W_RULE, "source": "rule"}]
-    ).theta
+    rule_one = fold_observations([_rule_poor(1.0)]).theta
     assert m < rule_one, f"单次 rule-poor theta={rule_one:.4f} 不应越过 WEAK_MARGIN={m}"
 
 
@@ -299,3 +297,7 @@ def test_c1_anchor_unaffected_by_class_difficulty():
 
 def _fair_obs() -> dict:
     return {"created_at": 1.0, "outcome": 0.5, "weight": W_JUDGE, "source": "llm_judge"}
+
+
+def _rule_poor(ts: float) -> dict:
+    return {"created_at": ts, "outcome": 0.0, "weight": W_RULE, "source": "rule"}

@@ -43,20 +43,18 @@ UNKNOWN_THRESHOLD = 0.55
 # C1 入闸判据（plan §3e，口径改 theta）：theta <= WEAK_MARGIN。
 # 语义锚点 =「同一主题至少 1 次判 poor」（2026-08-18 由 2 次下调：判定观测常摊到
 # 兄弟主题上，凑两次等于把真缺口挡在门外；live 表E 12 个漏提里 ≈8 个死在这）。
-# Elo 折叠（W_JUDGE=0.6）下 1 次 poor：b=0 → θ≈-0.30、b=0.5 → θ≈-0.2265，均 <= 本值；
 # 本值取 logit(0.45) ≈ -0.2007，恰等价 risk >= 0.55，便于换算成人能读的概率。
-# 不入闸的边界：fair-only（b∈[-0.5,0.5] 折完 θ >= -0.0735）、单次 W_RULE 观测
-# （b=0 → -0.15）——低信源仍需两次；2 次 poor（≈-0.54）维持入闸不变。
 # 不比 theta - b：b 是班级难度，一旦非零，一个 fair、theta≈0 的学生会被班级难度
 # 直接拖过闸——把「该生薄弱」改写成「这题班里难」，与门控原意冲突。b 只进
 # risk = 1 - sigmoid(theta - b)（影响已入闸候选的 p_need 排序），不决定谁能入闸。
 # 纪律：不写死就算完——test_mastery_state 由 fold_observations 实算夹出此值须落在
-# 1 次 poor 与 fair-only 之间；W_JUDGE 变了测试会红，强制重定常量。
+# 1 次 poor 与 fair-only 之间（b=0/b=0.5 的 1 次 poor 入闸、fair-only 与单次 W_RULE
+# 不入，边界数值见那三个测试）；W_JUDGE 变了测试会红，强制重定常量。
 WEAK_MARGIN = -0.2007
 
 # C2 复发：观测日志中同主题 poor 计数（30 天窗，与 p_forget S0=5 量级相称，进 eval 扫）。
-# 计数门槛 ≥1（与 WEAK_MARGIN 的「一次薄弱即管」同语义；2026-08-18 由 ≥2 下调）
 RECURRENCE_WINDOW_DAYS = 30
+RECURRENCE_MIN_COUNT = 1  # 窗内 poor 计数门槛（2026-08-18 由 2 下调，与 WEAK_MARGIN「一次薄弱即管」同语义）
 
 DEFAULT_C_FA = 1.0
 DEFAULT_C_FN = 3.0            # 漏报 3 倍代价（实验课损坏仪器风险 > 答非所问）
@@ -476,7 +474,7 @@ async def _read_error_repeated(
                 MasteryObservation.created_at >= cutoff,
             )
             .group_by(MasteryObservation.topic_id)
-            .having(func.count() >= 1)
+            .having(func.count() >= RECURRENCE_MIN_COUNT)
         )
     ).all()
     valid = set(topic_map.values())

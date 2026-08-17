@@ -92,7 +92,7 @@ def test_live_cases_match_graph_and_scripts():
     from scripts.eval_memory.stitch_cases_table_e_live import STITCH_CASES_LIVE, load_graph_live
     from scripts.eval_memory.stitch_scripts_table_e import SCRIPTS, expose_sessions
     from core.memory.mastery_state import POOR_OUTCOME_MAX
-    from core.memory.proactive import RECURRENCE_WINDOW_DAYS
+    from core.memory.proactive import RECURRENCE_MIN_COUNT, RECURRENCE_WINDOW_DAYS
 
     g = load_graph_live()
     tids = {t["topic_id"] for t in g["topics"]}
@@ -119,15 +119,16 @@ def test_live_cases_match_graph_and_scripts():
                     f"{cid}: evidence {ev} 既非 matched 也不在其先修闭包"
                 )
 
-        # 复发口径：观测落库后 30 天窗内同主题 poor≥1 的集合 == case 声明
-        # （2026-08-18 与 _read_error_repeated 同步由 ≥2 下调）
+        # 复发口径：观测落库后 30 天窗内同主题 poor 计数过 RECURRENCE_MIN_COUNT 的
+        # 集合 == case 声明（计数镜像 _read_error_repeated 的 GROUP BY/HAVING 形状，
+        # 门槛常量单源，别在测试里重写字面量）
         now = base + c.get("clock_days", 0) * 86400.0
         poor_cnt: dict[str, int] = defaultdict(int)
         for m in c["mastery"]:
             for o in entry_observations(c, m, base=base):
                 if o["outcome"] <= POOR_OUTCOME_MAX and o["created_at"] >= now - RECURRENCE_WINDOW_DAYS * 86400:
                     poor_cnt[m["topic_id"]] += 1
-        emergent = {t for t, n in poor_cnt.items() if n >= 1}
+        emergent = {t for t, n in poor_cnt.items() if n >= RECURRENCE_MIN_COUNT}
         assert emergent == set(c["error_repeated"]), (
             f"{cid}: 复发口径不符 emergent={sorted(emergent)} declared={sorted(c['error_repeated'])}"
         )
