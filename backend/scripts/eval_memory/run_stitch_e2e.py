@@ -8,11 +8,9 @@ Usage（backend 目录，需 EMBEDDING__API_KEY——问句要真实向量化）
 - **入口是生产读侧** ``core.memory.proactive.stitch_for_turn``：问句只有一句中文，
   matched_topic 由 ``_match_topic`` 拿 course_topic.embedding 真最近邻算出（旧 e2e
   把 case 的 matched_topic 塞回 decide_stitch，匹配这步是假的——已删）；
-- **构造侧走生产写侧的 override 注入口**：观测追加 + theta 全量重折 +
-  knowledge_mastery upsert 全部经 ``consolidation._write_mastery_observations``
-  （source/weight/created_at 注入，quiz_observe 同款）——列集/round/strength 语义
-  单源在生产，评测侧永不漂移；唯一非生产字段 last_stitched_at（commit_stitch_cooldown
-  独占）单独 UPDATE；
+- **构造侧走生产写侧的 override 注入口**（rationale 见 `_seed_case` docstring）：
+  观测/折叠/upsert 经 ``consolidation._write_mastery_observations`` 语义单源生产，
+  唯一非生产字段 last_stitched_at 单独 UPDATE；
 - **发问侧只传 query + 冻结 now**（case_now）：遗忘/复发/冷却全部由管道自己比
   「现在」算出，出题人不再预折 p_forget、预写 error_repeated。
 
@@ -241,9 +239,11 @@ async def run() -> dict:
                         gold and not brief.should_stitch and brief.reason == "cooldown"
                     ),
                 }
-                for arm, pred in zip(
-                    ZERO_LLM_ARMS, (False, True, brief.should_stitch),
-                ):
+                # 具名映射不依赖 ZERO_LLM_ARMS 的元素顺序（zip 版会随其重排静默对调
+                # never/always）；stats 键集仍由 ZERO_LLM_ARMS 初始化，臂名漂移 KeyError
+                for arm, pred in {
+                    "never": False, "always": True, "gate": brief.should_stitch,
+                }.items():
                     s = stats[arm]
                     if gold and pred:
                         s["tp"] += 1
