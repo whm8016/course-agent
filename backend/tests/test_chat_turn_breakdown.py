@@ -217,8 +217,9 @@ async def test_turn_breakdown_not_logged_when_loop_raises(caplog):
 
 @pytest.mark.asyncio
 async def test_timing_survives_malicious_preset_metadata(caplog):
-    """WS 入口把客户端 metadata 原样透传（api/run.py），_timing 预置非 dict（如字符串）
-    不该让计时写入 TypeError 崩掉整轮——覆盖式合并直接顶掉非法值。"""
+    """WS 入口已剥离客户端下划线键（api/run.py::_sanitize_client_metadata），但
+    bot/内网调用方仍可预置 metadata——_timing 预置非 dict（如字符串）不该让计时
+    写入 TypeError 崩掉整轮，覆盖式合并直接顶掉非法值。"""
     from core.pipeline_common import build_common_context_layers
 
     ctx = UnifiedContext(

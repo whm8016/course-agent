@@ -75,6 +75,16 @@ _MAX_HISTORY = _SETTINGS.run_history_max_length
 _MAX_MESSAGE = _SETTINGS.chat_message_max_length
 
 
+def _sanitize_client_metadata(raw) -> dict:
+    """客户端 metadata 净化：非 dict 归 {}（下游 .get/.setdefault 才不炸）；
+    下划线前缀的服务端内部键（_eval_now 可拨门控时钟绕过 24h 冷却、
+    _pending_stitch_cooldown 可替任意主题落冷却戳、_timing/_profile_text_model
+    是运行时槽）整批剥离——前端契约只发 count/requirement/sources 等业务键。"""
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if not str(k).startswith("_")}
+
+
 @router.websocket("/{capability_name}")
 async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
     """统一 WebSocket 入口：按 capability_name 路由到对应能力。"""
@@ -121,12 +131,14 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
     question: str = (payload.get("question") or "").strip()[:_MAX_MESSAGE]
     language: str = str(payload.get("language") or "zh")
     history: list[dict] = payload.get("history") or []
+    # metadata 提前一次性解析+净化（口径见 _sanitize_client_metadata docstring）
+    metadata: dict = _sanitize_client_metadata(payload.get("metadata"))
     tools_raw = payload.get("tools")
     if tools_raw is None:
         # 前端未显式传 tools：按"只有选定才启用"原则，深度研究用 metadata.sources
         # （用户的数据源选择）映射工具——kb→rag、web/papers→web_search；未选则不挂。
         # 原先 None 默认 ["rag"] 会无视用户选择强行接知识库检索。
-        sources = ((payload.get("metadata") or {}).get("sources") or [])
+        sources = metadata.get("sources") or []
         enabled_tools: list[str] = []
         if "kb" in sources:
             enabled_tools.append("rag")
@@ -134,7 +146,6 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
             enabled_tools.append("web_search")
     else:
         enabled_tools = [str(t) for t in (tools_raw or [])]
-    metadata: dict = payload.get("metadata") or {}
 
     # 附件（图片）：统一解析（列表优先，回退旧 image_path 单图填 url，走 materialize 归属校验）
     attachments = resolve_attachments(payload.get("attachments"), payload.get("image_path"))

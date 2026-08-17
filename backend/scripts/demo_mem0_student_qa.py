@@ -118,8 +118,12 @@ async def _ask_model(
     history: list[dict[str, Any]],
     enabled_tools: list[str],
     rag_mode: str,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """走 orchestrator → ChatPipeline → run_agent_loop，返回模型真实回复。"""
+    """走 orchestrator → ChatPipeline → run_agent_loop，返回模型真实回复。
+
+    extra_metadata：并入 ctx.metadata 的附加键（评测拨钟用——表E live 层传
+    ``_eval_now`` 让门控与该轮 created_at 同钟；生产调用方不传，行为不变）。"""
     from core.agent.mode_normalize import normalize_mode
     from core.context import UnifiedContext
     from core.memory.mem0_client import build_memory_context
@@ -137,7 +141,7 @@ async def _ask_model(
         enabled_tools=enabled_tools,
         rag_mode=rag_mode,
         memory_context=memory_context,
-        metadata={"turn_id": f"demo-{uuid.uuid4().hex[:12]}"},
+        metadata={"turn_id": f"demo-{uuid.uuid4().hex[:12]}", **(extra_metadata or {})},
     )
 
     answer = ""

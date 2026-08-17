@@ -177,9 +177,17 @@ async def build_common_context_layers(
                 # 暴露轮先巩固再聊下一轮时，墙钟会对着 N 天前的观测提前拼简报、
                 # 污染后续判定输入——评测传该轮 created_at 保证同钟。生产不设此
                 # 键（.get 默认 None=stitch_for_turn 内部各读侧取墙钟，行为不变）。
+                # 类型守卫：非数值（bool/str 等）一律回墙钟——拨钟值进算术会
+                # TypeError，被本层 except 吞掉会让 memory+mastery 两层整轮静默。
+                _eval_now = (ctx.metadata or {}).get("_eval_now")
                 brief = await stitch_for_turn(
                     ctx.user_message, ctx.user_id, ctx.course_id, db,
-                    now=(ctx.metadata or {}).get("_eval_now"),
+                    now=(
+                        _eval_now
+                        if isinstance(_eval_now, (int, float))
+                        and not isinstance(_eval_now, bool)
+                        else None
+                    ),
                 )
                 if not mastery_context:
                     mastery_context = brief.text

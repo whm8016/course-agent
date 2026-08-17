@@ -8,9 +8,14 @@ r"""表E live 全栈评测：30 例走现网课全栈（真 ChatPipeline[RAG+mem
 评测必须打在写入口上（CQS：对话账本是发件箱，巩固是唯一写掌握度的入口）。
 
 Usage（docker compose exec backend，现网栈+真实凭据）:
-    python -m scripts.eval_memory.run_stitch_e2e_live --check-match   # 预检：30 探测问句 NN 匹配（零 LLM）
+    python -m scripts.eval_memory.run_stitch_e2e_live --check-match   # 预检：30 探测问句 NN 匹配（仅真实向量化，零聊天/判定 LLM）
     python -m scripts.eval_memory.run_stitch_e2e_live                 # 全量 30 例（≈77 暴露轮，费用见下）
     python -m scripts.eval_memory.run_stitch_e2e_live --case-id cooldown_1h
+
+⚠️ 全量跑之前先 `docker compose stop worker`（跑完 start）——ARQ 巩固 cron 会把
+拨钟 episode（created_at 在过去）当积压/崩溃遗留捞走重判，与本 runner 的同步
+巩固并发双写观测（append-only），复发计数/theta 被污染、结果不可复现。观测条数
+异常会落结果的 obs_polluted 列，但那已经是事后检测。
 
 时钟口径：
 - 观测钟锚 base = 开跑墙钟 wall0 − 27 天（时钟三态 day28 的探测钟 = base+27d ≈
@@ -68,6 +73,10 @@ _CLOCK_DAYS_MAX = 27
 # 开跑前的现网课内探针问句（检索命中闸）：必须打到讲义块才证明索引挂上了
 _PROBE_QUERY = "线性电阻元件的伏安特性怎么测量？"
 
+# 评测用户的密码哈希（bcrypt 合法格式，口令是随机串——谁也登不进，登录校验走
+# 正常 401 而非非法 hash 触发的 ValueError→500）
+_EVAL_PASSWORD_HASH = "$2b$10$kR9HZHSLq.298U41UnsU4.bZjavDhKwBCVep9jKXbL4OPgPZfQ7f2"
+
 
 def _outcome_level(outcome: float) -> str:
     """观测 outcome → 等级（LEVEL_OUTCOME 逆映射，poor<=0.25 / good>=0.75 / 其间 fair）。"""
@@ -117,16 +126,20 @@ async def _ensure_user(db, user_id: str) -> None:
 
     row = (await db.execute(select(User).where(User.id == user_id))).scalars().first()
     if row is None:
-        db.add(User(id=user_id, username=user_id, password_hash="seed", role="student"))
+        db.add(User(
+            id=user_id, username=user_id,
+            password_hash=_EVAL_PASSWORD_HASH, role="student",
+        ))
         await db.commit()
 
 
-async def _cleanup_user(db, user_id: str, course_id: str) -> None:
-    """重跑幂等：只清这个评测 user 的 episode / mastery / 观测（mem0 best-effort）。
-
-    不碰 course_topic / 其他用户——隔离只靠 user_id（同生产读域），绝不改生产图。"""
-    from core.db.database import KnowledgeMastery, MasteryObservation, MemoryEpisode
-    from sqlalchemy import delete
+async def _cleanup_user(db, user_id: str, course_id: str) -> bool:
+    """重跑幂等：只清这个评测 user 的 episode / mastery / 观测 + 仪表盘图 +
+    mem0（best-effort，返回是否清成——没清成会污染下轮的 memory_context，
+    落进结果的 mem0_cleaned 列）。不碰 course_topic / 其他用户——隔离只靠
+    user_id（同生产读域），绝不改生产图。"""
+    from core.db.database import KnowledgeMastery, MasteryObservation, MemoryEpisode, User
+    from sqlalchemy import delete, select
 
     await db.execute(delete(MasteryObservation).where(
         MasteryObservation.user_id == user_id,
@@ -140,13 +153,21 @@ async def _cleanup_user(db, user_id: str, course_id: str) -> None:
         MemoryEpisode.user_id == user_id,
         MemoryEpisode.course_id == course_id,
     ))
+    # 巩固会把 error_patterns 写进 users.error_graph（仪表盘层，门控不读）——
+    # 一起清掉，重跑不残留旧模式的节点
+    row = (await db.execute(select(User).where(User.id == user_id))).scalars().first()
+    if row is not None:
+        row.error_graph = {"nodes": [], "edges": []}
+        row.knowledge_graph = {"nodes": [], "edges": []}
     await db.commit()
     try:
         from core.memory.mem0_client import get_memory
 
         await get_memory().delete_all(user_id=user_id)
+        return True
     except Exception as exc:
-        logger.warning("[live] mem0 清理失败（非致命，继续）：%s", exc)
+        logger.warning("[live] mem0 清理失败（非致命，但本轮 memory_context 可能带旧记忆）：%s", exc)
+        return False
 
 
 async def _expose_case(
@@ -201,7 +222,7 @@ async def _expose_case(
             )
             _append_history(history, turn["q"], assistant_msg)
             turn_logs.append({
-                "session": si, "topic_id": turn["topic_id"], "q": turn["q"],
+                "session": si, "at": at, "topic_id": turn["topic_id"], "q": turn["q"],
                 "recorded": ok, "tools_used": model_out.get("tools_used") or [],
                 "assistant_chars": len(assistant_msg),
             })
@@ -246,6 +267,7 @@ async def _read_extract(db, user_id: str, course_id: str, case: dict) -> dict:
     extract_topics = sorted(by_topic)
     detail: dict[str, dict] = {}
     n_ok = 0
+    polluted: list[str] = []
     for m in case["mastery"]:
         tid = m["topic_id"]
         got = by_topic.get(tid, [])
@@ -253,6 +275,10 @@ async def _read_extract(db, user_id: str, course_id: str, case: dict) -> dict:
         want = m["levels"]
         ok = bool(got_levels) and got_levels[-1] == want[-1]
         n_ok += int(ok)
+        # 观测条数 != 期望档数：多为 ARQ cron 与本 runner 并发巩固重判同段（双写），
+        # 或判定器多判了相邻主题——打偏记列，不从混淆矩阵里剔
+        if len(got_levels) != len(want):
+            polluted.append(tid)
         detail[tid] = {
             "expected": want, "actual": got_levels, "extract_ok": ok,
         }
@@ -261,6 +287,7 @@ async def _read_extract(db, user_id: str, course_id: str, case: dict) -> dict:
         "extract_detail": detail,
         "extract_ok": n_ok == len(case["mastery"]),
         "extract_ok_count": n_ok,
+        "obs_polluted": polluted,
         "n_observations": len(rows),
     }
 
@@ -305,7 +332,7 @@ def _gate_fields(brief) -> dict:
 
 
 async def run_check_match() -> dict:
-    """预检（零 LLM）：30 条探测问句过生产 _match_topic，跑前看 matched 偏不偏。"""
+    """预检（仅 30 次真实向量化，零聊天/判定 LLM）：探测问句过生产 _match_topic。"""
     from core.db.database import AsyncSessionLocal
     from core.memory.proactive import stitch_for_turn
 
@@ -337,6 +364,15 @@ async def run(case_ids: list[str] | None = None) -> dict:
     from .run_stitch_table_e import ZERO_LLM_ARMS, _metrics
 
     await _probe_retrieval(COURSE_ID)
+    # ⚠️ 运行前提（不满足会出现间歇性重复观测，结果不可复现）：先停 worker
+    # `docker compose stop worker`。cron_consolidate_memory 每 5 分钟把
+    # created_at 在过去（=全部拨钟 episode）的 pending/processing 当「长期积压/
+    # 崩溃遗留」捞走重判——与本 runner 的同步巩固并发会双写观测（append-only 无
+    # 去重），复发计数/theta 被污染；跑到一半的观测条数异常会落 obs_polluted 列。
+    logger.warning(
+        "[live] 运行前提：先 docker compose stop worker 再跑（拨钟 episode 会被 ARQ "
+        "cron 当积压重判、双写观测污染复发计数）；跑完 docker compose start worker"
+    )
 
     cases = [c for c in STITCH_CASES_LIVE if not case_ids or c["id"] in case_ids]
     if case_ids:
@@ -364,7 +400,7 @@ async def run(case_ids: list[str] | None = None) -> dict:
             logger.info("[live] === %s (%d/%d) user=%s ===", c["id"], idx + 1, len(STITCH_CASES_LIVE), user_id)
             async with AsyncSessionLocal() as db:
                 await _ensure_user(db, user_id)
-                await _cleanup_user(db, user_id, COURSE_ID)
+                mem0_cleaned = await _cleanup_user(db, user_id, COURSE_ID)
 
             turn_logs, retry = await _expose_case(user_id, COURSE_ID, c, case_base)
 
@@ -379,6 +415,8 @@ async def run(case_ids: list[str] | None = None) -> dict:
                 "query": c["query"], "gold_stitch": gold,
                 "gold_evidence": c["gold"].get("evidence_topic"),
                 "now": probe["now"],
+                "obs_base": case_base,
+                "mem0_cleaned": mem0_cleaned,
                 "matched_topic_expected": c["matched_topic"],
                 "matched_topic_actual": probe["gate"]["matched_topic"],
                 "match_ok": probe["gate"]["matched_topic"] == c["matched_topic"],
@@ -399,7 +437,11 @@ async def run(case_ids: list[str] | None = None) -> dict:
                 **{k: v for k, v in extract.items() if k != "extract_detail"},
                 "extract_detail": extract["extract_detail"],
             }
-            for arm, pred in (("never", False), ("always", True), ("gate", gate_stitch)):
+            # 具名映射不依赖 ZERO_LLM_ARMS 的元素顺序（对齐 run_stitch_e2e 的
+            # /simplify 收敛口径）；stats 键集仍由 ZERO_LLM_ARMS 初始化
+            for arm, pred in {
+                "never": False, "always": True, "gate": gate_stitch,
+            }.items():
                 s = stats[arm]
                 if gold and pred:
                     s["tp"] += 1
@@ -427,6 +469,7 @@ async def run(case_ids: list[str] | None = None) -> dict:
         "cooldown_fn": sum(1 for r in rows if r["cooldown_fn"]),
         "match_misses": sum(1 for r in rows if not r["match_ok"]),
         "extract_full_ok": sum(1 for r in rows if r["extract_ok"]),
+        "obs_polluted_cases": sum(1 for r in rows if r["obs_polluted"]),
         "details": rows,
     }
 
@@ -439,7 +482,7 @@ def main() -> None:
         description="表E live 全栈：真 ChatPipeline(RAG+mem0) → 巩固 → 拨钟门控（需现网栈+真实凭据）")
     parser.add_argument("--case-id", action="append", help="只跑指定 case（可多次给）")
     parser.add_argument("--check-match", action="store_true",
-                        help="预检：30 探测问句过生产匹配（零 LLM，跑全量前先看 matched 偏不偏）")
+                        help="预检：30 探测问句过生产匹配（仅真实向量化，零聊天/判定 LLM）")
     parser.add_argument("--out", type=Path, help="输出 JSON（默认 results/stitch_table_e_e2e_live.json）")
     args = parser.parse_args()
 

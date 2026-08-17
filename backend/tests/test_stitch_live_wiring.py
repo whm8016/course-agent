@@ -79,6 +79,43 @@ async def test_no_eval_now_passes_none():
     assert mock_stitch.await_args.kwargs.get("now") is None
 
 
+@pytest.mark.parametrize("bad", ["1.8e9", True, [1.8e9]])
+async def test_eval_now_type_guard_rejects_non_numeric(bad):
+    """非数值 _eval_now（调用方可预置任意类型）→ 回墙钟 None，不进算术炸整轮。"""
+    from core.memory.proactive import StitchBrief
+
+    with (
+        patch("core.llm.prompts.get_course_prompt", AsyncMock(return_value="")),
+        patch(
+            "core.memory.proactive.stitch_for_turn",
+            AsyncMock(return_value=StitchBrief(False, None, "unknown", 0.0, 1.0)),
+        ) as mock_stitch,
+        patch(
+            "core.memory.mem0_client.build_memory_context", AsyncMock(return_value="")
+        ),
+    ):
+        from core.pipeline_common import build_common_context_layers
+
+        await build_common_context_layers(_mk_ctx(eval_now=bad))
+
+    assert mock_stitch.await_args.kwargs.get("now") is None
+
+
+def test_ws_entry_strips_underscore_metadata_keys():
+    """WS 入口剥离客户端预置的下划线内部键（_eval_now 可拨门控钟绕过冷却）。"""
+    from api.run import _sanitize_client_metadata
+
+    raw = {
+        "_eval_now": 1e18, "_pending_stitch_cooldown": {"x": True},
+        "count": 3, "sources": ["kb"], "_timing": "oops",
+    }
+    clean = _sanitize_client_metadata(raw)
+    assert clean == {"count": 3, "sources": ["kb"]}
+    # 非 dict（含 None/字符串）一律归 {}——下游 .get/.setdefault 才不炸
+    assert _sanitize_client_metadata("not-a-dict") == {}
+    assert _sanitize_client_metadata(None) == {}
+
+
 # ---------- 2. 案例数据一致性（纯数据，零 DB）----------
 
 
