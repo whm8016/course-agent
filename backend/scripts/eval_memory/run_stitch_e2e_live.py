@@ -228,8 +228,10 @@ async def _expose_case(
 
 
 async def _read_extract(db, user_id: str, course_id: str, case: dict) -> dict:
-    """读真观测对账期望档案：extract_ok = 主题出现且末档=期望末档（评测信息量，不炸）。
+    """读真观测对账期望档案：extract_ok = 档序列与期望完全一致（评测信息量，不炸）。
 
+    2026-08-18 收紧：旧口径只比末档——两次不会只盖成一次也算过，把「判定器
+    盖章缩水」这个主因藏在对账外。现要求 got == want 整序列一致（条数+顺序+档位）。
     judge_levels 是「判定器长出来的世界」；打偏（多判/漏判/错档）全部记列，
     不从混淆矩阵里剔。"""
     from core.db.database import MasteryObservation
@@ -257,7 +259,7 @@ async def _read_extract(db, user_id: str, course_id: str, case: dict) -> dict:
     for m in case["mastery"]:
         got_levels = [g["level"] for g in by_topic.get(m["topic_id"], [])]
         want = m["levels"]
-        ok = bool(got_levels) and got_levels[-1] == want[-1]
+        ok = got_levels == want
         n_ok += int(ok)
         detail[m["topic_id"]] = {
             "expected": want, "actual": got_levels, "extract_ok": ok,
