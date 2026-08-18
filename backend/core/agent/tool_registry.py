@@ -136,7 +136,13 @@ async def _execute_rag(course_id: str, query: str, **kwargs) -> ToolResult:
             return ToolResult(
                 content="（知识库中未检索到与该问题相关的内容。）", success=False
             )
-        return ToolResult(content=content, sources=[{"type": "rag", "query": query}])
+        # sources 带上命中来源文件名（前端来源卡可溯源）：retriever 暴露 last_sources
+        # （pg 路已实现；LightRAG 未暴露时退回无文件名，行为与旧版一致）
+        file_paths = list(getattr(retriever, "last_sources", None) or [])
+        sources: list[dict] = [{"type": "rag", "query": query}]
+        if file_paths:
+            sources[0]["file_paths"] = file_paths
+        return ToolResult(content=content, sources=sources)
     except Exception as e:
         logger.exception("rag tool failed")
         return ToolResult(content=f"（知识库检索失败：{e}）", success=False)

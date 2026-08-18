@@ -73,7 +73,9 @@ class TestFormatContexts:
 
         ctx = [{"content": "x" * 100}]
         out = _format_contexts(ctx, limit=1, max_chars=30)
-        assert len(out) <= 30
+        # 预算只算正文（证据头不计费）：正文裁到 30，头是额外开销
+        assert out.endswith("x" * 30)
+        assert out.startswith("[证据1]")
 
     def test_multiple_chunks_joined(self):
         from core.rag.retriever.llamaindex_pg import _format_contexts
@@ -81,7 +83,24 @@ class TestFormatContexts:
         out = _format_contexts(
             [{"content": "a"}, {"content": "b"}], limit=5, max_chars=1000
         )
-        assert out == "a\n\nb"
+        assert "[证据1]" in out and "[证据2]" in out
+        assert "a" in out and "b" in out
+
+    def test_evidence_header_with_source(self):
+        """带 file_path 的 chunk 拼出与 LightRAG 同款证据头（仅文件名，不暴露路径）。"""
+        from core.rag.retriever.llamaindex_pg import _format_contexts
+
+        out = _format_contexts(
+            [{"content": "a", "file_path": "/data/讲义A.pdf"}], limit=5, max_chars=1000
+        )
+        assert out == "[证据1｜来源: 讲义A.pdf]\na"
+
+    def test_evidence_header_without_source(self):
+        """无 file_path → 裸证据头，不拼空来源。"""
+        from core.rag.retriever.llamaindex_pg import _format_contexts
+
+        out = _format_contexts([{"content": "a", "file_path": ""}], limit=5, max_chars=1000)
+        assert out == "[证据1]\na"
 
     def test_empty(self):
         from core.rag.retriever.llamaindex_pg import _format_contexts

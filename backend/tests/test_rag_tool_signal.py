@@ -20,10 +20,14 @@ from core.agent.tool_registry import _execute_rag
 
 
 class _RecordingRetriever:
-    """假检索器：记录每次调用 (method, kwargs)，返回固定字符串。"""
+    """假检索器：记录每次调用 (method, kwargs)，返回固定字符串。
 
-    def __init__(self, context_text: str = "HIT") -> None:
+    last_sources 模拟 pg 后端的来源回带（LightRAG 无此属性，_execute_rag 用 getattr 容错）。
+    """
+
+    def __init__(self, context_text: str = "HIT", last_sources: list[str] | None = None) -> None:
         self._ctx = context_text
+        self.last_sources = last_sources
         self.calls: list[tuple[str, dict]] = []
 
     async def retrieve_context(self, **kwargs):
@@ -72,15 +76,27 @@ async def test_execute_rag_no_hit_returns_failure_no_sources(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_execute_rag_hit_returns_sources(monkeypatch):
-    """有命中：success=True、带 rag 来源、内容含证据。"""
-    lr = _RecordingRetriever("KVL：沿任意闭合回路电压代数和为零。")
+    """有命中：success=True、带 rag 来源、内容含证据。retriever 无 last_sources → 不带文件名（旧版行为）。"""
+    lr = _RecordingRetriever("KVL：沿任意闭合回路电压代数和为零。", last_sources=None)
     _patch(monkeypatch, ready={"lightrag"}, lightrag=lr)
     result = await _execute_rag(course_id="c1", query="KVL 是什么")
 
     assert result.success is True
     assert len(result.sources) == 1
     assert result.sources[0]["type"] == "rag"
+    assert "file_paths" not in result.sources[0]
     assert "KVL" in result.content
+
+
+@pytest.mark.asyncio
+async def test_execute_rag_hit_sources_carry_file_paths(monkeypatch):
+    """pg 路：retriever.last_sources 命中来源 → sources 带 file_paths（前端来源卡可溯源）。"""
+    pg = _RecordingRetriever("KVL：沿任意闭合回路电压代数和为零。", last_sources=["讲义A.pdf"])
+    _patch(monkeypatch, ready={"llamaindex_pg"}, pg=pg)
+    result = await _execute_rag(course_id="c1", query="KVL 是什么")
+
+    assert result.success is True
+    assert result.sources[0]["file_paths"] == ["讲义A.pdf"]
 
 
 @pytest.mark.asyncio
