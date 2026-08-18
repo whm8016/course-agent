@@ -30,7 +30,7 @@ from core.db.cache import course_access_invalidate
 from core.db.limiter import limiter
 from core.codes import ensure_unique_join_code
 from core.db.database import (
-    CourseDailyRollup, CourseSchedule, CourseTopic, Enrollment, Grade, KBFile,
+    CourseDailyRollup, CourseSchedule, CourseTopic, Enrollment, Grade, KBFile, StudentCourseRollup,
     KnowledgeBase, Message, NotebookEntry, Session, User, get_db,
 )
 from core.memory.graph_memory import filter_graph_by_course
@@ -834,43 +834,71 @@ async def analytics_student_stats(
 
     student_ids = [r.student_id for r in enroll_rows]
 
-    # 2. Session counts per student
-    session_rows = (await db.execute(
-        select(Session.user_id, func.count(Session.id).label("cnt"))
-        .where(Session.course_id == course_id, Session.user_id.in_(student_ids))
-        .group_by(Session.user_id)
-    )).all()
-    session_map: dict[str, int] = {r.user_id: r.cnt for r in session_rows}
+    # 2-5 优先读 student_course_rollup（cron 每小时重算，P0 收口读路径）；行缺失或
+    # 过期（>6h，cron 未跑如 fresh 部署）降级现算。口径与 writer 完全一致：
+    # sessions=Session 计数 / messages=role=user 计数 / quiz=NotebookEntry 按 course_id
+    # / last_active=max(Session.updated_at)。enrollment+图谱（查询1）与 7 天趋势（查询9）
+    # rollup 没有，保持现算。mastery_avg/risk 列暂不消费（risk_score 走图谱公式，未对齐）。
+    rollup_rows = (await db.execute(
+        select(StudentCourseRollup).where(StudentCourseRollup.course_id == course_id)
+    )).scalars().all()
+    rollup_fresh = bool(rollup_rows) and (
+        time.time() - max(r.updated_at or 0 for r in rollup_rows) <= 6 * 3600
+    )
+    session_map: dict[str, int] = {}
+    msg_map: dict[str, int] = {}
+    last_active_map: dict[str, float] = {}
+    quiz_map: dict[str, dict] = {}
+    if rollup_fresh:
+        for r in rollup_rows:
+            session_map[r.user_id] = r.sessions or 0
+            msg_map[r.user_id] = r.messages or 0
+            if r.last_active_at is not None:
+                last_active_map[r.user_id] = r.last_active_at
+            quiz_map[r.user_id] = {"total": r.quiz_total or 0, "correct": r.quiz_correct or 0}
+        # cron 后新入课的学生不在 rollup 里 → 只对这部分现算（口径同 fallback）
+        live_ids = [sid for sid in student_ids if sid not in session_map]
+    else:
+        live_ids = student_ids
 
-    # 3. Message counts per student (user-role only)
-    msg_rows = (await db.execute(
-        select(Session.user_id, func.count(Message.id).label("cnt"))
-        .join(Session, Message.session_id == Session.id)
-        .where(Session.course_id == course_id, Message.role == "user",
-               Session.user_id.in_(student_ids))
-        .group_by(Session.user_id)
-    )).all()
-    msg_map: dict[str, int] = {r.user_id: r.cnt for r in msg_rows}
+    if live_ids:
+        # 2. Session counts per student
+        session_rows = (await db.execute(
+            select(Session.user_id, func.count(Session.id).label("cnt"))
+            .where(Session.course_id == course_id, Session.user_id.in_(live_ids))
+            .group_by(Session.user_id)
+        )).all()
+        session_map.update({r.user_id: r.cnt for r in session_rows})
 
-    # 4. Last active per student
-    last_active_rows = (await db.execute(
-        select(Session.user_id, func.max(Session.updated_at).label("last"))
-        .where(Session.course_id == course_id, Session.user_id.in_(student_ids))
-        .group_by(Session.user_id)
-    )).all()
-    last_active_map: dict[str, float] = {r.user_id: r.last for r in last_active_rows}
+        # 3. Message counts per student (user-role only)
+        msg_rows = (await db.execute(
+            select(Session.user_id, func.count(Message.id).label("cnt"))
+            .join(Session, Message.session_id == Session.id)
+            .where(Session.course_id == course_id, Message.role == "user",
+                   Session.user_id.in_(live_ids))
+            .group_by(Session.user_id)
+        )).all()
+        msg_map.update({r.user_id: r.cnt for r in msg_rows})
 
-    # 5. Quiz stats per student（按课程过滤：JOIN Session 取 course_id，
-    #    与 student/{id}/detail 口径一致；旧实现仅按 user_id 全局聚合，
-    #    会把他课程的答题也算进本课程，导致 list/detail 正确率对不上）
-    quiz_rows = (await db.execute(
-        select(NotebookEntry.user_id,
-               func.count(NotebookEntry.id).label("total"),
-               func.sum(func.cast(NotebookEntry.is_correct, Integer)).label("correct"))
-        .where(NotebookEntry.course_id == course_id, NotebookEntry.user_id.in_(student_ids))
-        .group_by(NotebookEntry.user_id)
-    )).all()
-    quiz_map: dict[str, dict] = {r.user_id: {"total": r.total, "correct": r.correct or 0} for r in quiz_rows}
+        # 4. Last active per student
+        last_active_rows = (await db.execute(
+            select(Session.user_id, func.max(Session.updated_at).label("last"))
+            .where(Session.course_id == course_id, Session.user_id.in_(live_ids))
+            .group_by(Session.user_id)
+        )).all()
+        last_active_map.update({r.user_id: r.last for r in last_active_rows})
+
+        # 5. Quiz stats per student（按课程过滤：JOIN Session 取 course_id，
+        #    与 student/{id}/detail 口径一致；旧实现仅按 user_id 全局聚合，
+        #    会把他课程的答题也算进本课程，导致 list/detail 正确率对不上）
+        quiz_rows = (await db.execute(
+            select(NotebookEntry.user_id,
+                   func.count(NotebookEntry.id).label("total"),
+                   func.sum(func.cast(NotebookEntry.is_correct, Integer)).label("correct"))
+            .where(NotebookEntry.course_id == course_id, NotebookEntry.user_id.in_(live_ids))
+            .group_by(NotebookEntry.user_id)
+        )).all()
+        quiz_map.update({r.user_id: {"total": r.total, "correct": r.correct or 0} for r in quiz_rows})
 
     # 6. Build per-student summaries
     student_summaries = []
