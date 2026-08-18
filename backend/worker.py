@@ -146,8 +146,8 @@ async def run_indexing(
         log_flow("worker.indexing.start", job_id=job_id, course_id=course_id,
                  kb_id=kb_id, files=len(file_paths), resume_from_chunk=resume_from_chunk)
         try:
-            from api.admin import _run_indexing
-            await _run_indexing(kb_id, course_id, file_paths, resume_from_chunk, backend)
+            from core.rag.indexing_runner import run_indexing
+            await run_indexing(kb_id, course_id, file_paths, resume_from_chunk, backend)
             _el = int((time.perf_counter() - t0) * 1000)
             log_flow("worker.indexing.complete", job_id=job_id, course_id=course_id, elapsed_ms=_el)
             from core.observability.metrics import observe_worker_job

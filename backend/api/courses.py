@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
 from core.codes import normalize_code
-from core.db.cache import cache_delete, cache_delete_pattern, cache_get, cache_set, course_access_get, course_access_set
+from core.db.cache import cache_delete, cache_get, cache_set, course_access_get, course_access_set
 from core.db.database import Enrollment, KnowledgeBase, aggregate_build_status, get_db
 
 router = APIRouter()
@@ -135,13 +135,9 @@ async def check_course_access(db: AsyncSession, course_id: str, user: dict) -> N
         raise HTTPException(status_code=403, detail="未选此课程，无法访问")
 
 
-async def invalidate_courses_cache() -> None:
-    """供 admin / teacher 模块在创建/删除/索引完成时调用。
-
-    课程列表按用户缓存（key 为 courses:list:{user_id}），课程的可见性/状态变更会影响
-    所有学生，因此用 SCAN 匹配前缀批量失效全部用户的缓存，而非删单个不存在的固定 key。
-    """
-    await cache_delete_pattern("courses:list:*")
+# 实现已下沉 core/db/cache.py（core/rag/indexing_runner 要调；此前它住在 api 层
+# 是索引业务逻辑滞留 api/admin 的根因）。此处 re-export 保住既有 import 路径。
+from core.db.cache import invalidate_courses_cache  # noqa: E402,F401
 
 
 class JoinCourseBody(BaseModel):

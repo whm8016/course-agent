@@ -30,22 +30,10 @@ def _backend_label(backend: str) -> str:
     return _BACKEND_LABELS.get(backend, "LightRAG")
 
 
-async def get_build(db: AsyncSession, kb_id: str, backend: str) -> KbBuild | None:
-    """取 (kb_id, backend) 对应的 kb_builds 行；无则 None。"""
-    r = await db.execute(
-        select(KbBuild).where(KbBuild.kb_id == kb_id, KbBuild.backend == backend)
-    )
-    return r.scalar_one_or_none()
-
-
-async def get_or_create_build(db: AsyncSession, kb_id: str, backend: str) -> KbBuild:
-    """取或建 (kb_id, backend) 的 kb_builds 行（status=pending）。在调用方事务内 flush 取 id。"""
-    build = await get_build(db, kb_id, backend)
-    if build is None:
-        build = KbBuild(kb_id=kb_id, backend=backend, status="pending")
-        db.add(build)
-        await db.flush()
-    return build
+# get_build/get_or_create_build 已下沉 core/rag/indexing_runner.py（kb_builds 行
+# 助手是纯 DB 访问；此前住 api 层连同 invalidate_courses_cache 一起，是索引业务
+# 滞留 api/admin 的根因）。re-export 保住 admin/teacher/测试的既有 import 路径。
+from core.rag.indexing_runner import get_build, get_or_create_build  # noqa: E402,F401
 
 
 async def trigger_kb_indexing(

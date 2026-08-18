@@ -82,6 +82,17 @@ async def cache_delete_pattern(pattern: str) -> None:
         logger.debug("cache_delete_pattern failed for pattern=%s", pattern, exc_info=True)
 
 
+async def invalidate_courses_cache() -> None:
+    """课程列表缓存批量失效（admin / teacher / indexing_runner 在创建/删除/索引完成时调用）。
+
+    课程列表按用户缓存（key 为 courses:list:{user_id}），课程的可见性/状态变更会影响
+    所有学生，因此用 SCAN 匹配前缀批量失效全部用户的缓存，而非删单个不存在的固定 key。
+    实现自 api/courses.py 下沉（core/rag/indexing_runner 需要调它——曾因此把索引
+    业务逻辑留在 api/admin，见该模块迁移说明）。
+    """
+    await cache_delete_pattern("courses:list:*")
+
+
 # ---------------------------------------------------------------------------
 # FAQ 高频问题
 # ---------------------------------------------------------------------------
