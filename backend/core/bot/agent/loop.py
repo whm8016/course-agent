@@ -8,8 +8,8 @@
 新版 bot 与 Web（/api/chat、/api/run）完全共享同一 Agent 引擎：
   InboundMessage
     → _resolve_user_id()        sender_id ──UserSocialBinding──► DB user_id
-    → _build_memory_context()   user_id ──get_user_by_id──► build_memory_context
-    → 构造 UnifiedContext（与 Web 一致）
+    → 构造 UnifiedContext（与 Web 一致；memory_context 留空，交给
+      build_common_context_layers 跑学情门控 + 第一路限权检索——与 Web 同口径）
     → TurnRuntimeManager.start_turn(ctx)
     → subscribe_turn(turn_id)   消费 ANSWER 事件，拼最终文本
 
@@ -238,15 +238,13 @@ class AgentLoop:
             return ""
 
     async def _build_memory_context(self, user_id: str, query_text: str = "") -> str:
-        """读 Mem0 记忆：用 query_text 语义检索相关记忆注入。匿名返回 ''。"""
-        if not user_id:
-            return ""
-        try:
-            from core.memory.mem0_client import build_memory_context
-            return await build_memory_context(user_id, query_text)
-        except Exception:
-            logger.exception("build_memory_context failed user_id=%s", user_id)
-            return ""
+        """（已停用预填）记忆注入改由公共层做：build_common_context_layers 跑学情门控
+        + 第一路限权检索，与 Web 同口径。旧版在这里预填 mem0 全量注入，绕过门控——
+        IM 与网页学情行为不一致（第一路全量、第二路不跑）。保留方法供旧调用方/测试，
+        恒返回 ''。
+        """
+        del user_id, query_text
+        return ""
 
     async def _run_turn(
         self,
@@ -269,9 +267,12 @@ class AgentLoop:
         session.add_message("user", user_message)
         conversation_history = session.get_history()[:-1]
 
-        # 2. 打通记忆：优先用传入的 user_id（web），否则 sender_id → 绑定表 → user_id
+        # 2. 打通记忆：优先用传入的 user_id（web），否则 sender_id → 绑定表 → user_id。
+        #    memory_context 留空——pipeline_common 的 build_common_context_layers 会跑
+        #    学情门控（stitch_for_turn）+ 第一路限权检索，与 Web 入口同口径（旧版预填
+        #    mem0 全量注入绕过门控，IM 与网页学情行为不一致）。
         resolved_user_id = user_id or await self._resolve_user_id(channel, sender_id)
-        memory_context = await self._build_memory_context(resolved_user_id, user_message)
+        memory_context = ""
 
         # 3. 构造 UnifiedContext（与 Web 主链路完全一致）
         ctx = UnifiedContext(

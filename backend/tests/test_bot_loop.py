@@ -7,6 +7,7 @@
   4. 无 course_id → enabled_tools 不含 rag
   5. LLM 返回空 → 不存入 session
   6. persona 注入 ctx.metadata["bot_persona"]
+  7. 记忆注入走公共层：memory_context 不在 bot 侧预填（mem0 旧入口零触达）
 
 不依赖真实 API key / DB / orchestrator —— 用 _FakeTRM 替换 TurnRuntimeManager。
 """
@@ -155,3 +156,29 @@ async def test_persona_injected_to_metadata(tmp_path):
     with _patch_trm(fake):
         await loop.process_direct("问题", session_key="s_persona")
     assert fake.last_ctx.metadata.get("bot_persona") == "你是数学辅导老师。"
+
+
+# ---------------------------------------------------------------------------
+# 场景 7：记忆注入走公共层——memory_context 不在 bot 侧预填
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_memory_context_not_prefilled(tmp_path):
+    """有 user_id 也不预填 mem0 记忆：ctx.memory_context 留空，注入交给
+    build_common_context_layers（学情门控 + 第一路限权检索，与 Web 同口径）。
+    旧版在这里全量预填绕过门控，导致 IM 与网页学情行为不一致。
+    """
+    loop = _make_loop(tmp_path)
+    fake = _FakeTRM()
+    with _patch_trm(fake), patch("core.memory.mem0_client.build_memory_context") as mock_mem:
+        await loop.process_direct("问题", session_key="s_mem", user_id="u_bind_1")
+    assert fake.last_ctx.user_id == "u_bind_1"   # 身份解析照常（公共层要用）
+    assert fake.last_ctx.memory_context == ""    # 不预填
+    mock_mem.assert_not_called()                 # mem0 旧入口不再被 bot 触达
+
+
+@pytest.mark.asyncio
+async def test_build_memory_context_stub_returns_empty(tmp_path):
+    """旧入口 _build_memory_context 保留为空实现（防旧调用方/测试炸），恒返回 ''。"""
+    loop = _make_loop(tmp_path)
+    assert await loop._build_memory_context("u1", "任意问题") == ""
