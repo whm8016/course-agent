@@ -221,6 +221,10 @@ async def append_mastery_from_topics(
 ) -> int:
     """闭集口径写 mastery：kp_id = topic_id（禁止再哈希），label 从 CourseTopic 查。
 
+    .. deprecated:: 死代码——全仓库无生产调用方（词表赋值已随掌握度估计器重构退出主路径，
+    巩固写侧统一走 ``consolidation._write_mastery_observations``，strength 强化也在那里：
+    good 观测 +1 封顶 15）。保留仅供历史参考/评测脚本，勿在新代码调用。
+
     与 append_mastery（LLM 开放抽取口径，历史兼容）的区别：id 由课程主题闭集给定，
     与门控读侧（proactive._read_mastery 的 topic_id 集）天然对齐，无断链。查不到 label
     的 hit（主题已删）跳过。affirm 信号 → strength += 1（MemoryBank spacing effect）。

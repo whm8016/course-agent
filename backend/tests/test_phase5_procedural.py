@@ -36,6 +36,42 @@ def test_draft_name_sanitizes_course_id():
     assert procedural._draft_name("") == "profile-global"
 
 
+async def test_risk_derived_is_inverse_of_mastery(db):
+    """派生 risk = 1 - sigmoid(theta - b)——theta 越高（掌握越好）risk 越低。
+
+    回归根因：旧版写成 1 - sigmoid(-theta + b) = sigmoid(theta - b) = 掌握度，
+    薄弱点排序全反。此处实跑 maybe_generate_procedural 的派生口径（mock LLM 捕获 prompt）。
+    """
+    from core.db.database import AsyncSessionLocal, KnowledgeMastery
+
+    # theta=-2（很薄弱）与 theta=+2（很扎实）两行，b=0
+    async with AsyncSessionLocal() as s:
+        s.add(KnowledgeMastery(
+            user_id="u_risk", course_id="c1", kp_id="k_weak", label="薄弱主题",
+            mastery=0.5, risk=0.5, observation_count=25, theta=-2.0,
+        ))
+        s.add(KnowledgeMastery(
+            user_id="u_risk", course_id="c1", kp_id="k_strong", label="扎实主题",
+            mastery=0.5, risk=0.5, observation_count=25, theta=2.0,
+        ))
+        await s.commit()
+
+    captured: dict = {}
+
+    async def _fake_gen(course_id, user_id, rows, risk_by_label=None):
+        captured["risk"] = risk_by_label
+        return "草稿"
+
+    with patch("core.memory.procedural.generate_skill_draft", new=_fake_gen), \
+         patch("core.memory.procedural.write_skill_draft", return_value="profile-c1"):
+        async with AsyncSessionLocal() as s:
+            await procedural.maybe_generate_procedural(s, "u_risk", "c1")
+
+    # 薄弱主题（theta=-2）risk 高、扎实主题（theta=+2）risk 低——旧符号恰相反
+    assert captured["risk"]["薄弱主题"] > 0.85
+    assert captured["risk"]["扎实主题"] < 0.15
+
+
 def test_write_skill_draft_not_always_with_review_flag():
     """草稿以 always=False 写 personal 层，frontmatter 标 auto_generated 待审核。"""
     svc = MagicMock()
