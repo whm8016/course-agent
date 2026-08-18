@@ -188,7 +188,7 @@ def _markdown_table(summary: dict) -> str:
         lines.append(
             f"| {arm} | {m['balanced_accuracy']:.4f} | "
             f"{m['interruption_rate']:.0%} | {m['miss_rate']:.0%} | "
-            f"{m['llm_calls_per_case']} | {sc if sc is not None else '—'} |"
+            f"{m.get('llm_calls_per_case', '—')} | {sc if sc is not None else '—'} |"
         )
     return head + "\n" + "\n".join(lines)
 

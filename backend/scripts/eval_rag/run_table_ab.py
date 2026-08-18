@@ -454,9 +454,8 @@ async def main() -> None:
                         help="表B 参与的臂（默认闭卷 vs 本系统）")
     args = parser.parse_args()
 
-    # 本系统臂（fact）走精排：.env 默认 RERANK__ENABLED=false（生产关，eval 验证有收益
-    # 后再上线），load_dotenv 已把 false 读进环境 → setdefault 无效，必须直接覆盖。
-    # 只改本评测进程；放 main() 而非模块级，模块被 import（如测试）时不污染进程环境。
+    # 本系统臂（fact）必须开精排：生产默认已是 true，这里仍显式覆盖，避免本机 .env
+    # 残留 false 把主表跑成无精排。只改本评测进程；放 main() 而非模块级。
     # 须在首次 get_settings()（检索阶段才发生）之前执行，pydantic-settings 启动时快照。
     os.environ["RERANK__ENABLED"] = "true"
     # fail-fast：开关开了但 build_rerank_fn() 仍返回 None（缺 EMBEDDING__API_KEY）时，

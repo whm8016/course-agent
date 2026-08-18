@@ -193,7 +193,7 @@ def compose(
                  "比对零 LLM。")
     lines.append("- 表B 为正则判拒答（零 LLM）：越界题拒答=对，课内题拒答=错。")
     lines.append("- 本系统 fact 臂为 PG 线全流水线（结构化切块 + dense + PG tsvector + RRF + 精排），"
-                 "评测进程内 RERANK__ENABLED=true（生产默认关）。")
+                 "与生产默认一致（RERANK__ENABLED=true）。")
     return "\n".join(lines)
 
 

@@ -83,9 +83,10 @@ async def main():
     )
     parser.add_argument(
         "--dataset",
-        choices=["qa", "synthetic"],
+        choices=["qa", "synthetic", "ood"],
         default="qa",
         help="评测集来源：qa=人工手写 qa_dataset.json（默认）；"
+             "ood=越界题 ood_dataset.json（gold=应拒答，表B 用）；"
              "synthetic=加载 synthetic_dataset.json（直接用现成题目，不重新合成，省 LLM）",
     )
     parser.add_argument(
@@ -153,6 +154,14 @@ async def main():
             logger.error("评测集文件不存在: %s", dataset_path)
             sys.exit(1)
         qa_items = json.loads(dataset_path.read_text("utf-8"))
+    elif args.dataset == "ood":
+        # 越界题（ood_dataset.json）：gold=应拒答，表B 用（正则判拒答，不走 RAGAS）
+        dataset_path = config.EVAL_DIR / "ood_dataset.json"
+        logger.info("加载越界评测集: %s", dataset_path)
+        if not dataset_path.exists():
+            logger.error("评测集文件不存在: %s", dataset_path)
+            sys.exit(1)
+        qa_items = json.loads(dataset_path.read_text("utf-8"))
     else:
         # 人工评测集（qa_dataset.json）
         logger.info("加载人工评测集: %s", config.DATASET_PATH)
@@ -183,6 +192,7 @@ async def main():
 
         all_results = await run_ablation(
             args.course, qa_items, ABLATION_CONFIGS, top_k=args.top_k,
+            retriever_backend=args.retriever,
         )
     else:
         # 原模式路径：逐 LightRAG mode（naive/local/global/mix）查询

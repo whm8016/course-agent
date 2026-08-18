@@ -20,7 +20,7 @@ r"""表E评测集：门控决策 vs 教师规则金标（mycourse 课文锚定�
 - ``last_stitched_hours_ago``：同证据主题上次实际拼入简报的小时数（冷却判定），
   锚定 **决策钟** case_now——冷却是「本轮前 N 小时」的运行时概念，与种钟解耦。
 - ``b_topic``：班级难度（仅 neg_class_hard，题目难度不决定谁能入闸的回归锚）。
-- ``error_repeated``：近 30 天同主题 poor ≥1 的复发证据（C2 候选口径，门槛常量
+- ``error_repeated``：近 30 天同主题 poor ≥ RECURRENCE_MIN_COUNT（两次）的复发证据（C2 候选口径，门槛常量
   ``proactive.RECURRENCE_MIN_COUNT``）；观测间距由它定——在列 1 天距（poor 自然
   落进 30 天窗）、不在 32 天距（旧 poor 推出窗外），e2e 落库后复发由读侧自己
   数出、自检对账。
@@ -75,10 +75,10 @@ def entry_observations(case: dict, m: dict, *, base: float | None = None) -> lis
     墙钟作锚，间距/天数推导仍走这一份单一真相源）——levels[-1] = t_last = 种钟 -
     days_since_last*86400（最后接触时刻），更早的档按间距往回倒；fold_observations
     入口自按 created_at 升序排（Elo 顺序相关），相对序不变则折出的 theta 逐位不变。
-    间距按复发口径定：条目在 case.error_repeated → 1 天（本主题 poor 落进 30 天窗，
-    读侧按 ≥1 自然数出）；不在 → 窗宽+2=32 天（旧 poor 推出窗外——≥1 口径下该主题
-    窗内无 poor，不制造复发）。复发计数门槛 2026-08-18 由 ≥2 下调到 ≥1（与
-    WEAK_MARGIN「一次薄弱即入闸」同语义）。
+    间距按复发口径定：条目在 case.error_repeated → 1 天（≥ RECURRENCE_MIN_COUNT 条
+    poor 都落进 30 天窗，读侧自然数出）；不在 → 窗宽+2=32 天（旧 poor 推出窗外——
+    窗内至多剩最后一条 poor，凑不满门槛，不制造复发）。复发计数门槛跟常量走（两次）；
+    2026-08-18 曾一度随弱线下调到 ≥1，同日回滚：进闸一次、复发仍两次，口径不合并。
     """
     from core.memory.mastery_state import LEVEL_OUTCOME, W_JUDGE
     from core.memory.proactive import RECURRENCE_WINDOW_DAYS
@@ -277,7 +277,7 @@ STITCH_CASES: list[dict] = [
             {"topic_id": "叠加定理", "label": "叠加定理", "levels": ["poor", "poor"], "days_since_last": 2},
             {"topic_id": "欧姆定律", "label": "欧姆定律", "levels": ["poor", "poor"], "days_since_last": 30},
         ],
-        "error_repeated": ["叠加定理", "欧姆定律"],
+        "error_repeated": ["叠加定理"],
         "query": "叠加定理拆电源的时候功率为什么不叠加？",
         "matched_topic": "叠加定理",
         "teacher_rule": "两头都该提时，先提反复失手的那件",
@@ -434,13 +434,15 @@ STITCH_CASES: list[dict] = [
     },
     {
         # 2026-08-18 弱线降为「一次判 poor 即入闸」后翻正（原 gold=False）：
-        # 一次失手 + 三周未碰 = 该回头看一眼，不再是"别小题大做"
+        # 一次失手 + 三周未碰 = 该回头看一眼，不再是"别小题大做"。
+        # 走的是先修（C1 一次即候选×遗忘耦合），不是复发——窗内只有一次 poor，
+        # 复发口径（≥ RECURRENCE_MIN_COUNT）下不进 error_repeated
         "id": "neg_single_poor",
         "label": "单次失手：欧姆错过一次、三周没碰",
         "mastery": [
             {"topic_id": "欧姆定律", "label": "欧姆定律", "levels": ["poor"], "days_since_last": 21},
         ],
-        "error_repeated": ["欧姆定律"],
+        "error_repeated": [],
         "query": "叠加定理怎么用？多个电源的电路要怎么拆？",
         "matched_topic": "叠加定理",
         "teacher_rule": "错过一次又三周没碰，该回头看一眼",
@@ -478,7 +480,9 @@ STITCH_CASES: list[dict] = [
             {"topic_id": "三端变阻器的应用", "label": "三端变阻器的应用", "levels": ["poor", "poor"], "days_since_last": 30},
             {"topic_id": "线性电路", "label": "线性电路", "levels": ["poor", "poor", "poor"], "days_since_last": 1},
         ],
-        "error_repeated": ["三端变阻器的应用", "线性电路"],
+        # 欧姆/三端这类 dsl=30 的先修臂：30 天窗只装得下最后一条 poor（1 天距时倒数
+        # 第二条也落在窗外），凑不满复发 ≥2——它们是先修缺口竞争者，不是复发证据
+        "error_repeated": ["线性电路"],
         "query": "分压器的调压特性实验要注意什么？",
         "matched_topic": "分压器的调压特性",
         "teacher_rule": "两个先修都薄弱，先提快忘掉的那个，正在练的不急",
@@ -491,7 +495,8 @@ STITCH_CASES: list[dict] = [
             {"topic_id": "三端变阻器的应用", "label": "三端变阻器的应用", "levels": ["poor", "poor"], "days_since_last": 30},
             {"topic_id": "线性电路", "label": "线性电路", "levels": ["poor", "poor", "poor"], "days_since_last": 30},
         ],
-        "error_repeated": ["三端变阻器的应用", "线性电路"],
+        # 两条都 dsl=30：窗内各剩一条 poor，都凑不满复发 ≥2，名单为空
+        "error_repeated": [],
         "query": "分压器的调压特性实验要注意什么？",
         "matched_topic": "分压器的调压特性",
         "teacher_rule": "都久没练，提更薄弱的那个",

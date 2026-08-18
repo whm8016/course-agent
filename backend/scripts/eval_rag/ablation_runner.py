@@ -27,6 +27,7 @@ async def run_ablation(
     configs: dict,
     *,
     top_k: int | None = None,
+    retriever_backend: str = "lightrag",
 ) -> dict[str, list[dict]]:
     """对每个 RetrievalConfig 跑 hybrid retrieve，返回 {config_label: [results]}。
 
@@ -35,24 +36,55 @@ async def run_ablation(
         qa_items: 评测集，每项含 id/question。
         configs: retrieval_config.ABLATION_CONFIGS（或子集）。
         top_k: 取前 K 条 context；None → config.EVAL_TOP_K。
+        retriever_backend: dense 路后端。"llamaindex_pg" 用 pgvector HNSW
+            （LlamaIndexRetriever._fuse 内的 _dense，纯 dense 不走融合）；
+            "lightrag" 用 LightRAG naive 向量。PG 线课程（如 mycourse）无
+            lightrag 索引，dense_only 会恒空——须传 llamaindex_pg。
     """
     from core.rag.hybrid_retriever import retrieve as hybrid_retrieve
     from core.rag.es_client import get_es_store
     from core.rag.rerank import build_rerank_fn
     from core.rag import get_retriever
 
-    retriever = get_retriever("lightrag")
     es_store = get_es_store()
     if es_store is None:
-        logger.warning(
-            "ES 未启用（settings.elasticsearch.enabled=false），BM25 路将退化为纯 dense，"
-            "bm25_only / bm25+rerank 配置会返回空结果"
+        # ES 已在第四期 drop-es 移除（settings.elasticsearch.enabled 默认 false）。
+        # BM25 路改用 PG tsvector（_PgSparseStore duck-type 同 es_store 接口），
+        # bm25_only / bm25+rerank 配置仍可跑（tsvector zhparser 分词 OR tsquery）。
+        from core.rag.retriever.llamaindex_pg import _PgSparseStore
+
+        es_store = _PgSparseStore()
+        logger.info(
+            "ES 未启用，BM25 路改用 PG tsvector（_PgSparseStore，接口等价）"
         )
     k = top_k if top_k is not None else config.EVAL_TOP_K
-    # partial 把 course_id 绑定为 dense_search 第一参，剩 (query, k) 适配 hybrid_retrieve 签名
-    dense_fn = partial(retriever.dense_search, course_id)
 
-    # 精排：force=True 无视生产 RERANK__ENABLED 开关，只看 api_key——否则默认关时
+    if retriever_backend == "llamaindex_pg":
+        # pg 后端 dense：HNSW 纯向量（与 LlamaIndexRetriever._fuse 的 _dense 同路，
+        # 但不走融合/精排——消融要的就是裸 dense 路）
+        from core.rag.llamaindex.pg_store import course_filter, get_embed_model, get_vector_store
+        from llama_index.core.vector_stores.types import VectorStoreQuery, VectorStoreQueryMode
+
+        vs = get_vector_store()
+        emb_model = get_embed_model()
+        filters = course_filter(course_id)
+
+        async def _pg_dense(query: str, kk: int) -> list[dict]:
+            q_emb = await emb_model._aget_query_embedding(query)
+            q = VectorStoreQuery(
+                query_embedding=q_emb, similarity_top_k=kk,
+                mode=VectorStoreQueryMode.DEFAULT, filters=filters,
+            )
+            from core.rag.retriever.llamaindex_pg import _nodes_to_docs
+            return _nodes_to_docs(await vs.aquery(q))
+
+        dense_fn = _pg_dense
+    else:
+        retriever = get_retriever("lightrag")
+        # partial 把 course_id 绑定为 dense_search 第一参，剩 (query, k) 适配 hybrid_retrieve 签名
+        dense_fn = partial(retriever.dense_search, course_id)
+
+    # 精排：force=True 无视 RERANK__ENABLED 开关，只看 api_key——否则本机关掉精排时
     # hybrid_rrf+rerank 与 hybrid_no_rerank 两组跑出来一样，消融无意义。是否真正调用
     # 由各 cfg.rerank_enabled 决定（hybrid_retriever 逐配置 gate）。
     rerank_fn = build_rerank_fn(force=True)

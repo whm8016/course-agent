@@ -1,6 +1,6 @@
 """表E live 层接线自检（CI 离线，零真实 LLM/embedding）。
 
-四件事：
+五件事：
 1. 生产缝 2：``pipeline_common`` 把 ``ctx.metadata["_eval_now"]`` 传进
    ``stitch_for_turn(now=...)``——不设键时传 None（墙钟，线上行为不变）。
 2. 案例数据 vs 现网图快照一致性：topic 存在、evidence 在先修闭包、复发口径
@@ -9,6 +9,8 @@
    **consolidate 生产写路径**长出（episode_ids 非空 = 走了巩固，不是 runner
    INSERT 装学生）、episode.created_at = 剧本钟、门控读真折叠。
 4. 冷却三步流（probe1 → commit → probe2 拨钟）在 mock 下 reason=cooldown。
+5. 两条「次数」口径不许合并：进闸（C1）一次即候选、复发（C2）三十天里两次
+   （RECURRENCE_MIN_COUNT）——单次失手不进复发集、够不着保底 0.7。
 
 不进 pytest 默认门的（凭据/手动）：全量 30 例 live 跑（run_stitch_e2e_live 正文）。
 """
@@ -30,7 +32,7 @@ def _mk_ctx(user_id="u-seam", course_id="c-seam", eval_now=object()):
     if eval_now is not None:
         metadata["_eval_now"] = eval_now
     return UnifiedContext(
-        course_id=course_id, user_id=user_id, session_id="s", user_message="叠加定理怎么用？",
+        course_id=course_id, user_id=user_id, session_id="s", user_message="叠加定理怎么验证？",
         conversation_history=[], mode="chat", enabled_tools=[], rag_mode="",
         memory_context="", metadata=metadata,
     )
@@ -89,16 +91,31 @@ def test_live_cases_match_graph_and_scripts():
     from collections import defaultdict
 
     from scripts.eval_memory.stitch_cases_table_e import entry_observations, prereq_predecessors
-    from scripts.eval_memory.stitch_cases_table_e_live import STITCH_CASES_LIVE, load_graph_live
+    from scripts.eval_memory.stitch_cases_table_e_live import (
+        STITCH_CASES_LIVE, live_case_now, load_graph_live,
+    )
     from scripts.eval_memory.stitch_scripts_table_e import SCRIPTS, expose_sessions
     from core.memory.mastery_state import POOR_OUTCOME_MAX
     from core.memory.proactive import RECURRENCE_MIN_COUNT, RECURRENCE_WINDOW_DAYS
+    from core.memory.course_topic_store import PREREQ_RELATIONS
 
     g = load_graph_live()
     tids = {t["topic_id"] for t in g["topics"]}
     edges = g["edges"]
     base = 1_786_953_600.0  # 任意锚：相对时间推导与锚无关
     n_turns = 0
+
+    # 结构口径守卫：全图先修闭包不超出直连（63 图实测零「仅传递可达」祖先）。
+    # 下次重建图长出隔级链时这条会红——「缺口证据全深度 1 / 论文按直连报」的
+    # 口径（见案例文件头注）随即须重审，不许静默漂移。
+    direct: dict[str, set[str]] = defaultdict(set)
+    for e in edges:
+        if e["relation"] in PREREQ_RELATIONS:
+            direct[e["dst"]].add(e["src"])
+    for t in sorted(tids):
+        assert prereq_predecessors(t, edges) == direct.get(t, set()), (
+            f"{t} 存在仅传递可达的先修（隔级链）——直连口径失效，深度声明须重审"
+        )
 
     assert len(STITCH_CASES_LIVE) == 30
     assert len({c["id"] for c in STITCH_CASES_LIVE}) == 30, "case id 重复"
@@ -121,8 +138,8 @@ def test_live_cases_match_graph_and_scripts():
 
         # 复发口径：观测落库后 30 天窗内同主题 poor 计数过 RECURRENCE_MIN_COUNT 的
         # 集合 == case 声明（计数镜像 _read_error_repeated 的 GROUP BY/HAVING 形状，
-        # 门槛常量单源，别在测试里重写字面量）
-        now = base + c.get("clock_days", 0) * 86400.0
+        # 门槛常量与探测钟公式都单源自生产侧模块，别在测试里重写字面量）
+        now = live_case_now(c, base)
         poor_cnt: dict[str, int] = defaultdict(int)
         for m in c["mastery"]:
             for o in entry_observations(c, m, base=base):
@@ -214,14 +231,22 @@ async def test_live_runner_wiring_gap_and_cooldown(live_graph_db):
 
     from scripts.eval_memory import run_stitch_e2e_live
     from scripts.eval_memory.stitch_cases_table_e_live import STITCH_CASES_LIVE
-    from scripts.eval_memory.stitch_scripts_table_e import expose_sessions
+    from scripts.eval_memory.stitch_scripts_table_e import SCRIPTS, expose_sessions
 
     course_id, topic_ids = live_graph_db
-    kw = {
-        "电阻串并联电路": ("串并联", "并联"),
-        "叠加定理": ("叠加定理",),
-        "戴维南定理": ("戴维南",),
-    }
+    # 措辞↔主题映射单源自数据（剧本每句自带 topic_id、case.query 自带 matched_topic，
+    # 整句做子串关键词——consolidation 喂 match_topics 的是「学生句\n助手句」拼接文本，
+    # 必含学生原话）：改问句措辞不再需要手同步关键词表；匹配质量归 --check-match 真向量
+    kw: dict[str, tuple[str, ...]] = {}
+    for turns in SCRIPTS.values():
+        for tid, q in turns:
+            kw.setdefault(tid, [])
+            kw[tid].append(q)
+    for c in STITCH_CASES_LIVE:
+        if c["matched_topic"]:
+            kw.setdefault(c["matched_topic"], [])
+            kw[c["matched_topic"]].append(c["query"])
+    kw = {t: tuple(qs) for t, qs in kw.items()}
     fake_embed = _OneHotEmbed(topic_ids, kw)
 
     def _judge_side_effect(segment_turns, topics, track=None):
@@ -267,10 +292,10 @@ async def test_live_runner_wiring_gap_and_cooldown(live_graph_db):
     assert summary["cases"] == 2
     by_id = {r["id"]: r for r in summary["details"]}
 
-    # --- 例 1：前置缺口（电阻串并联 2×poor、dsl 28、问叠加定理）---
+    # --- 例 1：前置缺口（电阻串并联 2×poor、dsl 28、问叠加定理的验证方法）---
     gap = by_id["pos_gap_rseries_superposition"]
     assert gap["match_ok"] is True
-    assert gap["matched_topic_actual"] == "叠加定理"
+    assert gap["matched_topic_actual"] == "叠加定理的验证方法"
     assert gap["gate"]["stitch"] is True
     assert gap["gate"]["reason"] == "prereq_gap"
     assert gap["gate"]["evidence"] == "电阻串并联电路"
@@ -280,7 +305,9 @@ async def test_live_runner_wiring_gap_and_cooldown(live_graph_db):
     assert gap["rag_hit"] is True
 
     # 观测由 consolidate 长出（episode_ids 非空 = 走了巩固写路径，runner 没 INSERT）
-    user_gap = "lv_00"
+    # user_id 编号与 runner 的全局 enumerate 单源（套件里增删案例不用改这里）
+    uids = {c["id"]: f"lv_{i:02d}" for i, c in enumerate(STITCH_CASES_LIVE)}
+    user_gap = uids["pos_gap_rseries_superposition"]
     async with AsyncSessionLocal() as s:
         obs = (
             await s.execute(
@@ -318,7 +345,7 @@ async def test_live_runner_wiring_gap_and_cooldown(live_graph_db):
         km = (
             await s.execute(
                 select(KnowledgeMastery).where(
-                    KnowledgeMastery.user_id == "lv_13",
+                    KnowledgeMastery.user_id == uids["cooldown_1h"],
                     KnowledgeMastery.kp_id == "戴维南定理",
                 )
             )
@@ -328,3 +355,73 @@ async def test_live_runner_wiring_gap_and_cooldown(live_graph_db):
     # 基线锚：本子集两例 gold 全 True（无负例，tnr 分母 0 记 0）→ never BA 0、always BA 0.5
     assert summary["arms"]["never"]["balanced_accuracy"] == 0.0
     assert summary["arms"]["always"]["balanced_accuracy"] == 0.5
+
+
+# ---------- 5. 两条「次数」口径不许合并（进闸一次 / 复发两次）----------
+
+
+async def test_single_poor_never_fires_recurrence():
+    """门控锁：所问主题窗内只有一次 poor——不进复发集、够不着保底 0.7、刚栽完沉默。
+
+    进闸（C1）一次判未掌握即可进候选（WEAK_MARGIN）；复发（C2）是三十天里两次
+    （RECURRENCE_MIN_COUNT）——两条「次数」是两回事，合并的后果是单次失手借
+    复发保底 0.7 直接开口，绕过「刚判薄弱说明正在学」的遗忘耦合。
+    """
+    from core.db.database import (
+        AsyncSessionLocal, MasteryObservation, User, close_db, init_db,
+    )
+    from core.memory.mastery_state import LEVEL_OUTCOME, W_JUDGE
+    from core.memory.proactive import (
+        RECURRENCE_MIN_COUNT, RECURRENCE_PNEED_FLOOR, _read_error_repeated, decide_stitch,
+    )
+
+    # 口径前提：本测试守护的是「两次才算复发」；想把常量降回 1，先来改这条注释
+    assert RECURRENCE_MIN_COUNT >= 2
+
+    await init_db()
+    user, course, topic = "u-single-poor", "c-single-poor", "戴维南定理"
+    now = 1_786_953_600.0
+    try:
+        async with AsyncSessionLocal() as s:
+            s.add(User(id=user, username=user, password_hash="x"))
+            s.add(MasteryObservation(
+                user_id=user, course_id=course, topic_id=topic, source="llm_judge",
+                outcome=LEVEL_OUTCOME["poor"], weight=W_JUDGE, created_at=now - 3600,
+            ))
+            await s.commit()
+
+        # 读侧：窗内 1 次 poor（哪怕就在一小时前）< 门槛 → 不进复发集
+        topic_map = {topic: topic}
+        async with AsyncSessionLocal() as s:
+            repeated = await _read_error_repeated(user, course, s, topic_map, now=now)
+        assert repeated == set()
+
+        # 决策侧：无先修缺口 → 沉默；p_need 够不着保底 0.7，reason 不许是 recurrence
+        mastery = {topic: {"risk": 0.65, "theta": -0.62, "p_forget": 0.0, "label": topic}}
+        brief = decide_stitch(topic, set(), mastery, repeated, now=now)
+        assert brief.should_stitch is False
+        assert brief.reason != "recurrence"
+        assert brief.p_need < RECURRENCE_PNEED_FLOOR
+
+        # 同档案带刚练过的先修缺口：走先修×遗忘≈0，同样沉默（不是复发开口）
+        mastery_gap = dict(mastery, **{"欧姆定律": {"risk": 0.7, "theta": -0.85, "p_forget": 0.0, "label": "欧姆定律"}})
+        b2 = decide_stitch(topic, {"欧姆定律"}, mastery_gap, repeated, now=now)
+        assert b2.should_stitch is False and b2.reason == "below_tau"
+        assert b2.p_need < RECURRENCE_PNEED_FLOOR
+
+        # 反事实锚：若被错当复发（membership），保底 0.7 立即开口——正是要拦的路
+        bad = decide_stitch(topic, set(), mastery, {topic}, now=now)
+        assert bad.should_stitch is True and bad.reason == "recurrence"
+        assert bad.p_need >= RECURRENCE_PNEED_FLOOR
+
+        # 边界对侧：窗内凑满第二条 poor → 读侧长出复发集（常量是真实边界，不是摆设）
+        async with AsyncSessionLocal() as s:
+            s.add(MasteryObservation(
+                user_id=user, course_id=course, topic_id=topic, source="llm_judge",
+                outcome=LEVEL_OUTCOME["poor"], weight=W_JUDGE, created_at=now - 2 * 86400,
+            ))
+            await s.commit()
+            repeated2 = await _read_error_repeated(user, course, s, topic_map, now=now)
+        assert repeated2 == {topic}
+    finally:
+        await close_db()

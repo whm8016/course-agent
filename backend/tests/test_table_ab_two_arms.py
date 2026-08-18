@@ -191,15 +191,15 @@ def test_cache_path_rerank_suffix(rerank_settings, tmp_path, monkeypatch):
 
 def test_cache_path_no_suffix_when_rerank_off(rerank_settings, tmp_path, monkeypatch):
     monkeypatch.setattr(config, "CACHE_DIR", tmp_path)
-    rerank_settings(None)
-    # 生产/其他脚本默认关（.env 亦是 false）：保持旧文件名，向后兼容已有缓存
+    rerank_settings("false")
+    # 显式关精排时不加 _rr，与无精排旧缓存文件名兼容
     assert rag_runner._cache_path("s01", "fact", "mycourse").name == "s01_fact_v2.json"
 
 
 def test_rerank_cache_isolation_roundtrip(rerank_settings, tmp_path, monkeypatch):
     """开精排后必须读不到无精排旧缓存（本次两臂主表的核心隔离语义）。"""
     monkeypatch.setattr(config, "CACHE_DIR", tmp_path)
-    rerank_settings(None)
+    rerank_settings("false")
     rag_runner.save_cache("s01", "fact", "mycourse", {"answer": "无精排旧答案"})
     rerank_settings("true")
     assert rag_runner.load_cache("s01", "fact", "mycourse") is None
