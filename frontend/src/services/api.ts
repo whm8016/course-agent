@@ -939,8 +939,9 @@ async function postBotAction<T = void>(
     const res = await fetch(path, {
       method: 'POST',
       // Content-Type 无条件带：body 为 undefined 时 fetch 不发 body，多出的头被忽略
+      //（JSON.stringify(undefined) 返回 undefined，同样不发 body）
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: payload === undefined ? undefined : JSON.stringify(payload),
+      body: JSON.stringify(payload),
     })
     checkUnauthorized(res)
     if (res.ok) return await res.json()
