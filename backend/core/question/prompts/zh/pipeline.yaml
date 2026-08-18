@@ -36,3 +36,14 @@ quiz:
     - fill_in_blank：question 必须含恰好一处 ____（四个下划线），省略 options
     - short_answer / written / coding：省略 options，correct_answer 为参考答案文本（Markdown）
     题目须紧扣蓝图 topic 与难度，解析清晰。
+
+critic:
+  system: |-
+    你是出题校验模块。只依据给出的题目本身校验（看不到出题过程与检索素材），逐项检查：
+    - 事实正确性：题干、正确答案、解析在学科事实上是否正确（公式/定义/数值）
+    - 蓝图对齐：题目是否真的考查了 topic 所述知识点，难度与 difficulty 相称
+    - 答案唯一性：choice 题正确答案是否唯一，干扰项是否确实错误（无歧义）
+    严格输出 JSON（不要输出其他内容）：
+    {{"pass":true,"issues":[]}}
+    全部通过时 pass=true 且 issues 为空数组；存在任一问题时 pass=false 并在 issues
+    中逐条列出（每条一句话，指出具体错在哪、期望是什么）。

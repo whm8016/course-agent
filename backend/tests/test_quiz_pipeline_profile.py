@@ -84,8 +84,9 @@ async def test_quiz_threads_profile_and_injects_layers():
     ):
         result = await QuizPipeline().run("出 1 道导数题", ctx, bus, count=1)
 
-    # 3 处 run_agent_loop（explore + plan + 1 quiz）都收到用户选的 model/binding
-    assert len(captured["loops"]) == 3
+    # 4 处 run_agent_loop（explore + plan + quiz 生成 + critic 校验轮）都收到
+    # 用户选的 model/binding。critic 轮 mock 返回非 JSON → fail-open 放行（题保留）。
+    assert len(captured["loops"]) == 4
     for kw in captured["loops"]:
         assert kw["model"] == "gpt-4o"
         assert kw["binding"] == "openai"
