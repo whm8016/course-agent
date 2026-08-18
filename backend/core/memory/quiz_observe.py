@@ -18,11 +18,17 @@ logger = logging.getLogger(__name__)
 async def record_quiz_observation(
     db, user_id: str, course_id: str, question_id: str,
     question_text: str, is_correct: bool,
+    user_answer: str = "", correct_answer: str = "",
 ) -> bool:
     """题面 match_topics → 首命中主题写一条 quiz 观测。返回是否写入。
 
     无 course_id / 无主题命中 / 重复提交 → 不写（返回 False）。映射失败是常态
     （题面与主题图不对齐），warning 不 error。
+
+    user_answer/correct_answer（可选尾参，向后兼容）：答错且任一非空时
+    evidence_quote 存「学生答 vs 正确答案」的具体差异——错因闭环的落点（门控
+    简报读它拼「曾见错法」，proactive._read_latest_poor_evidence）。答对或无
+    文本时回退题面截断 question_text[:200]（现有行为/测试期望不变）。
     """
     from core.db.database import MasteryObservation
     from core.memory.topic_match import match_topics
@@ -56,13 +62,18 @@ async def record_quiz_observation(
     if not hits:
         return False
     topic_id = hits[0][0]
+    # evidence_quote：答错且带作答文本 → 存学生具体错在哪（错因闭环）；否则题面回退
+    if not is_correct and (user_answer.strip() or correct_answer.strip()):
+        evidence = f"学生答：{user_answer[:100]}；正确答案：{correct_answer[:100]}"
+    else:
+        evidence = question_text[:200]
     # 观测追加 + 折叠写回（含 b_topic 题目侧更新）复用 consolidation 同一段逻辑
     from core.memory.consolidation import _write_mastery_observations
     from core.memory.judge import Judgement
 
     await _write_mastery_observations(
         db, user_id, course_id,
-        [Judgement(topic_id, "good" if is_correct else "poor", 1.0, question_text[:200])],
+        [Judgement(topic_id, "good" if is_correct else "poor", 1.0, evidence)],
         [],  # 无 episode 关联
         source_override="quiz", weight_override=W_QUIZ,
         question_id=question_id,

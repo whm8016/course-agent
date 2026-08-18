@@ -112,12 +112,15 @@ async def upsert_single_entry(
         )
         # 阶段F：判分观测入 mastery_observation（题面经 match_topics 映射主题，
         # source=quiz——全班难度估计权重最高的来源，b 由 cron 日频重折）。best-effort，
-        # 失败不阻塞答题主流程。
+        # 失败不阻塞答题主流程。user_answer/correct_answer 一并传：答错时
+        # evidence_quote 存「学生答 vs 正确答案」的具体差异（错因闭环）。
         try:
             from core.memory.quiz_observe import record_quiz_observation
             await record_quiz_observation(
                 db, uid, entry.get("course_id", ""), payload.question_id,
                 payload.question, payload.is_correct,
+                user_answer=payload.user_answer,
+                correct_answer=payload.correct_answer,
             )
         except Exception:
             import logging

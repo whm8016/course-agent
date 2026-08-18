@@ -212,6 +212,61 @@ async def test_quiz_observation_no_topic_no_write(db):
         assert len((await s.execute(select(MasteryObservation))).scalars().all()) == 0
 
 
+# ── 错因闭环：evidence_quote 存具体错因（复用现有字段，不建表）───────────────
+
+
+async def test_quiz_wrong_answer_stores_error_evidence(db):
+    """答错且带作答 → evidence_quote 是「学生答 vs 正确答案」，不再是纯题面。"""
+    await _seed()
+    from core.db.database import AsyncSessionLocal, MasteryObservation
+    from core.memory.quiz_observe import record_quiz_observation
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as s:
+        with patch("core.memory.topic_match.match_topics",
+                   AsyncMock(return_value=[("ohm", 0.88)])):
+            ok = await record_quiz_observation(
+                s, "u1", "c1", "q9", "欧姆定律的公式", False,
+                user_answer="I=UR", correct_answer="I=U/R",
+            )
+        await s.commit()
+
+    assert ok is True
+    async with AsyncSessionLocal() as s:
+        obs = (await s.execute(select(MasteryObservation))).scalars().all()
+    assert len(obs) == 1
+    assert "I=UR" in obs[0].evidence_quote  # 学生的错误作答摘录
+    assert "I=U/R" in obs[0].evidence_quote
+    assert obs[0].evidence_quote.startswith("学生答：")
+
+
+async def test_quiz_evidence_fallback_without_answer_text(db):
+    """答对 / 未传作答文本 → 维持题面截断回退（现有行为不变）。"""
+    await _seed()
+    from core.db.database import AsyncSessionLocal, MasteryObservation
+    from core.memory.quiz_observe import record_quiz_observation
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as s:
+        with patch("core.memory.topic_match.match_topics",
+                   AsyncMock(return_value=[("ohm", 0.88)])):
+            ok_wrong_no_text = await record_quiz_observation(
+                s, "u1", "c1", "q10", "欧姆定律的公式", False,
+            )
+            ok_right = await record_quiz_observation(
+                s, "u1", "c1", "q11", "欧姆定律单位", True,
+                user_answer="欧姆", correct_answer="欧姆",
+            )
+        await s.commit()
+
+    assert ok_wrong_no_text and ok_right
+    async with AsyncSessionLocal() as s:
+        obs = (await s.execute(select(MasteryObservation))).scalars().all()
+    by_q = {o.question_id: o for o in obs}
+    assert by_q["q10"].evidence_quote == "欧姆定律的公式"  # 答错但无文本 → 题面回退
+    assert by_q["q11"].evidence_quote == "欧姆定律单位"  # 答对 → 题面回退
+
+
 # ── rollup mastery 填充 ─────────────────────────────────────────────────────
 
 
