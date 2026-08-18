@@ -28,7 +28,7 @@ MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
 from core.analytics.faq import frequent_questions_merged
 from core.db.cache import course_access_invalidate
 from core.db.limiter import limiter
-from core.codes import ensure_unique_join_code
+from core.codes import JoinCodeExhaustedError, ensure_unique_join_code
 from core.db.database import (
     CourseDailyRollup, CourseSchedule, CourseTopic, Enrollment, Grade, KBFile, StudentCourseRollup,
     KnowledgeBase, Message, NotebookEntry, Session, User, get_db,
@@ -116,7 +116,10 @@ async def create_course(
     db.add(kb)
     await db.flush()
     # 建课即自动生成课程码（替代旧的"教师手动点生成"）
-    kb.join_code = await ensure_unique_join_code(db)
+    try:
+        kb.join_code = await ensure_unique_join_code(db)
+    except JoinCodeExhaustedError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     await db.flush()
     _kb_raw_dir(body.course_id).mkdir(parents=True, exist_ok=True)
     logger.info("教师创建课程 course_id=%s owner=%s", body.course_id, teacher["id"])
@@ -389,7 +392,10 @@ async def refresh_join_code(
 ):
     """生成或重置课程码，返回新码。"""
     kb = await _get_owned_kb(db, course_id, teacher)
-    kb.join_code = await ensure_unique_join_code(db, exclude_course_id=course_id)
+    try:
+        kb.join_code = await ensure_unique_join_code(db, exclude_course_id=course_id)
+    except JoinCodeExhaustedError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     kb.updated_at = time.time()
     await db.flush()
     await invalidate_courses_cache()

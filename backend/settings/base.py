@@ -3,7 +3,7 @@
 架构（业界标准组合式）：
 - 顶层 ``Settings(BaseSettings)`` + ``env_nested_delimiter="__"``。
 - 各职责拆为嵌套 ``BaseModel`` 子组（LLM/Vision/Embedding/Fallback/DB/
-  Security/Paths/Chunking/LightRAG/Rag/LlamaParse/TutorBot/QQBot/Feishu/
+  Security/Paths/Chunking/LightRAG/Rag/TutorBot/QQBot/Feishu/
   Search/ImageIngest/Mem0/Summary/Question）。
 - ``.env`` 用分隔式注入名：``LLM__API_KEY`` → ``settings.llm.api_key``、
   ``DB__URL`` → ``settings.db.url``、``SECURITY__JWT_SECRET`` →
@@ -584,13 +584,6 @@ class RerankConfig(BaseModel):
     min_score: float = 0.0
 
 
-class LlamaParseConfig(BaseModel):
-    """LlamaParse / LlamaIndex（图像 PDF / 扫描件解析）。"""
-
-    cloud_api_key: SecretStr = SecretStr("")  # 兼容 LLAMA_CLOUD_API_KEY 语义
-    parse_api_key: SecretStr = SecretStr("")  # 作 cloud_api_key 的 fallback
-
-
 class PdfConfig(BaseModel):
     """PDF 摄入解析配置（backend 二选一，无降级）。
 
@@ -826,7 +819,6 @@ class Settings(BaseSettings):
     chunking: ChunkingConfig = Field(default_factory=ChunkingConfig)
     lightrag: LightRAGConfig = Field(default_factory=LightRAGConfig)
     rerank: RerankConfig = Field(default_factory=RerankConfig)
-    llamaparse: LlamaParseConfig = Field(default_factory=LlamaParseConfig)
     pdf: PdfConfig = Field(default_factory=PdfConfig)
     parsing: ParsingConfig = Field(default_factory=ParsingConfig)
     tutorbot: TutorBotConfig = Field(default_factory=TutorBotConfig)
@@ -863,10 +855,6 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _apply_legacy_and_fallbacks(self) -> "Settings":
-        # LLAMA_CLOUD_API_KEY fallback to LLAMAPARSE_API_KEY
-        if not self.llamaparse.cloud_api_key.get_secret_value() and self.llamaparse.parse_api_key.get_secret_value():
-            self.llamaparse.cloud_api_key = self.llamaparse.parse_api_key
-
         # EMBEDDING_* 回退主 LLM 凭证
         if not self.embedding.api_key.get_secret_value():
             self.embedding.api_key = self.llm.api_key

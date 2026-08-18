@@ -29,7 +29,7 @@ from core.rag.es_client import delete_course_es_docs
 from core.rag.lightrag import purge_course_workspace
 from core.db.limiter import limiter
 from core.llm.prompts import invalidate_course_prompt_cache
-from core.codes import ensure_unique_join_code, generate_code
+from core.codes import JoinCodeExhaustedError, ensure_unique_join_code, generate_code
 from core.db.database import (
     ApplicationStatus,
     BotNotification,
@@ -234,7 +234,10 @@ async def create_kb(
     db.add(kb)
     await db.flush()
     # 与教师建课一致：建库即自动生成课程码（管理员库历史漏生成，前端凭此渲染二维码）
-    kb.join_code = await ensure_unique_join_code(db)
+    try:
+        kb.join_code = await ensure_unique_join_code(db)
+    except JoinCodeExhaustedError as e:
+        raise HTTPException(status_code=500, detail=str(e))
     await db.flush()
 
     _kb_raw_dir(body.course_id).mkdir(parents=True, exist_ok=True)

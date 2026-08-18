@@ -7,7 +7,7 @@
   - 跨组 fallback：embedding←llm、vision←embedding
   - _check_prod：production 安全门（JWT / CORS / PROVIDER_ENCRYPTION_KEY）
   - paths 默认值组装（BASE_DIR）
-  - legacy alias / rag backend 平台解析 / llamaparse fallback
+  - legacy alias / rag backend 平台解析
   - 全字段注入冒烟（防静默回落默认）
 
 隔离手法：Settings(_env_file=None) 跳过 .env 文件；_fresh() 清理干扰 env 后按入参
@@ -45,8 +45,6 @@ _INTERFERING_ENV = [
     "SECURITY__JWT_SECRET", "SECURITY__JWT_EXPIRE_HOURS",
     "SECURITY__ALLOWED_ORIGINS", "SECURITY__ADMIN_USERNAME",
     "SECURITY__PROVIDER_ENCRYPTION_KEY",
-    # LlamaParse
-    "LLAMAPARSE__CLOUD_API_KEY", "LLAMAPARSE__PARSE_API_KEY",
     # Chunking
     "CHUNKING__SIZE", "CHUNKING__OVERLAP", "CHUNKING__TOP_K",
     "CHUNKING__INGEST_SIZE", "CHUNKING__INGEST_OVERLAP",
@@ -209,10 +207,6 @@ def test_explicit_vision_not_overridden(monkeypatch):
     assert s.vision.api_key.get_secret_value() == "sk-vis-explicit"
     assert s.vision.base_url == "https://vis.example.com"
 
-
-def test_llamaparse_cloud_from_parse(monkeypatch):
-    s = _fresh(monkeypatch, LLAMAPARSE__PARSE_API_KEY="lp-x")
-    assert s.llamaparse.cloud_api_key.get_secret_value() == "lp-x"
 
 
 # ── prod 安全门（_check_prod）─────────────────────────────────────────────────

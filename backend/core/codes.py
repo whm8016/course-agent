@@ -23,11 +23,17 @@ from __future__ import annotations
 import secrets
 import string
 
-from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.db.database import KnowledgeBase
+
+
+class JoinCodeExhaustedError(RuntimeError):
+    """课程码生成 5 次重试仍撞码——32^8 空间下属极小概率事件（随机源异常或库规模异常）。
+
+    core 层不识 HTTP：由 api 调用方（admin/teacher）catch 后转 500。
+    """
 
 # Crockford-like 子集，剔除 0/O/1/I/L → 30 个无歧义字形。
 ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
@@ -90,4 +96,4 @@ async def ensure_unique_join_code(
         clash = await db.execute(stmt)
         if not clash.first():
             return code
-    raise HTTPException(status_code=500, detail="课程码生成失败，请重试")
+    raise JoinCodeExhaustedError("课程码生成失败：5 次重试仍撞码，请重试或检查随机源")
