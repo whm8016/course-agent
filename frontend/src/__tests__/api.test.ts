@@ -148,3 +148,43 @@ describe('deleteSession', () => {
     )
   })
 })
+
+// ---------------------------------------------------------------------------
+// startBot / stopBot：leader 409 重试
+// ---------------------------------------------------------------------------
+
+describe('bot 启停 leader 重试', () => {
+  const res409 = { ok: false, status: 409, json: async () => ({ detail: '当前 worker 不是 leader' }), text: async () => JSON.stringify({ detail: '当前 worker 不是 leader' }) } as unknown as Response
+  const res200 = { ok: true, status: 200, json: async () => ({}) } as unknown as Response
+  const res500 = { ok: false, status: 500, json: async () => ({ detail: '服务器内部错误' }), text: async () => JSON.stringify({ detail: '服务器内部错误' }) } as unknown as Response
+
+  it('连续 409 后命中 200 → startBot 成功且多次尝试', async () => {
+    const { startBot } = await import('../services/api')
+    global.fetch = vi.fn()
+      .mockResolvedValueOnce(res409)
+      .mockResolvedValueOnce(res409)
+      .mockResolvedValueOnce(res409)
+      .mockResolvedValueOnce(res200)
+
+    await startBot('bot1')
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(4)
+  })
+
+  it('409 重试预算耗尽 → 抛错（不再无限重试）', async () => {
+    const { startBot } = await import('../services/api')
+    global.fetch = vi.fn().mockResolvedValue(res409)
+
+    // 直接调内部默认参数会等 2s；这里只验证「会重试多次后放弃」——小预算走
+    // postBotAction 未导出，故用 5 次 409 后放 200 之外的路径：恒 409 + 默认预算
+    // 太慢，改验证 stopBot 相同逻辑下非 409 错误不重试
+    await expect(startBot('bot1')).rejects.toThrow('leader')
+  }, 10000)
+
+  it('非 409 错误不重试直接抛', async () => {
+    const { stopBot } = await import('../services/api')
+    global.fetch = vi.fn().mockResolvedValue(res500)
+
+    await expect(stopBot('bot1')).rejects.toThrow('服务器内部错误')
+    expect(vi.mocked(global.fetch)).toHaveBeenCalledTimes(1)
+  })
+})

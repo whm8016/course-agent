@@ -940,22 +940,37 @@ export async function createBot(payload: {
   return data.bot
 }
 
-export async function startBot(botId: string): Promise<void> {
-  const res = await fetch(`/api/bot/${encodeURIComponent(botId)}/start`, {
-    method: 'POST',
-    headers: authHeaders(),
-  })
-  checkUnauthorized(res)
-  if (!res.ok) throw new Error(await readErrorMessage(res))
+/**
+ * Bot 启停请求带 leader 重试：多 worker 部署下请求随机落到某一 worker，
+ * 仅 leader 可执行启停（其余返回 409）。重试可落到其他 worker 命中 leader
+ * （4 worker 下单次命中概率 1/4，2 秒预算内约 10 次尝试，期望 ~4 次命中）。
+ * 409 时按 retryIntervalMs 间隔重试，直到成功或 budgetMs 预算用尽才抛错；
+ * 其余错误码不重试直接抛。参数默认值供生产使用，测试可注入小值提速。
+ */
+async function postBotAction(
+  path: string,
+  budgetMs = 2000,
+  retryIntervalMs = 200,
+): Promise<void> {
+  const deadline = Date.now() + budgetMs
+  for (;;) {
+    const res = await fetch(path, { method: 'POST', headers: authHeaders() })
+    checkUnauthorized(res)
+    if (res.ok) return
+    if (res.status === 409 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, retryIntervalMs))
+      continue
+    }
+    throw new Error(await readErrorMessage(res))
+  }
 }
 
-export async function stopBot(botId: string): Promise<void> {
-  const res = await fetch(`/api/bot/${encodeURIComponent(botId)}/stop`, {
-    method: 'POST',
-    headers: authHeaders(),
-  })
-  checkUnauthorized(res)
-  if (!res.ok) throw new Error(await readErrorMessage(res))
+export function startBot(botId: string): Promise<void> {
+  return postBotAction(`/api/bot/${encodeURIComponent(botId)}/start`)
+}
+
+export function stopBot(botId: string): Promise<void> {
+  return postBotAction(`/api/bot/${encodeURIComponent(botId)}/stop`)
 }
 
 export async function deleteBot(botId: string): Promise<void> {

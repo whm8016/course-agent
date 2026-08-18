@@ -131,6 +131,9 @@ def _require_leader_or_409() -> None:
         raise HTTPException(
             status_code=409,
             detail="当前 worker 不是 leader，无法操作 bot 实例，请稍后重试。",
+            # 200ms 量级即可命中 leader（前端 api.ts 以 ~2s 预算重试；重试可落到
+            # 其他 worker，4 worker 下单次命中概率 1/4）
+            headers={"Retry-After": "1"},
         )
 
 
