@@ -467,56 +467,13 @@ async def cron_refit_difficulty(ctx) -> None:
     日频足够——新课头一天 b=0 即冷启动口径。全量重折天然幂等；不回写学生 theta
     （活跃学生下次巩固全量重折自动切到新 b；不活跃学生读侧 theta_old - b_new 有
     轻微偏差，接受）。零 LLM。ARQ 单容器天然单例；best-effort 全兜异常。
+    实现已下沉 core/memory/mastery.refit_class_difficulty（SQL 不住 worker）。
     """
-    import time as _time
+    from core.memory.mastery import refit_class_difficulty
 
-    from sqlalchemy import select, update
-
-    from core.db.database import AsyncSessionLocal, CourseTopic, MasteryObservation
-    from core.memory.mastery_state import fold_class_difficulty
-
-    since = _time.time() - 3 * 86400
     try:
-        async with AsyncSessionLocal() as db:
-            pairs = (
-                await db.execute(
-                    select(
-                        MasteryObservation.course_id, MasteryObservation.topic_id
-                    ).where(
-                        MasteryObservation.created_at >= since,
-                        MasteryObservation.course_id != "",
-                    ).distinct()
-                )
-            ).all()
-            for cid, tid in pairs:
-                obs = (
-                    (
-                        await db.execute(
-                            select(
-                                MasteryObservation.user_id,
-                                MasteryObservation.outcome,
-                                MasteryObservation.weight,
-                                MasteryObservation.created_at,
-                            ).where(
-                                MasteryObservation.course_id == cid,
-                                MasteryObservation.topic_id == tid,
-                            )
-                        )
-                    )
-                    .mappings()
-                    .all()
-                )
-                b, n_item = fold_class_difficulty(list(obs))
-                await db.execute(
-                    update(CourseTopic)
-                    .where(
-                        CourseTopic.course_id == cid,
-                        CourseTopic.topic_id == tid,
-                    )
-                    .values(difficulty_b=round(b, 6), n_item=n_item)
-                )
-            await db.commit()
-        logger.info("[worker] cron_refit_difficulty topics=%d", len(pairs))
+        n = await refit_class_difficulty(since_days=3)
+        logger.info("[worker] cron_refit_difficulty topics=%d", n)
     except Exception as exc:
         logger.warning("[worker] cron_refit_difficulty error: %s", exc, exc_info=True)
 

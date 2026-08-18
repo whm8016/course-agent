@@ -308,3 +308,64 @@ __all__ = [
     "get_mastery_context",
     "forget_prob",
 ]
+
+
+async def refit_class_difficulty(since_days: float = 3.0) -> int:
+    """全班难度重折：近 since_days 天有新观测的 (course, topic)，取该主题全班全量
+    观测跑 fold_class_difficulty，写回 course_topic.difficulty_b / n_item。返回重折主题数。
+
+    自 worker.py 的 cron_refit_difficulty 内联 SQL 下沉（worker 只留观测+转调；
+    fold 纯函数本就在 mastery_state.py）。口径不变：b 不在写路径更新（写侧判分观测
+    只有错题本一处，对话为主的流量下在线重折会让 b 恒 0）；每个学生各自 theta 对上
+    共享 b 成对更新（Pelánek/Klinkenberg 口径），按来源权重吃全部观测（判分 1.0 /
+    对话 0.6 / 词表 0.3）。全量重折天然幂等；不回写学生 theta（活跃学生下次巩固
+    全量重折自动切到新 b）。零 LLM。
+    """
+    import time as _time
+
+    from sqlalchemy import select, update
+
+    from core.db.database import AsyncSessionLocal, CourseTopic, MasteryObservation
+    from core.memory.mastery_state import fold_class_difficulty
+
+    since = _time.time() - since_days * 86400
+    async with AsyncSessionLocal() as db:
+        pairs = (
+            await db.execute(
+                select(
+                    MasteryObservation.course_id, MasteryObservation.topic_id
+                ).where(
+                    MasteryObservation.created_at >= since,
+                    MasteryObservation.course_id != "",
+                ).distinct()
+            )
+        ).all()
+        for cid, tid in pairs:
+            obs = (
+                (
+                    await db.execute(
+                        select(
+                            MasteryObservation.user_id,
+                            MasteryObservation.outcome,
+                            MasteryObservation.weight,
+                            MasteryObservation.created_at,
+                        ).where(
+                            MasteryObservation.course_id == cid,
+                            MasteryObservation.topic_id == tid,
+                        )
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            b, n_item = fold_class_difficulty(list(obs))
+            await db.execute(
+                update(CourseTopic)
+                .where(
+                    CourseTopic.course_id == cid,
+                    CourseTopic.topic_id == tid,
+                )
+                .values(difficulty_b=round(b, 6), n_item=n_item)
+            )
+        await db.commit()
+    return len(pairs)
