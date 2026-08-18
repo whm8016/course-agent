@@ -41,8 +41,6 @@ def graph_report(data: dict) -> dict:
     secs = Counter(t.get("source_section") for t in topics)
     unknown = secs.get("未知章节", 0)
     outline = [t for t in topics if "大纲" in str(t.get("source_section") or "")]
-    jiaoan = [t for t in topics if "教案" in str(t.get("source_section") or "")
-              and str(t.get("source_section") or "").endswith((".docx", ".pdf", ".pptx"))]
     labels = [t["label"] for t in topics]
     return {
         "n_topics": len(topics),
