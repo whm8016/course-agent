@@ -82,8 +82,8 @@ def build_rerank_fn(*, force: bool = False) -> Callable[..., Awaitable[list[dict
 
     Args:
         force: True 时无视 ``settings.rerank.enabled`` 开关，只看 ``embedding.api_key``
-            是否存在——消融实验用：生产默认关时仍要能跑出 ``hybrid_rrf+rerank`` 与
-            ``hybrid_no_rerank`` 的对比。生产热路径（llamaindex_pg）用默认 ``force=False``
+            是否存在——消融实验用：本机把 ``RERANK__ENABLED`` 关掉时仍要能跑出
+            ``hybrid_rrf+rerank`` 与 ``hybrid_no_rerank`` 的对比。生产热路径（llamaindex_pg）用默认 ``force=False``
             尊重开关。该开关由 hybrid_retriever 的 ``config.rerank_enabled`` 逐配置决定是否
             真正调用，force 只控制「rerank_fn 本身是否被构造出来」。
     """

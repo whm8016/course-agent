@@ -8,7 +8,8 @@
 - 原文随行：主题与边从同一块讲义文本一次抽出，边带原文引句（evidence）
 - 闭集端点（KGGen ``parse_relations_response`` 口径）：边端点 = 本块新主题 ∪ 前面块已抽出的
   主题——旧点可当端点但不重复成节点，跨章「在 X 的基础上」这类最有证据的边由此而来
-- 抽完再去重：merge_synonymous 归并后经别名表把边端点重映射到规范 topic_id
+- 抽完再去重：merge_synonymous（字符串 + 高阈值向量）→ resolve_synonyms_llm（中间带
+  候选对一批送 LLM 判同知识点，节点级实体对齐）→ 经别名表把边端点重映射到规范 topic_id
 不做「语义 top-k 候选 + 两两判定」——已废弃（凭标签猜边无证据根基）。
 
 核心入口：
@@ -25,6 +26,7 @@ import asyncio
 import json
 import logging
 import math
+import re
 import time
 from pathlib import Path
 
@@ -32,8 +34,18 @@ logger = logging.getLogger(__name__)
 
 JSON_DIR = Path("data/course_topics")
 
-# queued/extracting 超过该秒数无进度更新 → GET 改报 stalled：worker 被 SIGKILL/挂死时
-# 没人写 error（上次的事故形态），靠 ts 兜底提示教师可重试
+# 图片描述孤儿块头部标记（ingestion._append_image_desc_chunks 追加、服务 RAG 检索）：
+# 主题抽取读入即丢——图注是「图里有什么」不是「本章教什么」，当一章抽会喷出图注碎片点
+# （course_mycourse 曾 123 主题里 46 个「未知章节」全是菜单截图名）。
+_IMG_DESC_HEAD = "【图片描述】"
+# ingestion._replace 内联进正文的图注（[图: 描述]）：抽前剥掉，防菜单截图在章内再喷碎点。
+# 闭 ] 可选——图注被 chunk 边界拦腰截断时（开 [图: 在本块、闭 ] 在下块，后半块尾巴
+# 无 opener 只能靠 prompt 兜底句）剥到块尾。描述文本自身含 ] 时会提前闭合并留残片，
+# 同样交 prompt 兜底——正则歧义下这是最优猜测，不再加脆弱启发。
+_INLINE_IMG_RE = re.compile(r"\[图: [^\]]*(?:\]|$)")
+
+# 非终态（queued/extracting/finalizing）超过该秒数无进度更新 → GET 改报 stalled：
+# worker 被 SIGKILL/挂死时没人写 error（上次的事故形态），靠 ts 兜底提示教师可重试
 _STALL_WARN_SECONDS = 900
 
 
@@ -58,7 +70,7 @@ def export_json(
     展示字段不值一次迁移）。旧调用方（scripts/build_course_topics.py）不传则落空默认。
     """
     JSON_DIR.mkdir(parents=True, exist_ok=True)
-    out = JSON_DIR / f"course_{course_id}_topics.json"
+    out = _artifact_path(course_id)
     payload = {
         "course_id": course_id,
         "topics": topics,
@@ -126,14 +138,14 @@ def write_build_progress(course_id: str, **fields) -> None:
         tmp.replace(_pending_path(course_id))
     except OSError:
         return
-    _failed_sections_cache.pop(str(_artifact_path(course_id)), None)
 
 
 def read_build_status(course_id: str) -> dict | None:
     """读回构建进度（GET topic-graph 的 ``build`` 字段）。None = 无进行中/失败遗留构建。
 
-    queued/extracting 且 ts 距今超过 ``_STALL_WARN_SECONDS`` → 改报 stalled；error 是
-    终态不改写。文件缺失/损坏/缺 status 一律 None：纯展示字段，不因 IO 问题打断 GET。
+    除 error（终态）外的任何状态 ts 距今超过 ``_STALL_WARN_SECONDS`` → 改报 stalled：
+    worker 被 SIGKILL/挂死时没人写 error（含 finalizing 的 embedding/入库阶段），
+    只能靠 ts 兜底。文件缺失/损坏/缺 status 一律 None：纯展示字段，不因 IO 问题打断 GET。
     """
     try:
         data = json.loads(_pending_path(course_id).read_text(encoding="utf-8"))
@@ -143,10 +155,10 @@ def read_build_status(course_id: str) -> dict | None:
         return None
     status = str(data["status"])
     ts = data.get("ts")
-    if (status in ("queued", "extracting") and isinstance(ts, (int, float))
+    if (status != "error" and isinstance(ts, (int, float))
             and time.time() - ts > _STALL_WARN_SECONDS):
         status = "stalled"
-    out = {"status": status, "ts": ts}
+    out = {"status": status}
     for k in ("done", "total", "section", "error"):
         if data.get(k) is not None:
             out[k] = data[k]
@@ -163,12 +175,15 @@ def mark_rebuild_pending(course_id: str) -> None:
 
 
 def clear_rebuild_pending(course_id: str) -> None:
-    """本次构建结束（导出成功 / skip / 失败回滚）后去掉 pending，GET 恢复读 artifact。"""
+    """本次构建结束（导出成功 / skip）后去掉 pending，GET 恢复读 artifact。
+
+    缓存失效无需处理：``_failed_sections_cache`` 按 artifact mtime 校验，导出必然
+    重写 artifact（mtime 变化自然失效），skip 路径 artifact 未变（缓存值仍正确）。
+    """
     try:
         _pending_path(course_id).unlink(missing_ok=True)
     except OSError:
         return
-    _failed_sections_cache.pop(str(_artifact_path(course_id)), None)
 
 
 # -------------------- from-chunks 离线抽取（有课程库数据时跑）--------------------
@@ -186,6 +201,8 @@ _EXTRACT_BLOCK_PROMPT = """---Role---
    3~8 个；单块抽出超过 10 个几乎必然是拆细了，回头并。
    - 正例：「戴维南定理」「三端变阻器的连接方式」「一阶RC电路的零输入响应」
    - 反例（过宽）：「电路」「实验」「基本理论」
+   - 反例（图注）：对图片/仪器面板/菜单截图的描述（「XX面板各按键功能」「XX菜单选项」）
+     不是知识点——它们讲「图里有什么」，不是「本章教什么」，一条也不要输出。
 2. 变体归并：同一概念的不同写法/侧面（定理名、其等效电路、其验证方法、其参数
    测量）是**同一个**知识点，只建一条。label 逐字取自讲义中出现的那种写法——
    同一概念多种写法时选最常出现、最有代表性的一种，其余写法不再各自立点；
@@ -225,9 +242,12 @@ _GLEANING_PROMPT = """---Role---
 
 ---Instructions---
 【知识点 topics】
-- 只收本块讲义中**新教**的可考核核心知识点（一小节能讲完的单元，不是操作步骤细节）；
-  同一概念的变体写法/侧面并成一条，label 逐字取自讲义中最常出现的那种写法；
-  「已有知识点清单」里的旧点及其变体不进 topics；泛化词（「电路」「实验」）不收。
+- 只收本块讲义中**新教**的可考核核心知识点（一小节能讲完的单元，不是操作步骤细节）。
+  量的锚：每个实验/章节的核心知识点通常 3~8 个——与第一轮合计超过 10 个几乎必然
+  是拆细了，宁可漏补也不拆细。变体归并：同一概念的不同写法/侧面并成一条，label
+  逐字取自讲义中最常出现的那种写法；
+  「已有知识点清单」里的旧点及其变体不进 topics；泛化词（「电路」「实验」）不收；
+  图片/面板/菜单截图的描述不是知识点，一条也不收。
 【先修边 edges】
 - 只抽文本**明示**的先修依赖（「在X的基础上」「复习X」「由X推导」等写法）；src=前置，
   dst=后继；strength ∈ [0,1]；evidence 逐字摘抄块原文一句（50 字内）；两端须在本块新点或清单旧点内。
@@ -649,6 +669,197 @@ def merge_synonymous(
     return merged, alias
 
 
+# LLM 节点归并候选带：merge_synonymous 的 0.88 以下到此下界之间是「向量说不准」的
+# 中间带——不送 LLM 会留近似重复点（问句匹配在两点间摇摆、掌握度记散），全送又贵
+# 且乱并。带内 + 标签归一互相包含的对才当候选（KGGen cluster 的 blocking 思路）。
+_DEFAULT_RESOLVE_SIM_FLOOR = 0.70
+# 候选对数封顶：课级约 80 点，带内对通常几十；超量按相似度排序截断并打日志（不静默砍）
+_RESOLVE_PAIRS_CAP = 80
+# 包含通道最短词长（归一后字符数）：「电路」「测量」这类短词被半门课的长标签包含，
+# 纯包含信号太弱，只走余弦带；「叠加定理」（4 字）级别的包含才是强信号
+_CONTAIN_MIN_CHARS = 4
+
+_RESOLVE_SYNONYMS_PROMPT = """---Role---
+你是课程知识图谱专家，正在复查同一门课抽出的知识点清单，判断哪些写法指的是同一个知识点。
+
+---Goal---
+下面每行是一个**候选对**——标签相近、可能同指一个可考核知识点的两个写法（括号内是出处）。
+只把确实同指一个知识点的并成组；不确定的不并。
+
+---Instructions---
+1. 判据是「考核时算不算同一个点」：同一操作的粗泛写法与具体写法（如大纲里的
+   「示波器的使用」与实验章节里的「双踪示波器的触发方式」）算同一个，并；不同考核
+   单元（如「戴维南定理」与「叠加定理」）不并，哪怕都在讲电路等效。
+2. 宁可不并：并错会把两个独立考点焊死，学生掌握度互相污染；漏并只是多一个近似点。
+3. 只能使用候选对中出现过的标签，不要发明新标签、不要改写。
+4. 一组只放确实同指一个点的标签。多个细点只是各自和同一条大纲粗点相近、
+   彼此并不是同一个考点时，拆成多组，不要合成一大组。
+
+---候选对---
+{pairs}
+
+---Output---
+输出严格 JSON（无围栏），单行紧凑：{{"groups": [["标签1", "标签2"], ...]}}；没有可并的输出 {{"groups": []}}"""
+
+
+# 文件名档判定用已知文档扩展名结尾，不用「含点」——章节串是祖先标题路径，可含小数
+# 编号（「第2章 > 2.3 RC电路的响应」），按含点判会误把真章节打成文件名档
+_FILENAME_EXT_RE = re.compile(r"\.(docx?|pptx?|pdf|txt|md|xlsx?)$", re.IGNORECASE)
+
+
+def _section_rank(section: str | None) -> int:
+    """归并时 canonical 来源优先级：实验章节(0) < 其他真章节(1) < 文件名/未知(2)。
+
+    实验章节来源的点粒度最细最准（plan 口径：章节细点吃掉大纲/教案粗点，不反过来）。
+    文件名档先判——「实验指导书.pdf」这类以实验开头的文件名必须落文件名档，不能靠
+    实验前缀抢到 rank 0。
+    """
+    sec = (section or "").strip()
+    if not sec or sec == "未知章节" or _FILENAME_EXT_RE.search(sec):
+        return 2
+    if sec.startswith("实验"):
+        return 0
+    return 1
+
+
+def _candidate_pairs(
+    topics: list[dict], sim_floor: float, sim_ceiling: float,
+) -> list[tuple[int, int]]:
+    """LLM 归并的 blocking：余弦落在 [floor, ceiling) 或标签归一互相包含的点对。
+
+    纯函数：O(n²) 对数在课级规模（~80 点）无压力；返回按下界内相似度降序、封顶
+    ``_RESOLVE_PAIRS_CAP`` 的索引对（封顶打日志，不静默截断）。
+    """
+    from core.memory.course_topic_store import _norm_label, cosine
+
+    scored: list[tuple[float, int, int]] = []
+    for i in range(len(topics)):
+        for j in range(i + 1, len(topics)):
+            a, b = topics[i], topics[j]
+            na, nb = _norm_label(a["label"]), _norm_label(b["label"])
+            if not na or not nb or na == nb:
+                continue  # 同归一写法已被 merge_synonymous 吃掉
+            contained = (
+                min(len(na), len(nb)) >= _CONTAIN_MIN_CHARS and (na in nb or nb in na)
+            )
+            sim = cosine(a["embedding"] or [], b["embedding"] or [])
+            if contained or sim_floor <= sim < sim_ceiling:
+                # 包含是强信号（「叠加定理」⊂「叠加定理的验证」），排最前
+                scored.append((1.0 if contained else sim, i, j))
+    scored.sort(key=lambda x: (-x[0], x[1], x[2]))
+    if len(scored) > _RESOLVE_PAIRS_CAP:
+        logger.warning(
+            "[course_topics] LLM 归并候选对 %d 超封顶 %d，按相似度截断",
+            len(scored), _RESOLVE_PAIRS_CAP,
+        )
+    return [(i, j) for _, i, j in scored[:_RESOLVE_PAIRS_CAP]]
+
+
+async def resolve_synonyms_llm(
+    course_id: str, topics: list[dict], alias: dict[str, str], llm, model: str,
+    *, sim_floor: float = _DEFAULT_RESOLVE_SIM_FLOOR,
+    sim_ceiling: float = 0.88,
+) -> tuple[list[dict], dict[str, str], int]:
+    """merge_synonymous 之后的节点级 LLM 归并（实体对齐，不是边去重）。
+
+    对象是**节点**：embedding 中间带 + 标签互相包含的候选对，一批送 LLM 判「是否同一
+    可考核知识点」（KGGen cluster 的 embedding 分堆 + LLM 确认，收成一轮不迭代）。并完
+    由调用方走既有 ``finalize_edges``——alias 扩展后边端点自动重映射到规范 topic_id、
+    自环自动丢，无需再烧边级 LLM（LightRAG merge_entities 同序：先并节点再改挂关系）。
+
+    canonical 选择在代码侧不在 LLM 侧：组内按 ``_section_rank``（实验章节优先）+
+    order_idx 取保留点，只把与 canonical **有直接候选对**的点并进去（星形，不走
+    组内连通闭包——否则 [大纲,细点1,细点2] 会经枢纽把两个细点焊死）。
+    每个 groups 条目独立成并、不跨组传递：被多组认领的枢纽点只并进与 canonical 余弦
+    最高的那组。
+    字段口径同 merge_synonymous：definition 取较长者、embedding 取首个非空。
+
+    LLM 失败/无候选对：原样返回（降级为仅向量去重），不废整图——归并是增益不是依赖。
+    返回 (topics, alias, merged_count)。
+    """
+    from core.memory.course_topic_store import _norm_label, cosine
+
+    pairs = _candidate_pairs(topics, sim_floor, sim_ceiling) if len(topics) > 1 else []
+    if not pairs:
+        return topics, alias, 0
+
+    norm_to_idx = {n: i for i, t in enumerate(topics) if (n := _norm_label(t["label"]))}
+    rendered = "\n".join(
+        f"{n}. 「{topics[i]['label']}」（{str(topics[i].get('source_section') or '')[:20]}）"
+        f" ↔ 「{topics[j]['label']}」（{str(topics[j].get('source_section') or '')[:20]}）"
+        for n, (i, j) in enumerate(pairs, 1)
+    )
+    data = await _llm_json(
+        llm, model, _RESOLVE_SYNONYMS_PROMPT.format(pairs=rendered),
+        track={"course_id": course_id},
+    )
+    if not data:
+        logger.warning("[course_topics] LLM 节点归并失败，降级为仅向量去重（保留 %d 点）", len(topics))
+        return topics, alias, 0
+
+    # 组内星形并到 canonical：只收与它有直接候选对的点。组内连通闭包会把
+    # [大纲,触发,探头] 经枢纽焊成一点；跨组也不传递（两组共享枢纽时只留余弦更高的）。
+    cand_pairs = {frozenset(p) for p in pairs}
+
+    group_comps: list[tuple[float, int, list[int], int]] = []  # (最强余弦, 组序, 成员, canonical)
+    for gi, group in enumerate(data.get("groups") or []):
+        if not isinstance(group, list):
+            continue
+        known = sorted({norm_to_idx[n] for lb in group
+                        if (n := _norm_label(str(lb))) in norm_to_idx})
+        if len(known) < 2:
+            continue
+        canon = min(known, key=lambda i: (
+            _section_rank(topics[i].get("source_section")), topics[i]["order_idx"]))
+        attached = [i for i in known if i != canon and frozenset((i, canon)) in cand_pairs]
+        if not attached:
+            continue
+        members = attached + [canon]
+        best = max(cosine(topics[i]["embedding"] or [], topics[canon]["embedding"] or [])
+                   for i in attached)
+        group_comps.append((best, gi, members, canon))
+
+    # 跨组独占：成员已被更强组占用的整组放弃（宁可不并，不跨组传递）；被多组认领的
+    # 枢纽点只并进与 canonical 余弦最高的那组，平局按组序（LLM JSON 顺序，稳定）。
+    group_comps.sort(key=lambda x: (-x[0], x[1]))
+    used: set[int] = set()
+    canon_of: dict[int, int] = {}  # 被并点 idx → canonical idx
+    for _, _, members, canon in group_comps:
+        if used & set(members):
+            continue
+        used.update(members)
+        for i in members:
+            if i != canon:
+                canon_of[i] = canon
+    if not canon_of:
+        return topics, alias, 0
+
+    members_of: dict[int, list[int]] = {}
+    for i, c in canon_of.items():
+        members_of.setdefault(c, []).append(i)
+    # canonical 未被并，天然留在 keep 里（独占裁决保证它不在 canon_of 值域外重复出现）
+    keep = [i for i in range(len(topics)) if i not in canon_of]
+    for canon, members in members_of.items():
+        # 字段吸收口径同 merge_synonymous：定义取较长、embedding 取首个非空
+        for i in sorted(members):
+            if len(topics[i]["definition"]) > len(topics[canon]["definition"]):
+                topics[canon]["definition"] = topics[i]["definition"]
+            if not topics[canon]["embedding"] and topics[i]["embedding"]:
+                topics[canon]["embedding"] = topics[i]["embedding"]
+
+    keep.sort(key=lambda i: topics[i]["order_idx"])
+    out = [topics[i] for i in keep]
+    for i, t in enumerate(out):
+        t["order_idx"] = i
+    # alias 重定向：merge_synonymous 的 alias 已覆盖全部原始写法的归一（含被并点），
+    # 只需把指向被并 topic_id 的值统一换成 canonical 的 topic_id
+    id_map = {topics[i]["topic_id"]: topics[canon]["topic_id"] for i, canon in canon_of.items()}
+    alias2 = {n: id_map.get(tid, tid) for n, tid in alias.items()}
+    merged = len(topics) - len(out)
+    logger.info("[course_topics] LLM 节点归并：%d 点 → %d 点（候选对 %d）", len(topics), len(out), len(pairs))
+    return out, alias2, merged
+
+
 def _mk_edge(
     src_id: str, dst_id: str, confidence: float,
     relation: str = "prerequisite", evidence: str | None = None,
@@ -811,6 +1022,22 @@ def assemble_edges(
     return closed, stats
 
 
+def _source_group_name(chunk_sources: list[str] | None, i: int) -> str:
+    """前缀里没有 章节:/来源: 时的分组兜底：取审计 ``chunk_sources[i]`` 的文件名。
+
+    与 ``ingestion._build_source_prefix`` 的退化口径一致（文件名当分组键）；sources
+    缺失/越界/为空（老版本审计无此字段）才落「未知章节」——纯防御分支。
+    """
+    if chunk_sources and i < len(chunk_sources):
+        from core.rag.source_utils import strip_chunk_suffix
+
+        src = strip_chunk_suffix(str(chunk_sources[i]))
+        name = Path(src).name if src else ""
+        if name:
+            return name
+    return "未知章节"
+
+
 def load_course_chunks(course_id: str) -> list[dict]:
     """定位该课程的摄入切块审计 latest.json，解析成 [{text, section, order_idx}]。
 
@@ -819,6 +1046,10 @@ def load_course_chunks(course_id: str) -> list[dict]:
     避免路径逻辑两份）。审计 JSON 的 ``chunks`` 是**纯字符串列表**，每条开头带
     ``【章节: ...】`` 前缀（``ingestion._build_source_prefix`` 注入）；逐条 ``parse_source_prefix``
     拆出 section（按章聚合抽主题用）与纯正文 text。
+
+    图片描述块读入即丢、正文剥掉内嵌 ``[图: …]``（检索侧保留——这里是主题抽取的读入口，
+    图注是「图里有什么」不是「本章教什么」）。section 落空时退化用 ``chunk_sources``
+    文件名分组（见 ``_source_group_name``），不再一律落「未知章节」。
 
     两后端落盘都受 settings 开关门控（``chunking.save_pg_ingest_chunks`` / ``lightrag.save_ingest_chunks``）；
     关闭或未索引过 → 文件缺失 → 抛 FileNotFoundError（提示先建索引）。
@@ -840,15 +1071,41 @@ def load_course_chunks(course_id: str) -> list[dict]:
         )
     raw = json.loads(path.read_text(encoding="utf-8"))
     chunks = raw.get("chunks") if isinstance(raw, dict) else raw
+    chunk_sources = raw.get("chunk_sources") if isinstance(raw, dict) else None
     if not chunks:
         raise ValueError(
             f"课程 {course_id} 的审计 JSON 无 chunk（{path}）；索引可能空跑，请检查上传文件。"
         )
     parsed: list[dict] = []
+    dropped_img = 0
     for i, ck in enumerate(chunks):
         section, body = parse_source_prefix(ck)
-        parsed.append({"text": body, "section": section or "未知章节", "order_idx": i})
-    logger.info("[course_topics] 加载切块审计 course=%s path=%s chunks=%d", course_id, path, len(parsed))
+        # 图注孤儿块两代格式都丢：旧版块本身以【图片描述】开头（parse_source_prefix 会把
+        # 标记当伪前缀吃掉、section 落空）；新版带【来源: 文件名】前缀 + 【图片描述】体
+        if ck.lstrip().startswith(_IMG_DESC_HEAD) or body.lstrip().startswith(_IMG_DESC_HEAD):
+            dropped_img += 1
+            continue
+        body = _INLINE_IMG_RE.sub("", body)
+        if not body.strip():  # 剥掉图注后只剩空壳（整块都是 [图: …]）→ 丢
+            dropped_img += 1
+            continue
+        if not section:
+            # 退化分组：前缀无 章节:/来源: 字段时用审计 sources 的文件名（与
+            # _build_source_prefix 的退化口径一致），不再落「未知章节」——那会把
+            # 无章可归的块搅成一锅「未知章」抽出图注碎片点
+            section = _source_group_name(chunk_sources, i)
+        parsed.append({"text": body, "section": section, "order_idx": i})
+    if not parsed:
+        # 全部 chunk 都被图注过滤吞掉（如纯扫描件 PDF 课）：早失败并说真因——
+        # 否则一路走到抽取层报「全部块失败（LLM 不可用？）」，误导排查方向
+        raise ValueError(
+            f"课程 {course_id} 的 {len(chunks)} 个 chunk 全是图片描述块（{path}），"
+            f"无可抽正文的讲义文本。"
+        )
+    logger.info(
+        "[course_topics] 加载切块审计 course=%s path=%s chunks=%d（丢图注块 %d）",
+        course_id, path, len(parsed), dropped_img,
+    )
     return parsed
 
 
@@ -910,10 +1167,25 @@ async def build_topic_graph(course_id: str, db, *, force: bool = False) -> dict:
             raise RuntimeError(
                 f"course={course_id} 全部块抽取失败（{len(chunks)} chunks，LLM 不可用？），不落空图"
             )
+        raw_topic_count = len(topics)
         topics, alias = merge_synonymous(topics)
+        merged_embedding = raw_topic_count - len(topics)
+        merged_llm = 0
+        if s.course_topic.llm_resolve_enabled:
+            # 节点级 LLM 归并（失败内部降级为仅向量去重，不废整图）——归并扩 alias 后，
+            # assemble_edges 的 finalize_edges 自动把边端点重映射到规范 topic_id（边去重
+            # 不必再烧 LLM）。LightRAG merge_entities 同序：先并节点再改挂关系。
+            topics, alias, merged_llm = await resolve_synonyms_llm(
+                course_id, topics, alias, llm, model,
+                sim_floor=s.course_topic.llm_resolve_sim_floor,
+            )
         edges, edge_stats = assemble_edges(
             raw_edges, alias, topics, dropped_invalid=meta["edges_dropped_invalid"],
         )
+        # topics_merged_embedding 口径：merge_synonymous 阶段并掉的总数（字符串归一 +
+        # ≥0.88 向量两路合计——该函数不拆分两路计数，键名沿用 plan 约定）
+        edge_stats["topics_merged_embedding"] = merged_embedding
+        edge_stats["topics_merged_llm"] = merged_llm
 
         for t in topics:
             db.add(CourseTopic(

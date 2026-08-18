@@ -560,13 +560,13 @@ class RerankConfig(BaseModel):
     本地 BAAI/bge-reranker 需 torch+sentence-transformers，与既定内存预算冲突）。
     凭证复用 ``embedding.api_key``（同属 DashScope），不新增 key 字段。
 
-    **默认关**（``enabled=False``）：行为零变化。论文支撑「精排是高确定性收益项」
-    （arXiv:2606.21553 HotpotQA RRF top-20→cross-encoder→top-5，p<0.001），但 rerank 必须
-    在自己数据上验证（不能假设普遍有效），故 eval 有正向收益后再开（``RERANK__ENABLED=true``）。
+    **默认开**（``enabled=True``）：PG 检索在 RRF 融合后走 Cross-Encoder 精排。
+    无 ``EMBEDDING__API_KEY`` 时 ``build_rerank_fn`` 仍返回 None，行为与关精排一致；
+    API 失败由 hybrid_retriever 降级回 RRF。可用 ``RERANK__ENABLED=false`` 关掉。
     .env 前缀 ``RERANK__*``。
     """
 
-    enabled: TruthyBool = False             # 默认关；eval 验证有收益后开
+    enabled: TruthyBool = True              # 生产默认开；无 embedding key 时仍跳过精排
     model: str = "qwen3-rerank"             # gte-rerank-v2 已于 2026-05-30 下线，迁移至此
     # 送进精排的候选数：RRF 融合后最多 dense_top_k+bm25_top_k 条（默认 20+20=40），截前
     # candidate_top_n=20 送精排，尾部候选原样保留不参与重排序（见 core/rag/rerank.py）。
@@ -705,6 +705,13 @@ class CourseTopicConfig(BaseModel):
     # gleaning 补抽轮数（LightRAG extract_entities 模式）：每块首轮解析成功后追加
     # 「只补遗漏」轮，0 关闭。每 +1 轮 ≈ 块抽取调用量翻倍，质量收益递减，默认 1。
     gleaning: int = 1
+
+    # LLM 节点归并（merge_synonymous 之后一轮）：embedding 中间带（sim_floor~0.88）+
+    # 标签互相包含的候选对，一批送抽取模型判「是否同一可考核知识点」。默认开；关闭或
+    # LLM 失败都降级为仅向量去重（归并是增益不是依赖）。上界不设配置——0.88 是
+    # merge_synonymous 已吃掉的阈值，两处共用一个数才不会出现「都不管」的缝隙。
+    llm_resolve_enabled: bool = True
+    llm_resolve_sim_floor: float = 0.70
 
 
 class Mem0Config(BaseModel):
