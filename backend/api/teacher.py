@@ -255,7 +255,7 @@ async def get_topic_graph(
 
 
 class TopicSafetyBody(BaseModel):
-    """教师标注主题安全权重（当前门控不读，仅存储与展示；0=不预警 1=默认 >1=安全关键）。"""
+    """教师标注主题安全权重（门控 p_need 乘子；0=不预警 1=默认 >1=安全关键更易过闸）。"""
     safety_weight: float = Field(..., ge=0.0, le=10.0)
 
 
@@ -267,10 +267,10 @@ async def set_topic_safety_weight(
     teacher: dict = Depends(get_current_teacher),
     db: AsyncSession = Depends(get_db),
 ):
-    """教师标注主题安全权重——safety_weight 唯一合法写入入口（P2，当前门控不读）。
+    """教师标注主题安全权重——safety_weight 唯一合法写入入口（P2）。
 
-    保留原因：删列需写迁移、改 kb_indexing 响应契约与相关测试，超出「去掉 VoI」
-    的范围；将来若恢复任务风险因子可直接接回。
+    门控消费：proactive.decide_stitch 把该主题的 safety_weight 乘进 p_need
+    （0=该主题永不因它预警；>1 放大过闸概率，通电操作类实验漏报代价更高）。
     """
     await _get_owned_kb(db, course_id, teacher)
     row = (await db.execute(

@@ -47,8 +47,62 @@ async def test_quiz_observation_written_and_folds(db):
     assert len(obs) == 1
     assert obs[0].source == "quiz" and obs[0].outcome == 0.0 and obs[0].question_id == "q1"
     assert km[0].n_obs == 1 and km[0].theta < 0  # 答错 → theta 下移
+    # 答错不强化：strength 保持默认 5.0
+    assert km[0].strength == 5.0
     # 难度不在写路径更新（plan「班级难度估计修复」）：写完观测 b 仍为 0，等 cron 日频重折
     assert ct.difficulty_b == 0.0 and ct.n_item == 0
+
+
+async def test_quiz_correct_reinforces_strength(db):
+    """答对 → strength +1（MemoryBank spacing effect，论文式(4) S 递增）。
+
+    回归根因：旧实现唯一写 strength += 1 的 append_mastery_from_topics 无生产调用方，
+    巩固主路径不碰 strength → p_forget 只随时间变，答对不减缓遗忘。
+    """
+    await _seed()
+    from core.db.database import AsyncSessionLocal, KnowledgeMastery
+    from core.memory.quiz_observe import record_quiz_observation
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as s:
+        with patch("core.memory.topic_match.match_topics",
+                   AsyncMock(return_value=[("ohm", 0.88)])):
+            ok1 = await record_quiz_observation(s, "u1", "c1", "q1", "欧姆定律的公式", True)
+            ok2 = await record_quiz_observation(s, "u1", "c1", "q2", "欧姆定律单位", True)
+        await s.commit()
+
+    assert ok1 and ok2
+    async with AsyncSessionLocal() as s:
+        km = (await s.execute(select(KnowledgeMastery))).scalars().all()
+
+    # 首答对建行 strength=6（初值5+1），第二次答对 +1 → 7
+    assert km[0].strength == 7.0
+
+
+async def test_strength_capped_at_15(db):
+    """多轮 good 强化封顶 _STRENGTH_CAP=15，防 p_forget 恒 0。"""
+    from core.db.database import AsyncSessionLocal, CourseTopic, KnowledgeMastery
+    from core.memory.consolidation import _STRENGTH_CAP, _write_mastery_observations
+    from core.memory.judge import Judgement
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as s:
+        s.add(CourseTopic(course_id="c1", topic_id="ohm", label="欧姆定律"))
+        s.add(KnowledgeMastery(
+            user_id="u1", course_id="c1", kp_id="ohm", label="欧姆定律",
+            mastery=0.8, risk=0.2, observation_count=10, strength=15.0,
+            theta=1.0, n_obs=10,
+        ))
+        await s.commit()
+
+        # 已封顶的行再来一条 good 观测 → strength 仍 15（min 封顶）
+        await _write_mastery_observations(
+            s, "u1", "c1", [Judgement("ohm", "good", 1.0, "引用")], []
+        )
+
+    async with AsyncSessionLocal() as s:
+        km = (await s.execute(select(KnowledgeMastery))).scalars().one()
+    assert km.strength == _STRENGTH_CAP
 
 
 async def test_quiz_observation_idempotent(db):
