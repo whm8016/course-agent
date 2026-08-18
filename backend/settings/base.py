@@ -650,6 +650,8 @@ class TutorBotConfig(BaseModel):
     enabled: TruthyBool = False
     heartbeat_enabled: TruthyBool = True
     heartbeat_interval_sec: int = 1800
+    # 已读 bot 通知保留天数（worker 每日 cron 清理；未读不按时间清理）
+    notification_retention_days: int = 30
 
 
 class QQBotConfig(BaseModel):

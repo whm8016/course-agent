@@ -133,3 +133,31 @@ class NotificationService:
                 "Failed to send notification via %s to %s", platform, chat_id
             )
             return False
+
+
+async def purge_old_notifications(retention_days: int) -> int:
+    """清理 N 天前的**已读**通知（audit 遗留项：收件箱只增不减）。返回删除行数。
+
+    只删 read=True——未读是学生还没消费的收件，不按时间清理。
+    worker 每日 cron 调用（低峰期）；可恢复错误降级为日志（下次 cron 再试）。
+    """
+    import time as _time
+
+    from sqlalchemy import delete
+
+    from core.db.database import AsyncSessionLocal, BotNotification
+
+    cutoff = _time.time() - retention_days * 86400
+    try:
+        async with AsyncSessionLocal() as db:
+            res = await db.execute(
+                delete(BotNotification).where(
+                    BotNotification.read.is_(True),
+                    BotNotification.created_at < cutoff,
+                )
+            )
+            await db.commit()
+            return res.rowcount or 0
+    except Exception:
+        logger.warning("purge_old_notifications failed", exc_info=True)
+        return 0

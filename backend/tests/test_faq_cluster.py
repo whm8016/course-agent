@@ -83,3 +83,41 @@ async def test_frequent_questions_merged_reads_course_faq(client):
     assert items[0]["count"] == 2          # count 降序：基尔霍夫簇在前
     assert "基尔霍夫" in items[0]["question"]
     assert items[1]["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_frequent_questions_merged_cold_start_sql(client):
+    """冷启动（无 course_faq 行）回退 SQL 兜底：近30天重复提问按前缀聚合，
+    只计本课程消息（Message.course_id 直查，P1 后免 JOIN Session）。"""
+    import os as _os
+
+    from core.analytics.faq import frequent_questions_merged
+    from core.db.database import AsyncSessionLocal, Message, Session, User
+
+    now = time.time()
+    async with AsyncSessionLocal() as db:
+        u = User(username=f"cs_{_os.urandom(3).hex()}", password_hash="x")
+        db.add(u)
+        await db.flush()
+        s_in = Session(id=f"is_{_os.urandom(2).hex()}", course_id="c_cold", user_id=u.id)
+        s_out = Session(id=f"os_{_os.urandom(2).hex()}", course_id="c_other", user_id=u.id)
+        db.add_all([s_in, s_out])
+        await db.flush()
+        # 本课程：同文本问 2 次（兜底按前80字符完全相同分组，≥2 计入）；短消息（≤4 字符）不计
+        for txt in ["基尔霍夫定律怎么列方程", "基尔霍夫定律怎么列方程", "啥"]:
+            db.add(Message(
+                session_id=s_in.id, course_id="c_cold", role="user",
+                content=txt, created_at=now,
+            ))
+        # 他课程：同前缀再问 1 次——不应计入本课程（旧 JOIN 口径同）
+        db.add(Message(
+            session_id=s_out.id, course_id="c_other", role="user",
+            content="基尔霍夫定律怎么列方程", created_at=now,
+        ))
+        await db.commit()
+
+    async with AsyncSessionLocal() as db:
+        items = await frequent_questions_merged(db, "c_cold", 20)
+    assert len(items) == 1
+    assert items[0]["count"] == 2
+    assert items[0]["question"].startswith("基尔霍夫")

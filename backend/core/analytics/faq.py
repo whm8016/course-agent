@@ -11,7 +11,7 @@ import time
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from core.db.database import CourseFaq, Message, Session
+from core.db.database import CourseFaq, Message
 
 
 async def frequent_questions_merged(
@@ -30,7 +30,8 @@ async def frequent_questions_merged(
             for r in faq_rows
         ]
 
-    # 冷启动兜底：course_faq 未聚簇 -> 近 30 天重复提问（出现 ≥2 次）SQL
+    # 冷启动兜底：course_faq 未聚簇 -> 近 30 天重复提问（出现 ≥2 次）SQL。
+    # 按 Message.course_id 直查（P1 落列+回填后免 JOIN Session，走 idx_messages_course）。
     thirty_days_ago = time.time() - 86400 * 30
     # PG 严格模式：SELECT 与 GROUP BY 须为同一表达式对象以复用 bindparam。
     # 用 substr 而非 left：后者 PG 专有，SQLite 测试库没有。
@@ -41,9 +42,8 @@ async def frequent_questions_merged(
             func.count().label("cnt"),
             func.max(Message.created_at).label("last_ts"),
         )
-        .join(Session, Message.session_id == Session.id)
         .where(
-            Session.course_id == course_id,
+            Message.course_id == course_id,
             Message.role == "user",
             Message.created_at >= thirty_days_ago,
             func.length(Message.content) > 4,

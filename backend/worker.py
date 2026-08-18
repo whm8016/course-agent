@@ -443,6 +443,20 @@ async def cron_cluster_faqs(ctx) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def cron_purge_bot_notifications(ctx) -> None:
+    """每日 04:53 清理 N 天前已读 bot 通知（audit 遗留项：收件箱只增不减）。
+
+    未读不按时间清理（学生还没消费的收件）；天数 TUTORBOT__NOTIFICATION_RETENTION_DAYS
+    默认 30。purge_old_notifications 内部全兜异常，失败只记日志不影响其他 cron。
+    """
+    from core.bot.notification import purge_old_notifications
+    from settings import get_settings
+
+    n = await purge_old_notifications(get_settings().tutorbot.notification_retention_days)
+    if n:
+        logger.info("[worker] cron_purge_bot_notifications removed=%s", n)
+
+
 async def cron_refit_difficulty(ctx) -> None:
     """每日 04:41 全班难度重折：对近 3 天有新观测的 (course, topic)，取该主题全班
     全量观测跑 fold_class_difficulty，写回 course_topic.difficulty_b / n_item。
@@ -571,4 +585,6 @@ class WorkerSettings:
         cron(cron_cluster_faqs, minute={37}),
         # 每日 04:41 全班难度重折（低峰期；避开 04:17 GC 与 :23 rollup 的分钟错峰）。
         cron(cron_refit_difficulty, hour={4}, minute={41}),
+        # 每日 04:53 清理 N 天前已读 bot 通知（audit 遗留：收件箱只增不减；错峰 04:17/04:41）。
+        cron(cron_purge_bot_notifications, hour={4}, minute={53}),
     ]

@@ -159,10 +159,10 @@ async def rollup_student_course(course_ids: list[str]) -> int:
                         .group_by(SessionModel.user_id)
                     )).all()
                 }
-                # quiz（JOIN Session 按课程过滤，同 P1-a）。读 OLTP NotebookEntry 是因为
-                # verb='answered' 事件尚未接通（p2-b 只 wired asked）；Phase 4 接通后，quiz
-                # 计数应改为从 learning_events(verb=answered) 派生——届时两 rollup 同源、
-                # 事件自带 course_id 免 JOIN。此处勿当永久口径。
+                # quiz（按 NotebookEntry.course_id 课程过滤，P1 落列后免 JOIN）。
+                # verb='answered' 事件已接通（question_notebook 提交作答即写）；
+                # 此处仍读 OLTP NotebookEntry（答题真相源）——若后续统一切事件口径
+                # （learning_events 自带 course_id），daily/student 两 rollup 可同源派生。
                 quiz = {
                     r.user_id: (r.total, r.correct) for r in (await db.execute(
                         select(
