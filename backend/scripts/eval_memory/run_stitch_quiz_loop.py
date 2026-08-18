@@ -129,31 +129,27 @@ async def run(case_ids: list[str] | None = None, *, skip_expose: bool = False) -
                 continue
             # 独立 user 前缀 lvq_：别复用 live 表E 的 lv_（那边的冷却戳/观测会互相污染）
             user_id = f"lvq_{idx:02d}"
-            case_base = (
-                wall0
-                if ("cooldown_hours" in c and "clock_days" not in c)
-                else base
-            )
+            case_base = wall0 if _is_cooldown_case(c) else base
             logger.info("[quiz-loop] === %s user=%s ===", c["id"], user_id)
 
             from .seed_stitch_personas import _ensure_user
-
-            async with AsyncSessionLocal() as db:
-                await _ensure_user(db, user_id)
 
             if skip_expose:
                 # 复用库内档案（调试定向逻辑）：**不清理**——cleanup 后跳过暴露等于
                 # 拿空档案出题，weak_prereq/targeted 全 0，对账结果自欺
                 logger.info("[quiz-loop] %s --skip-expose：复用库内档案（不清理）", c["id"])
+                async with AsyncSessionLocal() as db:
+                    await _ensure_user(db, user_id)
             else:
                 async with AsyncSessionLocal() as db:
+                    await _ensure_user(db, user_id)
                     await _cleanup_user(db, user_id, COURSE_ID)
                 await _expose_case(user_id, COURSE_ID, c, case_base)
 
             gold_topic = c["gold"].get("evidence_topic") or ""
             async with AsyncSessionLocal() as db:
                 # 门控信息列（本脚本不重评门控，只记录「当时门控怎么说」）
-                gate_brief = await _probe_gate_info(db, user_id, c, base)
+                gate_brief = await _probe_gate_info(db, user_id, c, base, wall0)
                 weak_topics = await get_weak_topics(db, user_id, COURSE_ID)
                 weak_hit = any(w["topic_id"] == gold_topic for w in weak_topics)
 
@@ -198,37 +194,42 @@ async def run(case_ids: list[str] | None = None, *, skip_expose: bool = False) -
         await close_db()
 
     n = len(rows)
-    hit = sum(1 for r in rows if r["aligned"])
+
+    def _rate(key: str) -> float | None:
+        return round(sum(1 for r in rows if r[key]) / n, 4) if n else None
+
     return {
         "suite": "stitch_quiz_gap_alignment",
         "cases": n,
         "base": base,
         "base_utc": datetime.fromtimestamp(base, timezone.utc).isoformat(),
-        "quiz_gap_alignment_rate": round(hit / n, 4) if n else None,
+        "quiz_gap_alignment_rate": _rate("aligned"),
         # 分解指标：前提（缺口进清单）/ 直中 / 文本兜底——错在哪一层一眼看穿
-        "weak_prereq_rate": round(sum(1 for r in rows if r["weak_hit"]) / n, 4) if n else None,
-        "targeted_rate": round(sum(1 for r in rows if r["targeted_hit"]) / n, 4) if n else None,
-        "resolved_rate": round(sum(1 for r in rows if r["resolved_hit"]) / n, 4) if n else None,
+        "weak_prereq_rate": _rate("weak_hit"),
+        "targeted_rate": _rate("targeted_hit"),
+        "resolved_rate": _rate("resolved_hit"),
         "no_question_cases": sum(1 for r in rows if r["n_questions"] == 0),
         "details": rows,
     }
 
 
-async def _probe_gate_info(db, user_id: str, c: dict, base: float) -> dict:
+def _is_cooldown_case(c: dict) -> bool:
+    """冷却三例判别（与 run_stitch_e2e_live 的观测锚分支同一口径）：这类 case 的
+    观测锚是 wall0 而非 base——dsl=3+1 天间距，若挪 27 天复发窗装不下一条 poor
+    （见那边 _CLOCK_DAYS_MAX 注释），探测钟/观测锚都必须跟着墙钟走。"""
+    return "cooldown_hours" in c and "clock_days" not in c
+
+
+async def _probe_gate_info(
+    db, user_id: str, c: dict, base: float, wall0: float
+) -> dict:
     """信息列：拨钟探测一次门控（不 commit 冷却——本脚本不评冷却，别烧冷却戳）。
 
-    冷却三例（cooldown_hours）观测锚是 wall0，探测钟若仍用 base（27 天前）会落
-    在观测之前（负年龄钳 0、p_forget=0，前置臂口径失真）——与 e2e_live 同臂
-    对齐走墙钟。仅影响信息列（对账指标不读它）。"""
-    import time as _time
-
+    冷却例探测钟走 wall0（与 e2e_live 同臂对齐；用 base 会落在观测之前，负年龄
+    钳 0、p_forget=0，前置臂口径失真）。仅影响信息列（对账指标不读它）。"""
     from core.memory.proactive import stitch_for_turn
 
-    now = (
-        _time.time()
-        if ("cooldown_hours" in c and "clock_days" not in c)
-        else live_case_now(c, base)
-    )
+    now = wall0 if _is_cooldown_case(c) else live_case_now(c, base)
     brief = await stitch_for_turn(c["query"], user_id, COURSE_ID, db, now=now)
     return _gate_fields(brief)
 

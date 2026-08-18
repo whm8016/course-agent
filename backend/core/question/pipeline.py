@@ -73,6 +73,28 @@ class QuizPipeline:
         rt = await resolve_profile_runtime(context.llm_profile_id, context.user_id)
         layers = await build_common_context_layers(context)
 
+        # ── 薄弱点清单（出题定向）：explore 前发车、plan 前收 ────────────────
+        # 查询只依赖 user/course，与 explore 无数据依赖——create_task 提前发，
+        # DB 往返被 explore 的 LLM 耗时吸收（不占关键路径）。user+course 齐备才查
+        # （匿名/无课场景保持旧行为）；fail-safe：查询失败按无薄弱点继续，不阻塞
+        # 出题主流程（与 pipeline_common 门控同款容错口径）。
+        async def _load_weak_topics() -> list[dict[str, Any]]:
+            if not (context.user_id and context.course_id):
+                return []
+            try:
+                from core.db.database import AsyncSessionLocal
+                from core.memory.mastery import get_weak_topics
+
+                async with AsyncSessionLocal() as db:
+                    return await get_weak_topics(
+                        db, context.user_id, context.course_id
+                    )
+            except Exception:
+                logger.exception("[quiz] get_weak_topics 失败（按无薄弱点继续）")
+                return []
+
+        weak_task = asyncio.create_task(_load_weak_topics())
+
         # explore 可用工具：rag/web_search 检索素材 + ask_user（出题要求不清时让学生澄清，仅 WS 入口可暂停）
         explore_tools = [t for t in context.enabled_tools if t in ("rag", "web_search")] + ["ask_user"]
 
@@ -103,23 +125,8 @@ class QuizPipeline:
         log_flow("question.stage.explore",
                  elapsed_ms=int((_time.perf_counter() - _t_stage) * 1000),
                  tools_used=explore_outcome.tools_used)
-
-        # ── 薄弱点清单（出题定向）：explore 后、plan 前查一次 ────────────────
-        # user+course 齐备才查（匿名/无课场景保持旧行为）。fail-safe：查询失败按
-        # 无薄弱点继续，不阻塞出题主流程（与 pipeline_common 门控同款容错口径）。
-        weak_topics: list[dict[str, Any]] = []
-        if context.user_id and context.course_id:
-            try:
-                from core.db.database import AsyncSessionLocal
-                from core.memory.mastery import get_weak_topics
-
-                async with AsyncSessionLocal() as db:
-                    weak_topics = await get_weak_topics(
-                        db, context.user_id, context.course_id
-                    )
-            except Exception:
-                logger.exception("[quiz] get_weak_topics 失败（按无薄弱点继续）")
-                weak_topics = []
+        # 薄弱点查询（explore 前发车）在此收——plan 阶段要用
+        weak_topics = await weak_task
 
         # ── Stage 2: plan — 单次 LLM 出 templates 蓝图 ───────────────────
         _t_stage = _time.perf_counter()
@@ -187,32 +194,50 @@ class QuizPipeline:
             async def _gen(
                 idx: int, tmpl: dict[str, Any]
             ) -> tuple[int, dict[str, Any] | None, dict[str, Any] | None]:
-                """生成单题（并发安全）：fork 隔离 context → run_agent_loop → 解析 + 校验 + critic。
+                """生成单题（并发安全）：fork 隔离 context → 生成 → 解析校验 → critic。
 
                 返回 (idx, question, error)：成功则 question 非 None，失败则 error 非 None。
                 事件（quiz_question / quiz_question_error）按完成顺序直接发到主 stream——前端按
                 到达顺序追加、不依赖 index 排序，故完成顺序乱序无害；questions / errors 列表在
                 gather 后由主协程按 idx 排序汇总，保证结果载荷顺序确定（与串行时一致）。
                 """
-                async with sem:
-                    # 并发隔离：replace 是浅拷贝，attachments / metadata 仍指向原 context 同一对象；
-                    # _build_messages 会原地清空 doc 附件 base64（loop.py:96-97）并可能写 metadata，
-                    # 多题共享同一份会让先跑的题清空后跑题的附件。深拷贝隔离（同 research._fork_for_block）。
-                    base_prompt = (
-                        f"题目蓝图：{json.dumps(tmpl, ensure_ascii=False)}\n\n"
-                        f"探索摘要：\n{exploration_trace}\n\n"
-                        f"请生成第 {idx} 道题（JSON）。"
-                    )
-                    quiz_ctx = _fork_for_quiz(
+
+                async def _fail(source: dict[str, Any], reason: str, **extra: Any):
+                    """M-8/M-9 单题容错三件套（emit 错误事件 + 返回失败元组）的单一出口。
+
+                    source 取 tmpl（LLM 异常，题未解析出来）或 q（已解析，_parse_question
+                    的 question_id/topic 本就来自 template，两口径等价）。
+                    """
+                    err = {
+                        "index": idx - 1,
+                        "question_id": source.get("question_id", ""),
+                        "topic": source.get("topic", ""),
+                        "reason": reason,
+                        **extra,
+                    }
+                    await stream.emit({"type": "quiz_question_error", **err})
+                    return (idx, None, err)
+
+                async def _generate(
+                    prompt: str,
+                ) -> tuple[dict[str, Any] | None, tuple | None]:
+                    """单轮生成 + 解析 + schema 校验（初始与 critic 重试共用）。
+
+                    并发隔离：fork 深拷贝 attachments/metadata（replace 是浅拷贝，
+                    _build_messages 会原地清空 doc 附件 base64 并可能写 metadata，
+                    多题共享同一份会互踩，见 _fork_for_quiz）。失败已 emit，
+                    (q, err) 二选一非 None。
+                    """
+                    gen_ctx = _fork_for_quiz(
                         context,
-                        user_message=base_prompt,
+                        user_message=prompt,
                         conversation_history=[],
                         enabled_tools=[],
                         mode="quiz",
                     )
                     try:
-                        quiz_outcome = await run_agent_loop(
-                            context=quiz_ctx,
+                        outcome = await run_agent_loop(
+                            context=gen_ctx,
                             stream=stream,
                             system_prompt=with_common_prompt(quiz_system, layers),
                             tool_schemas=None,
@@ -225,102 +250,51 @@ class QuizPipeline:
                     except Exception:
                         # M-8：单题 LLM 调用异常（超时 / 网络 / provider 抖动）不中断整批
                         logger.exception("quiz 第 %d 题生成异常", idx)
-                        err = {
-                            "index": idx - 1,
-                            "question_id": tmpl.get("question_id", ""),
-                            "topic": tmpl.get("topic", ""),
-                            "reason": "generation_error",
-                        }
-                        await stream.emit({"type": "quiz_question_error", **err})
-                        return (idx, None, err)
-
-                    q = _parse_question(quiz_outcome.final_text, tmpl)
+                        return None, await _fail(tmpl, "generation_error")
+                    q = _parse_question(outcome.final_text, tmpl)
                     # M-9：内容级校验——空题干/空答案/choice 答案不命中 options 视为无效
                     if not _validate_question(q):
                         logger.warning("quiz 第 %d 题内容校验失败，跳过", idx)
-                        err = {
-                            "index": idx - 1,
-                            "question_id": q.get("question_id", ""),
-                            "topic": q.get("topic", ""),
-                            "reason": "schema_invalid",
-                        }
-                        await stream.emit({"type": "quiz_question_error", **err})
-                        return (idx, None, err)
+                        return None, await _fail(q, "schema_invalid")
+                    return q, None
+
+                async with sem:
+                    base_prompt = (
+                        f"题目蓝图：{json.dumps(tmpl, ensure_ascii=False)}\n\n"
+                        f"探索摘要：\n{exploration_trace}\n\n"
+                        f"请生成第 {idx} 道题（JSON）。"
+                    )
+                    q, err = await _generate(base_prompt)
+                    if q is None:
+                        return err
 
                     # ── critic 校验轮：schema 关过后独立复核（看不到生成过程）──
                     # 未过 → issues 拼回生成器重试（最多 _CRITIC_MAX_RETRIES 次）；
                     # 重试产物重新走 schema 校验再进 critic。仍失败走 M-8/M-9 同款
                     # 单题容错（reason="critic_failed"），其余题照常。
-                    critic_attempts = 0
-                    while True:
+                    for attempt in range(_CRITIC_MAX_RETRIES + 1):
                         issues = await _run_critic(
                             q, critic_system, context, layers, rt, stream
                         )
                         if not issues:
                             break
-                        if critic_attempts >= _CRITIC_MAX_RETRIES:
+                        if attempt == _CRITIC_MAX_RETRIES:  # 重试用尽（共 1+N 次 critic）
                             logger.warning(
                                 "quiz 第 %d 题 critic 未通过（重试用尽），跳过", idx
                             )
-                            err = {
-                                "index": idx - 1,
-                                "question_id": q.get("question_id", ""),
-                                "topic": q.get("topic", ""),
-                                "reason": "critic_failed",
-                                "critic_issues": issues[:5],
-                            }
                             critic_counts["failed"] += 1
-                            await stream.emit({"type": "quiz_question_error", **err})
-                            return (idx, None, err)
-                        critic_attempts += 1
-                        critic_counts["regenerated"] += 1
-                        retry_ctx = _fork_for_quiz(
-                            context,
-                            user_message=(
-                                f"{base_prompt}\n\n"
-                                f"上一版未通过校验，问题：{'；'.join(issues)}。"
-                                f"请修正后重新给出完整 JSON。"
-                            ),
-                            conversation_history=[],
-                            enabled_tools=[],
-                            mode="quiz",
-                        )
-                        try:
-                            quiz_outcome = await run_agent_loop(
-                                context=retry_ctx,
-                                stream=stream,
-                                system_prompt=with_common_prompt(quiz_system, layers),
-                                tool_schemas=None,
-                                max_iterations=1,
-                                emit_terminal_events=False,
-                                client=rt.client,
-                                model=rt.text_model,
-                                binding=rt.binding,
+                            return await _fail(
+                                q, "critic_failed", critic_issues=issues[:5]
                             )
-                        except Exception:
-                            # 重试轮的 M-8 同款：异常不中断整批
-                            logger.exception("quiz 第 %d 题重试生成异常", idx)
-                            err = {
-                                "index": idx - 1,
-                                "question_id": tmpl.get("question_id", ""),
-                                "topic": tmpl.get("topic", ""),
-                                "reason": "generation_error",
-                            }
-                            await stream.emit({"type": "quiz_question_error", **err})
-                            return (idx, None, err)
-
-                        q = _parse_question(quiz_outcome.final_text, tmpl)
-                        if not _validate_question(q):
-                            # 重试版反而格式坏了：M-9 语义（schema_invalid），非 critic 账
-                            logger.warning("quiz 第 %d 题重试后内容校验失败，跳过", idx)
-                            err = {
-                                "index": idx - 1,
-                                "question_id": q.get("question_id", ""),
-                                "topic": q.get("topic", ""),
-                                "reason": "schema_invalid",
-                            }
-                            await stream.emit({"type": "quiz_question_error", **err})
-                            return (idx, None, err)
+                        critic_counts["regenerated"] += 1
+                        q, err = await _generate(
+                            f"{base_prompt}\n\n"
+                            f"上一版未通过校验，问题：{'；'.join(issues)}。"
+                            f"请修正后重新给出完整 JSON。"
+                        )
+                        if q is None:
+                            # 重试轮 M-8/M-9（generation_error / schema_invalid，非 critic 账）
+                            return err
                     critic_counts["passed"] += 1
 
                     await stream.emit({
@@ -477,74 +451,88 @@ async def _run_critic(
     生成侧已有 schema 校验（_validate_question）兜底，校验器不可用不误杀好题。
     边界：已解析出 pass=false 但 issues 缺失/为空**不属于** fail-open——模型明确
     判否却拿不到理由，兜底一条 issue 触发重试，不静默放行。
+
+    两路只依赖 q、互不依赖，gather 并行（死循环块的超时不再挡 LLM 开跑）。
     """
-    issues: list[str] = []
-    if q.get("question_type") == "coding":
-        from core.question.sandbox import extract_code_blocks, run_code
+    async def _sandbox_issues() -> list[str]:
+        issues: list[str] = []
+        if q.get("question_type") == "coding":
+            from core.question.sandbox import extract_code_blocks, run_code
 
-        blocks = extract_code_blocks(q.get("correct_answer", "") or "")
-        for i, block in enumerate(blocks, 1):
-            try:
-                # to_thread：subprocess.run 是同步阻塞，直跑事件循环会让同 worker
-                # 的全部并发会话冻结到超时（生产 gunicorn -w4 每 worker 单 loop）
-                ok, detail = await asyncio.to_thread(run_code, block)
-            except Exception as exc:
-                logger.warning("[quiz] 沙箱执行异常（计 issue 走重试）", exc_info=True)
-                ok, detail = False, f"sandbox_error: {exc}"
-            if not ok:
-                issues.append(f"第{i}个代码块执行失败（{detail}）")
-
-    payload = json.dumps(
-        {
-            "question_type": q.get("question_type", ""),
-            "topic": q.get("topic", ""),
-            "difficulty": q.get("difficulty", ""),
-            "question": q.get("question", ""),
-            "options": q.get("options"),
-            "correct_answer": q.get("correct_answer", ""),
-            "explanation": q.get("explanation", ""),
-        },
-        ensure_ascii=False,
-    )
-    critic_ctx = _fork_for_quiz(
-        context,
-        user_message=f"待校验题目：\n{payload}\n\n请校验并输出 JSON。",
-        conversation_history=[],
-        enabled_tools=[],
-        mode="quiz",
-    )
-    try:
-        outcome = await run_agent_loop(
-            context=critic_ctx,
-            stream=stream,
-            system_prompt=with_common_prompt(critic_system, layers),
-            tool_schemas=None,
-            max_iterations=1,
-            emit_terminal_events=False,
-            client=rt.client,
-            model=rt.text_model,
-            binding=rt.binding,
-        )
-    except Exception:
-        logger.warning("[quiz] critic 调用失败（fail-open，仅沙箱结论生效）", exc_info=True)
+            blocks = extract_code_blocks(q.get("correct_answer", "") or "")
+            for i, block in enumerate(blocks, 1):
+                try:
+                    # to_thread：subprocess.run 是同步阻塞，直跑事件循环会让同 worker
+                    # 的全部并发会话冻结到超时（生产 gunicorn -w4 每 worker 单 loop）
+                    ok, detail = await asyncio.to_thread(run_code, block)
+                except Exception as exc:
+                    logger.warning("[quiz] 沙箱执行异常（计 issue 走重试）", exc_info=True)
+                    ok, detail = False, f"sandbox_error: {exc}"
+                if not ok:
+                    issues.append(f"第{i}个代码块执行失败（{detail}）")
         return issues
 
-    data = extract_json_from_llm(outcome.final_text)
-    if not isinstance(data, dict) or "pass" not in data:
-        logger.warning(
-            "[quiz] critic 输出不可解析（fail-open 放行）：%s",
-            (outcome.final_text or "")[:200],
+    async def _llm_issues() -> list[str]:
+        payload = json.dumps(
+            {
+                "question_type": q.get("question_type", ""),
+                "topic": q.get("topic", ""),
+                "difficulty": q.get("difficulty", ""),
+                "question": q.get("question", ""),
+                "options": q.get("options"),
+                "correct_answer": q.get("correct_answer", ""),
+                "explanation": q.get("explanation", ""),
+            },
+            ensure_ascii=False,
         )
-        return issues
-    if data.get("pass") is not True:
-        raw = data.get("issues")
-        if isinstance(raw, list):
-            issues.extend(str(x) for x in raw if str(x).strip())
-        if not issues:
-            # 判否但没给理由：不算 fail-open（那是给"不知道"的），兜底 issue 触发重试
-            logger.warning("[quiz] critic 判 pass=false 但无 issues，按兜底 issue 重试")
-            issues.append("critic 判定未通过，但未给出具体问题清单")
-    return issues
+        # attachments=[]：critic 只看题目 JSON，附件对它是纯开销（loop 每轮重解析
+        # 文档/重发图片 vision token，与「看不到生成过程」的设计口径也相悖）
+        critic_ctx = _fork_for_quiz(
+            context,
+            attachments=[],
+            user_message=f"待校验题目：\n{payload}\n\n请校验并输出 JSON。",
+            conversation_history=[],
+            enabled_tools=[],
+            mode="quiz",
+        )
+        try:
+            outcome = await run_agent_loop(
+                context=critic_ctx,
+                stream=stream,
+                system_prompt=with_common_prompt(critic_system, layers),
+                tool_schemas=None,
+                max_iterations=1,
+                emit_terminal_events=False,
+                client=rt.client,
+                model=rt.text_model,
+                binding=rt.binding,
+            )
+        except Exception:
+            logger.warning(
+                "[quiz] critic 调用失败（fail-open，仅沙箱结论生效）", exc_info=True
+            )
+            return []
+        data = extract_json_from_llm(outcome.final_text)
+        if not isinstance(data, dict) or "pass" not in data:
+            logger.warning(
+                "[quiz] critic 输出不可解析（fail-open 放行）：%s",
+                (outcome.final_text or "")[:200],
+            )
+            return []
+        if data.get("pass") is not True:
+            out: list[str] = []
+            raw = data.get("issues")
+            if isinstance(raw, list):
+                out.extend(str(x) for x in raw if str(x).strip())
+            if not out:
+                # 判否但没给理由：不算 fail-open（那是给"不知道"的），兜底 issue 触发重试
+                logger.warning("[quiz] critic 判 pass=false 但无 issues，按兜底 issue 重试")
+                out.append("critic 判定未通过，但未给出具体问题清单")
+            return out
+        return []
+
+    sandbox_part, llm_part = await asyncio.gather(_sandbox_issues(), _llm_issues())
+    return sandbox_part + llm_part
 
 
 def _fork_for_quiz(context: UnifiedContext, **overrides: Any) -> UnifiedContext:

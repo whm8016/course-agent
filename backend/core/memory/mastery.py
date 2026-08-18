@@ -187,7 +187,7 @@ async def get_weak_topics(
         scored.append((r, r.risk * decay))
 
     scored.sort(key=lambda x: -x[1])
-    weak = [(r, eff) for (r, eff) in scored if r.risk >= 0.5][:top_n]
+    weak = [r for r, _eff in scored if r.risk >= 0.5][:top_n]
     return [
         {
             "topic_id": r.kp_id,
@@ -195,7 +195,7 @@ async def get_weak_topics(
             "risk": round(float(r.risk or 0.0), 4),
             "observation_count": r.observation_count or 1,
         }
-        for r, _eff in weak
+        for r in weak
     ]
 
 

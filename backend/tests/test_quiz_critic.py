@@ -163,7 +163,7 @@ def test_run_code_pass_fail_timeout():
     assert bad is False
     assert "boom" in detail
 
-    slow, detail = run_code("while True:\n    pass", timeout=1)
+    slow, detail = run_code("while True:\n    pass", timeout=0.3)
     assert slow is False
     assert "timeout" in detail
 
