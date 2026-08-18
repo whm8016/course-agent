@@ -113,6 +113,36 @@ async def test_get_mastery_context_lists_weak_points(db):
     assert len(ctx) <= 300
 
 
+# ── get_weak_topics（结构化，出题定向单一真相源）────────────────────────────
+
+
+async def test_get_weak_topics_structured_and_filters(db):
+    """结构化薄弱点：字段齐 / risk<0.5 过滤 / 与 get_mastery_context 同源（同 label）。"""
+    from core.db.database import AsyncSessionLocal
+
+    kps_weak = [{"label": "积分", "entity_id": "e1", "mastery_delta": -0.3, "risk_delta": 0.4}]
+    kps_strong = [{"label": "加减法", "entity_id": "e2", "mastery_delta": 0.4, "risk_delta": -0.4}]
+    async with AsyncSessionLocal() as s:
+        await mastery.append_mastery(s, "u1", "c1", kps_weak, "ep1")
+        await mastery.append_mastery(s, "u1", "c1", kps_strong, "ep2")
+        weak = await mastery.get_weak_topics(s, "u1", "c1")
+        ctx = await mastery.get_mastery_context(s, "u1", "c1")
+
+    assert len(weak) == 1  # 加减法 risk<0.5 不算薄弱
+    assert weak[0] == {
+        "topic_id": "e1", "label": "积分", "risk": 0.9, "observation_count": 1,
+    }
+    # 同源：文本注入与结构化清单取自同一份排序（不各写一遍）
+    assert "积分" in ctx and "加减法" not in ctx
+
+
+async def test_get_weak_topics_empty(db):
+    from core.db.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as s:
+        assert await mastery.get_weak_topics(s, "u1", "c1") == []
+
+
 # ── consolidate 双写（mem0 升格 + LLM 判定路径写 mastery；阶段C 口径）────────
 
 

@@ -101,3 +101,60 @@ async def test_quiz_threads_profile_and_injects_layers():
     assert len(result["questions"]) == 1
     assert result["questions"][0]["question"] == "求 f(x)=x² 的导数"
     await bus.close()
+
+
+async def test_quiz_plan_injects_weak_topics():
+    """出题定向薄弱点：清单非空 → plan 轮 user_message 含 label，metadata 计数正确，
+    target_topic_id 从蓝图透传到题目。"""
+    ctx = _ctx()
+    bus = StreamBus()
+    rt = ProfileRuntime(client=MagicMock(name="client"), text_model="gpt-4o", binding="openai")
+    layers = CommonContextLayers()
+
+    weak = [{"topic_id": "deriv", "label": "导数定义", "risk": 0.81, "observation_count": 3}]
+    plan_text = (
+        '{"templates":[{"topic":"导数定义","question_type":"written",'
+        '"difficulty":"easy","target_topic_id":"deriv"}]}'
+    )
+    quiz_text = '{"question":"求 f(x)=x² 的导数","correct_answer":"2x","explanation":"幂函数法则"}'
+
+    call_n = {"i": 0}
+    plan_user_message = {"text": ""}
+
+    async def _fake_loop(**kw):
+        call_n["i"] += 1
+        if call_n["i"] == 2:  # plan → 蓝图带 target_topic_id
+            plan_user_message["text"] = kw["context"].user_message
+            return _outcome(plan_text)
+        if call_n["i"] == 3:  # quiz → 题目
+            return _outcome(quiz_text)
+        return _outcome("探索摘要：导数描述变化率")
+
+    with (
+        patch(
+            "core.question.pipeline.resolve_profile_runtime",
+            new=AsyncMock(return_value=rt),
+        ),
+        patch(
+            "core.question.pipeline.build_common_context_layers",
+            new=AsyncMock(return_value=layers),
+        ),
+        patch("core.question.pipeline.describe_images", new=AsyncMock(return_value="出题要求")),
+        patch("core.question.pipeline.get_tool_schemas", return_value=[{"name": "rag"}]),
+        patch("core.question.pipeline.run_agent_loop", new=AsyncMock(side_effect=_fake_loop)),
+        patch(
+            "core.memory.mastery.get_weak_topics",
+            new=AsyncMock(return_value=weak),
+        ),
+    ):
+        result = await QuizPipeline().run("出 1 道导数题", ctx, bus, count=1)
+
+    # plan 轮消息含薄弱点清单（label + topic_id 都在，LLM 才能定向）
+    assert "导数定义" in plan_user_message["text"]
+    assert "topic_id=deriv" in plan_user_message["text"]
+    # metadata 计数（评测读）
+    assert result["metadata"]["weak_topics_considered"] == 1
+    assert result["metadata"]["weak_topics_targeted"] == 1
+    # target_topic_id 从蓝图透传到题目（闭环评测对账的落点）
+    assert result["questions"][0]["target_topic_id"] == "deriv"
+    await bus.close()

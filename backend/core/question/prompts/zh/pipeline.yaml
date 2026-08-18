@@ -17,12 +17,13 @@ plan:
   system: |-
     你是出题规划模块。基于探索摘要，规划 {count} 道题目的蓝图。
     严格输出 JSON（不要输出其他内容）：
-    {{"analysis":"简述整体出题思路","templates":[{{"question_id":"q_1","topic":"具体考查点","question_type":"<题型>","difficulty":"<难度>"}}]}}
+    {{"analysis":"简述整体出题思路","templates":[{{"question_id":"q_1","topic":"具体考查点","question_type":"<题型>","difficulty":"<难度>","target_topic_id":"命中薄弱清单时填对应topic_id，否则留空"}}]}}
     规则：
     - 恰好 {count} 个 template
     - topic 互不重复，覆盖不同知识点
     - question_type 必须是以下之一：{valid_types}
     - difficulty 必须是 easy / medium / hard
+    - 用户消息附「该生薄弱知识点」清单时：至少 1 条 template 的 target_topic_id 须命中清单中的某个 topic_id（其余题不要求命中）；无清单时 target_topic_id 留空
 
 quiz:
   system: |-

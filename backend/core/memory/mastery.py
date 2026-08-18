@@ -142,10 +142,25 @@ async def append_mastery(
     return n
 
 
-async def get_mastery_context(
-    db, user_id: str, course_id: str, *, top_n: int = 5, max_chars: int = 300
-) -> str:
-    """读时衰减后取 risk 最高的 top-N 薄弱点，拼成注入文本（Phase 4b 用）。无数据则空串。"""
+async def get_weak_topics(
+    db, user_id: str, course_id: str, *, top_n: int = 5
+) -> list[dict]:
+    """读时衰减后 risk 最高的 top-N 薄弱点（结构化，单一真相源）。
+
+    get_mastery_context（拼文本注入）与出题 plan 阶段（定向出题 + target_topic_id
+    对账）共用本函数，避免两处各写一遍衰减+筛选。返回
+    [{topic_id, label, risk, observation_count}]，按衰减后 effective_risk 降序。
+
+    薄弱点：衰减后 effective_risk 高优先；risk<0.5 的不算薄弱
+    注意：此 0.5 是**仪表盘排序口径**，与门控的 WEAK_MARGIN（logit 空间，plan §3e）
+    故意不同源——门控判据是「至少一次判 poor」的语义锚点（2026-08-18 由两次下调），
+    这里只是看板筛选线。
+    勿"顺手统一"：把门控判据拉回 0.5 会把表现平平（fair）误判成前置缺口。
+
+    topic_id 取行上 kp_id（新口径闭集 id 即 topic_id）。legacy hash 行不做 label
+    对齐：出题展示走 label，id 断链只影响旧数据对账，不阻塞主流程（门控读侧的对
+    齐在 proactive._read_mastery，口径不同勿搬）。
+    """
     from core.db.database import KnowledgeMastery
     from sqlalchemy import select
 
@@ -162,7 +177,7 @@ async def get_mastery_context(
         .all()
     )
     if not rows:
-        return ""
+        return []
 
     now = time.time()
     scored = []
@@ -171,19 +186,32 @@ async def get_mastery_context(
         decay = math.exp(-_DECAY_LAMBDA_PER_DAY * age_days)
         scored.append((r, r.risk * decay))
 
-    # 薄弱点：衰减后 effective_risk 高优先；risk<0.5 的不算薄弱
-    # 注意：此 0.5 是**仪表盘排序口径**，与门控的 WEAK_MARGIN（logit 空间，plan §3e）
-    # 故意不同源——门控判据是「至少一次判 poor」的语义锚点（2026-08-18 由两次下调），
-    # 这里只是看板筛选线。
-    # 勿"顺手统一"：把门控判据拉回 0.5 会把表现平平（fair）误判成前置缺口。
     scored.sort(key=lambda x: -x[1])
     weak = [(r, eff) for (r, eff) in scored if r.risk >= 0.5][:top_n]
+    return [
+        {
+            "topic_id": r.kp_id,
+            "label": r.label,
+            "risk": round(float(r.risk or 0.0), 4),
+            "observation_count": r.observation_count or 1,
+        }
+        for r, _eff in weak
+    ]
+
+
+async def get_mastery_context(
+    db, user_id: str, course_id: str, *, top_n: int = 5, max_chars: int = 300
+) -> str:
+    """读时衰减后取 risk 最高的 top-N 薄弱点，拼成注入文本（Phase 4b 用）。无数据则空串。"""
+    weak = await get_weak_topics(db, user_id, course_id, top_n=top_n)
     if not weak:
         return ""
 
     lines = ["## 该生掌握度（薄弱点优先，注意诊断反复性错误）"]
-    for r, _eff in weak:
-        lines.append(f"- {r.label}：偏薄弱(风险{r.risk:.2f}，{r.observation_count}次观测)")
+    for w in weak:
+        lines.append(
+            f"- {w['label']}：偏薄弱(风险{w['risk']:.2f}，{w['observation_count']}次观测)"
+        )
     text = "\n".join(lines)
     if len(text) > max_chars:
         text = text[: max_chars - 1].rstrip() + "…"
@@ -305,6 +333,7 @@ __all__ = [
     "append_mastery",
     "append_mastery_from_topics",
     "topic_repeat_hint",
+    "get_weak_topics",
     "get_mastery_context",
     "forget_prob",
 ]

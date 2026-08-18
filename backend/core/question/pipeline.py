@@ -96,6 +96,23 @@ class QuizPipeline:
                  elapsed_ms=int((_time.perf_counter() - _t_stage) * 1000),
                  tools_used=explore_outcome.tools_used)
 
+        # ── 薄弱点清单（出题定向）：explore 后、plan 前查一次 ────────────────
+        # user+course 齐备才查（匿名/无课场景保持旧行为）。fail-safe：查询失败按
+        # 无薄弱点继续，不阻塞出题主流程（与 pipeline_common 门控同款容错口径）。
+        weak_topics: list[dict[str, Any]] = []
+        if context.user_id and context.course_id:
+            try:
+                from core.db.database import AsyncSessionLocal
+                from core.memory.mastery import get_weak_topics
+
+                async with AsyncSessionLocal() as db:
+                    weak_topics = await get_weak_topics(
+                        db, context.user_id, context.course_id
+                    )
+            except Exception:
+                logger.exception("[quiz] get_weak_topics 失败（按无薄弱点继续）")
+                weak_topics = []
+
         # ── Stage 2: plan — 单次 LLM 出 templates 蓝图 ───────────────────
         _t_stage = _time.perf_counter()
         async with stream.stage("plan", source="quiz"):
@@ -103,10 +120,20 @@ class QuizPipeline:
                 count=count,
                 valid_types="/".join(_VALID_TYPES),
             )
+            weak_block = ""
+            if weak_topics:
+                lines = ["该生薄弱知识点（按风险排序，出题时优先覆盖）："]
+                for w in weak_topics:
+                    lines.append(
+                        f"- {w['label']}（风险{w['risk']:.2f}，"
+                        f"{w['observation_count']}次观测，topic_id={w['topic_id']}）"
+                    )
+                weak_block = "\n".join(lines) + "\n\n"
             plan_ctx = replace(
                 context,
                 user_message=(
                     f"出题要求：{requirement}\n\n"
+                    f"{weak_block}"
                     f"探索摘要：\n{exploration_trace}\n\n"
                     f"请规划 {count} 道题目的蓝图（JSON）。"
                 ),
@@ -126,6 +153,9 @@ class QuizPipeline:
                 binding=rt.binding,
             )
             templates = _parse_templates(plan_outcome.final_text, count)
+        # 蓝图命中薄弱点的题数（评测对账用；weak_ids 空时恒 0）
+        weak_ids = {w["topic_id"] for w in weak_topics}
+        weak_targeted = sum(1 for t in templates if t.get("target_topic_id") in weak_ids)
         log_flow("question.stage.plan",
                  elapsed_ms=int((_time.perf_counter() - _t_stage) * 1000),
                  templates=len(templates))
@@ -238,6 +268,9 @@ class QuizPipeline:
                 "count_failed": len(errors),
                 "errors": errors,
                 "stages": ["explore", "plan", "quiz"],
+                # 出题定向薄弱点（评测读）：注入清单的条数 / 蓝图命中清单的题数
+                "weak_topics_considered": len(weak_topics),
+                "weak_topics_targeted": weak_targeted,
             },
         }
 
@@ -265,6 +298,8 @@ def _parse_templates(text: str, count: int) -> list[dict[str, Any]]:
             "topic": topic,
             "question_type": qt,
             "difficulty": diff,
+            # 定向命中（出题定向薄弱点）：plan 给了就透传，没给空串（旧测试/旧行为兼容）
+            "target_topic_id": str(item.get("target_topic_id") or "").strip(),
         })
         if len(templates) >= count:
             break
@@ -287,6 +322,8 @@ def _parse_question(text: str, template: dict[str, Any]) -> dict[str, Any]:
         "options": None,
         "difficulty": template.get("difficulty", ""),
         "topic": template.get("topic", ""),
+        # 蓝图定向命中的主题 id（出题定向薄弱点）：透传给前端/评测对账，无则空串
+        "target_topic_id": template.get("target_topic_id", ""),
     }
 
     if qt == "choice":
