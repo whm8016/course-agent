@@ -4,8 +4,8 @@
 admin 与 teacher 入口只保留各自的权限校验（_get_kb_or_404 / _get_owned_kb），其余
 全部委托给本模块。
 
-放 api 层（而非 core/rag/）是因为要调 api.courses.invalidate_courses_cache——放 core
-会形成 core→api 循环依赖。
+invalidate_courses_cache 已下沉 core/db/cache.py，本模块经它清缓存（历史版本因它
+住在 api/courses 而留在 api 层，该约束已解除）。
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from fastapi import HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.courses import invalidate_courses_cache
+from core.db.cache import invalidate_courses_cache
 from core.db.database import CourseTopic, KBFile, KbBuild, KnowledgeBase
 
 logger = logging.getLogger(__name__)

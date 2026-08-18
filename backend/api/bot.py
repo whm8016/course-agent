@@ -131,8 +131,9 @@ def _require_leader_or_409() -> None:
         raise HTTPException(
             status_code=409,
             detail="当前 worker 不是 leader，无法操作 bot 实例，请稍后重试。",
-            # 200ms 量级即可命中 leader（前端 api.ts 以 ~2s 预算重试；重试可落到
-            # 其他 worker，4 worker 下单次命中概率 1/4）
+            # Retry-After=1s 是给泛 HTTP 客户端的保守建议；本项目前端（api.ts
+            # postBotAction）按自身 200ms 节奏重试、不读此头（~2s 预算内约 10 次
+            # 尝试；重试可落到其他 worker，4 worker 下单次命中概率 1/4）
             headers={"Retry-After": "1"},
         )
 
@@ -236,6 +237,10 @@ async def start_bot(bot_id: str, user: dict = Depends(require_bot_manager)):
 async def stop_bot(bot_id: str, user: dict = Depends(require_bot_manager)):
     """Stop a running bot."""
     manager = get_bot_manager()
+    # 与 create/start/message 同款 leader 门控：bot 实例表只在 leader 内存里，
+    # follower 上 stop 查本地 dict 必然 miss（旧版返回误导性 404）。409 后前端
+    # postBotAction 重试可落到 leader 真正停掉。
+    _require_leader_or_409()
     actual_owner = _resolve_owner(manager, _owner_of(user), bot_id, _is_admin(user))
     success = await manager.stop_bot(actual_owner, bot_id)
     if not success:

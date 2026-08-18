@@ -18,8 +18,8 @@ from fastapi import HTTPException, UploadFile
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from api.kb_indexing import get_or_create_build
 from core.db.cache import invalidate_courses_cache
+from core.rag.indexing_runner import get_or_create_build
 from core.db.database import KBFile, KbBuild, KnowledgeBase, aggregate_build_status
 from core.rag.ingestion import IndexingControl
 from settings import get_settings
@@ -212,6 +212,18 @@ async def delete_kb_file(db: AsyncSession, kb: KnowledgeBase, file_id: str) -> d
     return {"message": "文件已删除", "remaining_files": kb.file_count}
 
 
+def _reset_build_to_pending(build: KbBuild) -> None:
+    """stop 两分支共用：置回 pending 并清零全部进度列（kb_builds 加新进度列只改这里）。"""
+    build.status = "pending"
+    build.progress = 0
+    build.progress_msg = "已终止"
+    build.chunks_done = 0
+    build.chunks_total = 0
+    build.token_estimate = 0
+    build.error_msg = ""
+    build.updated_at = time.time()
+
+
 async def pause_index_build(
     db: AsyncSession, kb: KnowledgeBase, course_id: str, backend: str,
     *, err_hint: str = "",
@@ -266,14 +278,7 @@ async def stop_index_build(
             raise HTTPException(status_code=503, detail=f"无法下发终止信号{err_hint}：{e}")
 
         # 立即落库为 pending 并清零进度：见 pause 的说明。worker 跑完不会回写。
-        build.status = "pending"
-        build.progress = 0
-        build.progress_msg = "已终止"
-        build.chunks_done = 0
-        build.chunks_total = 0
-        build.token_estimate = 0
-        build.error_msg = ""
-        build.updated_at = time.time()
+        _reset_build_to_pending(build)
         logger.info("已终止 course_id=%s backend=%s", course_id, backend)
         await invalidate_courses_cache()
         # 不清 Redis 控制信号：留给 worker 的 checkpoint 读到后自行 cancel 停止，
@@ -281,14 +286,7 @@ async def stop_index_build(
         return {"message": "已终止", "course_id": course_id, "backend": backend}
 
     if build.status == "paused":
-        build.status = "pending"
-        build.progress = 0
-        build.progress_msg = "已终止"
-        build.chunks_done = 0
-        build.chunks_total = 0
-        build.token_estimate = 0
-        build.error_msg = ""
-        build.updated_at = time.time()
+        _reset_build_to_pending(build)
         logger.info("已清除暂停进度 course_id=%s backend=%s", course_id, backend)
         await invalidate_courses_cache()
         return {"message": "已终止并清除进度", "course_id": course_id, "backend": backend}

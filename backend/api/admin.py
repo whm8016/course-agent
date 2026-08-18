@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_admin
-from api.courses import invalidate_courses_cache
+from core.db.cache import invalidate_courses_cache
 from api.kb_indexing import (
     get_topic_graph_payload,
     trigger_kb_indexing,
@@ -21,7 +21,6 @@ from api.kb_indexing import (
 from settings import get_settings
 FAQ_CACHE_THRESHOLD = get_settings().question.faq_cache_threshold
 KB_STORE_DIR = get_settings().paths.kb_store_dir
-MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
 from core.rag import get_indexer, is_lightrag_available
 from core.rag.es_client import delete_course_es_docs
 from core.rag.lightrag import purge_course_workspace

@@ -21,7 +21,7 @@ from api.kb_shared import (  # admin/teacher 共享（原先从 api.admin 横向
     save_uploaded_files,
     stop_index_build,
 )
-from api.courses import invalidate_courses_cache
+from core.db.cache import invalidate_courses_cache
 from api.kb_indexing import (
     get_topic_graph_payload,
     trigger_kb_indexing,
@@ -29,7 +29,6 @@ from api.kb_indexing import (
 )
 from settings import get_settings
 KB_STORE_DIR = get_settings().paths.kb_store_dir
-MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
 from core.analytics.faq import frequent_questions_merged
 from core.db.cache import course_access_invalidate
 from core.db.limiter import limiter
@@ -43,6 +42,11 @@ from core.memory.graph_memory import filter_graph_by_course
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/teacher", tags=["teacher"])
+
+# rollup 读路径降级阈值：cron_rollup_learning 每小时 :23 重算两张 rollup 表（worker.py），
+# 超过 6h 未刷新即视为 cron 停跑、降级现算。daily（overview）与 student（student-stats）
+# 两个读路径共用同一常量，勿再内联 6*3600。
+_ROLLUP_STALE_AFTER_S = 6 * 3600
 
 
 async def _get_owned_kb(
@@ -499,7 +503,7 @@ async def analytics_overview(
         )
     )).scalars().all()}
     today_row = rollup_rows.get(days_ymd[-1])
-    if today_row and (time.time() - (today_row.updated_at or 0)) <= 6 * 3600:
+    if today_row and (time.time() - (today_row.updated_at or 0)) <= _ROLLUP_STALE_AFTER_S:
         today_questions = today_row.questions or 0
         today_active = today_row.active_students or 0
         daily_trend = [
@@ -744,7 +748,7 @@ async def analytics_student_stats(
         select(StudentCourseRollup).where(StudentCourseRollup.course_id == course_id)
     )).scalars().all()
     rollup_fresh = bool(rollup_rows) and (
-        time.time() - max(r.updated_at or 0 for r in rollup_rows) <= 6 * 3600
+        time.time() - max(r.updated_at or 0 for r in rollup_rows) <= _ROLLUP_STALE_AFTER_S
     )
     session_map: dict[str, int] = {}
     msg_map: dict[str, int] = {}

@@ -82,6 +82,12 @@ async def cache_delete_pattern(pattern: str) -> None:
         logger.debug("cache_delete_pattern failed for pattern=%s", pattern, exc_info=True)
 
 
+def user_courses_cache_key(user_id: str) -> str:
+    """课程列表缓存 key（自 api/courses.py 下沉：与 invalidate_courses_cache 同居，
+    key 前缀不再跨模块分裂——改格式只须看这一处）。"""
+    return f"courses:list:{user_id}"
+
+
 async def invalidate_courses_cache() -> None:
     """课程列表缓存批量失效（admin / teacher / indexing_runner 在创建/删除/索引完成时调用）。
 

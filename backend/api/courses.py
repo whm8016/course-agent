@@ -6,7 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_user
 from core.codes import normalize_code
-from core.db.cache import cache_delete, cache_get, cache_set, course_access_get, course_access_set
+from core.db.cache import (
+    cache_delete, cache_get, cache_set, course_access_get, course_access_set,
+    user_courses_cache_key as _user_courses_cache_key,
+)
 from core.db.database import Enrollment, KnowledgeBase, aggregate_build_status, get_db
 
 router = APIRouter()
@@ -36,10 +39,6 @@ def _kb_to_course(kb: KnowledgeBase, include_join_code: bool = False) -> dict:
     if include_join_code:
         d["join_code"] = kb.join_code
     return d
-
-
-def _user_courses_cache_key(user_id: str) -> str:
-    return f"courses:list:{user_id}"
 
 
 @router.get("/courses")
@@ -134,10 +133,6 @@ async def check_course_access(db: AsyncSession, course_id: str, user: dict) -> N
     if not allowed:
         raise HTTPException(status_code=403, detail="未选此课程，无法访问")
 
-
-# 实现已下沉 core/db/cache.py（core/rag/indexing_runner 要调；此前它住在 api 层
-# 是索引业务逻辑滞留 api/admin 的根因）。此处 re-export 保住既有 import 路径。
-from core.db.cache import invalidate_courses_cache  # noqa: E402,F401
 
 
 class JoinCourseBody(BaseModel):
