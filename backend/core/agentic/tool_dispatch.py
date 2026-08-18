@@ -42,6 +42,8 @@ async def dispatch_tool_calls(
     from core.agent.tool_registry import execute_tool
 
     sem = asyncio.Semaphore(MAX_PARALLEL)
+    # 拒答硬闸：本轮 LLM 是否自己调了 web_search（开了才有资格绕过课程资料作答）
+    _web_search_in_batch = any(tc.name == "web_search" for tc in tool_calls)
 
     async def _run_one(tc: ToolCall) -> dict[str, Any]:
         async with sem:
@@ -55,6 +57,19 @@ async def dispatch_tool_calls(
                     call_kwargs["mode"] = rag_mode
                 result = await execute_tool(tc.name, course_id=course_id, user_id=user_id, **call_kwargs)
                 content = str(result.content) if result else "（无返回结果）"
+                if result is not None and not result.success:
+                    # 工具层失败（rag 无命中/后端未就绪等）：status 标 error（可观测），
+                    # rag 空命中且本轮未调 web_search 时追加硬约束——提示词约束只是软
+                    # 引导，模型可以绕；这里的指令明确禁止通用知识硬答，堵论文「资料
+                    # 未覆盖显式拒答」的工具层漏洞。
+                    status = "error"
+                    if tc.name == "rag" and not _web_search_in_batch:
+                        content = (
+                            f"{content}\n[系统指令] 知识库未检索到相关内容，本轮也没有联网"
+                            "搜索结果。禁止使用通用知识或猜测回答该问题，必须向学生说明"
+                            "「根据现有课程资料暂无法确认该问题」，并可建议学生换个问法"
+                            "或提供资料。"
+                        )
                 # pause_for_user 先存到 role=tool 消息的 _pause 临时字段，
                 # gather 后统一检测，不在并发路径里修改共享状态
                 pause_payload = result.pause_for_user if result else None
