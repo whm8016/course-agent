@@ -634,7 +634,7 @@ export default function ChatWindow({
         language: 'zh',
         metadata: { count: quizConfig.count, requirement },
         attachments: attachments.length > 0 ? attachments : undefined,
-        tools: ['rag'],
+        tools: useKb ? ['rag'] : [],
       },
       {
         onOpen: () =>
@@ -719,7 +719,7 @@ export default function ChatWindow({
     )
     quizCloseRef.current = close
     quizSendRef.current = send
-  }, [quizConfig, input, courseId, loading, quizStreaming, onSessionCreated, pendingFiles, uploadPendingAttachments])
+  }, [quizConfig, input, courseId, loading, quizStreaming, onSessionCreated, pendingFiles, uploadPendingAttachments, useKb])
 
   // ---------- 深度研究 ----------
   const handleResearchStart = useCallback(async (topic: string) => {
