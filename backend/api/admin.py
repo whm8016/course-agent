@@ -26,7 +26,9 @@ from settings import get_settings
 FAQ_CACHE_THRESHOLD = get_settings().question.faq_cache_threshold
 KB_STORE_DIR = get_settings().paths.kb_store_dir
 MAX_KB_UPLOAD_MB = get_settings().max_kb_upload_mb
-from core.rag import is_lightrag_available
+from core.rag import get_indexer, is_lightrag_available
+from core.rag.es_client import delete_course_es_docs
+from core.rag.lightrag import purge_course_workspace
 from core.db.limiter import limiter
 from core.llm.prompts import invalidate_course_prompt_cache
 from core.codes import ensure_unique_join_code, generate_code
@@ -240,6 +242,10 @@ async def _run_indexing(
     if resume_from_chunk == 0:
         from core.rag.lightrag import purge_course_workspace
         await purge_course_workspace(course_id)
+        # ES 双写副本同步清：ES 按 course_id 累积写，不清会让旧 chunk 在混合检索冒出
+        # （best-effort，未启用/失败仅告警不阻断索引）
+        from core.rag.es_client import delete_course_es_docs
+        await delete_course_es_docs(course_id)
 
     abort_action: str | None = None
     abort_chunks_done = 0
@@ -640,13 +646,29 @@ async def delete_kb(
     _: dict = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    """删除知识库（含磁盘文件）。"""
+    """删除知识库（含磁盘文件 + 三处检索副本）。"""
     kb = await _get_kb_or_404(db, course_id)
     await db.delete(kb)
 
     kb_dir = Path(KB_STORE_DIR) / course_id
     if kb_dir.exists():
         shutil.rmtree(kb_dir, ignore_errors=True)
+
+    # 三处检索副本也按 course_id 清：LightRAG 工作区（PG 行 + graphml + 实例池）、
+    # pgvector 行、ES 文档。都是 best-effort——失败只告警不阻断删库（DB 行已删，
+    # 前端不再展示该库；残留副本由重索引/存储 GC 兜底），避免清副本异常让删库 500。
+    try:
+        await purge_course_workspace(course_id)
+    except Exception:
+        logger.exception("删库后清 LightRAG 工作区失败 course=%s", course_id)
+    try:
+        await get_indexer("llamaindex_pg").delete(course_id)
+    except Exception:
+        logger.exception("删库后清 pgvector 行失败 course=%s", course_id)
+    try:
+        await delete_course_es_docs(course_id)
+    except Exception:
+        logger.exception("删库后清 ES 文档失败 course=%s", course_id)
 
     logger.info("删除知识库 course_id=%s", course_id)
     await invalidate_courses_cache()

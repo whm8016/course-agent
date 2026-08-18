@@ -173,3 +173,98 @@ async def test_run_indexing_pg_empty_chunks_marks_error(monkeypatch):
             assert (b.chunks_total or 0) == 0
     finally:
         await close_db()
+
+
+async def test_delete_kb_clears_three_retrieval_copies(monkeypatch, tmp_path):
+    """删库清三处检索副本：LightRAG 工作区 / pgvector 行 / ES 文档，任一失败不阻断删库。
+
+    回归根因：旧版只删 DB 行 + 上传文件，三处检索副本留下，旧讲义片段会在混合检索冒出。
+    """
+    from api.admin import delete_kb
+    from core.db.database import AsyncSessionLocal, close_db, init_db
+
+    cid = f"c_del_{__import__('os').urandom(3).hex()}"
+    await init_db()
+    try:
+        async with AsyncSessionLocal() as db:
+            async with db.begin():
+                kb = KnowledgeBase(course_id=cid, name="t")
+                db.add(kb)
+                await db.flush()
+
+        called: dict[str, int] = {"purge": 0, "pg_delete": 0, "es_delete": 0}
+
+        async def _fake_purge(course_id):
+            called["purge"] += 1
+
+        async def _fake_es_delete(course_id):
+            called["es_delete"] += 1
+
+        class _FakeIndexer:
+            async def delete(self, course_id):
+                called["pg_delete"] += 1
+                return True
+
+        # admin.delete_kb 里 KB_STORE_DIR 指到 tmp_path（目录不存在，rmtree 分支跳过）
+        monkeypatch.setattr("api.admin.KB_STORE_DIR", str(tmp_path))
+        monkeypatch.setattr("api.admin.purge_course_workspace", _fake_purge)
+        monkeypatch.setattr("api.admin.get_indexer", lambda name: _FakeIndexer())
+        monkeypatch.setattr("api.admin.delete_course_es_docs", _fake_es_delete)
+
+        async with AsyncSessionLocal() as db:
+            await delete_kb(course_id=cid, _={}, db=db)
+            await db.commit()  # 生产由 get_db 依赖提交；直调需手动（rmtree 等清副本已执行）
+
+        assert called == {"purge": 1, "pg_delete": 1, "es_delete": 1}
+
+        # DB 行确已删除
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            rows = await db.execute(
+                select(KnowledgeBase).where(KnowledgeBase.course_id == cid)
+            )
+            assert rows.scalars().first() is None
+    finally:
+        await close_db()
+
+
+async def test_delete_kb_survives_cleanup_failures(monkeypatch, tmp_path):
+    """三处清副本全抛异常 → 删库仍成功返回（DB 行已删，不因清副本 500）。"""
+    from api.admin import delete_kb
+    from core.db.database import AsyncSessionLocal, close_db, init_db
+
+    cid = f"c_delf_{__import__('os').urandom(3).hex()}"
+    await init_db()
+    try:
+        async with AsyncSessionLocal() as db:
+            async with db.begin():
+                db.add(KnowledgeBase(course_id=cid, name="t"))
+
+        async def _boom(course_id):
+            raise RuntimeError("storage down")
+
+        class _BoomIndexer:
+            async def delete(self, course_id):
+                raise RuntimeError("pg down")
+
+        monkeypatch.setattr("api.admin.KB_STORE_DIR", str(tmp_path))
+        monkeypatch.setattr("api.admin.purge_course_workspace", _boom)
+        monkeypatch.setattr("api.admin.get_indexer", lambda name: _BoomIndexer())
+        monkeypatch.setattr("api.admin.delete_course_es_docs", _boom)
+
+        async with AsyncSessionLocal() as db:
+            resp = await delete_kb(course_id=cid, _={}, db=db)
+            await db.commit()  # 生产由 get_db 依赖提交；直调需手动
+
+        assert "已删除" in resp["message"]
+
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            rows = await db.execute(
+                select(KnowledgeBase).where(KnowledgeBase.course_id == cid)
+            )
+            assert rows.scalars().first() is None
+    finally:
+        await close_db()

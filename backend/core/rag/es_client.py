@@ -119,6 +119,24 @@ class ESChunkStore:
             logger.warning("ES index_chunks 失败 course=%s: %s", course_id, exc)
             return False
 
+    async def delete_course(self, course_id: str) -> bool:
+        """按 course_id 清本课程全部 ES 文档（删库/重索引时清检索副本，防旧 chunk 冒出）。
+
+        与 index_chunks 同为 best-effort：未启用/未连通返回 False，调用方降级不阻断。
+        """
+        if not await self._ensure():
+            return False
+        try:
+            await self._client.delete_by_query(
+                index=self._index_name,
+                query={"term": {"course_id": course_id}},
+                conflicts="proceed",
+            )
+            return True
+        except Exception as exc:
+            logger.warning("ES delete_course 失败 course=%s: %s", course_id, exc)
+            return False
+
     async def bm25_search(self, query: str, course_id: str, top_k: int = 50) -> list[dict]:
         """BM25 关键词检索，返回 [{chunk_id, content, score, file_path}, ...]。"""
         if not await self._ensure():
@@ -164,3 +182,11 @@ def get_es_store() -> "ESChunkStore | None":
 
 
 __all__ = ["ESChunkStore", "get_es_store"]
+
+
+async def delete_course_es_docs(course_id: str) -> None:
+    """删本课程 ES 文档（模块级便捷入口）：未启用/失败仅告警，绝不阻断调用方。"""
+    store = get_es_store()
+    if store is None:
+        return
+    await store.delete_course(course_id)
