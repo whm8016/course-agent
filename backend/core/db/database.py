@@ -727,6 +727,9 @@ class LearningEvent(Base):
         Index("idx_events_course_verb_time", "course_id", "verb", "created_at"),
         # 学生 rollup cron：按 (学生, 课程) 取事件时间窗口
         Index("idx_events_actor_course_time", "actor_user_id", "course_id", "created_at"),
+        # 日 rollup cron：纯时间窗 + course_id != ''（否定谓词走不了上面任何前缀，
+        # 迁移 035 前每小时对 append-only 大表全表扫 ×7 天窗口）
+        Index("idx_events_time", "created_at"),
     )
 
 

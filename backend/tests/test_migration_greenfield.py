@@ -439,3 +439,24 @@ def test_026_adds_course_id_to_messages_and_notebook():
         assert conn.execute(
             sa.text("SELECT course_id FROM notebook_entries WHERE session_id='s2'")
         ).scalar() == "c2"
+
+
+def test_035_adds_learning_events_time_index():
+    """035 给 learning_events 加 created_at 单列索引（rollup cron 时间窗防全表扫）。"""
+    mod = _load_migration("035_learning_events_time_index.py")
+    engine = sa.create_engine("sqlite:///:memory:", poolclass=StaticPool)
+    with engine.begin() as conn:
+        conn.execute(sa.text(
+            "CREATE TABLE learning_events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "actor_user_id VARCHAR(32), course_id VARCHAR(64), verb VARCHAR(32), "
+            "object_id VARCHAR(128), object_text TEXT, session_id VARCHAR(32), "
+            "metadata TEXT, created_at FLOAT)"
+        ))
+        ctx = MigrationContext.configure(conn)
+        with Operations.context(ctx):
+            mod.upgrade()
+        insp = sa.inspect(conn)
+        assert "idx_events_time" in {i["name"] for i in insp.get_indexes("learning_events")}
+        # 幂等：重跑不炸（_index_exists 守卫）
+        with Operations.context(ctx):
+            mod.upgrade()
