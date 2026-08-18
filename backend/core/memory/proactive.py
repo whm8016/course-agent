@@ -242,8 +242,52 @@ async def stitch_for_turn(
             f"## 学情提示（跨会话，未问亦带）\n该生在「{label}」偏薄弱"
             f"（{ev.get('observation_count', '?')}次观测），本轮涉及其前置/相关内容，请留意诊断。"
         )
+        # 曾见错法（错因闭环）：读最近一条 poor 观测的 evidence_quote——答错时存的是
+        # 「学生答 vs 正确答案」（quiz_observe），让简报带上学生具体错在哪。只在已判
+        # 应拼时多查这一次（复发/前置候选稀发 + 24h 冷却，不加重常态负载）；fail-safe：
+        # 无观测/查询异常维持现状文本。
+        try:
+            poor_ev = await _read_latest_poor_evidence(
+                db, user_id, course_id, brief.evidence_topic
+            )
+        except Exception:
+            logger.warning(
+                "[stitch] 读错因失败（fail-safe 略过）topic=%s", brief.evidence_topic,
+                exc_info=True,
+            )
+            poor_ev = ""
+        if poor_ev:
+            text += f"\n曾见错法：{poor_ev[:80]}"
         return replace(brief, text=text, matched_topic=matched_topic)
     return replace(brief, matched_topic=matched_topic)
+
+
+async def _read_latest_poor_evidence(
+    db, user_id: str, course_id: str, topic_id: str
+) -> str:
+    """最近一条 poor 观测的 evidence_quote（「学生答 vs 正确答案」，错因闭环）。
+
+    只读 mastery_observation（门控认可口径，与 _read_error_repeated 同表），不碰
+    users.error_graph（哈希节点数不准复发，见模块头）。无 poor 观测返回空串。
+    """
+    from core.db.database import MasteryObservation
+    from core.memory.mastery_state import POOR_OUTCOME_MAX
+    from sqlalchemy import select
+
+    row = (
+        await db.execute(
+            select(MasteryObservation.evidence_quote)
+            .where(
+                MasteryObservation.user_id == user_id,
+                MasteryObservation.course_id == course_id,
+                MasteryObservation.topic_id == topic_id,
+                MasteryObservation.outcome <= POOR_OUTCOME_MAX,
+            )
+            .order_by(MasteryObservation.created_at.desc())
+            .limit(1)
+        )
+    ).first()
+    return (row[0] or "") if row else ""
 
 
 async def commit_stitch_cooldown(db, user_id: str, course_id: str, topic_id: str) -> None:

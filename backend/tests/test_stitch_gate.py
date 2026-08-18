@@ -10,6 +10,9 @@
 用真实折叠器（fold_observations）算出的状态，不再手拍 0.9。
 """
 import time
+from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from core.memory.mastery import forget_prob
 from core.memory.mastery_state import LEVEL_OUTCOME, W_JUDGE, fold_observations
@@ -321,3 +324,91 @@ def test_class_difficulty_not_drags_fair_student_into_gate():
 
 # WEAK_MARGIN 的数值口径锚（= logit(0.45)）归 test_mastery_state 独占——那里是
 # 折叠纪律归属地（_weak_margin_from_proactive + sandwich 三连）；此处只测决策行为。
+
+
+# ── 曾见错法（错因闭环：简报带最近一条 poor 观测的 evidence_quote）──────────
+
+
+@pytest.fixture
+async def db():
+    from core.db.database import close_db, init_db
+
+    await init_db()
+    yield
+    await close_db()
+
+
+async def _seed_prereq_gap(user_id: str, evidence_quote: str | None):
+    """前置臂档案：kcl→kvl 先修边，kcl 折叠行薄弱（theta=-1）且一周未练。
+
+    evidence_quote=None 时观测日志留两条 poor 占位但 evidence 为空；否则最新一条
+    poor 带上它（工作项2 的「学生答 vs 正确答案」格式）。matched 固定 kvl（问 KVL，
+    闭包回溯到 kcl 缺口），避开复发臂让场景只依赖观测日志的 evidence 字段。
+    """
+    import time as _time
+
+    from core.db.database import (
+        AsyncSessionLocal, CourseTopic, CourseTopicEdge, KnowledgeMastery,
+        MasteryObservation,
+    )
+
+    now = _time.time()
+    async with AsyncSessionLocal() as s:
+        s.add(CourseTopic(course_id="c1", topic_id="kcl", label="基尔霍夫电流定律"))
+        s.add(CourseTopic(course_id="c1", topic_id="kvl", label="基尔霍夫电压定律"))
+        s.add(CourseTopicEdge(
+            course_id="c1", src_topic_id="kcl", dst_topic_id="kvl",
+            relation="prerequisite",
+        ))
+        s.add(KnowledgeMastery(
+            user_id=user_id, course_id="c1", kp_id="kcl", label="基尔霍夫电流定律",
+            theta=-1.0, n_obs=2, last_observed_at=now - 7 * 86400,
+        ))
+        if evidence_quote is not None:
+            s.add(MasteryObservation(
+                user_id=user_id, course_id="c1", topic_id="kcl", source="quiz",
+                outcome=0.0, weight=1.0, evidence_quote="旧观测", created_at=now - 8 * 86400,
+            ))
+            s.add(MasteryObservation(
+                user_id=user_id, course_id="c1", topic_id="kcl", source="quiz",
+                outcome=0.0, weight=1.0, evidence_quote=evidence_quote,
+                created_at=now - 7 * 86400,
+            ))
+        await s.commit()
+
+
+async def test_brief_carries_latest_poor_evidence(db):
+    """有历史 poor 观测 → 简报追加「曾见错法」，取 created_at 最新那条。"""
+    from core.db.database import AsyncSessionLocal
+    from core.memory.proactive import stitch_for_turn
+
+    await _seed_prereq_gap("u_ev1", "学生答：I=UR；正确答案：I=U/R")
+    async with AsyncSessionLocal() as s:
+        with patch("core.memory.proactive._match_topic",
+                   AsyncMock(return_value=("kvl", 0.9))):
+            brief = await stitch_for_turn("回路电压怎么求", "u_ev1", "c1", s)
+
+    assert brief.should_stitch is True
+    assert brief.reason == "prereq_gap"
+    assert brief.evidence_topic == "kcl"
+    assert "曾见错法" in brief.text
+    assert "I=UR" in brief.text          # 学生的错误作答进了简报
+    assert "旧观测" not in brief.text     # 只取最新一条（created_at desc limit 1）
+
+
+async def test_brief_without_evidence_unchanged(db):
+    """无观测日志（只有折叠行）→ 简报文本与现状一致（fail-safe 回归）。"""
+    from core.db.database import AsyncSessionLocal
+    from core.memory.proactive import stitch_for_turn
+
+    await _seed_prereq_gap("u_ev2", evidence_quote=None)
+    async with AsyncSessionLocal() as s:
+        with patch("core.memory.proactive._match_topic",
+                   AsyncMock(return_value=("kvl", 0.9))):
+            brief = await stitch_for_turn("回路电压怎么求", "u_ev2", "c1", s)
+
+    assert brief.should_stitch is True
+    assert "曾见错法" not in brief.text
+    # 现状文本原样（首行 + 薄弱描述），不多任何一行
+    assert brief.text.startswith("## 学情提示（跨会话，未问亦带）")
+    assert brief.text.count("\n") == 1
