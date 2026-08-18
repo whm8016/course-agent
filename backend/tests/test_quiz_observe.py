@@ -267,6 +267,28 @@ async def test_quiz_evidence_fallback_without_answer_text(db):
     assert by_q["q11"].evidence_quote == "欧姆定律单位"  # 答对 → 题面回退
 
 
+async def test_quiz_only_correct_answer_falls_back(db):
+    """答错但只有 correct_answer（无学生作答）→ 题面回退，不产「学生答：；」空半截。"""
+    await _seed()
+    from core.db.database import AsyncSessionLocal, MasteryObservation
+    from core.memory.quiz_observe import record_quiz_observation
+    from sqlalchemy import select
+
+    async with AsyncSessionLocal() as s:
+        with patch("core.memory.topic_match.match_topics",
+                   AsyncMock(return_value=[("ohm", 0.88)])):
+            ok = await record_quiz_observation(
+                s, "u1", "c1", "q12", "欧姆定律的公式", False,
+                correct_answer="I=U/R",
+            )
+        await s.commit()
+
+    assert ok is True
+    async with AsyncSessionLocal() as s:
+        obs = (await s.execute(select(MasteryObservation))).scalars().all()
+    assert obs[0].evidence_quote == "欧姆定律的公式"
+
+
 # ── rollup mastery 填充 ─────────────────────────────────────────────────────
 
 

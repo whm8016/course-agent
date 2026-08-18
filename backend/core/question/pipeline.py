@@ -466,23 +466,31 @@ async def _run_critic(
     """独立 critic 校验轮：只给题目本身（看不到探索摘要/生成过程），返回问题清单。
 
     两路检查：
-      1. coding 题沙箱（程序化，零 LLM）：correct_answer/explanation 的围栏代码块
-         逐块 subprocess 执行，跑不过计入 issues（详见 sandbox.py 风险披露）。
+      1. coding 题沙箱（程序化，零 LLM）：correct_answer 的围栏代码块逐块执行，
+         跑不过计入 issues（详见 sandbox.py 风险披露）。explanation 里的代码常是
+         故意的错误示范——跑了必误杀，不吃。子进程异常（编码/杀软锁临时目录等）
+         也计 issue 走重试，不穿透 gather 炸整批（M-8 单题容错口径）。
       2. LLM critic（run_agent_loop 单轮）：事实正确性 / 蓝图对齐 / 干扰项唯一性，
          输出 {"pass": bool, "issues": [...]}。
 
     fail-open：critic LLM 调用异常 / 输出不可解析时按「仅沙箱结论」放行——
     生成侧已有 schema 校验（_validate_question）兜底，校验器不可用不误杀好题。
+    边界：已解析出 pass=false 但 issues 缺失/为空**不属于** fail-open——模型明确
+    判否却拿不到理由，兜底一条 issue 触发重试，不静默放行。
     """
     issues: list[str] = []
     if q.get("question_type") == "coding":
         from core.question.sandbox import extract_code_blocks, run_code
 
-        blocks = extract_code_blocks(
-            f"{q.get('correct_answer', '')}\n{q.get('explanation', '')}"
-        )
+        blocks = extract_code_blocks(q.get("correct_answer", "") or "")
         for i, block in enumerate(blocks, 1):
-            ok, detail = run_code(block)
+            try:
+                # to_thread：subprocess.run 是同步阻塞，直跑事件循环会让同 worker
+                # 的全部并发会话冻结到超时（生产 gunicorn -w4 每 worker 单 loop）
+                ok, detail = await asyncio.to_thread(run_code, block)
+            except Exception as exc:
+                logger.warning("[quiz] 沙箱执行异常（计 issue 走重试）", exc_info=True)
+                ok, detail = False, f"sandbox_error: {exc}"
             if not ok:
                 issues.append(f"第{i}个代码块执行失败（{detail}）")
 
@@ -532,6 +540,10 @@ async def _run_critic(
         raw = data.get("issues")
         if isinstance(raw, list):
             issues.extend(str(x) for x in raw if str(x).strip())
+        if not issues:
+            # 判否但没给理由：不算 fail-open（那是给"不知道"的），兜底 issue 触发重试
+            logger.warning("[quiz] critic 判 pass=false 但无 issues，按兜底 issue 重试")
+            issues.append("critic 判定未通过，但未给出具体问题清单")
     return issues
 
 

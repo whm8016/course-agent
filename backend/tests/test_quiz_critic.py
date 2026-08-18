@@ -121,15 +121,35 @@ async def test_critic_fail_all_marks_error():
     assert sum(1 for m in captured["messages"] if m.startswith("待校验题目：")) == 3
 
 
+async def test_critic_fail_without_issues_not_silently_passed():
+    """critic 判 pass=false 但 issues 缺失 → 兜底 issue 触发重试，不静默放行。
+
+    fail-open 只覆盖「不知道」（异常/不可解析）；「明确判否」被放行会让 critic 轮
+    空转（日志全绿、计数照加）。
+    """
+    with _harness(['{"pass": false, "issues": []}'], [_QUIZ_TEXT, _QUIZ_TEXT]) as captured:
+        result = await QuizPipeline().run("出 1 道导数题", _ctx(), StreamBus(), count=1)
+
+    # issues 空被兜底 → 两次 critic 都判否 → 重试用尽 critic_failed（不是静默出题）
+    assert result["questions"] == []
+    assert result["metadata"]["errors"][0]["reason"] == "critic_failed"
+    assert result["metadata"]["critic_failed"] == 1
+    assert any("未给出具体问题清单" in m for m in captured["regen_messages"])
+
+
 # ── sandbox.run_code 三态 + 抽取 ──────────────────────────────────────────────
 
 
 def test_extract_code_blocks():
     from core.question.sandbox import extract_code_blocks
 
-    text = "答案如下：\n```python\nprint(1)\n```\n解析见\n```\nx = 2\n```\n```text\n不是代码\n```"
+    text = (
+        "答案如下：\n```python\nprint(1)\n```\n解析见\n```\nx = 2\n```\n"
+        "```Python\nprint(3)\n```\n```python3\nprint(4)\n```\n```text\n不是代码\n```"
+    )
     blocks = extract_code_blocks(text)
-    assert blocks == ["print(1)", "x = 2"]  # python 块 + 裸块都抽，text 块跳过（裸```后无换行内容？）
+    # python/裸/Python/python3 围栏都抽（围栏头大小写不敏感），text 块跳过
+    assert blocks == ["print(1)", "x = 2", "print(3)", "print(4)"]
     assert extract_code_blocks("无代码块") == []
 
 

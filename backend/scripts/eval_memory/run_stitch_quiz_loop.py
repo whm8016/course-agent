@@ -140,11 +140,14 @@ async def run(case_ids: list[str] | None = None, *, skip_expose: bool = False) -
 
             async with AsyncSessionLocal() as db:
                 await _ensure_user(db, user_id)
-                await _cleanup_user(db, user_id, COURSE_ID)
 
             if skip_expose:
-                logger.info("[quiz-loop] %s --skip-expose：复用库内档案", c["id"])
+                # 复用库内档案（调试定向逻辑）：**不清理**——cleanup 后跳过暴露等于
+                # 拿空档案出题，weak_prereq/targeted 全 0，对账结果自欺
+                logger.info("[quiz-loop] %s --skip-expose：复用库内档案（不清理）", c["id"])
             else:
+                async with AsyncSessionLocal() as db:
+                    await _cleanup_user(db, user_id, COURSE_ID)
                 await _expose_case(user_id, COURSE_ID, c, case_base)
 
             gold_topic = c["gold"].get("evidence_topic") or ""
@@ -212,10 +215,21 @@ async def run(case_ids: list[str] | None = None, *, skip_expose: bool = False) -
 
 
 async def _probe_gate_info(db, user_id: str, c: dict, base: float) -> dict:
-    """信息列：拨钟探测一次门控（不 commit 冷却——本脚本不评冷却，别烧冷却戳）。"""
+    """信息列：拨钟探测一次门控（不 commit 冷却——本脚本不评冷却，别烧冷却戳）。
+
+    冷却三例（cooldown_hours）观测锚是 wall0，探测钟若仍用 base（27 天前）会落
+    在观测之前（负年龄钳 0、p_forget=0，前置臂口径失真）——与 e2e_live 同臂
+    对齐走墙钟。仅影响信息列（对账指标不读它）。"""
+    import time as _time
+
     from core.memory.proactive import stitch_for_turn
 
-    brief = await stitch_for_turn(c["query"], user_id, COURSE_ID, db, now=live_case_now(c, base))
+    now = (
+        _time.time()
+        if ("cooldown_hours" in c and "clock_days" not in c)
+        else live_case_now(c, base)
+    )
+    brief = await stitch_for_turn(c["query"], user_id, COURSE_ID, db, now=now)
     return _gate_fields(brief)
 
 
