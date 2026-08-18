@@ -938,13 +938,12 @@ async function postBotAction<T = void>(
   for (;;) {
     const res = await fetch(path, {
       method: 'POST',
-      headers: payload === undefined
-        ? authHeaders()
-        : { 'Content-Type': 'application/json', ...authHeaders() },
+      // Content-Type 无条件带：body 为 undefined 时 fetch 不发 body，多出的头被忽略
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: payload === undefined ? undefined : JSON.stringify(payload),
     })
     checkUnauthorized(res)
-    if (res.ok) return (await res.json()) as T
+    if (res.ok) return await res.json()
     if (res.status === 409 && Date.now() < deadline) {
       await new Promise((resolve) => setTimeout(resolve, retryIntervalMs))
       continue
