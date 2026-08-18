@@ -5,7 +5,6 @@ import datetime
 import logging
 import shutil
 import time
-import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile
@@ -14,10 +13,16 @@ from sqlalchemy import Integer, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from api.auth import get_current_teacher
-from api.admin import _kb_to_dict, _ALLOWED_EXT, _MAX_BYTES, _safe_upload_name
+from api.kb_shared import (  # admin/teacher 共享（原先从 api.admin 横向 import）
+    delete_kb_file,
+    kb_raw_dir as _kb_raw_dir,
+    kb_to_dict as _kb_to_dict,
+    pause_index_build,
+    save_uploaded_files,
+    stop_index_build,
+)
 from api.courses import invalidate_courses_cache
 from api.kb_indexing import (
-    get_or_create_build,
     get_topic_graph_payload,
     trigger_kb_indexing,
     trigger_topic_graph_build,
@@ -34,15 +39,10 @@ from core.db.database import (
     KnowledgeBase, Message, NotebookEntry, Session, User, get_db,
 )
 from core.memory.graph_memory import filter_graph_by_course
-from core.rag.ingestion import IndexingControl
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/teacher", tags=["teacher"])
-
-
-def _kb_raw_dir(course_id: str) -> Path:
-    return Path(KB_STORE_DIR) / course_id / "raw"
 
 
 async def _get_owned_kb(
@@ -165,46 +165,7 @@ async def upload_files(
     db: AsyncSession = Depends(get_db),
 ):
     kb = await _get_owned_kb(db, course_id, teacher)
-    raw_dir = _kb_raw_dir(course_id)
-    raw_dir.mkdir(parents=True, exist_ok=True)
-
-    saved: list[str] = []
-    for file in files:
-        ext = Path(file.filename or "").suffix.lower()
-        if ext not in _ALLOWED_EXT:
-            raise HTTPException(
-                status_code=400,
-                detail=f"不支持的文件类型 '{ext}'，允许：{', '.join(_ALLOWED_EXT)}",
-            )
-        content = await file.read()
-        if len(content) > _MAX_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail=f"文件 '{file.filename}' 超过 {MAX_KB_UPLOAD_MB} MB",
-            )
-        # M-51：清洗客户端文件名（防 ../ 穿越 / 控制字符），再拼 uuid 前缀落盘
-        clean_name = _safe_upload_name(file.filename)
-        safe_name = f"{uuid.uuid4().hex[:8]}_{clean_name}"
-        (raw_dir / safe_name).write_bytes(content)
-        db.add(KBFile(
-            kb_id=kb.id,
-            original_name=clean_name,
-            file_path=str(raw_dir / safe_name),
-            file_size=len(content),
-        ))
-        saved.append(clean_name)
-
-    await db.flush()
-    count_result = await db.execute(
-        select(func.count()).select_from(KBFile).where(KBFile.kb_id == kb.id)
-    )
-    kb.file_count = count_result.scalar_one()
-    kb.updated_at = time.time()
-    # 有新文件：已就绪的后端索引失效，置 pending 等待重建（读取方按 kb_builds 聚合）
-    for b in kb.builds:
-        if b.status == "ready":
-            b.status = "pending"
-    return {"uploaded": saved, "total_files": kb.file_count}
+    return await save_uploaded_files(db, kb, course_id, files)
 
 
 # ── 触发索引 ──────────────────────────────────────────────────────────────────
@@ -466,23 +427,7 @@ async def delete_course_file(
     db: AsyncSession = Depends(get_db),
 ):
     kb = await _get_owned_kb(db, course_id, teacher)
-    file_result = await db.execute(
-        select(KBFile).where(KBFile.id == file_id, KBFile.kb_id == kb.id)
-    )
-    f = file_result.scalar_one_or_none()
-    if not f:
-        raise HTTPException(status_code=404, detail="文件不存在")
-    fp = Path(f.file_path)
-    if fp.exists():
-        fp.unlink(missing_ok=True)
-    await db.delete(f)
-    await db.flush()
-    count_result = await db.execute(
-        select(func.count()).select_from(KBFile).where(KBFile.kb_id == kb.id)
-    )
-    kb.file_count = count_result.scalar_one()
-    kb.updated_at = time.time()
-    return {"message": "文件已删除", "remaining_files": kb.file_count}
+    return await delete_kb_file(db, kb, file_id)
 
 
 @router.post("/courses/{course_id}/index/pause")
@@ -493,26 +438,7 @@ async def pause_course_index(
     db: AsyncSession = Depends(get_db),
 ):
     kb = await _get_owned_kb(db, course_id, teacher)
-    build = await get_or_create_build(db, kb.id, backend)
-    if build.status != "indexing":
-        raise HTTPException(status_code=409, detail="当前没有正在进行的索引任务")
-    ctrl = IndexingControl(kb.id)
-    try:
-        await ctrl.request_pause()  # 通知 worker；事件循环被阻塞读不到也无妨
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"无法下发暂停信号：{e}")
-    # 立即落库为 paused：超大文档的 ainsert 会长时间阻塞 worker 事件循环，导致
-    # checkpoint 永远读不到信号、前端卡在"请求已发送"。这里直接置 paused 让前端
-    # 立即解脱；worker 终态写入有"不覆盖非 indexing 状态"保护，跑完不会回写。
-    done = build.chunks_done or 0
-    total = build.chunks_total or 0
-    build.status = "paused"
-    build.progress_msg = f"已暂停（已完成 {done}{f'/{total}' if total else ''} 个文本块）"
-    build.updated_at = time.time()
-    await invalidate_courses_cache()
-    # 不清 Redis 控制信号：留给 worker 的 checkpoint 读到后自行 cancel 停止，
-    # worker 终止后会在 finally 里 control.clear()。这里清了反而让 worker 读不到、继续跑。
-    return {"message": "已暂停", "course_id": course_id, "backend": backend}
+    return await pause_index_build(db, kb, course_id, backend)
 
 
 @router.post("/courses/{course_id}/index/stop")
@@ -523,38 +449,7 @@ async def stop_course_index(
     db: AsyncSession = Depends(get_db),
 ):
     kb = await _get_owned_kb(db, course_id, teacher)
-    build = await get_or_create_build(db, kb.id, backend)
-    if build.status == "indexing":
-        ctrl = IndexingControl(kb.id)
-        try:
-            await ctrl.request_stop()  # 通知 worker；事件循环被阻塞读不到也无妨
-        except Exception as e:
-            raise HTTPException(status_code=503, detail=f"无法下发终止信号：{e}")
-        # 立即落库为 pending 并清零进度：见 pause 的说明。worker 跑完不会回写。
-        build.status = "pending"
-        build.progress = 0
-        build.progress_msg = "已终止"
-        build.chunks_done = 0
-        build.chunks_total = 0
-        build.token_estimate = 0
-        build.error_msg = ""
-        build.updated_at = time.time()
-        await invalidate_courses_cache()
-        # 不清 Redis 控制信号：留给 worker 的 checkpoint 读到后自行 cancel 停止，
-        # worker 终止后会在 finally 里 control.clear()。这里清了反而让 worker 读不到、继续跑。
-        return {"message": "已终止", "course_id": course_id, "backend": backend}
-    if build.status == "paused":
-        build.status = "pending"
-        build.progress = 0
-        build.progress_msg = "已终止"
-        build.chunks_done = 0
-        build.chunks_total = 0
-        build.token_estimate = 0
-        build.error_msg = ""
-        build.updated_at = time.time()
-        await invalidate_courses_cache()
-        return {"message": "已终止并清除进度", "course_id": course_id, "backend": backend}
-    raise HTTPException(status_code=409, detail="当前状态不可终止")
+    return await stop_index_build(db, kb, course_id, backend)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
