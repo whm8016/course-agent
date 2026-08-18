@@ -127,3 +127,33 @@ async def test_header_restrictions(monkeypatch):
     assert "不得据此主动展开学生本轮未问的知识点" in out
     assert "与本轮问题无关时忽略" in out
     assert "不代表当前掌握程度" in out
+
+
+@pytest.mark.asyncio
+async def test_conflict_clean_applies_to_injection(monkeypatch):
+    """矛盾清理结果必须作用于注入（论文 §3.6 读侧矛盾抑制非空操作）。
+
+    回归根因：旧实现 _detect_and_clean_conflicts 清的是 results（局部变量），真正
+    注入用的 persona/events 原始列表——被判定矛盾的旧记忆照样进 prompt。
+    """
+    _mem_settings(monkeypatch)
+    from settings import get_settings
+    monkeypatch.setattr(get_settings().mem0, "conflict_detect_enabled", True)
+
+    # 两条高度相似（相似度>0.85）、时间差>7 天的 persona：旧的应被清掉
+    results = [
+        {"kind": "persona", "id": "p-old", "memory": "学生偏好简洁的讲解风格",
+         "created_at": "2026-01-01T00:00:00+00:00", "metadata": {"topic_ids": []}},
+        {"kind": "persona", "id": "p-new", "memory": "学生偏好简洁的讲解风格。",
+         "created_at": "2026-03-01T00:00:00+00:00", "metadata": {"topic_ids": []}},
+        {"kind": "event", "id": "e-1", "memory": "学过欧姆定律",
+         "created_at": "2026-03-01T00:00:00+00:00", "metadata": {"topic_ids": ["ohm"]}},
+    ]
+    with patch.object(mem0_client, "get_memory", lambda: _mk(results)):
+        out = await mem0_client.build_memory_context(
+            "u1", "问欧姆", course_id="c1", matched_topic="ohm"
+        )
+    # 新 persona 留、旧 persona 被矛盾清理剔除（绝不两条都注入）
+    assert "p-new" not in out  # id 不出现在文本里（只有 memory 文本），改断言条数：
+    persona_lines = [ln for ln in out.splitlines() if ln.startswith("- ") and "偏好简洁" in ln]
+    assert len(persona_lines) == 1  # 只剩较新的那条

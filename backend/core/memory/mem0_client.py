@@ -268,9 +268,14 @@ async def build_memory_context(
         logger.warning("[mem0] build_memory_context SEARCH_FAILED user_id=%s error=%s", user_id, exc)
         return ""
 
-    # 矛盾检测清理（如果启用）
+    # 矛盾检测清理（如果启用）：清理结果必须接回 persona/events——真正注入用的是这两份
+    # 原始槽列表，只清 results 不清槽等于论文 §3.6 读侧矛盾抑制对注入是空操作。
     if settings.mem0.conflict_detect_enabled and len(results) >= 2:
-        results = await _detect_and_clean_conflicts(user_id, results, settings)
+        cleaned = await _detect_and_clean_conflicts(user_id, results, settings)
+        if len(cleaned) != len(results):
+            keep_ids = {r.get("id") for r in cleaned}
+            persona = [r for r in persona if r.get("id") in keep_ids]
+            events = [r for r in events if r.get("id") in keep_ids]
 
     # event 槽按主题结构过滤：只留本轮命中主题的事件（两路分工——跨主题历史交给
     # 门控），再剔除门控本轮已开口的证据主题（同主题不说两遍）。
