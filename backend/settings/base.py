@@ -972,6 +972,13 @@ class Settings(BaseSettings):
                 "python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
             )
 
+        if is_prod and "postgres:postgres@" in self.db.url.get_secret_value():
+            raise RuntimeError(
+                "FATAL: DB__URL uses the default weak password (postgres:postgres). "
+                "Set POSTGRES_PASSWORD in the project-root .env and recreate the "
+                "postgres volume before production deployment."
+            )
+
         return self
 
     # ------------------------------------------------------------------

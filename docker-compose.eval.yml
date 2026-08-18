@@ -1,0 +1,35 @@
+# 评测专用服务（非生产运行时）——从 docker-compose.yml 拆出，生产部署不带此文件。
+#
+# pyproject 把 inspect-ai/ragas 隔离在 eval 组（注释明确"不污染生产环境"），
+# 故独立 service + 独立 venv volume(eval_venv)，与生产 backend_venv 完全隔离。
+# 常驻 sleep infinity，按需 exec 进容器跑 scripts/eval_*。
+# 连同一 default 网络访问 pg/redis；LLM key 经 env_file(./backend/.env) 注入。
+# eval_venv 首次挂载会从镜像拷贝生产 venv，再叠加 eval 组（命名 volume 初始化行为）：
+#   docker compose exec eval .venv/bin/pip install -e ".[eval]"
+#
+# 用法（在 docker-compose.yml 之上叠加）：
+#   docker compose -f docker-compose.yml -f docker-compose.eval.yml up -d
+services:
+  eval:
+    image: course-agent-backend  # 复用已 build 的 backend 镜像，不重复 build
+    restart: "no"
+    env_file:
+      - ./backend/.env
+    environment:
+      DB__URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/course_agent
+      DB__REDIS_URL: redis://redis:6379/0
+      ENVIRONMENT: "${ENVIRONMENT:-development}"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - eval_venv:/app/.venv
+      - backend_uploads:/app/uploads
+    command: ["sleep", "infinity"]
+
+volumes:
+  eval_venv:

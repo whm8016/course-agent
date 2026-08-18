@@ -55,6 +55,9 @@ ALLOWED_ORIGINS = get_settings().security.allowed_origins
 REDIS_URL = get_settings().db.redis_url.get_secret_value()
 KB_STORE_DIR = get_settings().paths.kb_store_dir
 TUTORBOT_ENABLED = get_settings().tutorbot.enabled
+# 生产关 Swagger/OpenAPI（docs/redoc/openapi.json 三处一起，只关 docs 不算完；
+# 8002 只绑宿主机回环后，这是第二道防线）
+IS_PRODUCTION = get_settings().is_production
 from core.db.database import init_db, close_db
 from core.db.limiter import limiter
 from core.arq_pool import get_arq_pool, close_arq_pool
@@ -492,6 +495,10 @@ app = FastAPI(
     title="课程学习Agent",
     lifespan=lifespan,
     swagger_ui_parameters={"persistAuthorization": True},
+    # 生产环境不暴露 API 文档端点（开发保留）
+    docs_url=None if IS_PRODUCTION else "/docs",
+    redoc_url=None if IS_PRODUCTION else "/redoc",
+    openapi_url=None if IS_PRODUCTION else "/openapi.json",
 )
 
 

@@ -243,16 +243,30 @@ def test_prod_rejects_missing_provider_key(monkeypatch):
 
 
 def test_prod_passes_with_full_config(monkeypatch):
-    """production + 合规 JWT/CORS/PROVIDER_KEY → 正常实例化。"""
+    """production + 合规 JWT/CORS/PROVIDER_KEY/DB密码 → 正常实例化。"""
     s = _fresh(
         monkeypatch,
         ENVIRONMENT="production",
         SECURITY__JWT_SECRET="strong-prod-secret-value-32chars!",
         SECURITY__ALLOWED_ORIGINS="https://example.com",
         SECURITY__PROVIDER_ENCRYPTION_KEY="some-fernet-key",
+        DB__URL="postgresql+asyncpg://postgres:strong-pass@localhost:5432/course_agent",
     )
     assert s.environment == "production"
     assert s.is_production is True
+
+
+def test_prod_rejects_default_db_password(monkeypatch):
+    """production + DB 弱密码(postgres:postgres) → fail-fast 拒绝启动。"""
+    with pytest.raises(RuntimeError, match="default weak password"):
+        _fresh(
+            monkeypatch,
+            ENVIRONMENT="production",
+            SECURITY__JWT_SECRET="strong-prod-secret-value-32chars!",
+            SECURITY__ALLOWED_ORIGINS="https://example.com",
+            SECURITY__PROVIDER_ENCRYPTION_KEY="some-fernet-key",
+            DB__URL="postgresql+asyncpg://postgres:postgres@localhost:5432/course_agent",
+        )
 
 
 def test_dev_warns_default_jwt(monkeypatch, recwarn):

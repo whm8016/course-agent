@@ -48,7 +48,10 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "8002:8002"
+      # 只绑宿主机回环：外部流量一律走 frontend(nginx:80) 反代；
+      # 回环同时挡住宿主机以外对 /docs /metrics 的裸访问（第二道防线是
+      # main.py 在 production 关 docs_url/redoc_url/openapi_url）。
+      - "127.0.0.1:8002:8002"
     env_file:
       - ./backend/.env
     environment:
@@ -113,6 +116,14 @@ services:
     # 但 ENV 不创建目录）。缺目录会让多进程模式下指标构造 FileNotFoundError（eval 注释已记录
     # 同坑）→ 模块体中途失败被驱逐 → ARQ 重试二次 import 撞 Duplicated timeseries。
     command: ["sh", "-c", "mkdir -p /dev/shm/prometheus_multiproc && rm -rf /dev/shm/prometheus_multiproc/* && exec .venv/bin/python -m arq worker.WorkerSettings"]
+    # worker 不监听 HTTP，健康检查用 /proc 扫描 arq 进程是否存活（镜像无 procps/pgrep；
+    # 主进程崩溃本就随容器退出+restart 兜底，这里抓的是 PID1 在但 arq 子进程没了的僵死态）。
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import glob,sys; sys.exit(0 if any(b'arq' in open(p,'rb').read() for p in glob.glob('/proc/[0-9]*/cmdline')) else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # ── MCP gateway sidecar ────────────────────────────────────────────────
   # 把 stdio 类 MCP server（modelscope-mcp-server / mcp-server-fetch）收敛成一份
@@ -146,34 +157,6 @@ services:
       retries: 5
       start_period: 15s
 
-  # ── 评测专用服务（非生产运行时）──────────────────────────────────────────
-  # pyproject 把 inspect-ai/ragas 隔离在 eval 组（注释明确"不污染生产环境"），
-  # 故独立 service + 独立 venv volume(eval_venv)，与生产 backend_venv 完全隔离。
-  # 常驻 sleep infinity，按需 docker compose exec eval ... 跑 scripts/eval_*。
-  # 连同一 default 网络访问 pg/redis；LLM key 经 env_file(./backend/.env) 注入。
-  # eval_venv 首次挂载会从镜像拷贝生产 venv，再叠加 eval 组（命名 volume 初始化行为）：
-  #   docker compose exec eval .venv/bin/pip install -e ".[eval]"
-  eval:
-    image: course-agent-backend  # 复用已 build 的 backend 镜像，不重复 build
-    restart: "no"
-    env_file:
-      - ./backend/.env
-    environment:
-      DB__URL: postgresql+asyncpg://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/course_agent
-      DB__REDIS_URL: redis://redis:6379/0
-      ENVIRONMENT: "${ENVIRONMENT:-development}"
-      PIP_DISABLE_PIP_VERSION_CHECK: "1"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    volumes:
-      - ./backend:/app
-      - eval_venv:/app/.venv
-      - backend_uploads:/app/uploads
-    command: ["sleep", "infinity"]
-
   frontend:
     build:
       context: ./frontend
@@ -184,9 +167,11 @@ services:
     depends_on:
       - backend
 
+# 评测专用服务已拆到 docker-compose.eval.yml（非生产运行时，生产 up 不带它）：
+#   docker compose -f docker-compose.yml -f docker-compose.eval.yml up -d eval
+
 volumes:
   pgdata:
   backend_uploads:
   backend_venv:
-  eval_venv:
   redisdata:
