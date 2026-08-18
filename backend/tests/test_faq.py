@@ -30,9 +30,9 @@ async def test_admin_faq_sql_fallback_when_course_faq_cold(client, admin_headers
         now = time.time()
         # 同一前缀提问 2 次 -> 计数 ≥2，应出现在看板
         for _ in range(2):
-            db.add(Message(session_id=sess.id, role="user", content="怎么列基尔霍夫电压方程", created_at=now))
+            db.add(Message(session_id=sess.id, course_id=course_id, role="user", content="怎么列基尔霍夫电压方程", created_at=now))
         # 只出现 1 次 -> 被 having(count>=2) 过滤掉
-        db.add(Message(session_id=sess.id, role="user", content="这是一条只问过一次的问题", created_at=now))
+        db.add(Message(session_id=sess.id, course_id=course_id, role="user", content="这是一条只问过一次的问题", created_at=now))
         await db.commit()
 
     r = await client.get(f"/api/admin/faq?course_id={course_id}", headers=admin_headers)
