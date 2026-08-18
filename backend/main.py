@@ -22,7 +22,7 @@ logging.basicConfig(level=_LOG_LEVEL, handlers=[_log_handler])
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from prometheus_fastapi_instrumentator import Instrumentator
@@ -35,7 +35,6 @@ from api.question_notebook import router as question_notebook_router
 from api.admin import router as admin_router
 from api.teacher import router as teacher_router
 from api.auth import router as auth_router
-from api.auth import get_current_admin
 from api.chat import router as chat_router
 from api.courses import router as courses_router
 from api.lightrag import router as lightrag_router
@@ -64,96 +63,11 @@ from core.arq_pool import get_arq_pool, close_arq_pool
 # C-1/C-3：关停标志统一来自 leader 模块（lifespan shutdown 第一行 mark_shutting_down，
 # 是「即将死亡」最早信号）。start_singleton_services 在每个 await 后读 is_shutting_down。
 from core.leader import mark_shutting_down, is_shutting_down
-from core.llm.llm import (
-    get_all_llm_circuit_states,
-    reset_all_llm_circuit_breakers,
-)
 
 logger = logging.getLogger(__name__)
 
 
-# ---- EventBus：turn 完成后的记忆更新订阅者 ----
-async def _on_capability_complete(event) -> None:
-    """CAPABILITY_COMPLETE：写 episodic 原始层（L3 outbox，取代 Redis buffer）+ L2 摘要压缩。"""
-    try:
-        from core.memory.episodic import record_episode
-
-        await record_episode(
-            user_id=event.user_id,
-            course_id=event.course_id,
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            user_msg=event.user_message,
-            assistant_msg=event.agent_output,
-            mode=event.mode,
-            tools_used=event.metadata.get("tools_used") or (),
-        )
-    except Exception:
-        logger.warning("EventBus: record_episode failed", exc_info=True)
-
-    # L3 巩固触发（Phase 3）：importance 累计超阈值 → enqueue consolidate_memory。
-    # 对齐 Generative Agents 的 reflection 累计触发；5min cron safety net 兜底（worker.py）。
-    try:
-        from core.memory import consolidation, episodic
-        from settings import get_settings
-
-        score = episodic.estimate_importance(
-            user_message=event.user_message,
-            agent_output=event.agent_output,
-            mode=event.mode,
-            tools_used=event.metadata.get("tools_used") or (),
-        )
-        if score > 0:
-            accumulated = await consolidation.add_importance(event.user_id, event.course_id, score)
-            threshold = get_settings().mem0.consolidation_importance_threshold
-            if accumulated >= threshold:
-                pool = await get_arq_pool()
-                if pool is not None:
-                    await pool.enqueue_job(
-                        "consolidate_memory", user_id=event.user_id, course_id=event.course_id
-                    )
-                await consolidation.reset_importance(event.user_id, event.course_id)
-    except Exception:
-        logger.warning("EventBus: consolidation trigger failed", exc_info=True)
-
-    # L2: 触发 session summary 增量压缩（异步，不阻塞主链路）
-    session_id = getattr(event, "session_id", "") or event.metadata.get("session_id", "") or ""
-    if session_id:
-        import asyncio
-        asyncio.create_task(_maybe_compress_summary(session_id))
-
-
-async def _maybe_compress_summary(session_id: str) -> None:
-    """异步执行 L2 摘要压缩（不阻塞主链路）。"""
-    try:
-        from core.memory.session_summary import get_summary_manager
-        from core.db.database import AsyncSessionLocal
-
-        summary_mgr = get_summary_manager()
-        async with AsyncSessionLocal() as db:
-            compressed = await summary_mgr.maybe_compress(db, session_id)
-            if compressed:
-                logger.info("[L2] session summary compressed session=%s", session_id)
-    except Exception:
-        logger.warning("[L2] session summary compress failed session=%s", session_id, exc_info=True)
-
-
-async def _on_complete_record_learning_event(event) -> None:
-    """CAPABILITY_COMPLETE 订阅者：落一条 verb=asked 学情事件（L0）。
-
-    供 p2-c FAQ 语义聚类 / p2-b rollup 聚合。作为独立订阅者并发派发（见上）。
-    record_learning_event 内部吞异常，best-effort。
-    """
-    from core.analytics.events import record_learning_event
-    session_id = getattr(event, "session_id", "") or event.metadata.get("session_id") or ""
-    await record_learning_event(
-        user_id=event.user_id,
-        course_id=event.course_id,
-        verb="asked",
-        object_text=(event.user_message or "")[:1000],
-        session_id=session_id,
-        metadata={"mode": event.mode, "tools_used": list(event.metadata.get("tools_used") or ())},
-    )
+# ---- EventBus 订阅者已归位 core/memory/lifecycle_subscribers.py ----
 
 
 # ---- Leader 单例服务：启停解耦为运行时可调用（竞选接管时动态拉起/停止）----
@@ -389,11 +303,10 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.debug("cost_quota reconcile on startup failed", exc_info=True)
 
-    # 注册 EventBus 处理器（turn 完成后记忆更新）
-    from events.event_bus import get_event_bus, EventType
-    bus = get_event_bus()
-    bus.subscribe(EventType.CAPABILITY_COMPLETE, _on_capability_complete)
-    bus.subscribe(EventType.CAPABILITY_COMPLETE, _on_complete_record_learning_event)
+    # 注册 EventBus 处理器（turn 完成后记忆更新；订阅者实现在 core/memory）
+    from events.event_bus import get_event_bus
+    from core.memory.lifecycle_subscribers import subscribe_memory_handlers
+    subscribe_memory_handlers(get_event_bus())
     logger.info("EventBus: registered capability_complete handlers")
 
     # 尝试初始化 ARQ 任务队列连接池
@@ -611,117 +524,9 @@ app.include_router(bot_router, prefix="/api")
 app.include_router(llm_router, prefix="/api")
 app.include_router(search_config_router, prefix="/api")
 app.include_router(user_llm_router, prefix="/api")
+from api.ops import router as ops_router
+app.include_router(ops_router, prefix="/api")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(KB_STORE_DIR, exist_ok=True)
 
 
-@app.get("/api/health")
-async def health():
-    checks: dict[str, str] = {}
-
-    # DB check
-    try:
-        from core.db.database import engine
-        from sqlalchemy import text as sa_text
-        async with engine.connect() as conn:
-            await conn.execute(sa_text("SELECT 1"))
-        checks["db"] = "ok"
-    except Exception as exc:
-        checks["db"] = f"error: {exc}"
-
-    # Redis check
-    try:
-        import redis.asyncio as aioredis
-        r = aioredis.from_url(REDIS_URL, socket_connect_timeout=2)
-        await r.ping()
-        await r.aclose()
-        checks["redis"] = "ok"
-    except Exception as exc:
-        checks["redis"] = f"error: {exc}"
-
-    # LLM check：仅验证 API key 已配置；不做实际调用（避免消耗 token / 拖慢探针）
-    try:
-        from settings import get_settings
-        DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
-        if DASHSCOPE_API_KEY:
-            checks["llm"] = "ok (api_key configured)"
-        else:
-            checks["llm"] = "error: DASHSCOPE_API_KEY not set"
-    except Exception as exc:
-        checks["llm"] = f"error: {exc}"
-
-    all_ok = all(v.startswith("ok") for v in checks.values())
-    return JSONResponse(
-        status_code=200 if all_ok else 503,
-        content={"status": "ok" if all_ok else "degraded", "checks": checks},
-    )
-
-
-@app.get("/api/health/detailed")
-async def health_detailed():
-    """
-    详细健康检查（包含熔断器和缓存状态）
-
-    用于运维监控和调试
-    """
-    checks: dict[str, str] = {}
-    details: dict = {}
-
-    # DB check
-    try:
-        from core.db.database import engine
-        from sqlalchemy import text as sa_text
-        async with engine.connect() as conn:
-            await conn.execute(sa_text("SELECT 1"))
-        checks["db"] = "ok"
-    except Exception as exc:
-        checks["db"] = f"error: {exc}"
-
-    # Redis check
-    try:
-        import redis.asyncio as aioredis
-        r = aioredis.from_url(REDIS_URL, socket_connect_timeout=2)
-        await r.ping()
-        await r.aclose()
-        checks["redis"] = "ok"
-    except Exception as exc:
-        checks["redis"] = f"error: {exc}"
-
-    # LLM check
-    try:
-        from settings import get_settings
-        DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
-        if DASHSCOPE_API_KEY:
-            checks["llm"] = "ok (api_key configured)"
-            # 熔断器按 binding 拆分：展示全部供应商状态；保留旧单数 key（default）向后兼容
-            _cb_states = get_all_llm_circuit_states()
-            details["llm_circuit_breakers"] = _cb_states
-            details["llm_circuit_breaker"] = _cb_states.get("default", "closed")
-        else:
-            checks["llm"] = "error: DASHSCOPE_API_KEY not set"
-    except Exception as exc:
-        checks["llm"] = f"error: {exc}"
-
-    all_ok = all(v.startswith("ok") for v in checks.values())
-    return JSONResponse(
-        status_code=200 if all_ok else 503,
-        content={
-            "status": "ok" if all_ok else "degraded",
-            "checks": checks,
-            "details": details,
-        },
-    )
-
-
-@app.post("/api/admin/circuit-breaker/reset")
-async def reset_circuit_breaker(_: dict = Depends(get_current_admin)):
-    """
-    重置 LLM 熔断器（运维操作）
-
-    当熔断器长时间处于 OPEN 状态时，可以手动重置
-    """
-    n = reset_all_llm_circuit_breakers()
-    return {
-        "message": f"所有 LLM 熔断器已重置（共 {n} 个）",
-        "states": get_all_llm_circuit_states(),
-    }

@@ -39,7 +39,7 @@ async def test_record_learning_event_persists(client):
 @pytest.mark.asyncio
 async def test_capability_complete_records_asked_event(client):
     """CAPABILITY_COMPLETE 的学情事件订阅者落一条 verb=asked 事件，含 mode/tools_used 上下文。"""
-    import main as main_mod
+    from core.memory.lifecycle_subscribers import _on_complete_record_learning_event
     from core.db.database import AsyncSessionLocal, LearningEvent
 
     event = SimpleNamespace(
@@ -47,7 +47,7 @@ async def test_capability_complete_records_asked_event(client):
         user_message="什么是戴维南定理？", mode="chat",
         metadata={"tools_used": ("calc",)},
     )
-    await main_mod._on_complete_record_learning_event(event)
+    await _on_complete_record_learning_event(event)
 
     async with AsyncSessionLocal() as db:
         rows = (await db.execute(
