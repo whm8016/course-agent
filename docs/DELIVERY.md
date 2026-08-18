@@ -49,12 +49,18 @@ cd .. && docker compose up -d
 
 ```bash
 cd backend
-.venv/Scripts/python -m pytest -q        # Windows；Linux 为 .venv/bin/python
+.venv/Scripts/python -m pytest --ignore=tests/test_stitch_cooldown_commit.py -q
+.venv/Scripts/python -m pytest tests/test_stitch_cooldown_commit.py -q   # 该文件单独跑（两步法）
 ```
 
-- 基线：**1426 passed / 2 skipped / 1 xfailed**（SQLite in-memory，无需外部服务）
-- 无需 `--ignore`。历史上 `tests/test_stitch_cooldown_commit.py` 曾在本机挂起须忽略，2026-08-19 复测 3 次均 ~1s 通过——为当时环境问题（WMI 挂起，conftest 已有防护垫），已不再复现；若再挂先查 `Restart-Service winmgmt` 再怀疑代码
-- 前端：`cd frontend && npm test`
+- 基线：**1435+ passed / 2 skipped / 1 xfailed**（SQLite in-memory，无需外部服务）
+- **已知测试隔离问题**（非产品代码 bug）：`test_stitch_cooldown_commit.py` 单文件跑 5/5 全过（~1s），
+  但混在全量里会挂——最小复现 `pytest tests/test_chat_happy.py tests/test_stitch_cooldown_commit.py`
+  （2 用例被拖到 ~34s，更大组合下第 4 用例 `test_failed_turn_does_not_burn_cooldown` 无限等待）。
+  根因方向：chat 系测试的 client fixture 起 app 后残留全局状态，拖慢/卡死 cooldown 文件
+  turn 路径的 `subscribe_turn` 终止。建议交付后专项修（TurnRuntimeManager 测试隔离），
+  交付期间用上面两步法口径。
+- 前端：`cd frontend && npm test`（67 用例）
 
 ## 五、已知问题
 
