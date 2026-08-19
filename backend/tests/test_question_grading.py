@@ -261,6 +261,52 @@ async def test_guard_empty_type_legacy_flows(client, auth_headers):
     m_ev.assert_awaited_once()
 
 
+# ── 复审修复回归（P0-1/P2-4：守卫 allow-list + concept 判分） ─────────────────
+
+
+async def test_guard_blocks_concept_and_case_variants(client, auth_headers):
+    """concept 判断题（options 空、无判分来源）与大小写变体 'Coding' 都不回流——
+    未判分作答写 poor@weight1.0 是主线路径污染（复审 P0-1/P2-4）。"""
+    for qtype in ("concept", "Coding", "SHORT_ANSWER"):
+        with patch("core.analytics.events.record_learning_event", new=AsyncMock()) as m_ev, \
+             patch("core.memory.quiz_observe.record_quiz_observation", new=AsyncMock()) as m_ob:
+            r = await client.post(
+                "/api/question/notebook/entries/upsert",
+                json=_upsert_payload(qtype), headers=auth_headers,
+            )
+        assert r.status_code == 200, r.text
+        m_ev.assert_not_called()
+        m_ob.assert_not_called()
+
+
+async def test_grade_concept_goes_llm_branch():
+    """concept 进 LLM 判分集：correct_answer 是 true/false 文本、学生自由输入需语义归一。"""
+    from core.question import grading as g
+    from core.question.answer_judge import AnswerJudgeResult
+
+    with patch.object(g, "judge_answer",
+                      AsyncMock(return_value=AnswerJudgeResult("good", 0.9, "对", "正确"))) as m:
+        r = await g.grade_answer({
+            "question_id": "q_c", "question_type": "concept",
+            "question": "地球绕太阳转", "correct_answer": "true",
+            "user_answer": "对",
+        })
+    m.assert_awaited_once()
+    assert r.grade == "good" and r.source == "llm_judge"
+
+
+async def test_grade_coding_all_cases_skipped_ungraded(monkeypatch):
+    """总预算耗尽全部用例 skipped（total=0）→ ungraded 而非 poor——基础设施限速
+    不是学生能力（复审 P2-2 配套：grading 侧 total==0 守卫）。"""
+    from core.question import grading as g
+    import core.question.sandbox as sb
+
+    monkeypatch.setattr(sb, "_TESTS_TOTAL_BUDGET_S", 0.0)
+    r = await g.grade_answer(_coding_payload("def add(a, b):\n    return a + b\n"))
+    assert r.grade == "ungraded"
+    assert "预算" in r.feedback or "未执行" in r.feedback
+
+
 async def test_grade_endpoint_coding_sandbox(client, auth_headers):
     """判分端点：coding → 沙箱路径真跑（mock run_tests 桩控制结果形状）。"""
     from core.question.sandbox import TestRunResult

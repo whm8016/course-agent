@@ -519,8 +519,10 @@ export default function QuizCard({ quiz, sessionId }: Props) {
         language: q.language ?? '',
       })
         .then((result) => {
+          // 判分成功即定格 done——收录失败不该把已判的结果串扰成 failed 态，
+          // 也不该丢掉判分产物（复审 P2-3：两段 catch 分开）
           setGradeStates((prev) => ({ ...prev, [i]: { status: 'done', result } }))
-          return upsertNotebookEntry({
+          void upsertNotebookEntry({
             ...base,
             question_type: q.question_type || 'written',
             user_answer: userAnswer,
@@ -529,7 +531,7 @@ export default function QuizCard({ quiz, sessionId }: Props) {
             grade_source: result.source || '',
             feedback: result.feedback,
             score: result.score,
-          })
+          }).catch(() => {})
         })
         .catch(() => {
           setGradeStates((prev) => ({ ...prev, [i]: { status: 'failed' } }))
@@ -542,22 +544,23 @@ export default function QuizCard({ quiz, sessionId }: Props) {
     })
   }
 
-  // 计分口径（A4）：分母 = 已判分题（本地判的选择/判断 + 判分完成的简答/coding）
+  // 计分口径（A4）：分母 = 已判分题。单趟遍历同一原始下标 i——
+  // 先 filter 再用过滤后下标查 gradeStates 会错位（复审 P1-2）
   const choiceQuestions = quiz.questions.filter((q) => q.options.length > 0)
-  const gradedNonChoice = quiz.questions.filter((q, i) => {
-    if (q.options.length > 0) return false
+  let gradedCount = 0
+  let correctCount = 0
+  quiz.questions.forEach((q, i) => {
+    if (q.options.length > 0) {
+      gradedCount += 1
+      if (selectedAnswers[i] === q.answer) correctCount += 1
+      return
+    }
     const gs = gradeStates[i]
-    return gs?.status === 'done' && gs.result.grade !== 'ungraded'
+    if (gs?.status === 'done' && gs.result.grade !== 'ungraded') {
+      gradedCount += 1
+      if (gs.result.grade === 'good') correctCount += 1
+    }
   })
-  const choiceCorrect = choiceQuestions.filter(
-    (q) => selectedAnswers[quiz.questions.indexOf(q)] === q.answer,
-  ).length
-  const nonChoiceCorrect = gradedNonChoice.filter((q, i) => {
-    const gs = gradeStates[i]
-    return gs?.status === 'done' && gs.result.grade === 'good'
-  }).length
-  const correctCount = choiceCorrect + nonChoiceCorrect
-  const gradedCount = choiceQuestions.length + gradedNonChoice.length
 
   const allChoiceAnswered = choiceQuestions.every(
     (q) => selectedAnswers[quiz.questions.indexOf(q)] !== undefined,

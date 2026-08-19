@@ -102,6 +102,8 @@ describe('VoiceInput 语音输入', () => {
     })
     const sent = vi.mocked(transcribeAudio).mock.calls[0][0]
     expect(sent.name).toBe('speech.webm') // mime→扩展名对齐（webm;codecs=opus → .webm）
+    // File 的 type 必须显式传——不传则 multipart 报 octet-stream 被后端 400（复审 P0-2）
+    expect(sent.type).toBe('audio/webm;codecs=opus')
     await waitFor(() => {
       expect(onTranscribed).toHaveBeenCalledWith('今天讲导数')
     })

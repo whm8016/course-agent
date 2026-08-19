@@ -972,6 +972,33 @@ async def init_db():
             "is_admin",
             "ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE",
         )
+        # A3 判分闭环（迁移 036）：补建存量非生产库——README 开发流程不跑 alembic，
+        # create_all checkfirst 不会给已存在的 notebook_entries 加列，漏了则
+        # notebook 全接口 500（no such column）。
+        await _ensure_column(
+            conn,
+            "notebook_entries",
+            "grade",
+            "ALTER TABLE notebook_entries ADD COLUMN grade VARCHAR(16) NOT NULL DEFAULT ''",
+        )
+        await _ensure_column(
+            conn,
+            "notebook_entries",
+            "grade_source",
+            "ALTER TABLE notebook_entries ADD COLUMN grade_source VARCHAR(16) NOT NULL DEFAULT ''",
+        )
+        await _ensure_column(
+            conn,
+            "notebook_entries",
+            "feedback",
+            "ALTER TABLE notebook_entries ADD COLUMN feedback TEXT NOT NULL DEFAULT ''",
+        )
+        await _ensure_column(
+            conn,
+            "notebook_entries",
+            "score",
+            "ALTER TABLE notebook_entries ADD COLUMN score FLOAT",
+        )
         await _ensure_column(
             conn,
             "users",

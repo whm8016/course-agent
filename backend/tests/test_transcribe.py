@@ -135,6 +135,19 @@ async def test_endpoint_video_webm_allowed(client, auth_headers):
     assert r.status_code == 200
 
 
+async def test_endpoint_mime_with_codec_param_allowed(client, auth_headers):
+    """带参数的 content-type（audio/webm;codecs=opus，浏览器 File 的真实报法）
+    归一化后放行——精确匹配裸键会把合法录音拒成 400（复审 P0-2）。"""
+    with patch("api.transcribe.resolve_asr_runtime",
+               AsyncMock(return_value=(_fake_client("ok"), "m"))):
+        r = await client.post(
+            "/api/transcribe",
+            files={"file": ("speech.webm", b"x", "audio/webm;codecs=opus")},
+            headers=auth_headers,
+        )
+    assert r.status_code == 200
+
+
 async def test_endpoint_unknown_mime_400_no_fallback(client, auth_headers):
     """未知 MIME 显式拒绝——绝不带着错误扩展名静默进 SDK（_safe_ext 坑的教训）。"""
     with patch("api.transcribe.resolve_asr_runtime",

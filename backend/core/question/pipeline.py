@@ -409,7 +409,11 @@ def _parse_question(text: str, template: dict[str, Any]) -> dict[str, Any]:
 
     if qt == "coding":
         q["language"] = "python"
-        q["starter_code"] = str(data.get("starter_code", "")).strip()
+        # null 显式归 ""（str(None) 会得字面量 "None" 进 textarea 预填，复审 P2-6）
+        q["starter_code"] = (
+            "" if data.get("starter_code") is None
+            else str(data.get("starter_code", "")).strip()
+        )
         raw_cases = data.get("test_cases")
         if isinstance(raw_cases, list):
             # strip 去空 + 只留 assert 前缀（生成噪声条目滤掉，别让一条坏用例杀整题），

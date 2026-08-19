@@ -55,14 +55,27 @@ async def transcribe(
     user: dict = Depends(get_current_user),
 ):
     """转写一段录音。限流 10/min（per-user，TESTING 环境关闭）。"""
-    mime = (file.content_type or "").strip().lower()
+    # MIME 归一化再查白名单：浏览器报的 content-type 常带参数（audio/webm;codecs=opus），
+    # 精确匹配裸键会把合法录音拒成 400（复审 P0-2 后端侧）
+    mime = (file.content_type or "").split(";", 1)[0].strip().lower()
     ext = _MIME_EXT.get(mime)
     if ext is None:
         raise HTTPException(status_code=400, detail=f"不支持的音频格式：{mime or '未知'}")
+    max_bytes = _max_audio_bytes()
+    # 读前大小预检（复审 P1-4）：Content-Length / UploadFile.size 任一超限直接 413，
+    # 不把数百 MB 灌进内存后才拒绝（nginx client_max_body_size 300m 放行的上限）
+    size_hint = getattr(file, "size", None)
+    if size_hint is None:
+        cl = request.headers.get("content-length")
+        size_hint = int(cl) if cl and cl.isdigit() else None
+    if size_hint is not None and size_hint > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"音频超过 {max_bytes // (1024 * 1024)}MB 上限",
+        )
     data = await file.read()
     if not data:
         raise HTTPException(status_code=400, detail="音频内容为空")
-    max_bytes = _max_audio_bytes()
     if len(data) > max_bytes:
         raise HTTPException(
             status_code=413,

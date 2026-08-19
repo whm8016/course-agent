@@ -82,12 +82,17 @@ def _inject_preamble(code: str) -> str:
 
 @dataclass
 class TestRunResult:
-    """run_tests 结果：passed/failed 带原始用例下标（部分正确计数用）。"""
+    """run_tests 结果：passed/failed 带原始用例下标（部分正确计数用）。
+
+    skipped：总预算耗尽未执行的用例——不计 total/ratio（基础设施限速不是学生
+    能力问题，复审 P2-2）。
+    """
 
     __test__ = False  # 防 pytest 把 Test 开头的 dataclass 误当测试类收集
 
     passed: list[int] = field(default_factory=list)
     failed: list[tuple[int, str]] = field(default_factory=list)
+    skipped: list[int] = field(default_factory=list)
     total: int = 0
 
     @property
@@ -150,8 +155,8 @@ def run_tests(
 
     human-eval check_correctness 同构：每条用例独立跑一遍完整代码（exit 0=过），
     逐条而非合并——一条挂不遮蔽其余，部分正确可计数（ratio → good/fair/poor）。
-    总预算 40s：超预算的剩余用例记 failed("budget_exhausted")，防失控用例串拖垮
-    判分端点的 60s 超时。
+    总预算 40s：超预算的剩余用例进 skipped（不计分母），防失控用例串拖垮判分
+    端点的 60s 超时。
     """
     cases = sanitize_test_cases(test_cases)
     full_code = (starter_code + "\n" if starter_code.strip() else "") + (code or "")
@@ -159,7 +164,9 @@ def run_tests(
     deadline = time.monotonic() + _TESTS_TOTAL_BUDGET_S
     for idx, tc in cases:
         if time.monotonic() > deadline:
-            result.failed.append((idx, "budget_exhausted"))
+            # 预算耗尽=基础设施限速，不计入 failed/total（不拉低学生 ratio）
+            result.skipped.append(idx)
+            result.total -= 1
             continue
         ok, detail = run_code(full_code + "\n\n" + tc, timeout=timeout_per_test)
         if ok:

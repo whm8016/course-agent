@@ -117,17 +117,18 @@ async def upsert_single_entry(
     entry = await nb.find_notebook_entry(db, uid, payload.session_id, payload.question_id)
     if entry is None:
         raise HTTPException(status_code=500, detail="Upsert failed")
-    # A3 防污染守卫（替代前端单点约定）：已知非本地可判题型（written/short_answer/
-    # coding/fill_in_blank 等无 options）只有在带判分来源（sandbox/llm_judge）时才
-    # 回流学情事件与 mastery 观测——未判分传 is_correct=False 会污染错题过滤与掌握度。
-    # 空 question_type 视为本地可判（legacy 兼容：answered 学情信号不能悄悄依赖
-    # 客户端必传题型字段）。entry 照写（题面/作答/参考答案留存）。
-    _NON_LOCAL_TYPES = ("written", "short_answer", "coding", "fill_in_blank")
-    locally_gradable = not (
-        payload.question_type in _NON_LOCAL_TYPES and not payload.options
-    )
+    # A3 防污染守卫（替代前端单点约定，allow-list 收口）：观测回流仅当
+    # ① options 非空（choice / 归一成 options 的判断题——本地可判）或
+    # ② 判分来源（sandbox/llm_judge）或
+    # ③ 空 question_type（legacy 兼容：answered 学情信号不能悄悄依赖客户端必传
+    #    题型字段，test_learning_events 的 P0-a 口径）。
+    # 未判分的 concept/written/coding（含大小写变体）一律拦——deny-list 漏题型/
+    # 漏归一化就是污染路径（复审 P0-1/P2-4）。entry 照写（题面/作答/参考答案留存）。
+    qt = payload.question_type.strip().lower()
     graded_upstream = payload.grade_source in ("sandbox", "llm_judge")
-    if payload.user_answer.strip() and (locally_gradable or graded_upstream):
+    locally_gradable = bool(payload.options) or qt == ""
+    flows_observation = locally_gradable or graded_upstream
+    if payload.user_answer.strip() and flows_observation:
         level = payload.grade if payload.grade in ("good", "fair", "poor") else (
             "good" if payload.is_correct else "poor"
         )
@@ -176,7 +177,7 @@ async def upsert_single_entry(
 
 
 @router.post("/grade")
-@limiter.limit("10/minute")
+@limiter.limit("30/minute")
 async def grade_entry(
     request: Request,
     payload: GradeEntryRequest,

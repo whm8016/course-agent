@@ -223,4 +223,26 @@ describe('QuizCard 提交答案三路收录', () => {
       expect(view.container.textContent).toContain('✓ 回答正确')
     })
   })
+
+  it('计分单趟不错位：选择题在前时非选择题答对也计数（复审 P1-2）', async () => {
+    vi.mocked(gradeAnswer).mockResolvedValue(_grade('good'))
+    const view = selectTypeAndSubmit('sess_8')
+
+    await waitFor(() => {
+      // 三题全对：choice 本地判对 + 简答 good + coding（骨架预填也算作答）good → 3/3。
+      // 错位旧代码对非选择题查 gradeStates[过滤后下标]（choice 的 idle 态）→ 只显示 2/3
+      expect(view.container.textContent).toMatch(/答对了 3\/3/)
+    })
+  })
+
+  it('判分成功但收录失败：徽章保持已判结果，不串扰成 failed（复审 P2-3）', async () => {
+    vi.mocked(upsertNotebookEntry).mockRejectedValue(new Error('网络断'))
+    vi.mocked(gradeAnswer).mockResolvedValue(_grade('good'))
+    const view = selectTypeAndSubmit('sess_9')
+
+    await waitFor(() => {
+      expect(view.container.textContent).toContain('✓ 回答正确')
+    })
+    expect(view.container.textContent).not.toContain('未能自动判分')
+  })
 })

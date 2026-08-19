@@ -74,10 +74,12 @@ export default function VoiceInput({ onTranscribed, disabled }: Props) {
 
   const transcribe = useCallback(
     async (blob: Blob) => {
-      const { ext } = mimeRef.current ?? { ext: 'webm' }
+      const { ext, mime } = mimeRef.current ?? { ext: 'webm', mime: 'audio/webm' }
       setPhase('transcribing')
       try {
-        const r = await transcribeAudio(new File([blob], `speech.${ext}`))
+        // File 的 type 只来自构造参数、不继承 Blob——不传则 multipart 报
+        // application/octet-stream，后端白名单直接 400（复审 P0-2 前端侧）
+        const r = await transcribeAudio(new File([blob], `speech.${ext}`, { type: mime }))
         if (r.text.trim()) onTranscribed(r.text.trim())
       } catch (e) {
         const msg = e instanceof Error ? e.message : '语音识别失败'

@@ -25,8 +25,10 @@ _GOOD_RATIO = 0.7
 # 判分并发闸（见模块 docstring）
 _GRADING_SEMAPHORE = asyncio.Semaphore(4)
 
-# 走 LLM 判分的题型（fill_in_blank 变体多，本地字符串比对误伤高——plan §A3 裁决）
-_LLM_GRADED_TYPES = ("short_answer", "written", "fill_in_blank")
+# 走 LLM 判分的题型（fill_in_blank 变体多，本地比对误伤高——plan §A3 裁决；
+# concept 判断题 correct_answer 是 true/false 文本、options 为空，学生自由输入
+# （"对"/"正确"/"true"）需语义归一——复审 P0-1 主线路径，进 LLM 判分集）
+_LLM_GRADED_TYPES = ("short_answer", "written", "fill_in_blank", "concept")
 
 
 @dataclass
@@ -84,6 +86,11 @@ async def grade_answer(payload: dict, track: dict[str, str] | None = None) -> Gr
         # IndentationError
         async with _GRADING_SEMAPHORE:
             r = await asyncio.to_thread(run_tests, code, test_cases)
+        if r.total == 0:
+            # 全部用例被预算耗尽跳过（skipped）→ 无可判证据，不能记 poor
+            return GradeResult(
+                question_id=qid, feedback="测试用例未执行（沙箱执行预算耗尽），请稍后重试"
+            )
         ratio = r.pass_ratio
         failed_parts = [f"第{i + 1}条：{d[:80]}" for i, d in r.failed]
         feedback = f"通过 {len(r.passed)}/{r.total} 条用例"
@@ -104,12 +111,15 @@ async def grade_answer(payload: dict, track: dict[str, str] | None = None) -> Gr
         )
 
     if qtype in _LLM_GRADED_TYPES:
-        result = await judge_answer(
-            str(payload.get("question", "")),
-            str(payload.get("correct_answer", "")),
-            user_answer,
-            track=track,
-        )
+        # LLM 支路同样进闸（复审 P2-1）：50 人同时交简答卷时不让判分调用无界打满
+        # LLM provider（限流是 per-user 的，挡不住跨用户叠加）
+        async with _GRADING_SEMAPHORE:
+            result = await judge_answer(
+                str(payload.get("question", "")),
+                str(payload.get("correct_answer", "")),
+                user_answer,
+                track=track,
+            )
         if result is None:
             return GradeResult(question_id=qid, feedback="未能自动判分")
         return GradeResult(
