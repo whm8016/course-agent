@@ -191,3 +191,74 @@ async def test_critic_llm_down_fails_open_sandbox_still_counts():
     assert len(issues) == 1
     assert "执行失败" in issues[0] and "boom" in issues[0]
     await bus.close()
+
+
+# ── A2：coding 题测试用例的 critic 校验（run_tests 全过才放行） ────────────────
+
+
+def _coding_q_with_tests() -> dict:
+    return {
+        "question_type": "coding",
+        "topic": "python 基础",
+        "difficulty": "easy",
+        "question": "实现 add(a, b) 返回两数之和",
+        "options": None,
+        "correct_answer": "```python\ndef add(a, b):\n    return a + b\n```",
+        "explanation": "见答案",
+        "language": "python",
+        "starter_code": "def add(a, b):\n",
+        "test_cases": ["assert add(1, 2) == 3", "assert add(-1, 1) == 0"],
+    }
+
+
+async def test_critic_coding_reference_fails_tests():
+    """参考答案未通过 test_cases → 逐条计 issue（重试依据），LLM down 时沙箱结论独立生效。"""
+    from core.question.pipeline import _run_critic
+    from core.question.sandbox import TestRunResult
+
+    rt = ProfileRuntime(client=MagicMock(name="client"), text_model="m", binding="openai")
+    bus = StreamBus()
+    fake = TestRunResult(passed=[1], failed=[(0, "exit=1: AssertionError")], total=2)
+    with patch("core.question.sandbox.run_tests", return_value=fake) as m:
+        with patch("core.question.pipeline.run_agent_loop",
+                   AsyncMock(side_effect=RuntimeError("LLM down"))):
+            issues = await _run_critic(
+                _coding_q_with_tests(), "critic system", _ctx(),
+                CommonContextLayers(), rt, bus,
+            )
+    m.assert_called_once()  # critic 轮确实跑了用例校验
+    assert len(issues) == 1
+    assert "第1条测试用例" in issues[0] and "AssertionError" in issues[0]
+    await bus.close()
+
+
+async def test_critic_coding_reference_passes_tests():
+    """参考答案全过 test_cases → 无用例 issue；空 test_cases（存量题形状）不调 run_tests。"""
+    from core.question.pipeline import _run_critic
+    from core.question.sandbox import TestRunResult
+
+    rt = ProfileRuntime(client=MagicMock(name="client"), text_model="m", binding="openai")
+    bus = StreamBus()
+    with patch("core.question.sandbox.run_tests",
+               return_value=TestRunResult(passed=[0, 1], total=2)) as m:
+        with patch("core.question.pipeline.run_agent_loop",
+                   AsyncMock(side_effect=RuntimeError("LLM down"))):
+            issues = await _run_critic(
+                _coding_q_with_tests(), "critic system", _ctx(),
+                CommonContextLayers(), rt, bus,
+            )
+    m.assert_called_once()
+    assert issues == []  # 代码块可跑 + 用例全过 + LLM down fail-open
+
+    # 存量题形状：无 test_cases → 只走既有围栏块校验，不触发用例校验
+    legacy = _coding_q_with_tests()
+    legacy["test_cases"] = []
+    with patch("core.question.sandbox.run_tests") as m2:
+        with patch("core.question.pipeline.run_agent_loop",
+                   AsyncMock(side_effect=RuntimeError("LLM down"))):
+            issues = await _run_critic(
+                legacy, "critic system", _ctx(), CommonContextLayers(), rt, bus,
+            )
+    m2.assert_not_called()
+    assert issues == []
+    await bus.close()

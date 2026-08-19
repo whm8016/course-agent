@@ -390,6 +390,11 @@ def _parse_question(text: str, template: dict[str, Any]) -> dict[str, Any]:
         "topic": template.get("topic", ""),
         # 蓝图定向命中的主题 id（出题定向薄弱点）：透传给前端/评测对账，无则空串
         "target_topic_id": template.get("target_topic_id", ""),
+        # A2 判分闭环：全题型扁平带三个新键（非 coding 空默认），下游免条件分支。
+        # language 本期锁 python，字段为多语言沙箱预留。
+        "language": "",
+        "starter_code": "",
+        "test_cases": [],
     }
 
     if qt == "choice":
@@ -402,6 +407,18 @@ def _parse_question(text: str, template: dict[str, Any]) -> dict[str, Any]:
                     clean[key] = str(v).strip()
         q["options"] = clean if clean else None
 
+    if qt == "coding":
+        q["language"] = "python"
+        q["starter_code"] = str(data.get("starter_code", "")).strip()
+        raw_cases = data.get("test_cases")
+        if isinstance(raw_cases, list):
+            # strip 去空 + 只留 assert 前缀（生成噪声条目滤掉，别让一条坏用例杀整题），
+            # 截断 10 条（钳制与 sandbox.sanitize_test_cases 同口径）
+            q["test_cases"] = [
+                str(t).strip() for t in raw_cases
+                if str(t).strip().startswith("assert")
+            ][:10]
+
     return q
 
 
@@ -413,6 +430,9 @@ def _validate_question(q: dict[str, Any]) -> bool:
       - question（题干）、correct_answer（答案）必须非空——空题干/空答案无法作答。
       - choice 题：options 至少 2 项（单项无意义）、correct_answer 必须命中 options 的某个 key
         （否则答案指向不存在的选项，前端无法高亮正确项）。
+      - coding 题（A2 判分闭环）：starter_code 非空（前端要渲染签名骨架）+ test_cases
+        ≥2 条且全部 assert 前缀（无用例判不了分，单条无法表达部分正确）。宽松校验
+        口径——用例内容质量交给 critic 轮。
 
     返回 False 的题由 pipeline 按 M-8 单题容错路径处理（标记 error，继续其它题）。
     """
@@ -425,6 +445,14 @@ def _validate_question(q: dict[str, Any]) -> bool:
         if not isinstance(opts, dict) or len(opts) < 2:
             return False
         if str(q.get("correct_answer", "")).strip().upper() not in opts:
+            return False
+    if q.get("question_type") == "coding":
+        if not str(q.get("starter_code", "")).strip():
+            return False
+        cases = q.get("test_cases")
+        if not isinstance(cases, list) or len(cases) < 2:
+            return False
+        if not all(str(c).strip().startswith("assert") for c in cases):
             return False
     return True
 
@@ -457,7 +485,7 @@ async def _run_critic(
     async def _sandbox_issues() -> list[str]:
         issues: list[str] = []
         if q.get("question_type") == "coding":
-            from core.question.sandbox import extract_code_blocks, run_code
+            from core.question.sandbox import extract_code_blocks, run_code, run_tests
 
             blocks = extract_code_blocks(q.get("correct_answer", "") or "")
             for i, block in enumerate(blocks, 1):
@@ -470,6 +498,22 @@ async def _run_critic(
                     ok, detail = False, f"sandbox_error: {exc}"
                 if not ok:
                     issues.append(f"第{i}个代码块执行失败（{detail}）")
+            # A2：参考实现必须通过全部 test_cases（human-eval check_correctness 同构）。
+            # 无 test_cases（存量题形状）不触发——只走上面既有围栏块校验。
+            test_cases = q.get("test_cases") or []
+            if blocks and test_cases:
+                ref_code = "\n\n".join(blocks)
+                try:
+                    r = await asyncio.to_thread(run_tests, ref_code, test_cases)
+                except Exception as exc:
+                    logger.warning("[quiz] 沙箱用例校验异常（计 issue 走重试）", exc_info=True)
+                    r = None
+                    issues.append(f"用例校验执行异常（sandbox_error: {exc}）")
+                if r is not None:
+                    for idx, detail in r.failed:
+                        issues.append(
+                            f"参考答案未通过第{idx + 1}条测试用例（{detail[:120]}）"
+                        )
         return issues
 
     async def _llm_issues() -> list[str]:
