@@ -271,6 +271,12 @@ class NotebookEntry(Base):
     difficulty = Column(String(32), nullable=False, default="")
     user_answer = Column(Text, nullable=False, default="")
     is_correct = Column(Boolean, nullable=False, default=False)
+    # A3 判分闭环：等级/来源/反馈/通过率（is_correct 布尔语义保留=「未全对进错题本」，
+    # fair 也落 False；等级细分看 grade）。grade_source：sandbox|llm_judge|local|""
+    grade = Column(String(16), nullable=False, default="")
+    grade_source = Column(String(16), nullable=False, default="")
+    feedback = Column(Text, nullable=False, default="")
+    score = Column(Float, nullable=True)
     bookmarked = Column(Boolean, nullable=False, default=False)
     followup_session_id = Column(String(64), nullable=False, default="")
     created_at = Column(Float, nullable=False, default=time.time)

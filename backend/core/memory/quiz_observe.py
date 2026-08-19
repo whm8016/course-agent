@@ -17,23 +17,39 @@ logger = logging.getLogger(__name__)
 
 async def record_quiz_observation(
     db, user_id: str, course_id: str, question_id: str,
-    question_text: str, is_correct: bool,
+    question_text: str, level: str | bool,
     user_answer: str = "", correct_answer: str = "",
+    weight: float | None = None, feedback: str = "",
 ) -> bool:
     """题面 match_topics → 首命中主题写一条 quiz 观测。返回是否写入。
 
     无 course_id / 无主题命中 / 重复提交 → 不写（返回 False）。映射失败是常态
     （题面与主题图不对齐），warning 不 error。
 
-    user_answer/correct_answer（可选尾参，向后兼容）：答错且有学生作答时
-    evidence_quote 存「学生答 vs 正确答案」的具体差异——错因闭环的落点（门控
-    简报读它拼「曾见错法」，proactive._read_latest_poor_evidence）。答对或无
-    学生作答时回退题面截断 question_text[:200]（现有行为/测试期望不变）。
+    level（A3 等级化）：good/fair/poor（fair=0.5 部分正确通道）；传 bool 是
+    choice 本地判的兼容写法（True→good / False→poor），旧调用方零改动。
+
+    weight（可选）：观测权重，默认 W_QUIZ(1.0)；LLM 判分来源传 W_JUDGE(0.6)——
+    软证据。feedback（可选）：判分反馈——非 good 时 evidence_quote 优先用它
+    （LLM/coding 判分的错因比「学生答 vs 正确答案」拼接更聚焦，门控简报直接可读）。
+
+    user_answer/correct_answer（可选尾参）：feedback 为空且非 good 时存
+    「学生答 vs 正确答案」的具体差异（错因闭环的落点，门控简报读它拼「曾见
+    错法」）。good 或无学生作答时回退题面截断 question_text[:200]。
     """
     from core.db.database import MasteryObservation
     from core.memory.topic_match import match_topics
     from core.memory.mastery_state import W_QUIZ
     from sqlalchemy import select
+
+    if isinstance(level, bool):  # choice 本地判兼容：bool → 等级
+        level = "good" if level else "poor"
+    level = str(level).strip().lower()
+    if level not in ("good", "fair", "poor"):
+        logger.warning("[quiz_observe] 非法 level=%r，跳过观测", level)
+        return False
+    if weight is None:
+        weight = W_QUIZ
 
     if not course_id or not (question_text or "").strip():
         return False
@@ -62,10 +78,13 @@ async def record_quiz_observation(
     if not hits:
         return False
     topic_id = hits[0][0]
-    # evidence_quote：答错且有学生作答 → 存学生具体错在哪（错因闭环）；否则题面回退。
-    # 学生作答是错因的主体——只有 correct_answer 没有 user_answer 时写出来是
-    # 「学生答：；正确答案：…」的空半截，不如回退题面。
-    if not is_correct and user_answer.strip():
+    # evidence_quote 优先级（A3）：判分 feedback > 学生答 vs 正确答案 > 题面截断。
+    # feedback 是 LLM/coding 判分的一句话错因，非 good 时最聚焦；为空时回退既有
+    # 「学生答」拼接（只有 correct_answer 没有 user_answer 时写出来是空半截，
+    # 不如回退题面）。
+    if level != "good" and feedback.strip():
+        evidence = feedback[:200]
+    elif level != "good" and user_answer.strip():
         evidence = f"学生答：{user_answer[:100]}"
         if correct_answer.strip():
             evidence += f"；正确答案：{correct_answer[:100]}"
@@ -77,9 +96,9 @@ async def record_quiz_observation(
 
     await _write_mastery_observations(
         db, user_id, course_id,
-        [Judgement(topic_id, "good" if is_correct else "poor", 1.0, evidence)],
+        [Judgement(topic_id, level, 1.0, evidence)],
         [],  # 无 episode 关联
-        source_override="quiz", weight_override=W_QUIZ,
+        source_override="quiz", weight_override=weight,
         question_id=question_id,
     )
     return True

@@ -31,6 +31,10 @@ def _entry_to_dict(
         "difficulty": row.difficulty,
         "user_answer": row.user_answer,
         "is_correct": row.is_correct,
+        "grade": row.grade if row.grade is not None else "",
+        "grade_source": row.grade_source if row.grade_source is not None else "",
+        "feedback": row.feedback if row.feedback is not None else "",
+        "score": row.score,
         "bookmarked": row.bookmarked,
         "followup_session_id": row.followup_session_id,
         "created_at": row.created_at,
@@ -78,6 +82,15 @@ async def upsert_notebook_entry(
         "difficulty": str(payload.get("difficulty", "")),
         "user_answer": str(payload.get("user_answer", "")),
         "is_correct": bool(payload.get("is_correct", False)),
+        # A3 判分闭环：等级/来源/反馈/通过率（grade_source=sandbox|llm_judge|local|""）
+        "grade": str(payload.get("grade", "") or ""),
+        "grade_source": str(payload.get("grade_source", "") or ""),
+        "feedback": str(payload.get("feedback", "") or ""),
+        "score": (
+            float(payload["score"])
+            if isinstance(payload.get("score"), (int, float))
+            else None
+        ),
         "updated_at": now,
     }
 
