@@ -32,6 +32,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from api.run import router as run_router
 from api.question import router as question_router
 from api.question_notebook import router as question_notebook_router
+from api.transcribe import router as transcribe_router
 from api.admin import router as admin_router
 from api.teacher import router as teacher_router
 from api.auth import router as auth_router
@@ -507,6 +508,7 @@ async def _prometheus_metrics() -> Response:
     return Response(generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
 app.include_router(question_router, prefix="/api")
 app.include_router(question_notebook_router, prefix="/api")
+app.include_router(transcribe_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(teacher_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
