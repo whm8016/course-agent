@@ -7,6 +7,7 @@ import MessageBubble from './MessageBubble'
 import AskUserCard, { type AskUserQuestion } from './AskUserCard'
 import OutlineCard, { type OutlineItem } from './OutlineCard'
 import ImageUpload, { type PendingFile } from './ImageUpload'
+import VoiceInput from './VoiceInput'
 import { isImage } from './fileUtils'
 import QuizConfigPanel from '../quiz/QuizConfigPanel'
 import { DEFAULT_QUIZ_CONFIG, type QuizConfig } from '../quiz/types'
@@ -1691,6 +1692,12 @@ export default function ChatWindow({
           <div className="hidden md:block">
             <ImageUpload files={pendingFiles} onSelect={handleFileSelect} onRemove={removeFile} />
           </div>
+
+          {/* 语音输入（B 线）：不放 hidden md:block——手机端最需要，常显 */}
+          <VoiceInput
+            onTranscribed={(t) => setInput((prev) => (prev ? prev + t : t))}
+            disabled={isRunning}
+          />
 
           {/* 输入框 */}
           <div className="flex-1 relative">

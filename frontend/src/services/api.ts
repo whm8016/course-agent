@@ -864,6 +864,21 @@ export interface GradeResponse {
   test_results: { index: number; passed: boolean; error?: string }[]
 }
 
+/** 语音转写（B 线）：录音 Blob → 文字。后端未配置 ASR 时报"未配置语音识别模型"。 */
+export async function transcribeAudio(file: File): Promise<{ text: string; model: string; duration_ms: number }> {
+  const form = new FormData()
+  form.append('file', file)
+  const res = await fetch('/api/transcribe', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: form,
+    signal: AbortSignal.timeout(60_000),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  return res.json()
+}
+
 /** 判一题（A4）：coding→沙箱，简答→LLM。100 人并发时后端排队，前端 60s 超时。 */
 export async function gradeAnswer(payload: {
   session_id?: string
