@@ -117,6 +117,29 @@ def test_env_injection_nested(monkeypatch):
     assert s.chunking.size == 600
 
 
+def test_asr_config_defaults_and_env(monkeypatch):
+    """B1：ASR 默认关（model 空=503），env 嵌套名可配。"""
+    s = _fresh(monkeypatch)
+    assert s.asr.model == ""  # 空 = 功能关闭
+    assert s.asr.language == "zh"
+    assert s.asr.max_audio_mb == 25
+    assert s.asr.timeout_sec == 60
+
+    s2 = _fresh(
+        monkeypatch,
+        ASR__MODEL="paraformer-v2",
+        ASR__API_KEY="sk-asr",
+        ASR__BASE_URL="https://dashscope.example/compatible-mode/v1",
+        ASR__LANGUAGE="en",
+        ASR__MAX_AUDIO_MB="10",
+    )
+    assert s2.asr.model == "paraformer-v2"
+    assert s2.asr.api_key.get_secret_value() == "sk-asr"
+    assert s2.asr.base_url.endswith("/v1")
+    assert s2.asr.language == "en"
+    assert s2.asr.max_audio_mb == 10
+
+
 def test_allowed_origins_split(monkeypatch):
     s = _fresh(monkeypatch, SECURITY__ALLOWED_ORIGINS="https://a.com, https://b.com")
     assert s.security.allowed_origins == ["https://a.com", "https://b.com"]

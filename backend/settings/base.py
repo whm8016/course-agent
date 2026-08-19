@@ -205,6 +205,20 @@ class VisionConfig(BaseModel):
     base_url: str = ""
 
 
+class AsrConfig(BaseModel):
+    """语音转写模型（B 线语音输入）。凭证独立，空 → 回退 embedding（见 core.llm.asr）。
+
+    model 为空 = 功能关闭（/api/transcribe 返回 503，前端隐藏麦克风入口）。
+    """
+
+    model: str = ""
+    api_key: StrippedSecret = SecretStr("")
+    base_url: str = ""
+    language: str = "zh"  # whisper/paraformer 语种提示（ISO-639-1）
+    timeout_sec: int = 60
+    max_audio_mb: int = 25
+
+
 class EmbeddingConfig(BaseModel):
     """Embedding（单一默认，不分裂）。"""
 
@@ -811,6 +825,7 @@ class Settings(BaseSettings):
     # ── 嵌套子组 ──────────────────────────────────────────────────────────
     llm: LLMConfig = Field(default_factory=LLMConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
+    asr: AsrConfig = Field(default_factory=AsrConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     fallback: FallbackConfig = Field(default_factory=FallbackConfig)
     db: DatabaseConfig = Field(default_factory=DatabaseConfig)
