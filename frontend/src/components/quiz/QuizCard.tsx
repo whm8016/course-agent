@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { MessageSquare, Send, Square, X, ClipboardList } from 'lucide-react'
+import { MessageSquare, Send, Square, X, ClipboardList, Loader2 } from 'lucide-react'
 import type { QuizData, QuizQuestion } from '../../types'
 import FormattedMarkdown from '../shared/FormattedMarkdown'
 import { connectQuestionFollowup } from '../../services/questionWs'
-import { upsertNotebookEntry } from '../../services/api'
+import { upsertNotebookEntry, gradeAnswer } from '../../services/api'
+import type { GradeResponse } from '../../services/api'
 
 interface Props {
   quiz: QuizData
@@ -11,6 +12,13 @@ interface Props {
   /** 所属会话 id：提交答案自动收录笔记本的幂等键之一 */
   sessionId?: string | null
 }
+
+/** 非选择题判分状态（A4）：提交后逐题 pending → done/failed */
+type GradeState =
+  | { status: 'idle' }
+  | { status: 'pending' }
+  | { status: 'done'; result: GradeResponse }
+  | { status: 'failed' }
 
 // ---------- Follow-up chat (WebSocket /api/question/followup) ----------
 interface FollowupMsg {
@@ -220,6 +228,7 @@ function QuestionItem({
   submitted,
   selected,
   typedAnswer,
+  gradeState,
   onSelect,
   onTypedAnswer,
 }: {
@@ -228,15 +237,75 @@ function QuestionItem({
   submitted: boolean
   selected: string | undefined
   typedAnswer: string
+  gradeState?: GradeState
   onSelect: (idx: number, opt: string) => void
   onTypedAnswer: (idx: number, val: string) => void
 }) {
   const [showFollowup, setShowFollowup] = useState(false)
   const isChoice = q.options.length > 0
+  const isCoding = (q.question_type ?? '').toLowerCase() === 'coding'
   const isCorrect = isChoice ? selected === q.answer : null
 
   // 简答题：提交后且有内容才显示参考答案
   const openAnswerSubmitted = !isChoice && submitted && typedAnswer.trim().length > 0
+
+  // 判分徽章（A4）：pending 转圈 / good✓ / fair◐（含通过率）/ poor✗ / ungraded 未判
+  const gradeBadge = () => {
+    if (isChoice || !submitted) return null
+    const gs = gradeState ?? { status: 'idle' as const }
+    if (gs.status === 'idle') return null
+    if (gs.status === 'pending') {
+      return (
+        <div className="flex items-center gap-1.5 text-xs text-ink-soft bg-surface-2 border border-line px-3 py-2 rounded-[var(--radius)]">
+          <Loader2 size={13} className="animate-spin" strokeWidth={1.5} />
+          判分中…
+        </div>
+      )
+    }
+    if (gs.status === 'failed') {
+      return (
+        <div className="text-xs text-warn-fg bg-warn-bg px-3 py-2 rounded-[var(--radius)]">
+          未能自动判分（网络/超时），参考答案如下
+        </div>
+      )
+    }
+    const r = gs.result
+    if (r.grade === 'ungraded') {
+      return (
+        <div className="text-xs text-muted bg-surface-2 border border-line px-3 py-2 rounded-[var(--radius)]">
+          该题未自动判分{r.feedback ? `（${r.feedback}）` : ''}
+        </div>
+      )
+    }
+    const label =
+      r.grade === 'good'
+        ? '✓ 回答正确'
+        : r.grade === 'fair'
+          ? `◐ 部分正确${r.score != null ? `（通过率 ${Math.round(r.score * 100)}%）` : ''}`
+          : '✗ 未通过'
+    const cls =
+      r.grade === 'good'
+        ? 'text-ok-fg bg-ok-bg'
+        : r.grade === 'fair'
+          ? 'text-warn-fg bg-warn-bg'
+          : 'text-danger-fg bg-danger-bg'
+    return (
+      <div className={`px-3 py-2 rounded-[var(--radius)] text-xs font-medium ${cls}`}>
+        <p>{label}</p>
+        {r.feedback && <p className="font-normal mt-1 opacity-90">{r.feedback}</p>}
+        {r.test_results.length > 0 && (
+          <ul className="font-normal mt-1.5 space-y-0.5 opacity-90">
+            {r.test_results.map((t) => (
+              <li key={t.index}>
+                {t.passed ? '✓' : '✗'} 用例 {t.index + 1}
+                {!t.passed && t.error ? `：${t.error.slice(0, 80)}` : ''}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    )
+  }
 
   return (
     <div className="border-b border-line last:border-0 pb-5 last:pb-0">
@@ -307,18 +376,26 @@ function QuestionItem({
           )}
         </>
       ) : (
-        /* 简答题 作答区域 */
+        /* 简答 / coding 作答区域 */
         <div className="space-y-2">
           <textarea
-            className="w-full border border-line rounded-[var(--radius)] px-3 py-2 text-sm text-ink placeholder:text-muted bg-surface resize-none focus:outline-none focus:border-ink disabled:bg-surface-2 disabled:text-muted transition"
-            rows={3}
-            placeholder="在此输入你的答案…"
+            className={`w-full border border-line rounded-[var(--radius)] px-3 py-2 text-sm text-ink placeholder:text-muted bg-surface resize-none focus:outline-none focus:border-ink disabled:bg-surface-2 disabled:text-muted transition ${
+              isCoding ? 'font-mono text-[13px] leading-relaxed' : ''
+            }`}
+            rows={isCoding ? 10 : 3}
+            spellCheck={!isCoding}
+            placeholder={
+              isCoding
+                ? '在函数骨架基础上补全实现…（提交后将自动运行测试用例判分）'
+                : '在此输入你的答案…'
+            }
             value={typedAnswer}
             disabled={submitted}
             onChange={(e) => onTypedAnswer(qIdx, e.target.value)}
           />
           {openAnswerSubmitted && (
             <div className="space-y-2">
+              {gradeBadge()}
               <div className="text-ok-fg bg-ok-bg px-3 py-2 rounded-[var(--radius)]">
                 <p className="text-[11px] font-semibold text-ok-fg mb-1">参考答案</p>
                 <FormattedMarkdown
@@ -356,7 +433,13 @@ function QuestionItem({
             question={q}
             questionIndex={qIdx}
             userAnswer={isChoice ? (selected ?? '') : typedAnswer}
-            isCorrect={isChoice ? isCorrect : null}
+            isCorrect={
+              isChoice
+                ? isCorrect
+                : gradeState?.status === 'done'
+                  ? gradeState.result.is_correct
+                  : null
+            }
             onClose={() => setShowFollowup(false)}
           />
         )}
@@ -369,35 +452,112 @@ function QuestionItem({
 export default function QuizCard({ quiz, sessionId }: Props) {
   const [selectedAnswers, setSelectedAnswers] = useState<Record<number, string>>({})
   const [typedAnswers, setTypedAnswers] = useState<Record<number, string>>({})
+  const [gradeStates, setGradeStates] = useState<Record<number, GradeState>>({})
   const [submitted, setSubmitted] = useState(false)
 
-  // 提交答案：本地判分展示 + 逐题自动收录笔记本（best-effort）。
-  // 只收选择/判断题（options 非空 = 本地可判分）；简答题不收录——后端 is_correct
-  // 非空布尔，未判分传 false 会污染错题过滤与 mastery 观测。失败静默，不阻塞判分展示。
+  // coding 题预填函数签名骨架（学生 textarea 自带骨架 = 完整可运行代码契约，
+  // 提交后沙箱直接跑，不用再前插 starter_code）
+  useEffect(() => {
+    setTypedAnswers((prev) => {
+      const next = { ...prev }
+      let changed = false
+      quiz.questions.forEach((q, i) => {
+        if (
+          next[i] === undefined &&
+          (q.question_type ?? '').toLowerCase() === 'coding' &&
+          q.starter_code
+        ) {
+          next[i] = q.starter_code
+          changed = true
+        }
+      })
+      return changed ? next : prev
+    })
+  }, [quiz.questions])
+
+  // 提交答案（A4 三路）：choice/判断 → 本地判 + 收录；简答/coding → 先判分再收录
+  // （判分结果带 grade/grade_source，后端守卫据此放行 mastery 观测回流）。
+  // 判分失败也收录题面作答，但不带 grade_source（守卫拦观测，防污染）。
+  // 失败静默，不阻塞判分展示。判断题已被 toQuizQuestion 归一为 options 形式。
   const handleSubmit = () => {
     setSubmitted(true)
     if (!sessionId) return
     quiz.questions.forEach((q, i) => {
-      if (q.options.length === 0) return // 判断题已被 toQuizQuestion 归一为 options 形式，天然收录
-      void upsertNotebookEntry({
+      const qid = q.question_id || `q_${i + 1}` // chat 模式 quiz 事件无后端 id 时兜底
+      const base = {
         session_id: sessionId,
-        question_id: q.question_id || `q_${i + 1}`, // chat 模式 quiz 事件无后端 id 时兜底
+        question_id: qid,
         question: q.question,
         question_type: q.question_type || 'choice',
-        options: quizOptionsToRecord(q.options),
         correct_answer: String(q.answer),
         explanation: q.explanation,
         difficulty: q.difficulty || '',
-        user_answer: selectedAnswers[i] ?? '',
-        is_correct: selectedAnswers[i] === q.answer,
-      }).catch(() => {})
+      }
+
+      if (q.options.length > 0) {
+        // 本地判分路径：is_correct 前端算（选项唯一确定），grade_source="local"
+        void upsertNotebookEntry({
+          ...base,
+          options: quizOptionsToRecord(q.options),
+          user_answer: selectedAnswers[i] ?? '',
+          is_correct: selectedAnswers[i] === q.answer,
+          grade: selectedAnswers[i] === q.answer ? 'good' : 'poor',
+          grade_source: 'local',
+        }).catch(() => {})
+        return
+      }
+
+      // 简答 / coding：判分（coding→沙箱，简答→LLM）→ 收录 → 渲染
+      const userAnswer = typedAnswers[i] ?? ''
+      setGradeStates((prev) => ({ ...prev, [i]: { status: 'pending' } }))
+      void gradeAnswer({
+        ...base,
+        question_type: q.question_type || 'written',
+        user_answer: userAnswer,
+        test_cases: q.test_cases ?? [],
+        starter_code: q.starter_code ?? '',
+        language: q.language ?? '',
+      })
+        .then((result) => {
+          setGradeStates((prev) => ({ ...prev, [i]: { status: 'done', result } }))
+          return upsertNotebookEntry({
+            ...base,
+            question_type: q.question_type || 'written',
+            user_answer: userAnswer,
+            is_correct: result.is_correct ?? false,
+            grade: result.grade === 'ungraded' ? '' : result.grade,
+            grade_source: result.source || '',
+            feedback: result.feedback,
+            score: result.score,
+          })
+        })
+        .catch(() => {
+          setGradeStates((prev) => ({ ...prev, [i]: { status: 'failed' } }))
+          void upsertNotebookEntry({
+            ...base,
+            question_type: q.question_type || 'written',
+            user_answer: userAnswer,
+          }).catch(() => {})
+        })
     })
   }
 
+  // 计分口径（A4）：分母 = 已判分题（本地判的选择/判断 + 判分完成的简答/coding）
   const choiceQuestions = quiz.questions.filter((q) => q.options.length > 0)
-  const correctCount = choiceQuestions.filter(
+  const gradedNonChoice = quiz.questions.filter((q, i) => {
+    if (q.options.length > 0) return false
+    const gs = gradeStates[i]
+    return gs?.status === 'done' && gs.result.grade !== 'ungraded'
+  })
+  const choiceCorrect = choiceQuestions.filter(
     (q) => selectedAnswers[quiz.questions.indexOf(q)] === q.answer,
   ).length
+  const nonChoiceCorrect = gradedNonChoice.filter((q, i) => {
+    const gs = gradeStates[i]
+    return gs?.status === 'done' && gs.result.grade === 'good'
+  }).length
+  const correctCount = choiceCorrect + nonChoiceCorrect
+  const gradedCount = choiceQuestions.length + gradedNonChoice.length
 
   const allChoiceAnswered = choiceQuestions.every(
     (q) => selectedAnswers[quiz.questions.indexOf(q)] !== undefined,
@@ -409,9 +569,9 @@ export default function QuizCard({ quiz, sessionId }: Props) {
         <h3 className="text-sm font-semibold text-ink flex items-center gap-1.5">
           <ClipboardList size={15} strokeWidth={1.5} />
           测验题目
-          {submitted && choiceQuestions.length > 0 && (
+          {submitted && gradedCount > 0 && (
             <span className="text-xs font-normal text-ink-soft ml-2">
-              答对了 {correctCount}/{choiceQuestions.length}
+              答对了 {correctCount}/{gradedCount}
             </span>
           )}
         </h3>
@@ -426,6 +586,7 @@ export default function QuizCard({ quiz, sessionId }: Props) {
             submitted={submitted}
             selected={selectedAnswers[qIdx]}
             typedAnswer={typedAnswers[qIdx] ?? ''}
+            gradeState={gradeStates[qIdx] ?? { status: 'idle' }}
             onSelect={(idx, opt) => {
               if (submitted) return
               setSelectedAnswers((prev) => ({ ...prev, [idx]: opt }))

@@ -32,6 +32,10 @@ export interface QuizQuestion {
   question_id?: string
   question_type?: string
   difficulty?: string
+  /** coding 题判分闭环（A4）：签名骨架 / assert 用例列表 / 语言（本期 python） */
+  starter_code?: string
+  test_cases?: string[]
+  language?: string
 }
 
 export interface QuizData {

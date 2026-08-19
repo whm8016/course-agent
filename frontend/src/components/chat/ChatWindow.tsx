@@ -109,6 +109,9 @@ interface QAPairRaw {
   options?: Record<string, string> | null
   concentration?: string
   difficulty?: string
+  starter_code?: string
+  test_cases?: string[]
+  language?: string
 }
 
 function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
@@ -128,6 +131,9 @@ function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
       question_id: qa.question_id,
       question_type: qa.question_type,
       difficulty: qa.difficulty,
+      starter_code: qa.starter_code ?? '',
+      test_cases: qa.test_cases ?? [],
+      language: qa.language ?? '',
     }
   }
 
@@ -144,6 +150,9 @@ function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
       question_id: qa.question_id,
       question_type: qa.question_type,
       difficulty: qa.difficulty,
+      starter_code: qa.starter_code ?? '',
+      test_cases: qa.test_cases ?? [],
+      language: qa.language ?? '',
     }
   }
 
@@ -155,6 +164,9 @@ function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
     question_id: qa.question_id,
     question_type: qa.question_type,
     difficulty: qa.difficulty,
+    starter_code: qa.starter_code ?? '',
+    test_cases: qa.test_cases ?? [],
+    language: qa.language ?? '',
   }
 }
 

@@ -839,6 +839,11 @@ export async function upsertNotebookEntry(payload: {
   difficulty?: string
   user_answer?: string
   is_correct?: boolean
+  /** 判分闭环（A4）：等级/来源/反馈/通过率——grade_source 为空时后端守卫拦观测 */
+  grade?: string
+  grade_source?: string
+  feedback?: string
+  score?: number | null
 }): Promise<void> {
   const res = await fetch('/api/question/notebook/entries/upsert', {
     method: 'POST',
@@ -847,6 +852,39 @@ export async function upsertNotebookEntry(payload: {
   })
   checkUnauthorized(res)
   if (!res.ok) throw new Error(await readErrorMessage(res))
+}
+
+export interface GradeResponse {
+  question_id: string
+  grade: 'good' | 'fair' | 'poor' | 'ungraded'
+  score: number | null
+  source: 'sandbox' | 'llm_judge' | ''
+  feedback: string
+  is_correct: boolean | null
+  test_results: { index: number; passed: boolean; error?: string }[]
+}
+
+/** 判一题（A4）：coding→沙箱，简答→LLM。100 人并发时后端排队，前端 60s 超时。 */
+export async function gradeAnswer(payload: {
+  session_id?: string
+  question_id?: string
+  question_type?: string
+  question?: string
+  correct_answer?: string
+  user_answer?: string
+  test_cases?: string[]
+  starter_code?: string
+  language?: string
+}): Promise<GradeResponse> {
+  const res = await fetch('/api/question/notebook/grade', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(60_000),
+  })
+  checkUnauthorized(res)
+  if (!res.ok) throw new Error(await readErrorMessage(res))
+  return res.json()
 }
 
 export async function updateNotebookEntry(
