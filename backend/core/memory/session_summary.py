@@ -236,6 +236,24 @@ def _extract_model() -> str:
     return s.course_topic.extract_model or s.llm.text_model
 
 
+def _extract_create_kwargs(prompt: str, temperature: float) -> tuple[str, dict]:
+    """L2 压缩两条路径（结构化/降级文本）共用的 create kwargs：extract_model + 关思考。
+
+    flash 出厂开思考，JSON 被写进 reasoning_content、content 读到空 -> 必现解析
+    失败（LangSmith 70s 内 9 条空调用的根因）。注入方式与 course_topic_builder
+    ._llm_json 同款。返回 (model, kwargs)，model 供两条路径的用量埋点复用。
+    """
+    model = _extract_model()
+    kwargs: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": 800,
+    }
+    apply_reasoning_kwargs(kwargs, get_settings().llm.binding, model, async_openai_client)
+    return model, kwargs
+
+
 @dataclass
 class SummaryItem:
     """L2 摘要条目（v2）。
@@ -699,10 +717,11 @@ class SessionSummaryManager:
         #    -> 跳过（下轮再压）。首次压缩（无游标）同样受闸——旧逻辑 last_msg_id 为空
         #    时整道闸被绕过，窗口刚越阈值就半截对话送压缩；压缩失败又不推进游标，
         #    下轮重压同一批，LangSmith 上表现为高频重复调用。
-        if len(new_messages) < self._compress_interval * 2:
+        gate_msgs = self._compress_interval * 2
+        if len(new_messages) < gate_msgs:
             logger.debug(
                 "[L2] skip compress session=%s new_msgs=%d < interval=%d rounds (= %d msgs)",
-                session_id, len(new_messages), self._compress_interval, self._compress_interval * 2,
+                session_id, len(new_messages), self._compress_interval, gate_msgs,
             )
             return False
 
@@ -808,24 +827,13 @@ class SessionSummaryManager:
         )
 
         # 结构化抽取：temp=0.3 首试，解析失败 temp=0 重试一次
-        model = _extract_model()
         for temperature in (0.3, 0.0):
             prompt = _STRUCTURED_COMPRESS_PROMPT.format(
                 existing_summary=existing_ref,
                 new_messages=msg_text,
             )
             raw = ""
-            create_kwargs: dict = {
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": temperature,
-                "max_tokens": 800,
-            }
-            # flash 出厂开思考，JSON 被写进 reasoning_content、content 读到空 -> 必现
-            # 解析失败。抽取关思考，只拿最终 JSON（与 course_topic_builder._llm_json 同款）。
-            apply_reasoning_kwargs(
-                create_kwargs, get_settings().llm.binding, model, async_openai_client
-            )
+            model, create_kwargs = _extract_create_kwargs(prompt, temperature)
             try:
                 resp = await async_openai_client.chat.completions.create(**create_kwargs)
                 if track is not None:
@@ -876,17 +884,7 @@ class SessionSummaryManager:
             existing_summary=existing_summary or "(无)",
             new_messages=msg_text,
         )
-        model = _extract_model()
-        create_kwargs: dict = {
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "temperature": 0.3,
-            "max_tokens": 800,
-        }
-        # 降级路径同样关思考：开思考时正文挤不进 content，这里只会拿到空摘要。
-        apply_reasoning_kwargs(
-            create_kwargs, get_settings().llm.binding, model, async_openai_client
-        )
+        model, create_kwargs = _extract_create_kwargs(prompt, 0.3)
         try:
             resp = await async_openai_client.chat.completions.create(**create_kwargs)
             if track is not None:

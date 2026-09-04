@@ -371,14 +371,19 @@ def _capture_client(captured: list[dict], content: str):
     return client
 
 
+def _thinking_env(monkeypatch, model: str) -> tuple[SessionSummaryManager, list[dict]]:
+    """思考注入用例共用 setup：定死 extract model + 总闸置空（按型号自动）。
+    reasoning_effort 置空是 load-bearing 的——不置空则断言随 env 总闸漂移。"""
+    monkeypatch.setattr(ss, "_extract_model", lambda: model)
+    monkeypatch.setattr(get_settings().llm, "reasoning_effort", "")
+    return SessionSummaryManager(), []
+
+
 @pytest.mark.asyncio
 async def test_do_compress_disables_thinking_and_uses_extract_model(monkeypatch):
     """抽取走 extract_model（非对话主模型），且 flash 关思考（extra_body.thinking
     disabled）——开着思考 JSON 进 reasoning_content、content 读到空，必现解析失败。"""
-    mgr = SessionSummaryManager()
-    monkeypatch.setattr(ss, "_extract_model", lambda: "deepseek-v4-flash")
-    monkeypatch.setattr(get_settings().llm, "reasoning_effort", "")  # 总闸空=按型号自动
-    captured: list[dict] = []
+    mgr, captured = _thinking_env(monkeypatch, "deepseek-v4-flash")
 
     with patch.object(ss, "async_openai_client", _capture_client(captured, json.dumps(
         {"items": [{"k": "fact", "key": "f", "t": "第6版"}], "resolved": []}, ensure_ascii=False,
@@ -394,10 +399,7 @@ async def test_do_compress_disables_thinking_and_uses_extract_model(monkeypatch)
 @pytest.mark.asyncio
 async def test_do_compress_text_disables_thinking(monkeypatch):
     """降级文本路径同样关思考：开思考时正文挤不进 content，只会拿到空摘要。"""
-    mgr = SessionSummaryManager()
-    monkeypatch.setattr(ss, "_extract_model", lambda: "deepseek-v4-flash")
-    monkeypatch.setattr(get_settings().llm, "reasoning_effort", "")
-    captured: list[dict] = []
+    mgr, captured = _thinking_env(monkeypatch, "deepseek-v4-flash")
 
     with patch.object(ss, "async_openai_client", _capture_client(captured, "自由文本摘要")):
         out = await mgr._do_compress_text("", _mk_messages())
@@ -411,10 +413,7 @@ async def test_do_compress_text_disables_thinking(monkeypatch):
 async def test_do_compress_unknown_model_injects_nothing(monkeypatch):
     """安全性质：extract_model 是不在分流表内的模型（如 openai）→ 一根毫毛不动。
     乱塞 thinking/reasoning 参数会被这类供应商 400。"""
-    mgr = SessionSummaryManager()
-    monkeypatch.setattr(ss, "_extract_model", lambda: "gpt-4o")
-    monkeypatch.setattr(get_settings().llm, "reasoning_effort", "")
-    captured: list[dict] = []
+    mgr, captured = _thinking_env(monkeypatch, "gpt-4o")
 
     with patch.object(ss, "async_openai_client", _capture_client(captured, json.dumps(
         {"items": [{"k": "topic", "key": "t", "t": "主题"}]}, ensure_ascii=False,
