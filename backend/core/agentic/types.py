@@ -28,6 +28,7 @@ class RoundResult:
     ttft_ms: int | None = None              # 首 token 延迟（ms）
     reasoning: str = ""                     # 本轮推理（思考）全文，无则空串（非推理模型恒空，优雅降级）
     usage: TokenUsage | None = None         # 本轮 token 用量（input/output/cache_read），provider 不支持采集时为 None
+    truncated: bool = False                 # 本轮是否因 max_tokens 输出上限被截断（finish_reason=="length"）
 
     @property
     def has_tool_calls(self) -> bool:

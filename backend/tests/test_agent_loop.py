@@ -26,7 +26,8 @@ from core.stream_bus import StreamBus
 # 辅助：构造假的流式 LLM 响应
 # ---------------------------------------------------------------------------
 
-def _make_chunk(content: str = "", tool_calls: list[dict] | None = None):
+def _make_chunk(content: str = "", tool_calls: list[dict] | None = None,
+                finish_reason: str | None = None):
     """构造一个 OpenAI 流式 chunk 的 mock 对象。"""
     delta = MagicMock()
     delta.content = content or None
@@ -47,6 +48,7 @@ def _make_chunk(content: str = "", tool_calls: list[dict] | None = None):
 
     choice = MagicMock()
     choice.delta = delta
+    choice.finish_reason = finish_reason  # 显式设置（None=流中间块），避免 MagicMock 默认 truthy
     chunk = MagicMock()
     chunk.choices = [choice]
     return chunk
@@ -572,6 +574,150 @@ async def test_answer_now_skipped_when_not_terminal(ctx, bus):
     # 检查点被跳过：无 answer_now 相关 thinking
     assert not any(e.get("stage") == "answer_now" for e in events)
     assert "子任务结果" in outcome.final_text
+
+
+# ---------------------------------------------------------------------------
+# 场景 11：expect_final_answer=False 的工具轮 → 旁白静音，不漏进 token 流
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_aside_buffered_when_not_final_answer_round(ctx, bus):
+    """深度解题旁白防漏：expect_final_answer() 返回 False 的轮次（solve 状态机
+    未 all_done，预期是工具轮）不真流式——模型调工具前写的分析旁白在轮末走
+    thinking 事件进思考小框，绝不作为 token 事件漏进回答框。"""
+    # 第一轮：旁白 + tool_calls（qwen/deepseek 调工具前常先吐一段分析文字）
+    aside_tool_chunks = [
+        _make_chunk("我先分析这道题：要求电阻并联"),
+        _make_chunk("的等效阻值，"),
+        _make_chunk(tool_calls=[{
+            "id": "call_aside",
+            "name": "rag",
+            "arguments": json.dumps({"query": "并联电阻"}),
+        }]),
+    ]
+    # 第二轮：最终答案
+    finish_chunks = [
+        _make_chunk("并联等效阻值公式为"),
+        _make_chunk("R=R1·R2/(R1+R2)。"),
+    ]
+
+    call_count = 0
+
+    async def _fake_create(**kwargs):
+        nonlocal call_count
+        call_count += 1
+        mock = MagicMock()
+        if call_count == 1:
+            mock.__aiter__ = lambda self: _async_iter(aside_tool_chunks)
+        else:
+            mock.__aiter__ = lambda self: _async_iter(finish_chunks)
+        return mock
+
+    fake_tool_result = MagicMock()
+    fake_tool_result.content = "检索结果"
+    fake_tool_result.pause_for_user = None
+
+    with patch("core.agentic.loop._default_client") as mock_client, \
+         patch("core.agent.tool_registry.execute_tool", AsyncMock(return_value=fake_tool_result)):
+        mock_client.chat.completions.create = _fake_create
+        outcome = await run_agent_loop(
+            context=ctx, stream=bus, system_prompt="你是课程助教。",
+            tool_schemas=[{
+                "type": "function",
+                "function": {"name": "rag", "description": "检索知识库", "parameters": {}},
+            }],
+            expect_final_answer=lambda: False,  # 恒「解题中」→ 两轮都静音
+        )
+
+    assert outcome.final_text == "并联等效阻值公式为R=R1·R2/(R1+R2)。"
+
+    events = await _collect_events(bus)
+    # 核心：token 事件拼接必须只含最终答案，旁白一个字都不能漏进答案流
+    token_joined = "".join(e["content"] for e in events if e["type"] == "token")
+    assert token_joined == outcome.final_text, \
+        f"旁白泄漏进 token 流：{token_joined!r}"
+    # 旁白应作为 thinking 事件进思考小框
+    aside_events = [e for e in events if e["type"] == "thinking" and "我先分析" in str(e.get("content"))]
+    assert aside_events, "旁白应轮末以 thinking 事件进思考小框"
+
+
+# ---------------------------------------------------------------------------
+# 场景 12：expect_final_answer=True 的答案轮 → 保留逐字真流式
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_final_answer_streams_live_when_expected(ctx, bus):
+    """expect_final_answer() 返回 True（solve 状态机 all_done，预期出最终答案）
+    的轮次照旧逐 chunk 真流式——与 chat 模式同体验，deep_solve 修复不牺牲答案
+    流式效果。"""
+    finish_chunks = [
+        _make_chunk("最终答案"),
+        _make_chunk("分为"),
+        _make_chunk("两部分。"),
+    ]
+
+    async def _fake_create(**kwargs):
+        mock = MagicMock()
+        mock.__aiter__ = lambda self: _async_iter(finish_chunks)
+        return mock
+
+    with patch("core.agentic.loop._default_client") as mock_client:
+        mock_client.chat.completions.create = _fake_create
+        outcome = await run_agent_loop(
+            context=ctx, stream=bus, system_prompt="你是课程助教。",
+            tool_schemas=None,
+            expect_final_answer=lambda: True,  # 恒「该出答案了」→ 开麦
+        )
+
+    assert outcome.final_text == "最终答案分为两部分。"
+    events = await _collect_events(bus)
+    token_events = [e for e in events if e["type"] == "token"]
+    # 真流式：3 个 content chunk → 3 个 token 事件一一对应（假流式会按 8 字符切片成 2 个）
+    assert len(token_events) == 3
+    assert "".join(e["content"] for e in token_events) == "最终答案分为两部分。"
+
+
+# ---------------------------------------------------------------------------
+# 场景 13：finish_reason="length" → 截断可见（done.metadata.truncated + 16384 上限）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_truncation_flagged_when_finish_reason_length(ctx, bus):
+    """输出上限截断不再静默：末块 finish_reason=="length" 时 done.metadata 带
+    truncated=True（前端可提示），且 max_tokens 已从 8192 提到 16384（深度解题
+    长推导曾频繁撞 8192 被无声掐断）。"""
+    finish_chunks = [
+        _make_chunk("公式推导到一半"),
+        _make_chunk("就被掐断了"),
+        _make_chunk(finish_reason="length"),  # 末块：因输出长度上限停止
+    ]
+
+    captured: dict[str, Any] = {}
+
+    async def _fake_create(**kwargs):
+        captured["max_tokens"] = kwargs.get("max_tokens")
+        mock = MagicMock()
+        mock.__aiter__ = lambda self: _async_iter(finish_chunks)
+        return mock
+
+    with patch("core.agentic.loop._default_client") as mock_client:
+        mock_client.chat.completions.create = _fake_create
+        await run_agent_loop(
+            context=ctx, stream=bus, system_prompt="你是课程助教。",
+            tool_schemas=None,
+        )
+
+    # 输出上限：8192 → 16384（qwen-plus 思考模式允许至 32768，取稳妥值）
+    assert captured["max_tokens"] == 16384
+
+    events = await _collect_events(bus)
+    done_events = [e for e in events if e["type"] == "done"]
+    assert done_events, "应有 done 事件"
+    assert done_events[0]["metadata"].get("truncated") is True, \
+        "finish_reason=length 必须在 done.metadata 带 truncated=True"
+
+    # 对照：正常 stop 的轮 done.metadata.truncated 应为 False（或至少不为 True）
+    # ——由 test_finish_round_no_tools 等既有场景隐式覆盖，此处只锁 length 路径。
 
 
 # ---------------------------------------------------------------------------

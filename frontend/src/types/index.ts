@@ -57,6 +57,8 @@ export interface AgentMetadata {
   retrieve_strategy?: string
   hallucination?: HallucinationInfo
   usage?: MessageUsage
+  /** done 事件携带：最终答案是否因输出长度上限（finish_reason=length）被截断 */
+  truncated?: boolean
 }
 
 export interface SSEEvent {
@@ -102,6 +104,7 @@ export interface Message {
     retrieve_strategy?: string
     hallucination?: HallucinationInfo
     stopped?: boolean
+    truncated?: boolean
     stage?: string
     call_state?: string
     usage?: MessageUsage

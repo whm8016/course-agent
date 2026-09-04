@@ -32,6 +32,7 @@ from core.pipeline_common import (
 from core.prompt_loader import load_prompt_dict
 from core.solve.session import (
     DEFAULT_MAX_REPLANS,
+    current_solve_session_id,
     get_session,
     reset_current_solve_session,
     set_current_solve_session,
@@ -123,6 +124,11 @@ class DeepSolvePipeline:
                 client=rt.client,
                 model=rt.text_model,
                 binding=rt.binding,
+                # 旁白防漏：状态机 all_done 前的轮次（plan/检索/逐步解题）预期是工具轮，
+                # 不真流式——模型调工具前写的分析旁白轮末进思考小框，不再漏进答案 token
+                # 流；all_done 后的最终作答轮恢复逐字真流式。set_current_solve_session 在
+                # 上行已注入，lambda 轮询时 contextvar 对本任务可见。
+                expect_final_answer=lambda: get_session(current_solve_session_id()).all_done(),
             )
         finally:
             reset_current_solve_session(token)

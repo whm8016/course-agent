@@ -993,6 +993,7 @@ export default function ChatWindow({
     let retrieveStrategy = ''
     let hallucination: HallucinationInfo | undefined
     let usage: MessageUsage | undefined
+    let truncated = false
 
     const streamResult = await chatStream(
       courseId,
@@ -1179,6 +1180,7 @@ export default function ChatWindow({
             retrieveStrategy = event.metadata?.retrieve_strategy || ''
             hallucination = event.metadata?.hallucination
             usage = event.metadata?.usage
+            truncated = Boolean(event.metadata?.truncated)
             break
           case 'error':
             // 后端 stream_bus 的 error 事件字段是 `message`（非 content）；两个都认，避免「出错了: undefined」
@@ -1218,6 +1220,7 @@ export default function ChatWindow({
         retrieve_strategy: retrieveStrategy || undefined,
         hallucination,
         stopped: wasAborted || undefined,
+        truncated: truncated || undefined,
         usage,
       },
     }

@@ -23,7 +23,7 @@ import json
 import logging
 import re
 import time
-from typing import Any
+from typing import Any, Callable
 
 from settings import get_settings
 LLM_BINDING = get_settings().llm.binding
@@ -153,7 +153,11 @@ async def _one_round(
         "messages": messages,
         "stream": True,
         "temperature": temperature,
-        "max_tokens": 8192,
+        # 输出上限：8192→16384——深度解题长推导（Markdown+LaTeX 分步解答）曾频繁撞
+        # 8192 被 finish_reason=length 无声掐断（格式残缺）。qwen-plus 思考模式允许至
+        # 32768，取稳妥值；DeepSeek 档思考计入此额度，仍可能截断——由下方 finish_reason
+        # 捕获兜底（truncated 标记 + WARNING 日志），截断不再静默。
+        "max_tokens": 16384,
         # 成本可观测性：末块携带 usage（OpenAI 原生 / Anthropic 适配器合成等价块）。
         # 不支持的端点会在 _create_with_image_fallback 内被剥除并重试（见 llm.py）。
         "stream_options": {"include_usage": True},
@@ -173,6 +177,7 @@ async def _one_round(
     _tool_call_seen = False              # 本轮 delta 是否出现过 tool_calls（出现后停发答案 token）
     _tag_leak_seen = False               # 本轮 content 是否嗅探到 DSML 标签泄漏（见 _strip_dsml_tags）
     round_usage: TokenUsage | None = None  # 本轮 usage（从末块捕获），provider 不支持时保持 None
+    _finish_reason: str | None = None    # 本轮结束原因（末块携带）；"length"=输出上限截断
 
     # H-16：自配/profile client（llm_client 非 None）不接入全局熔断器。
     # 判定信号 = _one_round 的 llm_client 参数：None → 全局默认 client（平台所有未自配
@@ -212,6 +217,11 @@ async def _one_round(
         choices = getattr(chunk, "choices", None) or []
         if not choices:
             continue
+        # 截断可见性：末块携带 finish_reason（"stop"=正常 / "length"=撞输出上限被掐断）。
+        # 取最后一个非空值；此前全程无检测，length 截断被当完整答案静默发出。
+        _fr = getattr(choices[0], "finish_reason", None)
+        if _fr:
+            _finish_reason = str(_fr)
         delta = getattr(choices[0], "delta", None)
         if delta is None:
             continue
@@ -308,6 +318,15 @@ async def _one_round(
         ))
 
     _elapsed_ms = int((time.perf_counter() - _t_start) * 1000)
+    truncated = _finish_reason == "length"
+    if truncated:
+        log_flow(
+            "agent_loop.answer_truncated",
+            level=logging.WARNING,
+            model=model,
+            content_chars=len(content),
+            has_tool_calls=bool(tool_calls),
+        )
     log_flow(
         "agent_loop.llm_round",
         model=model,
@@ -326,6 +345,7 @@ async def _one_round(
         ttft_ms=_ttft_ms,
         reasoning=reasoning,
         usage=round_usage,
+        truncated=truncated,
     )
 
 
@@ -417,6 +437,7 @@ async def run_agent_loop(
     emit_terminal_events: bool = True,
     extra_context: str = "",
     temperature: float | None = None,
+    expect_final_answer: Callable[[], bool] | None = None,
 ) -> LoopOutcome:
     """执行 tool_calls 驱动的 Agent Loop，完成一个用户回合。
 
@@ -440,6 +461,14 @@ async def run_agent_loop(
                         避免中间 done 提前终止整条流；最终 done 由调用方
                         capability 自行补发。其余事件（thinking/tool_call/
                         tool_result/token）不受此参数影响。
+        expect_final_answer: 每轮 LLM 调用前轮询，返回 True 表示本轮预期产出
+                        最终答案（如 deep_solve 的 solve 状态机 all_done）→
+                        该轮真流式（content 逐字进答案框）；False 表示预期是
+                        工具轮 → 本轮 content 全程缓冲，轮末有 tool_calls 则
+                        旁白走 thinking 事件进思考小框，避免模型调工具前的
+                        分析文字作为 token 事件漏进回答框。None（默认）= 恒真
+                        流式，chat/quiz/research 行为零变化。最后一轮（强制
+                        作答）不受此参数影响，恒真流式。
 
     向 stream 发送的事件：
         {"type": "thinking",   "content": "..."}   工具调用前的旁白
@@ -485,6 +514,7 @@ async def run_agent_loop(
     iteration = 0
     seen_tool_result = False  # 是否已触发过工具调用（决定下一轮 reasoning 的 stage）
     answer_now_triggered = False  # 是否因前端"立即回答"而提前直接回答（done metadata 标记）
+    final_truncated = False  # 最终答案轮是否被 max_tokens 掐断（done metadata 标记，前端提示）
     _loop_t0 = time.perf_counter()
 
     log_flow("agent_loop.start", mode=context.mode, model=model,
@@ -530,6 +560,7 @@ async def run_agent_loop(
                                               reasoning_stage="answer_now", binding=eff_binding,
                                               tool_choice_override="none", temperature=_round_temp)
                     final_text = result.content
+                    final_truncated = result.truncated
                     turn_usage = turn_usage.add(result.usage)
                     # 首轮计时：answer_now 可在任意 iteration 触发，仅当此前无首轮记录
                     # （first_round_ms==0）才算"第一次模型调用"；多轮工具后点"立即回答"
@@ -607,9 +638,19 @@ async def run_agent_loop(
         try:
             # 每轮都真流式：content 边收边透传（_one_round 内 _tool_call_seen 防工具轮串话）。
             # 这样正常对话（模型首轮即作答、不调工具）也能逐字流式，而非等整段生成完再切片。
+            #
+            # 旁白防漏（deep_solve，expect_final_answer 非空时）：工具轮前的分析旁白曾
+            # 赶在 tool_calls 信号之前作为 token 事件漏进回答框（真流式无法预判本轮是否
+            # 调工具）。改由调用方按业务状态判断：预期工具轮（如 solve 状态机未 all_done）
+            # 不传 live_sink → 本轮 content 全程缓冲，轮末有 tool_calls 则旁白走下方
+            # not streamed_live 分支发 thinking 事件进思考小框；预期答案轮或最后一轮
+            # （强制作答）恢复真流式。None = 恒真流式，chat/quiz/research 行为零变化。
+            _live = stream if (
+                expect_final_answer is None or is_final_round or bool(expect_final_answer())
+            ) else None
             result = await _one_round(
                 messages, schemas, model, client,
-                live_sink=stream,
+                live_sink=_live,
                 reasoning_sink=stream,
                 reasoning_stage=reasoning_stage,
                 binding=eff_binding,
@@ -722,6 +763,7 @@ async def run_agent_loop(
         else:
             # 无工具调用，或最后一轮（2.1：is_final_round 时 tool_calls 不再 dispatch）→ 收尾作答
             final_text = result.content
+            final_truncated = result.truncated
             if result.content.strip():
                 last_nonempty_content = result.content
             # 每轮都已通过 live_sink 真流式透传（streamed_live 恒 True），无需补发；
@@ -793,6 +835,7 @@ async def run_agent_loop(
                 "tools_used": list(dict.fromkeys(tools_used)),  # 去重保序
                 "iterations": iteration + 1,
                 "answer_now": answer_now_triggered,  # 是否因"立即回答"提前收尾（前端区分/埋点）
+                "truncated": final_truncated,  # 最终答案是否被 max_tokens 掐断（前端提示"回答不完整"）
                 # 本轮 token 用量（学生端气泡底部小字）。美元成本仅 expose_cost_to_student 开启时带。
                 "usage": {
                     "input_tokens": turn_usage.input_tokens,

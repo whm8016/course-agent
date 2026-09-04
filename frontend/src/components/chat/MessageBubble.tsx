@@ -252,6 +252,13 @@ export default function MessageBubble({ message, thinkingSteps, courseId, sessio
             </div>
           )
         })()}
+        {message.metadata?.truncated && (
+          // 后端 done.metadata.truncated：答案因 max_tokens 输出上限被掐断（finish_reason=length），
+          // 提示用户内容不完整而非"格式错误"
+          <div className="mt-1.5 text-[11px] text-amber-500/90">
+            回答因输出长度限制被截断，可要求精简后重试
+          </div>
+        )}
       </div>
     </div>
   )
