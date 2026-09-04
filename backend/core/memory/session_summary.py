@@ -30,10 +30,10 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from settings import get_settings
-TEXT_MODEL = get_settings().llm.text_model
 from core.analytics.token_usage import track_llm_response
 from core.db.database import Session, Message
 from core.llm.llm import client as async_openai_client
+from core.llm.reasoning_params import apply_reasoning_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -228,6 +228,12 @@ _V1_KEY_TO_KIND: dict[str, str] = {
 }
 
 _MAX_MSG_CHARS = 2000  # 单条消息喂 LLM 的上限（避免硬截丢信息）
+
+
+def _extract_model() -> str:
+    """L2 压缩抽取模型：JSON 抽取须用非 reasoning 档（与 graph_memory._extract_model 同口径）。"""
+    s = get_settings()
+    return s.course_topic.extract_model or s.llm.text_model
 
 
 @dataclass
@@ -689,11 +695,14 @@ class SessionSummaryManager:
             logger.debug("[L2] no new messages to compress session=%s", session_id)
             return False
 
-        # 6) 频率闸：已压过且本轮新增不足 compress_interval -> 跳过（下轮再压）
-        if last_msg_id and len(new_messages) < self._compress_interval:
+        # 6) 频率闸：本轮新增不足 compress_interval 轮（一轮 = user+assistant 两条）
+        #    -> 跳过（下轮再压）。首次压缩（无游标）同样受闸——旧逻辑 last_msg_id 为空
+        #    时整道闸被绕过，窗口刚越阈值就半截对话送压缩；压缩失败又不推进游标，
+        #    下轮重压同一批，LangSmith 上表现为高频重复调用。
+        if len(new_messages) < self._compress_interval * 2:
             logger.debug(
-                "[L2] skip compress session=%s new_msgs=%d < interval=%d",
-                session_id, len(new_messages), self._compress_interval,
+                "[L2] skip compress session=%s new_msgs=%d < interval=%d rounds (= %d msgs)",
+                session_id, len(new_messages), self._compress_interval, self._compress_interval * 2,
             )
             return False
 
@@ -771,9 +780,9 @@ class SessionSummaryManager:
             line += " " + "".join(hints)
         return line
 
-    async def _track_l2_usage(self, resp: Any, track: dict[str, str]) -> None:
+    async def _track_l2_usage(self, resp: Any, model: str, track: dict[str, str]) -> None:
         """L2 压缩 LLM 用量埋点（结构化/降级两条压缩路径共用；best-effort 不抛）。"""
-        await track_llm_response(resp, model=TEXT_MODEL, mode="l2_summary", **track)
+        await track_llm_response(resp, model=model, mode="l2_summary", **track)
 
     async def _do_compress(
         self,
@@ -799,22 +808,29 @@ class SessionSummaryManager:
         )
 
         # 结构化抽取：temp=0.3 首试，解析失败 temp=0 重试一次
+        model = _extract_model()
         for temperature in (0.3, 0.0):
             prompt = _STRUCTURED_COMPRESS_PROMPT.format(
                 existing_summary=existing_ref,
                 new_messages=msg_text,
             )
             raw = ""
+            create_kwargs: dict = {
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": temperature,
+                "max_tokens": 800,
+            }
+            # flash 出厂开思考，JSON 被写进 reasoning_content、content 读到空 -> 必现
+            # 解析失败。抽取关思考，只拿最终 JSON（与 course_topic_builder._llm_json 同款）。
+            apply_reasoning_kwargs(
+                create_kwargs, get_settings().llm.binding, model, async_openai_client
+            )
             try:
-                resp = await async_openai_client.chat.completions.create(
-                    model=TEXT_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    temperature=temperature,
-                    max_tokens=800,
-                )
+                resp = await async_openai_client.chat.completions.create(**create_kwargs)
                 if track is not None:
                     # 用量埋点：双温重试循环内逐次记（最多 2 次调用各一行，别只记最后）
-                    await self._track_l2_usage(resp, track)
+                    await self._track_l2_usage(resp, model, track)
                 raw = (resp.choices[0].message.content or "").strip()
             except Exception as e:
                 logger.warning("[L2] structured compress temp=%s failed: %s", temperature, e)
@@ -860,15 +876,21 @@ class SessionSummaryManager:
             existing_summary=existing_summary or "(无)",
             new_messages=msg_text,
         )
+        model = _extract_model()
+        create_kwargs: dict = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.3,
+            "max_tokens": 800,
+        }
+        # 降级路径同样关思考：开思考时正文挤不进 content，这里只会拿到空摘要。
+        apply_reasoning_kwargs(
+            create_kwargs, get_settings().llm.binding, model, async_openai_client
+        )
         try:
-            resp = await async_openai_client.chat.completions.create(
-                model=TEXT_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.3,
-                max_tokens=800,
-            )
+            resp = await async_openai_client.chat.completions.create(**create_kwargs)
             if track is not None:
-                await self._track_l2_usage(resp, track)
+                await self._track_l2_usage(resp, model, track)
             summary = (resp.choices[0].message.content or "").strip()
             logger.info("[L2] text fallback compress done summary_len=%d", len(summary))
             return summary or None

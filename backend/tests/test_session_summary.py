@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from settings import get_settings
 from core.memory import session_summary as ss
 from core.memory.session_summary import SessionSummaryManager, SummaryItem
 
@@ -351,6 +352,78 @@ async def test_do_compress_falls_back_to_text_on_bad_json():
 
     assert temps == [0.3, 0.0]          # 结构化试了两次（首试 + temp=0 重试）
     assert out == "降级文本摘要"          # 降级到旧文本逻辑
+
+
+# ── 思考开关注入（flash 出厂开思考 -> content 空，LangSmith 线上事故回归）────
+
+def _capture_client(captured: list[dict], content: str):
+    """mock client：记录每次 create kwargs、返回固定 content；base_url 置空走模型名反查。"""
+
+    async def fake_create(**kwargs):
+        captured.append(kwargs)
+        resp = MagicMock()
+        resp.choices = [MagicMock()]
+        resp.choices[0].message.content = content
+        return resp
+
+    client = _mock_client_with(fake_create)
+    client.base_url = ""
+    return client
+
+
+@pytest.mark.asyncio
+async def test_do_compress_disables_thinking_and_uses_extract_model(monkeypatch):
+    """抽取走 extract_model（非对话主模型），且 flash 关思考（extra_body.thinking
+    disabled）——开着思考 JSON 进 reasoning_content、content 读到空，必现解析失败。"""
+    mgr = SessionSummaryManager()
+    monkeypatch.setattr(ss, "_extract_model", lambda: "deepseek-v4-flash")
+    monkeypatch.setattr(get_settings().llm, "reasoning_effort", "")  # 总闸空=按型号自动
+    captured: list[dict] = []
+
+    with patch.object(ss, "async_openai_client", _capture_client(captured, json.dumps(
+        {"items": [{"k": "fact", "key": "f", "t": "第6版"}], "resolved": []}, ensure_ascii=False,
+    ))):
+        out = await mgr._do_compress("", _mk_messages())
+
+    assert out is not None
+    assert captured[0]["model"] == "deepseek-v4-flash"          # 不再用对话主模型
+    assert captured[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+    assert "reasoning_effort" not in captured[0]
+
+
+@pytest.mark.asyncio
+async def test_do_compress_text_disables_thinking(monkeypatch):
+    """降级文本路径同样关思考：开思考时正文挤不进 content，只会拿到空摘要。"""
+    mgr = SessionSummaryManager()
+    monkeypatch.setattr(ss, "_extract_model", lambda: "deepseek-v4-flash")
+    monkeypatch.setattr(get_settings().llm, "reasoning_effort", "")
+    captured: list[dict] = []
+
+    with patch.object(ss, "async_openai_client", _capture_client(captured, "自由文本摘要")):
+        out = await mgr._do_compress_text("", _mk_messages())
+
+    assert out == "自由文本摘要"
+    assert captured[0]["model"] == "deepseek-v4-flash"
+    assert captured[0]["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+@pytest.mark.asyncio
+async def test_do_compress_unknown_model_injects_nothing(monkeypatch):
+    """安全性质：extract_model 是不在分流表内的模型（如 openai）→ 一根毫毛不动。
+    乱塞 thinking/reasoning 参数会被这类供应商 400。"""
+    mgr = SessionSummaryManager()
+    monkeypatch.setattr(ss, "_extract_model", lambda: "gpt-4o")
+    monkeypatch.setattr(get_settings().llm, "reasoning_effort", "")
+    captured: list[dict] = []
+
+    with patch.object(ss, "async_openai_client", _capture_client(captured, json.dumps(
+        {"items": [{"k": "topic", "key": "t", "t": "主题"}]}, ensure_ascii=False,
+    ))):
+        out = await mgr._do_compress("", _mk_messages())
+
+    assert out is not None
+    assert "extra_body" not in captured[0]
+    assert "reasoning_effort" not in captured[0]
 
 
 # ── get_summary（注入点拿到可读文本）────────────────────────────────────────

@@ -5,7 +5,8 @@
   2) 游标不可范围查询 → keyset (created_at, id) 增量（test_keyset_incremental_*）+
      存量 NULL 游标兼容路径（test_legacy_cursor_compat_*）；
   3) 跨进程竞态 + lost update → Redis per-session 锁（test_cross_process_redis_lock_*）
-     + OCC 条件 UPDATE（test_occ_conflict_*）。
+     + OCC 条件 UPDATE（test_occ_conflict_*）；
+  4) 频率闸按轮计且首次也受闸 → test_first_compress_*（半截对话不再送压缩）。
 
 COUNT/keyset/兼容用真实 in-memory SQLite（client fixture 触发 init_db 建表），
 _maybe_compress_locked 跑真 SQL；OCC 冲突与跨进程锁用 mock（确定性）。
@@ -71,6 +72,70 @@ async def test_count_short_circuit_skips_compress(client):
             ret = await mgr.maybe_compress(db, sid)
         assert ret is False
         mocked.assert_not_called()  # 没走到 LLM
+    finally:
+        await db.close()
+
+
+# ── 频率闸按轮计且首次也受闸（治「半截对话送压缩 + 失败重压雪上加霜」）───────
+
+@pytest.mark.asyncio
+async def test_first_compress_gated_by_interval_rounds(client):
+    """首次压缩（last_msg_id 为空）且新增不足 interval 轮（一轮=2条）→ 跳过不烧 LLM。
+    修复前 last_msg_id 为空时频率闸整道被绕过：窗口刚越阈值就半截对话送压缩；
+    压缩失败又不推进游标，下轮重压同一批（LangSmith 高频空调用的另一半根源）。"""
+    sid = "sess-first-gate"
+    # window=3 保留 6 条，10 条消息 → 首次增量 m00..m03 共 4 条 < 5 轮(10 条)
+    db = await _seed(sid, msg_count=10)
+    try:
+        mgr = ss.SessionSummaryManager(window_size=_WINDOW, buffer_size=_BUFFER, compress_interval=5)
+        with patch.object(mgr, "_do_compress", new=AsyncMock(return_value="x")) as mocked:
+            ret = await mgr.maybe_compress(db, sid)
+        assert ret is False
+        mocked.assert_not_called()  # 没走到 LLM
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_first_compress_enough_rounds_proceeds(client):
+    """新增足 interval 轮（≥10 条）→ 首次压缩放行，喂全量到 boundary 的消息、游标前移。"""
+    sid = "sess-first-ok"
+    # 16 条消息 → boundary=m09，首次增量 m00..m09 恰 10 条 = 5 轮 → 放行
+    db = await _seed(sid, msg_count=16)
+    try:
+        mgr = ss.SessionSummaryManager(window_size=_WINDOW, buffer_size=_BUFFER, compress_interval=5)
+        seen: list[str] = []
+
+        async def record(existing, msgs, track=None):
+            seen.extend(m.id for m in msgs)
+            return '{"topics":["t"]}'
+
+        with patch.object(mgr, "_do_compress", side_effect=record):
+            ret = await mgr.maybe_compress(db, sid)
+
+        assert ret is True
+        assert seen == [f"m{i:02d}" for i in range(10)]  # 首次无游标：m00..boundary 全量
+        row = await _read_l2(db, sid)
+        assert row.summary_up_to_msg_id == "m09"
+        assert row.summary_version == 1
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
+async def test_incremental_compress_gated_by_interval_rounds(client):
+    """增量侧同样按轮计：已压过（游标 m01）本轮新增 2 条 < 5 轮(10 条) → 跳过不烧 LLM。"""
+    sid = "sess-inc-gate"
+    db = await _seed(sid, msg_count=10, summary="已有摘要",
+                     up_to_msg_id="m01", up_to_ca=1001.0, version=1)
+    try:
+        mgr = ss.SessionSummaryManager(window_size=_WINDOW, buffer_size=_BUFFER, compress_interval=5)
+        with patch.object(mgr, "_do_compress", new=AsyncMock(return_value="x")) as mocked:
+            ret = await mgr.maybe_compress(db, sid)
+        assert ret is False
+        mocked.assert_not_called()
+        row = await _read_l2(db, sid)
+        assert row.summary_version == 1  # 游标/版本未动，下轮再压
     finally:
         await db.close()
 
