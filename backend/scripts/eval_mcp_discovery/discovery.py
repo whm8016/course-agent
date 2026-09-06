@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
-import math
 import re
 from typing import Any
 
+from core.agent.registry import ToolEntry
 from core.agent.tool_protocol import ToolResult
+from core.memory.course_topic_store import cosine
 from core.mcp.adapter import MCPToolAdapter
 
 # ---------------------------------------------------------------------------
@@ -47,8 +48,6 @@ def _tokens(text: str) -> list[str]:
 class LocalEmbedder:
     """哈希词袋嵌入：确定性、无需联网。相似度由中英文关键词重叠驱动。"""
 
-    name = f"local-hash-{_DIM}"
-
     def embed(self, texts: list[str]) -> list[list[float]]:
         out: list[list[float]] = []
         for t in texts:
@@ -56,26 +55,26 @@ class LocalEmbedder:
             for tok in _tokens(t):
                 h = int(hashlib.md5(tok.encode()).hexdigest(), 16)
                 vec[h % _DIM] += 1.0
-            norm = math.sqrt(sum(x * x for x in vec)) or 1.0
+            norm = sum(x * x for x in vec) ** 0.5 or 1.0
             out.append([x / norm for x in vec])
         return out
-
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    return sum(x * y for x, y in zip(a, b))
 
 
 # ---------------------------------------------------------------------------
 # 工具向量索引
 # ---------------------------------------------------------------------------
 class ToolIndex:
-    """对 ``name: description`` 建向量索引；search(need) 返回余弦最近邻 top-k。"""
+    """对 ``name: description`` 建向量索引；search(need) 返回余弦最近邻 top-k。
 
-    def __init__(self, tools: list[MCPToolAdapter] | dict[str, MCPToolAdapter], embedder: LocalEmbedder | None = None) -> None:
+    余弦复用 core.memory.course_topic_store.cosine（仓库单一实现；对已归一化的
+    LocalEmbedder 输出与点积逐位等价）。
+    """
+
+    def __init__(self, tools: list[MCPToolAdapter] | dict[str, MCPToolAdapter]) -> None:
         if isinstance(tools, dict):
             tools = list(tools.values())
         self._tools: list[MCPToolAdapter] = list(tools)
-        self._embedder = embedder or LocalEmbedder()
+        self._embedder = LocalEmbedder()
         self._texts = [f"{a.wrapped_name}: {a.description}" for a in self._tools]
         self._vecs = self._embedder.embed(self._texts) if self._tools else []
 
@@ -84,7 +83,7 @@ class ToolIndex:
         if not self._tools or not need.strip():
             return []
         q = self._embedder.embed([need])[0]
-        scored = [(_cosine(q, v), a) for a, v in zip(self._tools, self._vecs)]
+        scored = [(cosine(q, v), a) for a, v in zip(self._tools, self._vecs)]
         scored.sort(key=lambda x: x[0], reverse=True)
         return [(a, s) for s, a in scored[:top_k]]
 
@@ -106,7 +105,7 @@ class DiscoverToolLoader:
         else:
             self._pool = {a.wrapped_name: a for a in pool}
         self._top_k = top_k
-        self._index = ToolIndex(self._pool, LocalEmbedder())
+        self._index = ToolIndex(self._pool)
         self._loaded: set[str] = set()
         self._live_schemas: list[dict[str, Any]] | None = None
         self.discover_queries: list[str] = []  # 供指标采集：模型实际发出的 need 列表
@@ -123,17 +122,16 @@ class DiscoverToolLoader:
         """初始为空（demo 每 task 全新 loader；生产语义下此处返回已加载集合）。"""
         return []
 
-    def discover(self, need: str, top_k: int | None = None) -> dict[str, list[dict[str, str]]]:
-        """按 need 语义检索 top-k 并加载进 live list；返回命中明细。
+    def discover(self, need: str) -> dict[str, list[dict[str, str]]]:
+        """按 need 语义检索 top-k（构造时的 self._top_k）并加载进 live list；返回命中明细。
 
         返回 {"loaded": [{"name","description"}...], "already_loaded": [...]}——
         description 一并返回，供 tool result 文本告知模型"现在多了什么能力"。
         """
         self.discover_queries.append(str(need))
-        k = top_k or self._top_k
         loaded: list[dict[str, str]] = []
         already: list[dict[str, str]] = []
-        for adapter, _score in self._index.search(need, k):
+        for adapter, _score in self._index.search(need, self._top_k):
             if adapter.wrapped_name in self._loaded:
                 already.append({"name": adapter.wrapped_name, "description": adapter.description})
                 continue
@@ -208,8 +206,6 @@ async def execute_discover_tools(need: str = "", **kwargs: Any) -> ToolResult:
 
 def register_discover_tool(registry: Any) -> None:
     """把 discover_tools 注册进 ToolRegistry（执行路由复用 execute_tool）。"""
-    from core.agent.registry import ToolEntry
-
     registry.register(ToolEntry(
         name="discover_tools",
         schema=DISCOVER_TOOLS_SCHEMA,

@@ -20,34 +20,18 @@ from core.observability.cost import TokenUsage
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _clean_registry():
-    """模块级注册 mock 工具，跑完整体清理（不污染其它测试的全局 registry）。
+def _clean_env():
+    """模块级启用评测环境（registry 注册 + 全局重定向），跑完整体还原。
 
-    ensure_setup 会把 session_state._SESSIONS_BASE 重定向到本包 results/_sessions/——
-    teardown 必须还原，否则本模块之后跑的用例（如显式指定文件顺序的 test_deferred_tools）
-    会把 loaded_tools.json 静默写进评测目录。
+    突变/还原清单同源在 harness.ensure_setup 的还原闭包里——这里不做镜像维护；
+    不还原的话，本模块之后跑的用例（如显式指定文件顺序的 test_deferred_tools）
+    会把 loaded_tools.json 静默写进评测目录、token 统计类测试读到被关掉的开关。
     """
-    import core.mcp.session_state as ss
-    from scripts.eval_mcp_discovery import synthetic_tools
-    from scripts.eval_mcp_discovery.discovery import register_discover_tool
     from scripts.eval_mcp_discovery.harness import ensure_setup
-    from core.agent.registry import get_tool_registry
-    from settings import get_settings
 
-    _settings = get_settings()
-    orig_base = ss._SESSIONS_BASE
-    orig_usage = _settings.usage_tracking.enabled
-    orig_quota = _settings.cost_quota.enabled
-    ensure_setup()
-    register_discover_tool(get_tool_registry())
+    restore = ensure_setup()
     yield
-    synthetic_tools.unregister_mock_tools()
-    get_tool_registry().unregister("discover_tools")
-    ss._SESSIONS_BASE = orig_base
-    # ensure_setup 为评测进程关了两个全局开关，pytest 进程里须还原（否则污染
-    # 后续依赖 usage_tracking/cost_quota 默认开的 token 统计类测试）
-    _settings.usage_tracking.enabled = orig_usage
-    _settings.cost_quota.enabled = orig_quota
+    restore()
 
 
 @pytest.fixture()
@@ -139,7 +123,7 @@ def test_discover_loader_appends_and_dedups():
     from scripts.eval_mcp_discovery.discovery import DiscoverToolLoader
 
     live: list[dict] = [{"type": "function", "function": {"name": "discover_tools"}}]
-    loader = DiscoverToolLoader(pool=synthetic_tools.pool_to_dict(synthetic_tools.build_pool()), top_k=3)
+    loader = DiscoverToolLoader(pool=synthetic_tools.build_pool(), top_k=3)
     loader.bind_live_schemas(live)
     assert loader.initial_schemas() == []
 

@@ -47,13 +47,13 @@ def summarize(recs: list[dict]) -> dict:
         summary[arm] = {
             "cases": len(rows),
             "errors": len(rows) - n,
-            "avg_input_tokens": round(sum(r.get("input_tokens", 0) for r in ok) / n),
-            "avg_output_tokens": round(sum(r.get("output_tokens", 0) for r in ok) / n),
-            "avg_rounds": round(sum(r.get("rounds", 0) for r in ok) / n, 2),
-            "avg_wall_ms": round(sum(r.get("wall_ms", 0) for r in ok) / n),
-            "avg_recall": round(sum(r.get("recall", 0.0) for r in ok) / n, 4),
-            "avg_false_calls": round(sum(len(r.get("false_calls", [])) for r in ok) / n, 2),
-            "avg_system_prompt_chars": round(sum(r.get("system_prompt_chars", 0) for r in ok) / n),
+            "avg_input_tokens": round(sum(r["input_tokens"] for r in ok) / n),
+            "avg_output_tokens": round(sum(r["output_tokens"] for r in ok) / n),
+            "avg_rounds": round(sum(r["rounds"] for r in ok) / n, 2),
+            "avg_wall_ms": round(sum(r["wall_ms"] for r in ok) / n),
+            "avg_recall": round(sum(r["recall"] for r in ok) / n, 4),
+            "avg_false_calls": round(sum(len(r["false_calls"]) for r in ok) / n, 2),
+            "avg_system_prompt_chars": round(sum(r["system_prompt_chars"] for r in ok) / n),
         }
     return summary
 
@@ -70,7 +70,7 @@ def print_summary(summary: dict) -> None:
     print("-" * len(header))
     for arm, s in summary.items():
         row = [
-            arm, s["cases"], s.get("errors", "-"),
+            arm, s["cases"], s["errors"],
             s.get("avg_input_tokens", "-"), s.get("avg_output_tokens", "-"),
             s.get("avg_rounds", "-"),
             round(s["avg_wall_ms"] / 1000, 1) if "avg_wall_ms" in s else "-",
@@ -97,13 +97,14 @@ async def main() -> None:
     from settings import get_settings
 
     effective_model = args.model or config.MODEL or get_settings().llm.text_model
-    tasks = get_tasks()
+    all_tasks = get_tasks()
+    tasks = all_tasks
     if args.tasks:
         wanted = set(args.tasks)
         tasks = [t for t in tasks if t["id"] in wanted]
         missing = wanted - {t["id"] for t in tasks}
         if missing:
-            parser.error(f"未知任务 id: {sorted(missing)}（可选 {[t['id'] for t in get_tasks()]}）")
+            parser.error(f"未知任务 id: {sorted(missing)}（可选 {[t['id'] for t in all_tasks]}）")
     if args.limit:
         tasks = tasks[: args.limit]
 

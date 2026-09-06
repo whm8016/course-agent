@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any, Callable
 
-from core.agent.registry import ToolEntry, ToolRegistry, get_tool_registry
+from core.agent.registry import ToolEntry, ToolRegistry
 from core.agent.tool_protocol import ToolResult
 from core.mcp.adapter import MCPToolAdapter
 
@@ -139,7 +139,7 @@ def build_pool(size: int | None = None) -> list[MCPToolAdapter]:
                 name: {"type": ptype, "description": pdesc}
                 for name, ptype, pdesc in params
             }
-            required = [name for name, _, _ in params[:1]] or []
+            required = [params[0][0]] if params else []
             adapters.append(MCPToolAdapter(
                 server_name=server,
                 original_name=original_name,
@@ -151,11 +151,6 @@ def build_pool(size: int | None = None) -> list[MCPToolAdapter]:
     if size is not None:
         adapters = adapters[:size]
     return adapters
-
-
-def pool_to_dict(pool: list[MCPToolAdapter]) -> dict[str, MCPToolAdapter]:
-    """wrapped_name → adapter（DeferredToolLoader 的 pool 入参格式）。"""
-    return {a.wrapped_name: a for a in pool}
 
 
 def make_mock_executor(adapter: MCPToolAdapter) -> Callable[..., Any]:
@@ -175,35 +170,24 @@ def make_mock_executor(adapter: MCPToolAdapter) -> Callable[..., Any]:
     return _execute
 
 
-def register_mock_tools(registry: ToolRegistry | None = None, pool: list[MCPToolAdapter] | None = None) -> list[str]:
-    """把合成工具注册进 ToolRegistry（幂等：同名覆盖），返回注册名列表。"""
-    reg = registry if registry is not None else get_tool_registry()
-    tools = pool if pool is not None else build_pool()
-    names: list[str] = []
-    for adapter in tools:
-        reg.register(ToolEntry(
+def register_mock_tools(registry: ToolRegistry, pool: list[MCPToolAdapter]) -> None:
+    """把给定池子的合成工具注册进 ToolRegistry（幂等：同名覆盖）。
+
+    显式收 pool：注册集与 harness 评测用的池子同源，TOOL_POOL_SIZE 裁剪时
+    registry 里不会残留池外的可调用工具（猜名直调口径不漂移）。清理走
+    ``registry.unregister(name)``（harness.ensure_setup 的还原闭包内联做）。
+    """
+    for adapter in pool:
+        registry.register(ToolEntry(
             name=adapter.wrapped_name,
             schema=adapter.to_openai_schema(),
             executor=make_mock_executor(adapter),
             deferred=True,
         ))
-        names.append(adapter.wrapped_name)
-    return names
-
-
-def unregister_mock_tools(registry: ToolRegistry | None = None, names: list[str] | None = None) -> None:
-    """清理注册（测试隔离用；names 为 None 时按全池反查）。"""
-    reg = registry if registry is not None else get_tool_registry()
-    if names is None:
-        names = [a.wrapped_name for a in build_pool()]
-    for name in names:
-        reg.unregister(name)
 
 
 __all__ = [
     "build_pool",
-    "pool_to_dict",
     "make_mock_executor",
     "register_mock_tools",
-    "unregister_mock_tools",
 ]

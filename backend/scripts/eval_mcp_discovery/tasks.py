@@ -8,9 +8,6 @@ from __future__ import annotations
 
 from core.mcp.adapter import wrapped_tool_name
 
-# (server, tool) 对：该任务"应当用到"的领域工具
-Expect = list[tuple[str, str]]
-
 _TASK_DEFS: list[dict] = [
     {
         "id": "paper_translate",

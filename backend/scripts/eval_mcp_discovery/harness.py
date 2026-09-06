@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
 from . import config  # noqa: F401  # bootstrap 副作用（sys.path/.env）必须最先执行
 
@@ -37,30 +37,35 @@ _DISCOVER_PROMPT_BLOCK = (
     "拿到足够信息后再作答。"
 )
 
-_setup_done = False
 
+def ensure_setup() -> Callable[[], None]:
+    """process 级初始化：session 重定向 + 关生产侧写 + 合成工具注册；返回还原闭包。
 
-def ensure_setup() -> None:
-    """幂等初始化：session 持久化重定向 + 关闭生产侧写 + 合成工具注册。
+    突变与还原清单同源在此（测试 fixture 只需 ``restore = ensure_setup(); ...; restore()``，
+    不再人肉镜像维护）。真实评测进程忽略返回值（进程退出即还原）：
 
     - ``core.mcp.session_state._SESSIONS_BASE`` 指向 results/_sessions/，避免 arm A 的
       load_tools 持久化往真实 data/sessions/ 写评测垃圾（_state_file 调用时读模块全局，
       赋值即生效）。
     - 关 ``usage_tracking`` / ``cost_quota``（进程内 settings 单例，只影响本评测进程）：
       否则真实评测每 case 往生产 llm_usage_records 插一行账单、并向 Redis 累计配额。
-    - mock 工具 + discover_tools 注册进进程级 ToolRegistry（register 幂等，重复调用安全）。
-    """
-    global _setup_done
-    if _setup_done:
-        return
-    import core.mcp.session_state as _ss
+    - mock 工具 + discover_tools 注册进进程级 ToolRegistry；注册池与 run_case 用的
+      池子同源（build_pool(TOOL_POOL_SIZE)），裁剪时 registry 不残留池外可调用工具。
 
-    config.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-    _ss._SESSIONS_BASE = config.SESSIONS_DIR
+    各步幂等（mkdir exist_ok / 赋值 / register 同名覆盖），重复调用安全——还原闭包
+    还原的是**首次调用前**的原值，故不要嵌套调用。
+    """
+    import core.mcp.session_state as _ss
 
     from settings import get_settings
 
     _settings = get_settings()
+    _orig_base = _ss._SESSIONS_BASE
+    _orig_usage = _settings.usage_tracking.enabled
+    _orig_quota = _settings.cost_quota.enabled
+
+    config.SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+    _ss._SESSIONS_BASE = config.SESSIONS_DIR
     _settings.usage_tracking.enabled = False
     _settings.cost_quota.enabled = False
 
@@ -68,9 +73,20 @@ def ensure_setup() -> None:
     from .discovery import register_discover_tool
     from core.agent.registry import get_tool_registry
 
-    synthetic_tools.register_mock_tools(get_tool_registry())
-    register_discover_tool(get_tool_registry())
-    _setup_done = True
+    _registry = get_tool_registry()
+    _pool = synthetic_tools.build_pool(config.TOOL_POOL_SIZE)
+    synthetic_tools.register_mock_tools(_registry, _pool)
+    register_discover_tool(_registry)
+    _names = [a.wrapped_name for a in _pool] + ["discover_tools"]
+
+    def _restore() -> None:
+        for name in _names:
+            _registry.unregister(name)
+        _settings.usage_tracking.enabled = _orig_usage
+        _settings.cost_quota.enabled = _orig_quota
+        _ss._SESSIONS_BASE = _orig_base
+
+    return _restore
 
 
 def _metrics_from_outcome(
@@ -90,18 +106,20 @@ def _metrics_from_outcome(
     "发现后调用"与"猜名直调"分开，避免 recall 虚高误读。
     """
     expected = set(task["expected_tools"])
-    tools_used = list(getattr(outcome, "tools_used", None) or [])
+    tools_used = list(outcome.tools_used)
     # 命中率只看领域工具（mcp_*）：meta 工具（load_tools/discover_tools）不算误召
     domain_used = [t for t in tools_used if str(t).startswith("mcp_")]
     hits = expected & set(domain_used)
+    usage = outcome.total_usage  # LoopOutcome 恒有（default_factory）
     return {
         "task_id": task["id"],
         "arm": arm,
-        "completed": bool(getattr(outcome, "completed", False)),
-        "rounds": getattr(outcome, "rounds", 0),
-        "input_tokens": getattr(outcome.total_usage, "input_tokens", 0) if getattr(outcome, "total_usage", None) else 0,
-        "output_tokens": getattr(outcome.total_usage, "output_tokens", 0) if getattr(outcome, "total_usage", None) else 0,
-        "cache_read_tokens": getattr(outcome.total_usage, "cache_read_tokens", 0) if getattr(outcome, "total_usage", None) else 0,
+        "error": None,
+        "completed": outcome.completed,
+        "rounds": outcome.rounds,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
         "tools_used": tools_used,
         "domain_tools_used": domain_used,
         "recall": round(len(hits) / len(expected), 4) if expected else 0.0,
@@ -112,7 +130,7 @@ def _metrics_from_outcome(
         "load_tools_used": "load_tools" in tools_used,
         "system_prompt_chars": system_prompt_chars,
         "wall_ms": wall_ms,
-        "final_text": (getattr(outcome, "final_text", "") or "")[:500],
+        "final_text": (outcome.final_text or "")[:500],
     }
 
 
@@ -127,19 +145,20 @@ async def run_case(
 ) -> dict:
     """跑单个 (task, arm)，返回指标 dict。loop_fn 可注入 mock loop（离线测试）。
 
+    前置：调用方须已 ``ensure_setup()``（run_eval.main / 测试 fixture 各自负责，
+    process 级初始化不藏在 per-case 里）。
     fail-fast 口径：任务 expected_tools 不在合成池内直接抛 ValueError（池子被
     TOOL_POOL_SIZE 裁剪过时提示先跑全量）；LLM 调用失败记 error 不中断整批。
     """
     from . import synthetic_tools
     from .discovery import DISCOVER_TOOLS_SCHEMA, DiscoverToolLoader, _CURRENT_DISCOVER_LOADER
 
-    ensure_setup()
     if arm not in ARMS:
         raise ValueError(f"未知 arm: {arm}（可选 {ARMS}）")
 
     pool = synthetic_tools.build_pool(config.TOOL_POOL_SIZE)
-    pool_dict = synthetic_tools.pool_to_dict(pool)
-    missing = [t for t in task["expected_tools"] if t not in pool_dict]
+    pool_names = {a.wrapped_name for a in pool}
+    missing = [t for t in task["expected_tools"] if t not in pool_names]
     if missing:
         raise ValueError(
             f"任务 {task['id']} 的 expected_tools 不在合成池内: {missing}"
@@ -167,7 +186,7 @@ async def run_case(
     discover_loader: DiscoverToolLoader | None = None
     deferred_loader = None
 
-    rec: dict[str, Any] = {"task_id": task["id"], "arm": arm, "error": None}
+    rec: dict[str, Any]
     t0 = time.perf_counter()
     try:
         if arm == "deferred_exact":
@@ -179,7 +198,7 @@ async def run_case(
             # 评测口径：每 case 干净起点（loaded=空集），不读 results/_sessions 里
             # 上次运行的持久化——同 sid 重跑才可复现；load() 触发的 _persist 落在
             # 重定向后的 _SESSIONS_BASE，不污染真实 data/sessions/。
-            loader = DeferredToolLoader(pool=pool_dict, session_id=sid, loaded=set())
+            loader = DeferredToolLoader(pool=pool, session_id=sid, loaded=set())
             deferred_loader = loader
             tool_schemas.extend(loader.initial_schemas())
             loader.bind_live_schemas(tool_schemas)
@@ -187,17 +206,14 @@ async def run_case(
         else:
             system_prompt = _BASE_PROMPT + "\n\n" + _DISCOVER_PROMPT_BLOCK
             tool_schemas = [DISCOVER_TOOLS_SCHEMA]
-            discover_loader = DiscoverToolLoader(pool=pool_dict, top_k=config.DISCOVER_TOP_K)
+            discover_loader = DiscoverToolLoader(pool=pool, top_k=config.DISCOVER_TOP_K)
             discover_loader.bind_live_schemas(tool_schemas)
             discover_token = _CURRENT_DISCOVER_LOADER.set(discover_loader)
 
         if loop_fn is None:
             from core.agentic.loop import run_agent_loop
 
-            async def loop_fn_default(**kwargs):  # noqa: F811
-                return await run_agent_loop(**kwargs)
-
-            loop_fn = loop_fn_default
+            loop_fn = run_agent_loop
 
         outcome = await loop_fn(
             context=ctx,
@@ -221,11 +237,14 @@ async def run_case(
             discover_count=discover_count,
             loaded_names=loaded_names,
         )
-        rec["error"] = None
     except Exception as exc:  # noqa: BLE001
         logger.exception("[eval_mcp_discovery] %s/%s 运行失败", arm, task["id"])
-        rec["error"] = repr(exc)
-        rec["wall_ms"] = int((time.perf_counter() - t0) * 1000)
+        rec = {
+            "task_id": task["id"],
+            "arm": arm,
+            "error": repr(exc),
+            "wall_ms": int((time.perf_counter() - t0) * 1000),
+        }
     finally:
         from .discovery import reset_discover_loader as _rd
         from core.agentic.dynamic_tools import reset_deferred_loader as _rl
