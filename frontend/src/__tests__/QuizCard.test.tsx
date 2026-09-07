@@ -5,8 +5,8 @@
  * （不带 grade_source，后端守卫拦观测）/ coding 骨架预填 / ungraded 展示 /
  * sessionId 缺省静默跳过 / 计分分母=已判分题。
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent, screen, waitFor } from '@testing-library/react'
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
+import { render, fireEvent, screen, waitFor, act } from '@testing-library/react'
 import QuizCard from '../components/quiz/QuizCard'
 import type { QuizData } from '../types'
 import { upsertNotebookEntry, gradeAnswer } from '../services/api'
@@ -15,6 +15,19 @@ import type { GradeResponse } from '../services/api'
 vi.mock('../services/api', () => ({
   upsertNotebookEntry: vi.fn().mockResolvedValue(undefined),
   gradeAnswer: vi.fn(),
+}))
+
+// 追问面板 WS：捕获 handlers 供测试注入流式 token
+const followupState = vi.hoisted(() => ({
+  handlers: {} as { onMessage?: (m: Record<string, unknown>) => void },
+}))
+vi.mock('../services/questionWs', () => ({
+  connectQuestionFollowup: vi.fn(
+    (_payload: unknown, handlers: typeof followupState.handlers) => {
+      followupState.handlers = handlers
+      return vi.fn()
+    },
+  ),
 }))
 
 const quiz: QuizData = {
@@ -64,7 +77,7 @@ function _grade(grade: GradeResponse['grade'], over: Partial<GradeResponse> = {}
 }
 
 /** 选完客观题 + 填简答，提交（异步判分链随后由 waitFor 断言） */
-function selectTypeAndSubmit(sessionId: string | null, typed = '光合作用是……') {
+function selectTypeAndSubmit(sessionId: string | null, typed: string | null = '光合作用是……') {
   const view = render(<QuizCard quiz={quiz} sessionId={sessionId} />)
   fireEvent.click(screen.getByText('B. 2'))
   if (typed !== null) {
@@ -244,5 +257,121 @@ describe('QuizCard 提交答案三路收录', () => {
       expect(view.container.textContent).toContain('✓ 回答正确')
     })
     expect(view.container.textContent).not.toContain('未能自动判分')
+  })
+})
+
+describe('QuizCard 追问面板流式滚动', () => {
+  // jsdom 不实现 scrollIntoView，stub 成 spy：旧实现每个 token 调一次，可数
+  const scrollIntoView = vi.fn()
+
+  beforeAll(() => {
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      value: scrollIntoView,
+      configurable: true,
+    })
+  })
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(upsertNotebookEntry).mockResolvedValue(undefined)
+    vi.mocked(gradeAnswer).mockResolvedValue(_grade('ungraded'))
+  })
+
+  /** 打开第 1 题追问面板，并劫持面板滚动容器的 scrollTop 赋值（jsdom 无布局，以此观测跟随） */
+  function openFollowupPanel() {
+    const view = render(<QuizCard quiz={quiz} sessionId={null} />)
+    fireEvent.click(screen.getAllByText('追问')[0])
+    const panel = document.querySelector('.max-h-52') as HTMLDivElement
+    expect(panel).not.toBeNull()
+    const setScrollTop = vi.fn()
+    Object.defineProperty(panel, 'scrollTop', {
+      get: () => 0,
+      set: setScrollTop,
+      configurable: true,
+    })
+    return { view, panel, setScrollTop }
+  }
+
+  function sendFollowup() {
+    fireEvent.change(screen.getByPlaceholderText('输入追问内容…'), {
+      target: { value: '为什么' },
+    })
+    fireEvent.click(screen.getByTitle('发送'))
+  }
+
+  it('流式跟随只动面板自身 scrollTop，绝不 scrollIntoView（那会拖动整页祖先链）', async () => {
+    const { setScrollTop } = openFollowupPanel()
+    sendFollowup()
+
+    act(() => {
+      followupState.handlers.onMessage?.({ type: 'token', content: '因' })
+      followupState.handlers.onMessage?.({ type: 'token', content: '为' })
+    })
+
+    // 旧实现在 30/50ms 定时器里安排 scrollIntoView(smooth)，等它落地再断言
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 120))
+    })
+
+    // 不许碰 scrollIntoView：连带滚动祖先链（整个聊天页被反复压到底）+ smooth 高频排队
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    // 跟随发生在面板容器自身
+    expect(setScrollTop).toHaveBeenCalled()
+  })
+
+  it('用户在面板内上拉脱离贴底后，后续 token 不再拽回', async () => {
+    const { panel, setScrollTop } = openFollowupPanel()
+    sendFollowup()
+
+    act(() => {
+      followupState.handlers.onMessage?.({ type: 'token', content: '答' })
+    })
+    expect(setScrollTop).toHaveBeenCalled()
+    setScrollTop.mockClear()
+
+    // 模拟上拉：jsdom 无布局，手动把容器报告成"离底 300px"再派发 scroll
+    Object.defineProperty(panel, 'scrollHeight', { get: () => 500, configurable: true })
+    Object.defineProperty(panel, 'clientHeight', { get: () => 200, configurable: true })
+    fireEvent.scroll(panel)
+
+    act(() => {
+      followupState.handlers.onMessage?.({ type: 'token', content: '案' })
+      followupState.handlers.onMessage?.({ type: 'token', content: '续' })
+    })
+
+    expect(setScrollTop).not.toHaveBeenCalled()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+  })
+
+  it('用户拉回底部后恢复跟随', () => {
+    const { panel, setScrollTop } = openFollowupPanel()
+    sendFollowup()
+    act(() => {
+      followupState.handlers.onMessage?.({ type: 'token', content: '答' })
+    })
+    setScrollTop.mockClear()
+
+    // 脱离贴底（离底 300px）：后续 token 不跟随
+    Object.defineProperty(panel, 'scrollHeight', { get: () => 500, configurable: true })
+    Object.defineProperty(panel, 'clientHeight', { get: () => 200, configurable: true })
+    fireEvent.scroll(panel)
+    act(() => {
+      followupState.handlers.onMessage?.({ type: 'token', content: '案' })
+    })
+    expect(setScrollTop).not.toHaveBeenCalled()
+
+    // 拉回贴底（离底 20px）：恢复跟随
+    Object.defineProperty(panel, 'scrollTop', {
+      get: () => 480,
+      set: setScrollTop,
+      configurable: true,
+    })
+    fireEvent.scroll(panel)
+    setScrollTop.mockClear()
+    act(() => {
+      followupState.handlers.onMessage?.({ type: 'token', content: '续' })
+    })
+    expect(setScrollTop).toHaveBeenCalled()
+    expect(scrollIntoView).not.toHaveBeenCalled()
   })
 })

@@ -48,11 +48,29 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
   const [messages, setMessages] = useState<FollowupMsg[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
+  const [isAtBottom, setIsAtBottom] = useState(true)
   const closeRef = useRef<(() => void) | null>(null)
 
   // 卸载时关闭未完成的追问连接，避免 WebSocket 泄漏
   useEffect(() => () => closeRef.current?.(), [])
+
+  // 贴底判定（与 ChatWindow 同口径 40px）：用户上拉脱离即停止自动跟随
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (!el) return
+    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+    setIsAtBottom((prev) => (prev !== near ? near : prev))
+  }, [])
+
+  // 流式新内容到达时，仅在贴底期间跟随，直接赋值本容器 scrollTop（瞬时、只动面板）。
+  // 不用 bottomRef.scrollIntoView({smooth})——那会连带滚动祖先链（整个聊天页被反复
+  // 压到底），且每个 token 排一次 smooth 动画与用户手动滚动打架（ChatWindow 已踩过同坑）
+  useEffect(() => {
+    if (!isAtBottom) return
+    const el = scrollRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [messages, loading, isAtBottom])
 
   const questionType = question.options?.length ? 'choice' : 'written'
 
@@ -77,7 +95,7 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
     setMessages((prev) => [...prev, userMsg])
     setInput('')
     setLoading(true)
-    setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 50)
+    setIsAtBottom(true) // 自己刚发的话出现在底部，恢复跟随（只滚面板自身）
 
     const historyContext =
       messages.length > 0
@@ -114,7 +132,6 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
               }
               return [...prev, { role: 'assistant', content: answer }]
             })
-            setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' }), 30)
           } else if (t === 'answer') {
             answer = String(event.content ?? answer)
             setMessages((prev) => {
@@ -163,7 +180,11 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
           <X size={13} strokeWidth={1.5} />
         </button>
       </div>
-      <div className="max-h-52 overflow-y-auto px-3 py-2 space-y-2">
+      <div
+        ref={scrollRef}
+        onScroll={handleScroll}
+        className="max-h-52 overflow-y-auto px-3 py-2 space-y-2"
+      >
         {messages.length === 0 && (
           <p className="text-[11px] text-muted text-center py-2">有问题？在这里追问吧</p>
         )}
@@ -189,7 +210,6 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
             <span className="w-1.5 h-1.5 bg-ink-soft rounded-full animate-bounce" />
           </div>
         )}
-        <div ref={bottomRef} />
       </div>
       <div className="flex items-center gap-2 px-3 py-2 border-t border-line">
         <input
