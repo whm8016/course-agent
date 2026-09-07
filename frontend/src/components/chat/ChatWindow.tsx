@@ -53,6 +53,13 @@ function rowToMessage(row: ApiMessageRow): Message {
   }
 }
 
+/** 前端消息 → 后端 history 线格式（chat SSE 与 quiz/research 两条 WS 共用，三处一致）。
+ * 只取 role/content——图片/附件等展示字段不出端；后端只取末尾 run_history_max_length
+ * （=20）条，更早历史由 session_id 走 L2 摘要通道。 */
+function toWsHistory(messages: Message[]): { role: string; content: string }[] {
+  return messages.map((m) => ({ role: m.role, content: m.content }))
+}
+
 /** 与 MessageBubble 的 _thinkingSteps 同结构；必须每次 setState 用新引用，流式中才会重绘 */
 function cloneThinkingSnapshot(steps: Message[]): Message[] {
   return steps.map((m) => ({ ...m, metadata: m.metadata ? { ...m.metadata } : undefined }))
@@ -359,6 +366,18 @@ export default function ChatWindow({
   const isQuizMode = activeCap === 'quiz'
   const isResearchMode = activeCap === 'research'
 
+  // 终态统一清理流式 overlay（streaming + 确认卡片）：done/error、全局停止、卡片取消、
+  // 切换会话各路径共用。仅调稳定 setter，useCallback 空依赖恒稳定。
+  const resetQuizOverlays = useCallback(() => {
+    setQuizStreaming(false)
+    setQuizAskUser(null)
+  }, [])
+  const resetResearchOverlays = useCallback(() => {
+    setResearchStreaming(false)
+    setResearchAskUser(null)
+    setResearchOutline(null)
+  }, [])
+
   useEffect(() => {
     currentSessionRef.current = sessionId
   }, [sessionId])
@@ -443,19 +462,15 @@ export default function ChatWindow({
     setLoading(false)
     setStreamingStarted(false)
     setIsStopping(false)
-    setQuizStreaming(false)
+    // 挂起中的确认卡片（quiz 追问 / 研究追问 / 研究大纲）随会话切换一并撤下
+    resetQuizOverlays()
     setQuizTraces([])
     setQuizStreamQuestions([])
     setQuizError('')
-    setResearchStreaming(false)
+    resetResearchOverlays()
     setResearchTraces([])
     setResearchError('')
-    // 挂起中的确认卡片（quiz 追问 / 研究追问 / 研究大纲）随会话切换一并撤下，
-    // 否则残留在新会话窗口渲染
-    setQuizAskUser(null)
-    setResearchAskUser(null)
-    setResearchOutline(null)
-  }, [sessionId])
+  }, [sessionId, resetQuizOverlays, resetResearchOverlays])
 
   // 关闭能力菜单（点外部）
   useEffect(() => {
@@ -654,7 +669,7 @@ export default function ChatWindow({
         attachments: attachments.length > 0 ? attachments : undefined,
         tools: useKb ? ['rag'] : [],
         // 跨模式记忆：同会话刚聊的内容（不含本轮），后端以"背景摘录"形态带入出题
-        history: messages.map((m) => ({ role: m.role, content: m.content })),
+        history: toWsHistory(messages),
         session_id: activeSessionId || undefined,
       },
       {
@@ -702,8 +717,7 @@ export default function ChatWindow({
               ...prev,
               { text: `生成完成，共 ${collectedQuestions.length} 道`, kind: 'done' },
             ])
-            setQuizStreaming(false)
-            setQuizAskUser(null)
+            resetQuizOverlays()
             const quizData: QuizData = { questions: [...collectedQuestions] }
             const assistantMsg: Message = {
               role: 'assistant',
@@ -722,8 +736,7 @@ export default function ChatWindow({
             quizCloseRef.current?.()
           } else if (t === 'error') {
             setQuizError(String(msg.message ?? msg.content ?? '出题失败，请重试'))
-            setQuizStreaming(false)
-            setQuizAskUser(null)
+            resetQuizOverlays()
           }
         },
         onClose: () => {
@@ -740,17 +753,9 @@ export default function ChatWindow({
     )
     quizCloseRef.current = close
     quizSendRef.current = send
-  }, [quizConfig, input, courseId, loading, quizStreaming, messages, onSessionCreated, pendingFiles, uploadPendingAttachments, useKb])
+  }, [quizConfig, input, courseId, loading, quizStreaming, messages, resetQuizOverlays, onSessionCreated, pendingFiles, uploadPendingAttachments, useKb])
 
   // ---------- 深度研究 ----------
-  // 终态统一清理研究流式 overlay（streaming/askUser/outline）：done/error 分支、
-  // 全局停止、卡片取消三处共用。仅调稳定 setter，useCallback 空依赖恒稳定。
-  const resetResearchOverlays = useCallback(() => {
-    setResearchStreaming(false)
-    setResearchAskUser(null)
-    setResearchOutline(null)
-  }, [])
-
   const handleResearchStart = useCallback(async (topic: string) => {
     if (!topic.trim() || !courseId) return
     if (loading || researchStreaming) return
@@ -825,8 +830,6 @@ export default function ChatWindow({
       }
     }
 
-    // 终态清理流式 overlay：组件作用域 resetResearchOverlays（含全局停止/卡片取消路径）
-
     // ask_user 暂停标志（断线重连判定）+ 重连防循环（至多一次）。本地 let 跨 connect() 共享。
     let awaitingClarification = false
     let reconnected = false
@@ -843,7 +846,7 @@ export default function ChatWindow({
           },
           attachments: attachments.length > 0 ? attachments : undefined,
           // 跨模式记忆：同会话刚聊的内容（不含本轮），后端以"背景摘录"形态带入研究
-          history: messages.map((m) => ({ role: m.role, content: m.content })),
+          history: toWsHistory(messages),
           session_id: activeSessionId || undefined,
         },
         {
@@ -993,7 +996,7 @@ export default function ChatWindow({
     const controller = new AbortController()
     abortControllerRef.current = controller
 
-    const history = messages.map((m) => ({ role: m.role, content: m.content }))
+    const history = toWsHistory(messages)
 
     const thinkingSteps: Message[] = []
     let answerContent = ''
@@ -1299,9 +1302,8 @@ export default function ChatWindow({
   const handleStop = () => {
     if (quizStreaming) {
       quizCloseRef.current?.()
-      setQuizStreaming(false)
       // 等待追问回复时点停止：连接已断，卡片必须一并撤下，否则残留在屏幕上
-      setQuizAskUser(null)
+      resetQuizOverlays()
       return
     }
     if (researchStreaming) {
@@ -1443,8 +1445,7 @@ export default function ChatWindow({
             }}
             onCancel={() => {
               quizCloseRef.current?.()
-              setQuizStreaming(false)
-              setQuizAskUser(null)
+              resetQuizOverlays()
             }}
           />
         )}

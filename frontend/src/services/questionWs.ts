@@ -56,6 +56,31 @@ function withToken(url: string): string {
   return token ? `${url}?token=${encodeURIComponent(token)}` : url
 }
 
+/** WS 句柄工厂（三个 connect 共用）。close 先解绑 onclose/onerror 再关——浏览器对主动
+ * 关闭同样派发 close 事件，不解绑会被上层当"意外断开"（research 的 onClose 带
+ * resume_research_id 自动重连，会把刚取消/停止的大纲确认卡原样弹回）。 */
+function makeWsHandle(ws: WebSocket): WsHandle {
+  const close = () => {
+    try {
+      ws.onclose = null
+      ws.onerror = null
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close()
+      }
+    } catch {
+      // ignore
+    }
+  }
+  const send = (msg: object) => {
+    try {
+      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
+    } catch {
+      // ignore
+    }
+  }
+  return { close, send }
+}
+
 // ============================================================
 // Deep Research
 // ============================================================
@@ -99,29 +124,7 @@ export function connectDeepResearch(
   handlers: DeepResearchHandlers = {},
 ): WsHandle {
   const ws = new WebSocket(deepResearchWsUrl())
-
-  const close = () => {
-    try {
-      // 主动关闭：先解绑回调再 close——浏览器对主动关闭同样触发 onclose/onerror，
-      // 不解绑会被当"意外断开"（research 的 onClose 会带 resume_research_id 自动
-      // 重连，把刚取消/停止的大纲确认卡原样弹回）
-      ws.onclose = null
-      ws.onerror = null
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close()
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  const send = (msg: object) => {
-    try {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
-    } catch {
-      // ignore
-    }
-  }
+  const { close, send } = makeWsHandle(ws)
 
   ws.onopen = () => {
     handlers.onOpen?.()
@@ -168,27 +171,7 @@ export function connectQuestionGenerate(
   handlers: QuestionGenHandlers = {},
 ): WsHandle {
   const ws = new WebSocket(questionGenerateWsUrl())
-
-  const close = () => {
-    try {
-      // 主动关闭：先解绑回调再 close（同 connectDeepResearch，防误报"意外关闭"/重连）
-      ws.onclose = null
-      ws.onerror = null
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close()
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  const send = (msg: object) => {
-    try {
-      if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(msg))
-    } catch {
-      // ignore
-    }
-  }
+  const { close, send } = makeWsHandle(ws)
 
   ws.onopen = () => {
     handlers.onOpen?.()
@@ -216,16 +199,7 @@ export function connectQuestionFollowup(
   handlers: QuestionGenHandlers = {},
 ): () => void {
   const ws = new WebSocket(questionFollowupWsUrl())
-
-  const close = () => {
-    try {
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close()
-      }
-    } catch {
-      // ignore
-    }
-  }
+  const { close } = makeWsHandle(ws)
 
   ws.onopen = () => {
     handlers.onOpen?.()
