@@ -22,6 +22,10 @@ export interface QuestionGeneratePayload {
   attachments?: AttachmentInfo[]
   /** 显式启用的工具。出题默认 ['rag']：始终基于该课程知识库检索，避免模型凭空发挥 */
   tools?: string[]
+  /** 同会话此前的对话（OpenAI message 格式）：切出题前刚聊的内容，后端以"背景摘录"形态带入 */
+  history?: { role: string; content: string }[]
+  /** 所属会话 id：后端据此加载 L2 摘要（长会话更早历史的压缩） */
+  session_id?: string
 }
 
 export interface QuestionFollowupPayload {
@@ -68,6 +72,10 @@ export interface DeepResearchPayload {
   }
   language?: string
   attachments?: AttachmentInfo[]
+  /** 同会话此前的对话（OpenAI message 格式）：切研究前刚聊的内容，后端以"背景摘录"形态带入 */
+  history?: { role: string; content: string }[]
+  /** 所属会话 id：后端据此加载 L2 摘要（长会话更早历史的压缩） */
+  session_id?: string
 }
 
 export interface DeepResearchMessage {
@@ -94,6 +102,11 @@ export function connectDeepResearch(
 
   const close = () => {
     try {
+      // 主动关闭：先解绑回调再 close——浏览器对主动关闭同样触发 onclose/onerror，
+      // 不解绑会被当"意外断开"（research 的 onClose 会带 resume_research_id 自动
+      // 重连，把刚取消/停止的大纲确认卡原样弹回）
+      ws.onclose = null
+      ws.onerror = null
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close()
       }
@@ -158,6 +171,9 @@ export function connectQuestionGenerate(
 
   const close = () => {
     try {
+      // 主动关闭：先解绑回调再 close（同 connectDeepResearch，防误报"意外关闭"/重连）
+      ws.onclose = null
+      ws.onerror = null
       if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
         ws.close()
       }

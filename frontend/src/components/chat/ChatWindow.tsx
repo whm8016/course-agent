@@ -450,6 +450,11 @@ export default function ChatWindow({
     setResearchStreaming(false)
     setResearchTraces([])
     setResearchError('')
+    // 挂起中的确认卡片（quiz 追问 / 研究追问 / 研究大纲）随会话切换一并撤下，
+    // 否则残留在新会话窗口渲染
+    setQuizAskUser(null)
+    setResearchAskUser(null)
+    setResearchOutline(null)
   }, [sessionId])
 
   // 关闭能力菜单（点外部）
@@ -648,6 +653,9 @@ export default function ChatWindow({
         metadata: { count: quizConfig.count, requirement },
         attachments: attachments.length > 0 ? attachments : undefined,
         tools: useKb ? ['rag'] : [],
+        // 跨模式记忆：同会话刚聊的内容（不含本轮），后端以"背景摘录"形态带入出题
+        history: messages.map((m) => ({ role: m.role, content: m.content })),
+        session_id: activeSessionId || undefined,
       },
       {
         onOpen: () =>
@@ -732,9 +740,17 @@ export default function ChatWindow({
     )
     quizCloseRef.current = close
     quizSendRef.current = send
-  }, [quizConfig, input, courseId, loading, quizStreaming, onSessionCreated, pendingFiles, uploadPendingAttachments, useKb])
+  }, [quizConfig, input, courseId, loading, quizStreaming, messages, onSessionCreated, pendingFiles, uploadPendingAttachments, useKb])
 
   // ---------- 深度研究 ----------
+  // 终态统一清理研究流式 overlay（streaming/askUser/outline）：done/error 分支、
+  // 全局停止、卡片取消三处共用。仅调稳定 setter，useCallback 空依赖恒稳定。
+  const resetResearchOverlays = useCallback(() => {
+    setResearchStreaming(false)
+    setResearchAskUser(null)
+    setResearchOutline(null)
+  }, [])
+
   const handleResearchStart = useCallback(async (topic: string) => {
     if (!topic.trim() || !courseId) return
     if (loading || researchStreaming) return
@@ -809,12 +825,7 @@ export default function ChatWindow({
       }
     }
 
-    // 终态统一清理流式 overlay（streaming/askUser/outline），done/error 两分支共用
-    const resetResearchOverlays = () => {
-      setResearchStreaming(false)
-      setResearchAskUser(null)
-      setResearchOutline(null)
-    }
+    // 终态清理流式 overlay：组件作用域 resetResearchOverlays（含全局停止/卡片取消路径）
 
     // ask_user 暂停标志（断线重连判定）+ 重连防循环（至多一次）。本地 let 跨 connect() 共享。
     let awaitingClarification = false
@@ -831,6 +842,9 @@ export default function ChatWindow({
             ...(resumeId ? { resume_research_id: resumeId } : {}),
           },
           attachments: attachments.length > 0 ? attachments : undefined,
+          // 跨模式记忆：同会话刚聊的内容（不含本轮），后端以"背景摘录"形态带入研究
+          history: messages.map((m) => ({ role: m.role, content: m.content })),
+          session_id: activeSessionId || undefined,
         },
         {
           onOpen: () =>
@@ -908,7 +922,7 @@ export default function ChatWindow({
       researchSendRef.current = send
     }
     connect()
-  }, [courseId, loading, researchStreaming, useKb, useWebSearch, onSessionCreated, pendingFiles, uploadPendingAttachments])
+  }, [courseId, loading, researchStreaming, messages, useKb, useWebSearch, onSessionCreated, pendingFiles, uploadPendingAttachments, resetResearchOverlays])
 
   // ---------- 普通聊天 ----------
   const handleSend = useCallback(async () => {
@@ -1286,11 +1300,14 @@ export default function ChatWindow({
     if (quizStreaming) {
       quizCloseRef.current?.()
       setQuizStreaming(false)
+      // 等待追问回复时点停止：连接已断，卡片必须一并撤下，否则残留在屏幕上
+      setQuizAskUser(null)
       return
     }
     if (researchStreaming) {
       researchCloseRef.current?.()
-      setResearchStreaming(false)
+      // 同上：askUser/outline 卡片随连接关闭一并清理
+      resetResearchOverlays()
       return
     }
     if (!loading) return
@@ -1424,6 +1441,11 @@ export default function ChatWindow({
               quizSendRef.current?.({ type: 'submit_user_reply', text: '', answers })
               setQuizAskUser(null)
             }}
+            onCancel={() => {
+              quizCloseRef.current?.()
+              setQuizStreaming(false)
+              setQuizAskUser(null)
+            }}
           />
         )}
         {/* 深度研究流式进度气泡 */}
@@ -1456,6 +1478,10 @@ export default function ChatWindow({
               researchSendRef.current?.({ type: 'submit_user_reply', text: '', answers })
               setResearchAskUser(null)
             }}
+            onCancel={() => {
+              resetResearchOverlays()
+              researchCloseRef.current?.()
+            }}
           />
         )}
         {researchOutline && (
@@ -1465,6 +1491,10 @@ export default function ChatWindow({
             onSubmit={(edited) => {
               researchSendRef.current?.({ type: 'submit_user_reply', outline: edited })
               setResearchOutline(null)
+            }}
+            onCancel={() => {
+              resetResearchOverlays()
+              researchCloseRef.current?.()
             }}
           />
         )}

@@ -10,6 +10,8 @@ interface Props {
   topic?: string
   sub_topics: OutlineItem[]
   onSubmit: (edited: OutlineItem[]) => void
+  /** 取消/放弃本轮研究：关闭连接并撤下卡片（可选；不传则只有开始研究入口） */
+  onCancel?: () => void
 }
 
 /**
@@ -17,7 +19,7 @@ interface Props {
  * 学生可改 title/overview、增删子主题，点「开始研究」后调 onSubmit（title 为空的项被过滤，
  * 与 deeptutor ResearchOutlineEditor 一致）。提交结果经 submit_user_reply 的 outline 字段回传。
  */
-export default function OutlineCard({ topic, sub_topics, onSubmit }: Props) {
+export default function OutlineCard({ topic, sub_topics, onSubmit, onCancel }: Props) {
   const [items, setItems] = useState<OutlineItem[]>(
     (sub_topics ?? []).map((s) => ({ title: s.title ?? '', overview: s.overview ?? '' })),
   )
@@ -70,7 +72,15 @@ export default function OutlineCard({ topic, sub_topics, onSubmit }: Props) {
           增加子主题
         </button>
 
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          {onCancel && (
+            <button
+              onClick={onCancel}
+              className="px-3 py-1.5 text-xs font-medium rounded-[var(--radius)] border border-line bg-canvas text-ink-soft hover:border-ink hover:text-ink transition"
+            >
+              取消
+            </button>
+          )}
           <button
             onClick={() => onSubmit(items.filter((it) => it.title.trim() !== ''))}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-[var(--radius)] bg-ink text-canvas hover:opacity-90 transition"

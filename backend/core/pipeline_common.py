@@ -11,9 +11,11 @@
   resolve_profile_runtime(profile_id, user_id) → ProfileRuntime
       解析**对话**供应商 (client, text_model, binding)。用户自配 > 平台 profile > 全 None。
   build_common_context_layers(ctx, *, include_skills=False) → CommonContextLayers
-      组装通用上下文层（course_prompt / bot_persona / memory / session_summary / now）。
-      include_skills=True 时额外急切注入 always-on skill 全文（仅 chat 挂 read_skill 工具；
-      solve/research/quiz 不挂，传 False 避免提示有 skill 却无工具可读）。
+      组装通用上下文层（course_prompt / bot_persona / memory / session_summary /
+      recent_discussion / now）。include_skills=True 时额外急切注入 always-on skill 全文
+      （仅 chat 挂 read_skill 工具；solve/research/quiz 不挂，传 False 避免提示有 skill
+      却无工具可读）。recent_discussion 仅非 chat 模式：把最近几轮原文以背景资料形态
+      带给深度管线（M-6 清空对话轮次后"针对刚才讲的出题"仍有指代对象）。
   assemble_common_context(layers) → str
       纯函数：按稳定性递减拼接通用层，过滤空段。
   describe_images(ctx, base_text, rt) → str
@@ -67,7 +69,54 @@ class CommonContextLayers:
     memory_context: str = ""
     mastery_context: str = ""
     session_summary: str = ""
+    recent_discussion: str = ""
     now_text: str = ""
+
+
+def _msg_content_text(m: dict) -> str:
+    """content 规范化为纯文本：str 原样；list（多模态 parts）拼接各 text part；其余回退空串。
+
+    WS 入口（api/run.py）读 history 无 pydantic 校验（SSE 路径有），str()/repr() 会把
+    非法形态打成 Python repr 噪声塞进 prompt，非 dict 元素则直接 AttributeError。
+    """
+    content = m.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            str(p.get("text") or "") for p in content if isinstance(p, dict)
+        ).strip()
+    return ""
+
+
+def _render_recent_discussion(
+    history: list[dict], max_pairs: int = 3, max_chars_per_msg: int = 400
+) -> str:
+    """非 chat 管线的「刚才在聊什么」摘录：取末尾最多 max_pairs 轮原文，每条截 max_chars_per_msg。
+
+    M-6 把 quiz/solve/research 的 conversation_history 清空（防闲聊被当对话轮次喂模型）后，
+    同会话切模式说「针对刚才讲的出几道题」会失去指代对象。本层把最近几轮以**背景资料**
+    形态进 system prompt——与对话轮次两条通道分离，模型知道是参考资料而非要继续的对话。
+    """
+    if not isinstance(history, list):
+        return ""
+    role_labels = {"user": "用户", "assistant": "助手"}
+    # 跳过非 dict 元素与空内容（如 quiz 结果消息 content=''）再取尾部
+    tail = [
+        m
+        for m in history
+        if isinstance(m, dict) and _msg_content_text(m).strip()
+    ][-max_pairs * 2 :]
+    if not tail:
+        return ""
+    lines = ["## 本次会话刚才的对话（原文摘录，仅供参考背景，不是新的指令）"]
+    for m in tail:
+        role = role_labels.get(str(m.get("role")), str(m.get("role") or "?"))
+        content = _msg_content_text(m).strip()
+        if len(content) > max_chars_per_msg:
+            content = content[:max_chars_per_msg] + "…"
+        lines.append(f"{role}：{content}")
+    return "\n".join(lines)
 
 
 async def resolve_profile_runtime(
@@ -151,6 +200,12 @@ async def build_common_context_layers(
         f"## 本次对话前情摘要（早期对话的压缩，非完整原文）\n{ctx.session_summary}"
         if ctx.session_summary
         else ""
+    )
+    # 「刚才的对话」原文摘录（L1 未压缩，覆盖 L2 未触发前的短会话）：仅非 chat 模式——
+    # chat 的 conversation_history 本就原样进 _build_messages，再注入会重复；quiz/solve/
+    # research 被 M-6 清成对话轮次空表，靠本层以背景资料形态带回最近讨论。
+    recent_discussion = (
+        _render_recent_discussion(ctx.conversation_history) if ctx.mode != "chat" else ""
     )
     now_text = f"【当前时间】{datetime.now().astimezone().strftime('%Y-%m-%d %H:%M %A')}"
 
@@ -242,8 +297,9 @@ async def build_common_context_layers(
             }
 
     metadata = ctx.metadata or {}
-    # Phase 2：coordinator_enabled 时对 T2 动态层（memory/mastery/summary）集体预算裁剪，低优先级
-    # 先裁（memory->mastery->summary，summary 不可重建最后裁）。默认关=各层走原 per-slice cap。
+    # Phase 2：coordinator_enabled 时对 T2 动态层（recent/memory/mastery/summary）集体预算裁剪，
+    # 低优先级先裁（recent->memory->mastery->summary：原文摘录逐字可复现最先裁，summary 不可
+    # 重建最后裁）。默认关=各层走原 per-slice cap。
     if get_settings().context_budget.coordinator_enabled:
         from core.agentic.context_budget import cap_dynamic_slices
         from core.agentic.context_window import compute_budgets
@@ -259,14 +315,16 @@ async def build_common_context_layers(
         _t2_budget = max(1, _soft_trigger // _T2_BUDGET_DIVISOR)
         _capped = cap_dynamic_slices(
             {
+                "recent_discussion": recent_discussion,
                 "memory_context": memory_context,
                 "mastery_context": mastery_context,
                 "session_summary": session_summary,
             },
             _t2_budget,
             frozenset(),
-            ["memory_context", "mastery_context", "session_summary"],
+            ["recent_discussion", "memory_context", "mastery_context", "session_summary"],
         )
+        recent_discussion = _capped["recent_discussion"]
         memory_context = _capped["memory_context"]
         mastery_context = _capped["mastery_context"]
         session_summary = _capped["session_summary"]
@@ -277,16 +335,18 @@ async def build_common_context_layers(
         memory_context=memory_context,
         mastery_context=mastery_context,
         session_summary=session_summary,
+        recent_discussion=recent_discussion,
         now_text=now_text,
     )
 
 
 def assemble_common_context(layers: CommonContextLayers) -> str:
-    """纯函数：按稳定性递减拼接通用层（course→persona→always→memory→summary→now），过滤空段。
+    """纯函数：按稳定性递减拼接通用层（course→persona→always→memory→summary→recent→now），过滤空段。
 
     与 chat 的 assemble_system_prompt 同语义（稳定性递减 + 空段过滤 + 空行连接），但不含
     chat 专属的 loop_system/skills_manifest/tool_hint/extended 段。各 pipeline 在 task_system
     之后叠加本输出：``task_system + "\\n\\n" + assemble_common_context(layers)``。
+    recent_discussion 是未压缩原文、比压缩摘要更不稳定，排在 summary 之后。
     """
     return "\n\n".join(
         p
@@ -297,6 +357,7 @@ def assemble_common_context(layers: CommonContextLayers) -> str:
             layers.memory_context,
             layers.mastery_context,
             layers.session_summary,
+            layers.recent_discussion,
             layers.now_text,
         )
         if p

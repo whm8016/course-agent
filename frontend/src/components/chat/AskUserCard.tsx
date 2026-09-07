@@ -16,13 +16,15 @@ interface Props {
   intro?: string
   questions: AskUserQuestion[]
   onSubmit: (answers: AskUserReply[]) => void
+  /** 取消/放弃本轮追问：关闭连接并撤下卡片（可选；不传则只有提交入口） */
+  onCancel?: () => void
 }
 
 /**
  * ask_user 工具触发的问题卡片：后端 loop 暂停等回复期间展示。
  * 有 options 的题→选项按钮单选；无 options→文本框。提交后调 onSubmit（未答给空串=跳过）。
  */
-export default function AskUserCard({ intro, questions, onSubmit }: Props) {
+export default function AskUserCard({ intro, questions, onSubmit, onCancel }: Props) {
   const [answers, setAnswers] = useState<Record<string, string>>({})
   const set = (id: string, text: string) => setAnswers((p) => ({ ...p, [id]: text }))
 
@@ -64,7 +66,15 @@ export default function AskUserCard({ intro, questions, onSubmit }: Props) {
           </div>
         ))}
 
-        <div className="flex justify-end">
+        <div className="flex justify-end gap-2">
+          {onCancel && (
+            <button
+              onClick={onCancel}
+              className="px-3 py-1.5 text-xs font-medium rounded-[var(--radius)] border border-line bg-canvas text-ink-soft hover:border-ink hover:text-ink transition"
+            >
+              取消
+            </button>
+          )}
           <button
             onClick={() =>
               onSubmit(questions.map((q) => ({ questionId: q.id, text: answers[q.id] ?? '' })))
