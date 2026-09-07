@@ -106,6 +106,10 @@ class EnforceReport:
     cleared_tool_results: int   # L1 清理的 tool 结果条数
     summary_added: bool         # L2 是否做了 LLM 摘要续接
     dropped_messages: int       # L3 丢弃的最旧消息条数
+    # 观测补正文（此前只留计数，LangSmith 上"删了什么/压成了什么"无从查证）：
+    cleared_originals: list[str] = dataclasses.field(default_factory=list)  # L1 被清 tool 原文（引用，由上报层截断）
+    summary_text: str = ""      # L2 摘要正文（失败/未触发为空串）
+    dropped_originals: list[str] = dataclasses.field(default_factory=list)  # L3 被丢消息 preview（[role] 前 200 字）
 
 
 def _messages_tokens(messages: list[dict[str, Any]]) -> int:
@@ -205,11 +209,19 @@ def evict_tool_results(
 
 # -- L3：丢最旧 20% 消息组（免费硬降级）-----------------------------------------
 
-def drop_oldest_turn_group(messages: list[dict[str, Any]], *, fraction: float = 0.2) -> int:
+def drop_oldest_turn_group(
+    messages: list[dict[str, Any]],
+    *,
+    fraction: float = 0.2,
+    captured_originals: list[str] | None = None,
+) -> int:
     """L3 硬降级：丢弃最旧的 fraction（默认 20%）消息组（按 turn 切），保证请求一定发得出去。
 
     对齐 Claude Code PTL retry 策略（丢最旧 20%）。保留首轮（system + 首个 user 前导，_split_turns
     把它们归 turns[0]）不动——只丢最旧的 tool 轮。就地改 messages（用 survivors 覆盖）。返回丢弃条数。
+
+    captured_originals 非空时把被丢消息 preview append 进去（``[role] 正文前 200 字``，
+    与 turn_runtime pretrim preview 同格式），供 LangSmith 上报"删了什么"。
     """
     from core.agentic.context_policy import _split_turns
 
@@ -221,7 +233,13 @@ def drop_oldest_turn_group(messages: list[dict[str, Any]], *, fraction: float = 
     drop_n = max(1, int(droppable * fraction))
     drop_n = min(drop_n, droppable)  # 不超过可丢数
     survivors = turns[:1] + turns[1 + drop_n:]
-    dropped = sum(len(t) for t in turns[1:1 + drop_n])
+    dropped_msgs = [m for t in turns[1:1 + drop_n] for m in t]
+    if captured_originals is not None:
+        captured_originals.extend(
+            f"[{m.get('role')}] {str(m.get('content') or '')[:200]}"
+            for m in dropped_msgs
+        )
+    dropped = len(dropped_msgs)
     messages[:] = [m for t in survivors for m in t]
     return dropped
 
@@ -247,6 +265,7 @@ async def enforce(
     cleared = 0
     summary_added = False
     dropped = 0
+    summary_text = ""
 
     # L1：清旧 tool 结果（免费）。捕获被清原文供 L2 摘要复用。
     captured: list[str] = []
@@ -270,10 +289,12 @@ async def enforce(
             })
             summary_added = True
             total = _messages_tokens(messages)
+        summary_text = summary
 
     # L3：硬降级（仍超硬天花板）。丢最旧 20% 消息组，保请求发得出去。
+    dropped_previews: list[str] = []
     if total > hard_ceiling:
-        dropped = drop_oldest_turn_group(messages)
+        dropped = drop_oldest_turn_group(messages, captured_originals=dropped_previews)
         total = _messages_tokens(messages)
 
     return EnforceReport(
@@ -282,6 +303,9 @@ async def enforce(
         cleared_tool_results=cleared,
         summary_added=summary_added,
         dropped_messages=dropped,
+        cleared_originals=list(captured),
+        summary_text=summary_text,
+        dropped_originals=dropped_previews,
     )
 
 

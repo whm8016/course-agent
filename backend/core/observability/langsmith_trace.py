@@ -184,6 +184,25 @@ def _record(
         logger.debug("record run '%s' failed", name, exc_info=True)
 
 
+def ls_extra(name: str, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    """构造传给 ``client.chat.completions.create(**kwargs)`` 的 langsmith 附加参数。
+
+    wrap_openai 包过的 client 识别 ``langsmith_extra``（给单次调用打名字/metadata，
+    用于把压缩等辅助调用从同名的 course_agent_chat 流量里区分出来）；原生 openai
+    client 不认识该 kwarg（直接 TypeError），故未启用追踪时返回空 dict，调用点
+    ``create(**create_kwargs, **ls_extra(...))`` 逐字节等价于原调用。
+
+    前提：``_TRACING_ON`` 与"client 已 wrap 成功"一致（llm.py import 期统一 wrap；
+    wrap 失败仅 debug 日志）。升级 langsmith 若改 ``wrap_openai`` 行为需复核此门控。
+    """
+    if not _TRACING_ON:
+        return {}
+    extra: dict[str, Any] = {"name": name}
+    if metadata:
+        extra["metadata"] = metadata
+    return {"langsmith_extra": extra}
+
+
 def record_tool_result(
     *,
     tool_name: str,
@@ -242,11 +261,16 @@ def record_context_trim(
     masked_turns: int = 0,
     dropped_messages: int = 0,
     summary_added: bool = False,
+    dropped_preview: str | None = None,
+    summary_text: str | None = None,
 ) -> None:
-    """记录一次轮内上下文裁剪（evict_tool_results / context_policy.apply）。
+    """记录一次上下文裁剪（轮内 enforce / 回合前 plan_turn 裁剪）。
 
     轮内裁剪没有天然对应的 LLM/tool run，此前完全不可观测——LangSmith 只能看到裁剪
     *之后* 发给模型的 messages，看不到这一步删了什么。挂在当前 turn run 下为子 run。
+
+    dropped_preview/summary_text 补正文截断（此前只留计数/布尔，"压缩成了什么"在
+    LangSmith 上无从查证）；统一在此截断，调用方无需各自把关。
     """
     _record(
         name=f"context.trim.{stage}",
@@ -257,6 +281,8 @@ def record_context_trim(
             "masked_turns": masked_turns,
             "dropped_messages": dropped_messages,
             "summary_added": summary_added,
+            "dropped_preview": (dropped_preview or "")[:800],
+            "summary_text": (summary_text or "")[:800],
         },
     )
 
@@ -269,4 +295,5 @@ __all__ = [
     "record_tool_result",
     "record_rag_result",
     "record_context_trim",
+    "ls_extra",
 ]

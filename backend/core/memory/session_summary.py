@@ -34,6 +34,7 @@ from core.analytics.token_usage import track_llm_response
 from core.db.database import Session, Message
 from core.llm.llm import client as async_openai_client
 from core.llm.reasoning_params import apply_reasoning_kwargs
+from core.observability.langsmith_trace import ls_extra
 
 logger = logging.getLogger(__name__)
 
@@ -835,7 +836,13 @@ class SessionSummaryManager:
             raw = ""
             model, create_kwargs = _extract_create_kwargs(prompt, temperature)
             try:
-                resp = await async_openai_client.chat.completions.create(**create_kwargs)
+                # LangSmith 独立 run 名：L2 压缩是后台任务，不挂在任何 turn trace 下，
+                # 不打名字则与普通聊天同为 course_agent_chat 无法区分（Input=拼给它的
+                # existing_summary+new_messages，Output=压缩产物，打名字后才查得到）。
+                resp = await async_openai_client.chat.completions.create(
+                    **create_kwargs,
+                    **ls_extra("l2_session_summary", track),
+                )
                 if track is not None:
                     # 用量埋点：双温重试循环内逐次记（最多 2 次调用各一行，别只记最后）
                     await self._track_l2_usage(resp, model, track)
@@ -886,7 +893,10 @@ class SessionSummaryManager:
         )
         model, create_kwargs = _extract_create_kwargs(prompt, 0.3)
         try:
-            resp = await async_openai_client.chat.completions.create(**create_kwargs)
+            resp = await async_openai_client.chat.completions.create(
+                **create_kwargs,
+                **ls_extra("l2_session_summary_text_fallback", track),
+            )
             if track is not None:
                 await self._track_l2_usage(resp, model, track)
             summary = (resp.choices[0].message.content or "").strip()

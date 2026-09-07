@@ -111,6 +111,7 @@ class TurnRuntimeManager:
         except Exception:
             logger.debug("resolve_profile_runtime failed, fallback TEXT_MODEL", exc_info=True)
         _history_before = len(context.conversation_history)
+        _history_snapshot = list(context.conversation_history)  # 被砍正文差集的裁剪前快照
         if get_settings().context_budget.coordinator_enabled:
             from core.agentic.context_budget import plan_turn
             _plan = plan_turn(
@@ -121,6 +122,8 @@ class TurnRuntimeManager:
             context.conversation_history = _plan.keep_history
             context.metadata["_budget_plan"] = _plan
             if _plan.carry_forward_added:
+                # 前插的摘要正文 preview 先捕获再清空（供 pretrim 子 run 上报）
+                context.metadata["_ctx_pretrim_summary_preview"] = (context.session_summary or "")[:800]
                 context.session_summary = ""  # 摘要已前插历史，清 system 切片避免双付
             context.metadata["_ctx_pretrim"] = {
                 "coordinator_enabled": True,
@@ -141,6 +144,15 @@ class TurnRuntimeManager:
                 "dropped": _history_before - len(context.conversation_history),
                 "carry_forward_added": False,
             }
+        # 被砍历史正文 preview（对象 identity 差集；ContextBuilder.build / plan_turn 的
+        # keep_history 都保留原消息对象引用）。供 _run_turn 里 context.trim.pretrim 子 run
+        # 上报——此前回合前裁剪只有计数挂在 turn 根 run metadata，删了什么内容无从查证。
+        _kept_ids = {id(m) for m in context.conversation_history}
+        context.metadata["_ctx_pretrim_dropped_previews"] = [
+            f"[{m.get('role')}] {str(m.get('content') or '')[:200]}"
+            for m in _history_snapshot
+            if id(m) not in _kept_ids
+        ][:10]
         log_flow("turn.context_pretrim", turn_id=turn_id, **context.metadata["_ctx_pretrim"])
 
         # ask_user 暂停/恢复经 reply_channel（Redis BLPOP/RPUSH，跨 worker 投递；memory:// 回退进程内）。
@@ -361,6 +373,24 @@ class TurnRuntimeManager:
             },
             tags=[f"mode:{execution.context.mode or 'chat'}"],
         ):
+            # 回合前裁剪补一条可展开的 context.trim.pretrim 子 run（与轮内 context.trim.in_turn
+            # 同形态）：裁剪发生在 start_turn，早于本 trace 开始，此前只把计数拍扁成 turn 根 run
+            # metadata 的 pretrim_* 键——没有独立 run、更没有被砍正文，容易被忽略。dropped>0
+            # 才记，零裁剪回合不产生噪声 run。
+            _pre = execution.context.metadata.get("_ctx_pretrim") or {}
+            if _pre.get("dropped"):
+                from core.observability.langsmith_trace import record_context_trim
+                record_context_trim(
+                    stage="pretrim",
+                    coordinator_enabled=bool(_pre.get("coordinator_enabled")),
+                    iteration=-1,  # 回合前裁剪，不在任何轮内
+                    dropped_messages=int(_pre.get("dropped") or 0),
+                    summary_added=bool(_pre.get("carry_forward_added")),
+                    dropped_preview="\n---\n".join(
+                        execution.context.metadata.get("_ctx_pretrim_dropped_previews") or []
+                    ),
+                    summary_text=execution.context.metadata.get("_ctx_pretrim_summary_preview"),
+                )
             try:
                 async for event in orchestrator.handle(execution.context):
                     # 记录 seq（供断线重连回放）
