@@ -5,7 +5,7 @@
  * （不带 grade_source，后端守卫拦观测）/ coding 骨架预填 / ungraded 展示 /
  * sessionId 缺省静默跳过 / 计分分母=已判分题。
  */
-import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, screen, waitFor, act } from '@testing-library/react'
 import QuizCard from '../components/quiz/QuizCard'
 import type { QuizData } from '../types'
@@ -89,9 +89,13 @@ function selectTypeAndSubmit(sessionId: string | null, typed: string | null = '�
   return view
 }
 
+// 两个 describe 共用：清空所有 mock 调用记录（含追问块模块级的 scrollIntoView spy）
+beforeEach(() => {
+  vi.clearAllMocks()
+})
+
 describe('QuizCard 提交答案三路收录', () => {
   beforeEach(() => {
-    vi.clearAllMocks()
     vi.mocked(upsertNotebookEntry).mockResolvedValue(undefined)
     vi.mocked(gradeAnswer).mockResolvedValue(_grade('ungraded'))
   })
@@ -271,17 +275,23 @@ describe('QuizCard 追问面板流式滚动', () => {
     })
   })
 
-  beforeEach(() => {
-    vi.clearAllMocks()
-    vi.mocked(upsertNotebookEntry).mockResolvedValue(undefined)
-    vi.mocked(gradeAnswer).mockResolvedValue(_grade('ungraded'))
-  })
+  // 用例内中途换 fake timers，断言抛错也不能把假计时器泄漏给后续用例
+  afterEach(() => vi.useRealTimers())
+
+  /** 模拟用户上拉脱离贴底：jsdom 无布局，手动把容器报告成"离底 300px"再派发 scroll */
+  function detachFromBottom(panel: HTMLDivElement) {
+    Object.defineProperty(panel, 'scrollHeight', { get: () => 500, configurable: true })
+    Object.defineProperty(panel, 'clientHeight', { get: () => 200, configurable: true })
+    fireEvent.scroll(panel)
+  }
 
   /** 打开第 1 题追问面板，并劫持面板滚动容器的 scrollTop 赋值（jsdom 无布局，以此观测跟随） */
   function openFollowupPanel() {
     const view = render(<QuizCard quiz={quiz} sessionId={null} />)
     fireEvent.click(screen.getAllByText('追问')[0])
-    const panel = document.querySelector('.max-h-52') as HTMLDivElement
+    // 结构锚点：输入框所在 footer 的上一个兄弟即面板滚动容器（不锚 max-h-52 这类纯样式类）
+    const panel = screen.getByPlaceholderText('输入追问内容…').parentElement
+      ?.previousElementSibling as HTMLDivElement
     expect(panel).not.toBeNull()
     const setScrollTop = vi.fn()
     Object.defineProperty(panel, 'scrollTop', {
@@ -301,17 +311,19 @@ describe('QuizCard 追问面板流式滚动', () => {
 
   it('流式跟随只动面板自身 scrollTop，绝不 scrollIntoView（那会拖动整页祖先链）', async () => {
     const { setScrollTop } = openFollowupPanel()
+    // fake timers：若回归出旧式"30/50ms 定时器里 scrollIntoView"的实现，
+    // 冲掉 pending 定时器会立刻暴露，不用真等 120ms
+    vi.useFakeTimers()
     sendFollowup()
 
     act(() => {
       followupState.handlers.onMessage?.({ type: 'token', content: '因' })
       followupState.handlers.onMessage?.({ type: 'token', content: '为' })
     })
-
-    // 旧实现在 30/50ms 定时器里安排 scrollIntoView(smooth)，等它落地再断言
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 120))
+      await vi.advanceTimersByTimeAsync(150)
     })
+    vi.useRealTimers()
 
     // 不许碰 scrollIntoView：连带滚动祖先链（整个聊天页被反复压到底）+ smooth 高频排队
     expect(scrollIntoView).not.toHaveBeenCalled()
@@ -329,10 +341,7 @@ describe('QuizCard 追问面板流式滚动', () => {
     expect(setScrollTop).toHaveBeenCalled()
     setScrollTop.mockClear()
 
-    // 模拟上拉：jsdom 无布局，手动把容器报告成"离底 300px"再派发 scroll
-    Object.defineProperty(panel, 'scrollHeight', { get: () => 500, configurable: true })
-    Object.defineProperty(panel, 'clientHeight', { get: () => 200, configurable: true })
-    fireEvent.scroll(panel)
+    detachFromBottom(panel)
 
     act(() => {
       followupState.handlers.onMessage?.({ type: 'token', content: '案' })
@@ -352,9 +361,7 @@ describe('QuizCard 追问面板流式滚动', () => {
     setScrollTop.mockClear()
 
     // 脱离贴底（离底 300px）：后续 token 不跟随
-    Object.defineProperty(panel, 'scrollHeight', { get: () => 500, configurable: true })
-    Object.defineProperty(panel, 'clientHeight', { get: () => 200, configurable: true })
-    fireEvent.scroll(panel)
+    detachFromBottom(panel)
     act(() => {
       followupState.handlers.onMessage?.({ type: 'token', content: '案' })
     })

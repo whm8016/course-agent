@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { MessageSquare, Send, Square, X, ClipboardList, Loader2 } from 'lucide-react'
 import type { QuizData, QuizQuestion } from '../../types'
 import FormattedMarkdown from '../shared/FormattedMarkdown'
+import { useStickToBottom } from '../../lib/stickToBottom'
 import { connectQuestionFollowup } from '../../services/questionWs'
 import { upsertNotebookEntry, gradeAnswer } from '../../services/api'
 import type { GradeResponse } from '../../services/api'
@@ -48,29 +49,19 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
   const [messages, setMessages] = useState<FollowupMsg[]>([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(false)
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const [isAtBottom, setIsAtBottom] = useState(true)
+  // 贴底跟随三件套与 ChatWindow 主消息流共用 useStickToBottom（阈值/直赋口径单点维护）
+  const { ref: scrollRef, isAtBottom, onScroll: handleScroll, scrollToBottom } = useStickToBottom()
   const closeRef = useRef<(() => void) | null>(null)
 
   // 卸载时关闭未完成的追问连接，避免 WebSocket 泄漏
   useEffect(() => () => closeRef.current?.(), [])
 
-  // 贴底判定（与 ChatWindow 同口径 40px）：用户上拉脱离即停止自动跟随
-  const handleScroll = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
-    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-    setIsAtBottom((prev) => (prev !== near ? near : prev))
-  }, [])
-
-  // 流式新内容到达时，仅在贴底期间跟随，直接赋值本容器 scrollTop（瞬时、只动面板）。
-  // 不用 bottomRef.scrollIntoView({smooth})——那会连带滚动祖先链（整个聊天页被反复
-  // 压到底），且每个 token 排一次 smooth 动画与用户手动滚动打架（ChatWindow 已踩过同坑）
+  // 流式新内容到达时，仅在贴底期间跟随（只滚面板自身，不碰祖先链——口径见 useStickToBottom）
   useEffect(() => {
     if (!isAtBottom) return
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [messages, loading, isAtBottom])
+  }, [messages, loading, isAtBottom, scrollRef])
 
   const questionType = question.options?.length ? 'choice' : 'written'
 
@@ -95,7 +86,7 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
     setMessages((prev) => [...prev, userMsg])
     setInput('')
     setLoading(true)
-    setIsAtBottom(true) // 自己刚发的话出现在底部，恢复跟随（只滚面板自身）
+    scrollToBottom() // 自己刚发的话出现在底部，恢复跟随（只滚面板自身）
 
     const historyContext =
       messages.length > 0
@@ -156,7 +147,7 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
         onClose: finish,
       },
     )
-  }, [input, loading, messages, buildQuestionContext])
+  }, [input, loading, messages, buildQuestionContext, scrollToBottom])
 
   // 停止追问流式：关闭 WS + 标记已停止（与主窗口 handleStop 行为一致）
   const handleStop = useCallback(() => {

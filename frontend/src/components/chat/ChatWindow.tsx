@@ -9,6 +9,7 @@ import OutlineCard, { type OutlineItem } from './OutlineCard'
 import ImageUpload, { type PendingFile } from './ImageUpload'
 import VoiceInput from './VoiceInput'
 import { isImage } from './fileUtils'
+import { useStickToBottom } from '../../lib/stickToBottom'
 import QuizConfigPanel from '../quiz/QuizConfigPanel'
 import { DEFAULT_QUIZ_CONFIG, type QuizConfig } from '../quiz/types'
 import { chatStream, uploadImage, fetchMessages, saveMessage, createSession, updateSessionMode, fetchLlmProfilesSelectable, fetchMyLlmProvider, deleteMyLlmProvider, requestAnswerNow } from '../../services/api'
@@ -336,11 +337,11 @@ export default function ChatWindow({
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const dragCounterRef = useRef(0)
-  const bottomRef = useRef<HTMLDivElement>(null)
-  const scrollContainerRef = useRef<HTMLDivElement>(null)
-  // 是否"贴在底部"跟随新内容。用户上拉超出阈值即 false（停止自动滚动，允许定住看）；
-  // 滚回底部或点"回到底部"按钮恢复 true。用 state 而非 ref，是为了驱动按钮显隐重渲染。
-  const [isAtBottom, setIsAtBottom] = useState(true)
+  // 贴底跟随三件套（滚动容器 ref / 贴底判定 onScroll / 滚底 scrollToBottom）收口在
+  // useStickToBottom，与 QuizCard 追问面板共用同一份口径。isAtBottom 用 state
+  // 是为了驱动"回到底部"按钮显隐重渲染。
+  const { ref: scrollContainerRef, isAtBottom, onScroll: handleScroll, scrollToBottom } =
+    useStickToBottom()
   const currentSessionRef = useRef<string | null>(sessionId)
   // 标记“下一次 sessionId 变化是内部首次创建会话”（非用户切换），供切换 effect 跳过中止与重拉
   const suppressSwitchRef = useRef(false)
@@ -485,29 +486,13 @@ export default function ChatWindow({
     return () => document.removeEventListener('mousedown', handler)
   }, [capMenuOpen])
 
-  const handleScroll = useCallback(() => {
-    const el = scrollContainerRef.current
-    if (!el) return
-    // 真正"贴底"（距底 < 40px）才跟随。阈值从 80 收窄：流式时用户想看的内容多在底部
-    // 附近，80px 内一旦上拉就被瞬时拽回、定不住。改 40 后上拉一点即脱离自动跟随。
-    const near = el.scrollHeight - el.scrollTop - el.clientHeight < 40
-    setIsAtBottom((prev) => (prev !== near ? near : prev))
-  }, [])
-
-  // 流式新内容到达时，仅在用户贴底期间跟随。直接赋值 el.scrollTop（瞬时、只动本容器），
-  // 不用 bottomRef.scrollIntoView——后者会连带滚动祖先链，且 smooth 在高频流式下排队
-  // 动画与用户手动滚动打架，是"拉不动/定不住"的主要来源。
+  // 流式新内容到达时，仅在用户贴底期间跟随（贴底判定阈值与 scrollTop 直赋的口径
+  // 在 useStickToBottom，QuizCard 追问面板共用同一份）
   useEffect(() => {
     if (!isAtBottom) return
     const el = scrollContainerRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [messages, loading, quizStreaming, quizTraces, isAtBottom])
-
-  const scrollToBottom = useCallback(() => {
-    const el = scrollContainerRef.current
-    if (el) el.scrollTop = el.scrollHeight
-    setIsAtBottom(true)
-  }, [])
+  }, [messages, loading, quizStreaming, quizTraces, isAtBottom, scrollContainerRef])
 
   useEffect(() => {
     return () => {
@@ -643,7 +628,7 @@ export default function ChatWindow({
       image: firstImagePreview,
       attachments: attachments.length > 0 ? attachments : undefined,
     }
-    setIsAtBottom(true)
+    scrollToBottom()
     setInput('')
     update((prev) => [...prev, userMsg])
     clearFiles()
@@ -753,7 +738,7 @@ export default function ChatWindow({
     )
     quizCloseRef.current = close
     quizSendRef.current = send
-  }, [quizConfig, input, courseId, loading, quizStreaming, messages, resetQuizOverlays, onSessionCreated, pendingFiles, uploadPendingAttachments, useKb])
+  }, [quizConfig, input, courseId, loading, quizStreaming, messages, resetQuizOverlays, onSessionCreated, pendingFiles, uploadPendingAttachments, useKb, scrollToBottom])
 
   // ---------- 深度研究 ----------
   const handleResearchStart = useCallback(async (topic: string) => {
@@ -797,7 +782,7 @@ export default function ChatWindow({
       image: firstImagePreview,
       attachments: attachments.length > 0 ? attachments : undefined,
     }
-    setIsAtBottom(true)
+    scrollToBottom()
     update((prev) => [...prev, userMsg])
     clearFiles()
     setResearchStreaming(true)
@@ -925,7 +910,7 @@ export default function ChatWindow({
       researchSendRef.current = send
     }
     connect()
-  }, [courseId, loading, researchStreaming, messages, useKb, useWebSearch, onSessionCreated, pendingFiles, uploadPendingAttachments, resetResearchOverlays])
+  }, [courseId, loading, researchStreaming, messages, useKb, useWebSearch, onSessionCreated, pendingFiles, uploadPendingAttachments, resetResearchOverlays, scrollToBottom])
 
   // ---------- 普通聊天 ----------
   const handleSend = useCallback(async () => {
@@ -984,7 +969,7 @@ export default function ChatWindow({
       attachments: attachments.length > 0 ? attachments : undefined,
     }
 
-    setIsAtBottom(true)
+    scrollToBottom()
     update((prev) => [...prev, userMsg])
     setInput('')
     clearFiles()
@@ -1290,6 +1275,7 @@ export default function ChatWindow({
     handleQuizStart,
     isResearchMode,
     handleResearchStart,
+    scrollToBottom,
   ])
 
   // "立即回答"：让正在思考的模型基于已有信息直接作答（不中断 SSE，答案仍走原流）
@@ -1514,7 +1500,6 @@ export default function ChatWindow({
             </div>
           </div>
         )}
-        <div ref={bottomRef} />
         {/* 用户上拉脱离底部时显示：sticky 钉在滚动容器视口右下，不随内容滚；
             点击滚回底部并恢复自动跟随。贴底期间（isAtBottom=true）不渲染，零干扰。 */}
         {!isAtBottom && (
