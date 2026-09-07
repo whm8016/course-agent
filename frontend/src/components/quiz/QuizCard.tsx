@@ -56,12 +56,10 @@ function FollowupPanel({ question, questionIndex, userAnswer, isCorrect, onClose
   // 卸载时关闭未完成的追问连接，避免 WebSocket 泄漏
   useEffect(() => () => closeRef.current?.(), [])
 
-  // 流式新内容到达时，仅在贴底期间跟随（只滚面板自身，不碰祖先链——口径见 useStickToBottom）
+  // 流式新内容到达时，仅在贴底期间跟随（"怎么滚"统一在 useStickToBottom）
   useEffect(() => {
-    if (!isAtBottom) return
-    const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [messages, loading, isAtBottom, scrollRef])
+    if (isAtBottom) scrollToBottom()
+  }, [messages, loading, isAtBottom, scrollToBottom])
 
   const questionType = question.options?.length ? 'choice' : 'written'
 

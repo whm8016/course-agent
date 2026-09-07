@@ -486,13 +486,10 @@ export default function ChatWindow({
     return () => document.removeEventListener('mousedown', handler)
   }, [capMenuOpen])
 
-  // 流式新内容到达时，仅在用户贴底期间跟随（贴底判定阈值与 scrollTop 直赋的口径
-  // 在 useStickToBottom，QuizCard 追问面板共用同一份）
+  // 流式新内容到达时，仅在贴底期间跟随（"怎么滚"统一在 useStickToBottom）
   useEffect(() => {
-    if (!isAtBottom) return
-    const el = scrollContainerRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }, [messages, loading, quizStreaming, quizTraces, isAtBottom, scrollContainerRef])
+    if (isAtBottom) scrollToBottom()
+  }, [messages, loading, quizStreaming, quizTraces, isAtBottom, scrollToBottom])
 
   useEffect(() => {
     return () => {

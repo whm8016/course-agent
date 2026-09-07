@@ -287,7 +287,7 @@ describe('QuizCard 追问面板流式滚动', () => {
 
   /** 打开第 1 题追问面板，并劫持面板滚动容器的 scrollTop 赋值（jsdom 无布局，以此观测跟随） */
   function openFollowupPanel() {
-    const view = render(<QuizCard quiz={quiz} sessionId={null} />)
+    render(<QuizCard quiz={quiz} sessionId={null} />)
     fireEvent.click(screen.getAllByText('追问')[0])
     // 结构锚点：输入框所在 footer 的上一个兄弟即面板滚动容器（不锚 max-h-52 这类纯样式类）
     const panel = screen.getByPlaceholderText('输入追问内容…').parentElement
@@ -299,7 +299,7 @@ describe('QuizCard 追问面板流式滚动', () => {
       set: setScrollTop,
       configurable: true,
     })
-    return { view, panel, setScrollTop }
+    return { panel, setScrollTop }
   }
 
   function sendFollowup() {
@@ -323,7 +323,7 @@ describe('QuizCard 追问面板流式滚动', () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(150)
     })
-    vi.useRealTimers()
+    // 此后只有同步断言，无定时器依赖——恢复真实计时器交给 afterEach 兜底
 
     // 不许碰 scrollIntoView：连带滚动祖先链（整个聊天页被反复压到底）+ smooth 高频排队
     expect(scrollIntoView).not.toHaveBeenCalled()
@@ -341,6 +341,7 @@ describe('QuizCard 追问面板流式滚动', () => {
     expect(setScrollTop).toHaveBeenCalled()
     setScrollTop.mockClear()
 
+    // 脱离贴底：后续 token 不跟随
     detachFromBottom(panel)
 
     act(() => {
@@ -360,7 +361,7 @@ describe('QuizCard 追问面板流式滚动', () => {
     })
     setScrollTop.mockClear()
 
-    // 脱离贴底（离底 300px）：后续 token 不跟随
+    // 脱离贴底：后续 token 不跟随
     detachFromBottom(panel)
     act(() => {
       followupState.handlers.onMessage?.({ type: 'token', content: '案' })
