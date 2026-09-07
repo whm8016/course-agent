@@ -20,7 +20,9 @@ export function useStickToBottom() {
     setIsAtBottom(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
   }, [])
 
-  /** 滚到底并恢复跟随（发送新消息 / 点击"回到底部"按钮）。 */
+  /** 滚到底并恢复跟随（发送新消息 / "回到底部"按钮 / 流式跟随 effect）。
+   *  跟随 effect 形态以 if (isAtBottom) 守卫调用——只想要"滚"的场合必须自带守卫，
+   *  否则 setIsAtBottom(true) 会把已脱离贴底的容器意外拉回跟随。 */
   const scrollToBottom = useCallback(() => {
     const el = ref.current
     if (el) el.scrollTop = el.scrollHeight

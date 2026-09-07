@@ -341,7 +341,6 @@ describe('QuizCard 追问面板流式滚动', () => {
     expect(setScrollTop).toHaveBeenCalled()
     setScrollTop.mockClear()
 
-    // 脱离贴底：后续 token 不跟随
     detachFromBottom(panel)
 
     act(() => {
@@ -361,7 +360,6 @@ describe('QuizCard 追问面板流式滚动', () => {
     })
     setScrollTop.mockClear()
 
-    // 脱离贴底：后续 token 不跟随
     detachFromBottom(panel)
     act(() => {
       followupState.handlers.onMessage?.({ type: 'token', content: '案' })
