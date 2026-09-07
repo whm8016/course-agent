@@ -295,15 +295,17 @@ worker 全改以 HTTP 客户端接入这一个 gateway，stdio 子进程全网�
 ```
 backend（4 worker）──SSE──> mcp-gateway（1 份 mcp-proxy）
                                   ├─ modelscope-mcp-server（本地，替代不可靠的云端 SSE 接口）
-                                  └─ mcp-server-fetch（替代每 worker 一份的 uvx 子进程）
+                                  ├─ mcp-server-fetch（替代每 worker 一份的 uvx 子进程）
+                                  └─ mcp-server-calculator（可信计算：解题步骤核算，AST 白名单求值）
 deepwiki 直连官方 https://mcp.deepwiki.com/mcp（streamableHttp，免认证无子进程），不走 gateway
 ```
 
 - **构建期预装、运行时零网络**：gateway Dockerfile 用 `uv tool install` 把 server 版本钉死装进独立
   venv，运行时直接 exec 已装入口，不再 `uvx` 运行时拉包；版本变更走一次 build → 可复现/可回滚/可审计
   （对冲 `@latest` 的 installer spoofing）。`UV_OFFLINE=1` 兜底，意外拉包快速失败而非卡超时。
-- **mcp 版本隔离**：`modelscope-mcp-server`（mcp 2.x）与 `mcp-server-fetch`（mcp<2）各自独立 tool venv，
-  互不冲突；`--pass-environment` 把 `MODELSCOPE_API_TOKEN` 透传给子进程。
+- **mcp 版本隔离**：`modelscope-mcp-server`（mcp 2.x）与 `mcp-server-fetch`、`mcp-server-calculator`
+  （均 mcp<2，自声明约束无需 --with）各自独立 tool venv，互不冲突；`--pass-environment` 把
+  `MODELSCOPE_API_TOKEN` 透传给子进程。
 - **transport 选 SSE**：sparfenyuk/mcp-proxy 服务端只暴露 SSE，manager 的 `sse_client` 成熟且有测试；
   backend 每个 server 配 `type=sse` + `url=http://mcp-gateway:8096/servers/{name}/sse`。
 - **资源隔离**：gateway 独立容器、不挂 `/app` 业务卷、`mem_limit: 1g`，第三方代码读不到业务数据。

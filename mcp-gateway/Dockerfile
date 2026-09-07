@@ -18,14 +18,16 @@ ENV UV_TOOL_BIN_DIR=/opt/uv-bin \
     UV_PYTHON_DOWNLOADS=never
 
 # 国内 build 经 --build-arg UV_INDEX_URL 指镜像源（如清华）加速；不传用 PyPI 默认。
-# 三个包各自独立 tool venv，互不影响 mcp 版本：
+# 四个包各自独立 tool venv，互不影响 mcp 版本：
 #   - modelscope-mcp-server 依赖 mcp 2.x（fastmcp）
 #   - mcp-server-fetch 需 mcp<2（旧 SDK），用 --with 注入约束
+#   - mcp-server-calculator 自声明 mcp<2（AST 白名单求值，无裸 eval），无需 --with
 #   - mcp-proxy 自身独立
 ARG UV_INDEX_URL
 RUN --mount=type=cache,target=/root/.cache/uv \
     UV_INDEX_URL="${UV_INDEX_URL:-}" uv tool install modelscope-mcp-server==0.2.1 \
     && UV_INDEX_URL="${UV_INDEX_URL:-}" uv tool install --with "mcp<2" mcp-server-fetch \
+    && UV_INDEX_URL="${UV_INDEX_URL:-}" uv tool install mcp-server-calculator==0.2.1 \
     && UV_INDEX_URL="${UV_INDEX_URL:-}" uv tool install --with "mcp<2" mcp-proxy==0.12.0
 
 ENV PATH="/opt/uv-bin:${PATH}"
@@ -39,4 +41,5 @@ CMD ["mcp-proxy", \
      "--port", "8096", \
      "--pass-environment", \
      "--named-server", "modelscope", "modelscope-mcp-server", \
-     "--named-server", "fetch", "mcp-server-fetch"]
+     "--named-server", "fetch", "mcp-server-fetch", \
+     "--named-server", "calculator", "mcp-server-calculator"]
