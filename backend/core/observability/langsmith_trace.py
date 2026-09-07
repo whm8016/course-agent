@@ -145,6 +145,24 @@ def wrap_openai_client(client: Any, *, chat_name: str) -> Any:
     return client
 
 
+_client_singleton: Any = None
+
+
+def _get_client() -> Any:
+    """懒单例 langsmith Client。
+
+    每次 Client() 都新建 requests.Session（全新连接池）、注册 atexit、起一条批量
+    tracing 守护线程——record_* 调用点已有多个，逐次新建是三重浪费；懒建一次复用。
+    （GIL 下并发竞态最多重复建一次，无害。）
+    """
+    global _client_singleton
+    if _client_singleton is None:
+        from langsmith import Client  # type: ignore[import-untyped]
+
+        _client_singleton = Client()
+    return _client_singleton
+
+
 def _record(
     *,
     name: str,
@@ -162,11 +180,10 @@ def _record(
     if not _TRACING_ON:
         return
     try:
-        from langsmith import Client  # type: ignore[import-untyped]
         from langsmith.run_helpers import get_current_run_tree  # type: ignore[import-untyped]
 
         parent = get_current_run_tree()
-        client = Client()
+        client = _get_client()
         run_id = client.create_run(
             name=name,
             run_type=run_type,
@@ -272,6 +289,8 @@ def record_context_trim(
     dropped_preview/summary_text 补正文截断（此前只留计数/布尔，"压缩成了什么"在
     LangSmith 上无从查证）；统一在此截断，调用方无需各自把关。
     """
+    if not _TRACING_ON:
+        return  # 关态早退：调用方拼 preview/join 的开销在 _emit_trim_report 侧已省，这里再省 outputs 构建
     _record(
         name=f"context.trim.{stage}",
         run_type="chain",

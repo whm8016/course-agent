@@ -106,10 +106,12 @@ class EnforceReport:
     cleared_tool_results: int   # L1 清理的 tool 结果条数
     summary_added: bool         # L2 是否做了 LLM 摘要续接
     dropped_messages: int       # L3 丢弃的最旧消息条数
-    # 观测补正文（此前只留计数，LangSmith 上"删了什么/压成了什么"无从查证）：
-    cleared_originals: list[str] = dataclasses.field(default_factory=list)  # L1 被清 tool 原文（引用，由上报层截断）
+    # 观测补正文（此前只留计数，LangSmith 上"删了什么/压成了什么"无从查证）。
+    # cleared/dropped 均为 200 字 preview 口径——全文唯一消费者是 enforce 内部的 L2 摘要，
+    # 报告只服务上报，存全文是白搬（join 后仍被 [:800] 截掉）。
+    cleared_originals: list[str] = dataclasses.field(default_factory=list)  # L1 被清 tool 原文前 200 字
     summary_text: str = ""      # L2 摘要正文（失败/未触发为空串）
-    dropped_originals: list[str] = dataclasses.field(default_factory=list)  # L3 被丢消息 preview（[role] 前 200 字）
+    dropped_originals: list[str] = dataclasses.field(default_factory=list)  # L3 被丢消息 preview（msg_preview）
 
 
 def _messages_tokens(messages: list[dict[str, Any]]) -> int:
@@ -209,6 +211,15 @@ def evict_tool_results(
 
 # -- L3：丢最旧 20% 消息组（免费硬降级）-----------------------------------------
 
+def msg_preview(m: dict[str, Any]) -> str:
+    """单条消息的观测 preview（``[role] 正文前 200 字``）。
+
+    L3 dropped_originals 与 turn_runtime 回合前裁剪 preview 共用——把格式钉进代码，
+    避免 LangSmith 上 in_turn 与 pretrim 的 preview 各改各的、静默漂移。
+    """
+    return f"[{m.get('role')}] {str(m.get('content') or '')[:200]}"
+
+
 def drop_oldest_turn_group(
     messages: list[dict[str, Any]],
     *,
@@ -220,8 +231,8 @@ def drop_oldest_turn_group(
     对齐 Claude Code PTL retry 策略（丢最旧 20%）。保留首轮（system + 首个 user 前导，_split_turns
     把它们归 turns[0]）不动——只丢最旧的 tool 轮。就地改 messages（用 survivors 覆盖）。返回丢弃条数。
 
-    captured_originals 非空时把被丢消息 preview append 进去（``[role] 正文前 200 字``，
-    与 turn_runtime pretrim preview 同格式），供 LangSmith 上报"删了什么"。
+    captured_originals 非空时把被丢消息 preview append 进去（msg_preview 格式），
+    供 LangSmith 上报"删了什么"。
     """
     from core.agentic.context_policy import _split_turns
 
@@ -235,10 +246,7 @@ def drop_oldest_turn_group(
     survivors = turns[:1] + turns[1 + drop_n:]
     dropped_msgs = [m for t in turns[1:1 + drop_n] for m in t]
     if captured_originals is not None:
-        captured_originals.extend(
-            f"[{m.get('role')}] {str(m.get('content') or '')[:200]}"
-            for m in dropped_msgs
-        )
+        captured_originals.extend(msg_preview(m) for m in dropped_msgs)
     dropped = len(dropped_msgs)
     messages[:] = [m for t in survivors for m in t]
     return dropped
@@ -303,7 +311,7 @@ async def enforce(
         cleared_tool_results=cleared,
         summary_added=summary_added,
         dropped_messages=dropped,
-        cleared_originals=list(captured),
+        cleared_originals=[s[:200] for s in captured],
         summary_text=summary_text,
         dropped_originals=dropped_previews,
     )

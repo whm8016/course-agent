@@ -224,8 +224,8 @@ async def test_enforce_l1_clears(monkeypatch):
     assert report.tokens_after < report.tokens_before
     assert report.summary_added is False  # L1 够，不升级
     assert report.dropped_messages == 0
-    # 观测正文：被清 tool 原文入报告（供 LangSmith dropped_preview），未做摘要则空
-    assert report.cleared_originals == [big]
+    # 观测正文：被清 tool 原文前 200 字 preview 入报告（供 LangSmith dropped_preview），未做摘要则空
+    assert report.cleared_originals == [big[:200]]
     assert report.summary_text == ""
 
 
@@ -257,8 +257,8 @@ async def test_enforce_l2_summary_when_l1_insufficient(monkeypatch):
     # 摘要以 <context_summary> system 消息插入
     assert any(m.get("role") == "system" and "<context_summary>" in str(m.get("content"))
                for m in msgs)
-    # 观测正文：L1 被清原文 + L2 摘要产物都入报告（供 LangSmith 上报）
-    assert report.cleared_originals == [big_tool]
+    # 观测正文：L1 被清原文前 200 字 preview + L2 摘要产物都入报告（供 LangSmith 上报）
+    assert report.cleared_originals == [big_tool[:200]]
     assert report.summary_text == "压缩摘要"
 
 
@@ -286,7 +286,6 @@ async def test_enforce_l3_drop_when_over_hard_ceiling(monkeypatch):
     assert report.dropped_messages > 0  # L3 丢了消息
     assert len(msgs) < 5 * 4 + 1  # 消息变少
     # 观测正文：被丢消息 preview 入报告（[role] 前 200 字，供 LangSmith dropped_preview）
-    assert report.dropped_originals
     assert len(report.dropped_originals) == report.dropped_messages
     assert report.dropped_originals[0].startswith("[")
 

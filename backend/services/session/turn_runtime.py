@@ -147,12 +147,15 @@ class TurnRuntimeManager:
         # 被砍历史正文 preview（对象 identity 差集；ContextBuilder.build / plan_turn 的
         # keep_history 都保留原消息对象引用）。供 _run_turn 里 context.trim.pretrim 子 run
         # 上报——此前回合前裁剪只有计数挂在 turn 根 run metadata，删了什么内容无从查证。
-        _kept_ids = {id(m) for m in context.conversation_history}
-        context.metadata["_ctx_pretrim_dropped_previews"] = [
-            f"[{m.get('role')}] {str(m.get('content') or '')[:200]}"
-            for m in _history_snapshot
-            if id(m) not in _kept_ids
-        ][:10]
+        # 零裁剪轮跳过（差集白算，且 _run_turn 只在 dropped>0 时读此键）；preview 格式
+        # 与 L3 共用 context_budget.msg_preview，钉住同一形态防漂移。
+        if context.metadata["_ctx_pretrim"]["dropped"]:
+            from core.agentic.context_budget import msg_preview
+
+            _kept_ids = {id(m) for m in context.conversation_history}
+            context.metadata["_ctx_pretrim_dropped_previews"] = [
+                msg_preview(m) for m in _history_snapshot if id(m) not in _kept_ids
+            ][:10]
         log_flow("turn.context_pretrim", turn_id=turn_id, **context.metadata["_ctx_pretrim"])
 
         # ask_user 暂停/恢复经 reply_channel（Redis BLPOP/RPUSH，跨 worker 投递；memory:// 回退进程内）。

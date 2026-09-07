@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import asyncio
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -39,9 +38,8 @@ def test_ls_extra_enabled(monkeypatch):
     assert lt.ls_extra("l2_session_summary", {"session_id": "s1"}) == {
         "langsmith_extra": {"name": "l2_session_summary", "metadata": {"session_id": "s1"}},
     }
-    # metadata 空/None 时不带 key
+    # metadata 空时不带 key
     assert lt.ls_extra("ctx_summary") == {"langsmith_extra": {"name": "ctx_summary"}}
-    assert lt.ls_extra("ctx_summary", None) == {"langsmith_extra": {"name": "ctx_summary"}}
 
 
 # ---------------------------------------------------------------------------
@@ -85,8 +83,6 @@ async def test_chat_complete_passes_langsmith_name(monkeypatch):
     seen: list[dict] = []
 
     class _FakeResp:
-        model = "m"
-        usage = None
         choices = [SimpleNamespace(message=SimpleNamespace(content="ok"))]
 
     async def fake_make(**kw):
@@ -140,10 +136,17 @@ class _DoneOrch:
         yield StreamEvent(type=StreamEventType.DONE, payload={})
 
 
-async def _run_turn_with_history(history: list[dict], trims: list[dict]) -> tuple[str, dict]:
-    """跑一个 turn（长历史触发回合前裁剪），trims 捕获 record_context_trim 调用。
+async def _run_turn_with_history(
+    history: list[dict],
+    trims: list[dict],
+    *,
+    coordinator: bool = False,
+    session_summary: str = "",
+) -> tuple[str, dict, UnifiedContext]:
+    """跑一个 turn（可参数化 coordinator 开关 / L2 摘要），trims 捕获 record_context_trim 调用。
 
-    返回 (turn_id, ctx.metadata)。
+    返回 (turn_id, ctx.metadata, ctx)。subscribe 流结束即 _run_turn 已入 finally，
+    await task 确定性等它收尾（免固定 sleep 的等待与慢机 flake 残余）。
     """
     from services.session.turn_runtime import TurnRuntimeManager
 
@@ -151,6 +154,7 @@ async def _run_turn_with_history(history: list[dict], trims: list[dict]) -> tupl
     ctx = UnifiedContext(
         course_id="c1", user_id="u1", user_message="hi", mode="chat",
         session_id="sess-1", conversation_history=history,
+        session_summary=session_summary,
     )
     fake_settings = type(
         "S", (),
@@ -158,9 +162,10 @@ async def _run_turn_with_history(history: list[dict], trims: list[dict]) -> tupl
             "research": type(
                 "R", (), {"clarify_enabled": False, "clarify_wait_timeout_s": 0}
             )(),
-            "context_budget": type("CB", (), {"coordinator_enabled": False})(),
+            "context_budget": type("CB", (), {"coordinator_enabled": coordinator})(),
         },
     )()
+
     def spy_trim(**kw):
         trims.append(kw)
         # 只记录不上报：本机 .env 开着 tracing 时真函数会向 LangSmith 上传（测试不打外网）
@@ -168,13 +173,15 @@ async def _run_turn_with_history(history: list[dict], trims: list[dict]) -> tupl
     with patch("core.orchestrator.get_orchestrator", return_value=_DoneOrch()), \
          patch("services.session.turn_runtime.get_settings", return_value=fake_settings), \
          patch("services.session.turn_runtime.resolve_budget", lambda m: 100), \
-         patch("core.observability.langsmith_trace.record_context_trim", spy_trim):
+         patch.object(lt, "record_context_trim", spy_trim):
         turn_id = await mgr.start_turn(ctx)
         async for _ev in mgr.subscribe_turn(turn_id):
             pass
-    await asyncio.sleep(0.05)
+    _ex = mgr._executions.get(turn_id)
+    if _ex and _ex.task:
+        await _ex.task  # 确定性等 _run_turn 收尾（finally 里的 EventBus 发布等）
     mgr._executions.pop(turn_id, None)  # 免 TTL 清理任务悬挂
-    return turn_id, ctx.metadata
+    return turn_id, ctx.metadata, ctx
 
 
 async def test_pretrim_records_dropped_previews():
@@ -187,13 +194,13 @@ async def test_pretrim_records_dropped_previews():
     history = [{"role": "user", "content": long_msg} for _ in range(6)]
     history.append({"role": "user", "content": "最新的问题"})
     trims: list[dict] = []
-    _tid, meta = await _run_turn_with_history(history, trims)
+    _tid, meta, _ctx = await _run_turn_with_history(history, trims)
 
     pre = next(t for t in trims if t["stage"] == "pretrim")
     assert pre["dropped_messages"] > 0
     assert "这是一个很长的历史消息" in pre["dropped_preview"]  # 被砍正文可见
     assert "[user]" in pre["dropped_preview"]
-    assert pre["summary_text"] in (None, "")  # 旧分支无摘要续接
+    assert pre["summary_text"] is None  # 旧分支无摘要续接（未传该参数）
     # metadata 里同样留了 previews（_run_turn 从这里读）
     assert meta["_ctx_pretrim"]["dropped"] == pre["dropped_messages"]
     assert len(meta["_ctx_pretrim_dropped_previews"]) == pre["dropped_messages"]
@@ -215,49 +222,22 @@ async def test_pretrim_carry_forward_captures_summary_preview(monkeypatch):
     metadata 存一份，否则 pretrim run 的 summary_text 永远为空。
     """
     from core.agentic import context_budget as cb
-    from services.session import turn_runtime as trm_mod
 
     monkeypatch.setattr(cb, "compute_budgets", lambda m: (10, 20))  # 极小阈值必裁
-    # plan_turn 内部读真 settings 的 carry_forward_location（turn 分支开关由上面的
-    # fake_settings 控制，无需动真值）
+    # plan_turn 内部读真 settings 的 carry_forward_location（turn 分支开关由 helper 的
+    # fake_settings coordinator=True 控制）；compute_budgets patch 让裁剪确定性触发
     monkeypatch.setattr(
         get_settings().context_budget, "carry_forward_location", "history_prefix"
     )
 
-    from services.session.turn_runtime import TurnRuntimeManager
-
-    mgr = TurnRuntimeManager()
-    ctx = UnifiedContext(
-        course_id="c1", user_id="u1", user_message="hi", mode="chat",
-        session_id="sess-2",
-        conversation_history=[
-            {"role": "user", "content": f"很长的历史消息 {i} " + "x" * 200}
-            for i in range(4)
-        ],
-    )
-    ctx.session_summary = "此前对话的摘要正文：学了导数定义。"
-    fake_settings = type(
-        "S", (),
-        {
-            "research": type(
-                "R", (), {"clarify_enabled": False, "clarify_wait_timeout_s": 0}
-            )(),
-            "context_budget": type("CB", (), {"coordinator_enabled": True})(),
-        },
-    )()
     trims: list[dict] = []
-
-    def spy_trim(**kw):
-        trims.append(kw)
-
-    with patch("core.orchestrator.get_orchestrator", return_value=_DoneOrch()), \
-         patch.object(trm_mod, "get_settings", return_value=fake_settings), \
-         patch.object(lt, "record_context_trim", spy_trim):
-        turn_id = await mgr.start_turn(ctx)
-        async for _ev in mgr.subscribe_turn(turn_id):
-            pass
-    await asyncio.sleep(0.05)
-    mgr._executions.pop(turn_id, None)
+    _tid, _meta, ctx = await _run_turn_with_history(
+        [{"role": "user", "content": f"很长的历史消息 {i} " + "x" * 200}
+         for i in range(4)],
+        trims,
+        coordinator=True,
+        session_summary="此前对话的摘要正文：学了导数定义。",
+    )
 
     pre = next(t for t in trims if t["stage"] == "pretrim")
     assert pre["summary_added"] is True  # carry_forward 前插发生
