@@ -733,6 +733,19 @@ class Mem0Config(BaseModel):
     conflict_detect_enabled: TruthyBool = True
     conflict_similarity_threshold: float = 0.85
     conflict_min_days_gap: int = 7
+    # 读侧精排（P0）：build_memory_context 硬过滤（主题/门控/矛盾清理）后、截断前，
+    # 候选数超每槽上限时用 core/rag/rerank.py 的 build_rerank_fn()（qwen3-rerank）重排
+    # ——向量噪声可能把相关记忆挤到截断线外。与 RAG 精排共用凭证/模型/超参（RerankConfig），
+    # 但本开关独立：这是每轮对话同步热路径（不同于 RAG 只在检索工具调用时触发），
+    # 默认关，评测后再定默认值。生效前置：rerank.enabled=True 且有 EMBEDDING__API_KEY
+    # （RERANK__ENABLED=false 是全局 kill-switch，mem0 不绕过）；rerank_fn None/异常降级原序。
+    rerank_enabled: TruthyBool = False
+    # 矛盾检测二级 LLM 仲裁：文本相似度落在 [conflict_llm_sim_floor,
+    # conflict_similarity_threshold) 灰区（语义矛盾但措辞不同，如偏好反转——difflib
+    # 抓不住）且同 kind 的记忆对，调一次 LLM 四选一（UPDATE/CONTRADICT/SUPPLEMENT/
+    # DUPLICATE，mem0 官方 ADD/UPDATE/DELETE/NOOP 口径的读侧版）。默认关，先跑评测再定。
+    conflict_llm_arbitration_enabled: TruthyBool = False
+    conflict_llm_sim_floor: float = 0.4
     add_skip_patterns: str = "好的,谢谢,嗯,ok,明白了,收到,好,知道了,继续"
     add_min_length: int = 10
     flush_max_turns: int = 3

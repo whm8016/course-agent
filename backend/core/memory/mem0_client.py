@@ -23,7 +23,9 @@ filters 做 AND 过滤，避免 A 课程聊天产生的记忆串到 B 课程（I
 """
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
 import urllib.parse as up
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -223,8 +225,36 @@ async def _search_slot(
     return normalize_results(results)
 
 
+async def _rerank_slot_if_needed(query_text: str, slot: list, limit: int) -> list:
+    """槽内精排（P0）：候选数超截断上限才触发，None/异常一律降级回向量原序。
+
+    精排基建复用 core/rag/rerank.py 的 build_rerank_fn()（qwen3-rerank，契约只要求
+    docs 各含 content 字段，与 RAG 共用凭证/超参）。放在硬过滤（主题/门控/矛盾清理）
+    之后、截断之前调用——rank 不浪费在注定被滤掉的行上，过滤后 ≤limit 还能省一次
+    外部 API 往返（本函数挂在每轮对话同步热路径上，延迟敏感）。
+    """
+    if len(slot) <= limit:
+        return slot
+    try:
+        from core.rag.rerank import build_rerank_fn  # 延迟导入，与 _get_settings 同风格
+
+        rerank_fn = build_rerank_fn()  # 开关关（mem0/rerank 两级）或无 key → None，行为不变
+        if rerank_fn is None:
+            return slot
+        ranked = await rerank_fn(
+            query_text, [{**r, "content": r.get("memory") or ""} for r in slot], top_n=limit
+        )
+        logger.info(
+            "[mem0] slot_reranked candidates=%d limit=%d", len(slot), limit
+        )
+        return ranked
+    except Exception as exc:
+        logger.warning("[mem0] slot rerank failed, fallback to vector order: %s", exc)
+        return slot
+
+
 async def build_memory_context(
-    user_id: str, query_text: str, *, course_id: str = "", top_k: int = 5, max_chars: int = 1500,
+    user_id: str, query_text: str, *, course_id: str = "", top_k: int = 8, max_chars: int = 1500,
     matched_topic: str = "", gate_evidence_topic: str | None = None,
 ) -> str:
     """注入对话：按 persona/event 两槽检索该用户记忆，拼成两段文本。无相关则空串。
@@ -296,6 +326,14 @@ async def build_memory_context(
             if gate_evidence_topic not in ((r.get("metadata") or {}).get("topic_ids") or [])
         ]
 
+    # P0 读侧精排：所有硬过滤之后、截断之前——两槽各自在候选数超上限时用 qwen3-rerank
+    # 重排（向量噪声可能把相关记忆挤到截断线外）。开关关/无 key/失败均降级原序。
+    if settings.mem0.rerank_enabled:
+        persona, events = await asyncio.gather(
+            _rerank_slot_if_needed(query_text, persona, _PERSONA_MAX_ITEMS),
+            _rerank_slot_if_needed(query_text, events, _EVENT_MAX_ITEMS),
+        )
+
     persona_items = [r.get("memory") for r in persona if r.get("memory")][:_PERSONA_MAX_ITEMS]
     event_items = [r.get("memory") for r in events if r.get("memory")][:_EVENT_MAX_ITEMS]
     persona_items = [t[:_ITEM_MAX_CHARS] for t in persona_items]
@@ -328,15 +366,56 @@ async def build_memory_context(
     )
 
 
+# 矛盾仲裁标签（mem0 官方 ADD/UPDATE/DELETE/NOOP 决策口径的读侧版）：前三个=旧记忆
+# 该让位，SUPPLEMENT=互为补充都保留。无法命中标签一律按 SUPPLEMENT 处理（保守不丢条）。
+_ARBITRATION_LABELS = ("UPDATE", "CONTRADICT", "SUPPLEMENT", "DUPLICATE")
+_ARBITRATION_PROMPT = """你是学生记忆库的矛盾仲裁器。给定同一学生的两条记忆（一旧一新），判断二者关系，只输出以下四个标签之一，不要输出其他内容：
+
+- UPDATE：新记忆更新了旧记忆（旧信息已过时）
+- CONTRADICT：两条语义矛盾（如偏好反转）
+- DUPLICATE：两条表达同一件事
+- SUPPLEMENT：两条互为补充、各有价值，都应保留
+
+前三个标签意味着旧记忆应被剔除；无法确定时输出 SUPPLEMENT。"""
+
+
+def _row_kind(r: dict) -> str:
+    """行 kind：真实行写在 payload metadata（consolidation/tools 的 add 写入），测试
+    fixture 放顶层——metadata 优先、顶层兜底，两套都能取到。"""
+    return (r.get("metadata") or {}).get("kind") or r.get("kind") or ""
+
+
+async def _llm_arbitrate_pair(old_text: str, old_dt: datetime, new_text: str, new_dt: datetime) -> str:
+    """灰区对的 LLM 四选一仲裁，返回 _ARBITRATION_LABELS 之一。
+
+    temperature=0 + 短输出；异常向上抛由调用方降级。输出里匹配不到合法标签时按
+    SUPPLEMENT（保留）——仲裁器说不上来就别替学生扔记忆。
+    """
+    from core.llm.llm import chat_complete  # 延迟导入：热路径仅灰区对存在时才触达
+
+    out = await chat_complete(
+        _ARBITRATION_PROMPT,
+        [],
+        f"旧记忆（{old_dt.date()}）：{old_text}\n新记忆（{new_dt.date()}）：{new_text}",
+        temperature=0.0,
+        max_tokens=16,
+        langsmith_name="mem0_conflict_arbitration",
+    )
+    m = re.search(r"\b(UPDATE|CONTRADICT|SUPPLEMENT|DUPLICATE)\b", (out or "").upper())
+    return m.group(1) if m else "SUPPLEMENT"
+
+
 async def _detect_and_clean_conflicts(user_id: str, results: list[dict], settings) -> list[dict]:
-    """基于文本相似度规则检测矛盾记忆，保留较新的那条。
+    """矛盾检测（两级）：规则粗筛 + 灰区 LLM 仲裁（可配置，默认关）。
 
-    判定条件：
-    1. 两条记忆的文本相似度 > threshold（默认 0.85）
-    2. 两条记忆的时间差 > min_days_gap（默认 7 天）
+    第一级（规则，零成本）：文本相似度 > conflict_similarity_threshold（默认 0.85）
+    且时间差 > min_days_gap（默认 7 天）→ 保留较新的，剔除旧的。处理明显重复/字面更新。
 
-    满足条件时，保留 created_at 更新的那条，排除旧的那条。
-    零 LLM token 开销，纯 difflib.SequenceMatcher 计算。
+    第二级（LLM 仲裁，conflict_llm_arbitration_enabled 开启时）：同 kind、相似度落在
+    [conflict_llm_sim_floor, threshold) 灰区的对——语义矛盾但措辞不同（如偏好反转），
+    difflib 抓不住——逐对调 LLM 做 UPDATE/CONTRADICT/SUPPLEMENT/DUPLICATE 四选一；
+    前三者剔除旧条。LLM 失败/输出非法 → 该对按 SUPPLEMENT 保留（与规则级灰区不结论
+    的原行为一致）。仅影响本次注入，不物理删除。
 
     Args:
         user_id: 用户 ID
@@ -348,9 +427,13 @@ async def _detect_and_clean_conflicts(user_id: str, results: list[dict], setting
     """
     threshold = settings.mem0.conflict_similarity_threshold
     min_days_gap = settings.mem0.conflict_min_days_gap
+    arbitration_enabled = settings.mem0.conflict_llm_arbitration_enabled
+    sim_floor = settings.mem0.conflict_llm_sim_floor
 
     # 需要排除的记忆 ID
     exclude_ids: set[str] = set()
+    # 灰区对（第二级仲裁候选）：(r1, r2, dt1, dt2)
+    grayzone: list[tuple[dict, dict, datetime, datetime]] = []
 
     # 两两比较（最多 C(top_k, 2) 对）
     for i, r1 in enumerate(results):
@@ -419,6 +502,37 @@ async def _detect_and_clean_conflicts(user_id: str, results: list[dict], setting
                             "[mem0] conflict_detected user_id=%s keep=%s (%s) exclude=%s (%s) similarity=%.2f gap=%.1f days",
                             user_id, mem2_id, dt2.date(), mem1_id, dt1.date(), similarity, days_gap
                         )
+            elif (
+                arbitration_enabled
+                and similarity >= sim_floor
+                and _row_kind(r1) and _row_kind(r1) == _row_kind(r2)
+            ):
+                # 灰区对：同 kind、相似度在 [floor, threshold)——语义矛盾但措辞不同
+                # （如偏好反转）时 difflib 抓不住，收集起来交给第二级 LLM 仲裁。
+                grayzone.append((r1, r2, dt1, dt2))
+
+    # 第二级：灰区对逐个 LLM 仲裁（串行——每轮灰区对通常 0~3 个，不值得并发复杂度）。
+    # 失败/非法输出 → 该对按 SUPPLEMENT 保留，与规则级灰区不结论的原行为一致。
+    if arbitration_enabled:
+        for r1, r2, dt1, dt2 in grayzone:
+            old, old_dt, new, new_dt = (
+                (r1, dt1, r2, dt2) if dt1 <= dt2 else (r2, dt2, r1, dt1)
+            )
+            if old.get("id") in exclude_ids or new.get("id") in exclude_ids:
+                continue  # 规则级已剔除一侧，无需重复仲裁
+            try:
+                label = await _llm_arbitrate_pair(
+                    old.get("memory", ""), old_dt, new.get("memory", ""), new_dt
+                )
+            except Exception as exc:
+                logger.warning("[mem0] conflict LLM arbitration failed (keep both): %s", exc)
+                continue
+            if label != "SUPPLEMENT":
+                exclude_ids.add(old.get("id"))
+                logger.info(
+                    "[mem0] conflict_llm_arbitrated user_id=%s label=%s keep=%s exclude=%s",
+                    user_id, label, new.get("id"), old.get("id"),
+                )
 
     # 返回过滤后的结果
     if exclude_ids:
