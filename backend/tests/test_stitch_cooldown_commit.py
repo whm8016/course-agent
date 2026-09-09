@@ -133,6 +133,12 @@ async def _run_turn_with(events, ctx_metadata=None):
         turn_id = await mgr.start_turn(ctx)
         async for _ev in mgr.subscribe_turn(turn_id):
             pass
+        # 确定性等 _run_turn 收尾：subscribe 流在 bus.close() 即结束，此后 finally
+        # 还有落盘/EventBus/冷却提交（回合落盘加入后尾更长，不 await 必竞态）。
+        _ex = mgr._executions.get(turn_id)
+        if _ex and _ex.task:
+            await _ex.task
+        mgr._executions.pop(turn_id, None)
     return called
 
 

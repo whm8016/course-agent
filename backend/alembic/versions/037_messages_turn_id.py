@@ -10,8 +10,8 @@ Letta 服务端持有历史 / Agents SDK session_persistence）。
 - 唯一「索引」而非表级约束：SQLite ALTER 不支持 add constraint，索引两方通用。
   重复投递由 add_message 的 SELECT 先查短路，索引是 DB 层兜底。
 
-Revision ID: 027
-Revises: 026
+Revision ID: 037
+Revises: 036
 Create Date: 2026-09-09
 """
 from typing import Sequence, Union
@@ -19,8 +19,8 @@ from typing import Sequence, Union
 from alembic import op
 import sqlalchemy as sa
 
-revision: str = "027"
-down_revision: Union[str, None] = "026"
+revision: str = "037"
+down_revision: Union[str, None] = "036"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
