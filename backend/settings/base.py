@@ -367,8 +367,11 @@ class ContextBudgetConfig(BaseModel):
     probe_cache_ttl_s: int = 604800             # 探测缓存 TTL（7 天；模型窗口变更频率低）
 
     # -- 兼容字段（保留供 eval_turn_budget 旧臂位读取；新级联统一 L1->L2->L3 不再分支）--
-    coordinator_enabled: TruthyBool = False        # 回合前 plan_turn 反应式裁剪开关（默认关=旧 resolve_budget 20% 裁历史）
-    carry_forward_location: str = "system_prompt"  # history_prefix=超软阈值时摘要前插历史续接
+    # L2 返修后默认开：读侧已改为游标尾部全量原文（不再按条数截断），历史长度口径统一
+    # 由 plan_turn 按 token 预算裁剪，且裁掉时把 L2 摘要卡前插历史续接（carry-forward，
+    # 对齐 Claude Code）；关=回落旧 resolve_budget 20% 窗口裁历史。
+    coordinator_enabled: TruthyBool = True
+    carry_forward_location: str = "history_prefix"
     eviction_strategy: str = "cascade"              # dormant：新级联恒走 L1->L2->L3，不再按此分支
 
 
