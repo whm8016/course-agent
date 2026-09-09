@@ -242,13 +242,6 @@ async def test_persist_skips_foreign_session(client):
 async def test_same_turn_rows_created_at_strictly_increasing(seeded_session):
     """P1 回归：同回合 user/assistant 两行 created_at 严格递增——keyset 游标与
     展示排序按 (created_at, id)，同 ts + 随机 id 会乱序甚至被 keyset 永久排除。"""
-    async with AsyncSessionLocal() as db2:
-        rs = (await db2.execute(
-            select(Message.created_at, Message.role)
-            .where(Message.session_id == _SID)
-            .order_by(Message.created_at, Message.id)
-        )).all()
-    assert len(rs) == 0  # seed 后无消息
     await _run_turn(
         [_ev(StreamEventType.ANSWER, content="答"),
          _ev(StreamEventType.DONE, metadata={"mode": "chat"})],
@@ -260,7 +253,7 @@ async def test_same_turn_rows_created_at_strictly_increasing(seeded_session):
             .where(Message.session_id == _SID)
             .order_by(Message.created_at, Message.id)
         )).all()
-    assert [r.role for r in rs] == ["user", "assistant"]
+    assert [r.role for r in rs] == ["user", "assistant"]  # user 恒在前
     assert rs[1].created_at > rs[0].created_at  # 严格递增，非随机 id 决定
 
 

@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from settings import get_settings
 from core.analytics.token_usage import track_llm_response
-from core.db.database import Session, Message
+from core.db.database import AsyncSessionLocal, Message, Session
 from core.llm.llm import client as async_openai_client
 from core.llm.reasoning_params import apply_reasoning_kwargs
 from core.observability.langsmith_trace import ls_extra
@@ -523,23 +523,49 @@ def _load_meta(raw) -> dict:
         return {}
 
 
-async def _resolve_cursor(db: AsyncSession, session: Session) -> tuple[float | None, str | None]:
-    """Session 行的 L2 游标 -> keyset 下界 (created_at, id)。
+async def _resolve_cursor(db: AsyncSession, session) -> tuple[float | None, str | None]:
+    """Session 的 L2 游标 -> keyset 下界 (created_at, id)。
 
-    新游标路径（summary_up_to_created_at 已回填）直取；存量行 NULL 走 msg_id 反查
-    created_at 的兼容路径；游标消息已被删（CASCADE）-> (None, None) 即无下界。
-    压缩增量区间与读侧尾部载入共用。
+    接受 ORM Session 行或列裁剪 Row（只要有 summary_up_to_msg_id /
+    summary_up_to_created_at 两属性）。新游标路径（created_at 已回填）直取；
+    存量行 NULL 走 msg_id 反查 created_at 的兼容路径；游标消息已被删（CASCADE）
+    -> (None, None) 即无下界。压缩增量区间与读侧尾部载入共用。
     """
-    if session.summary_up_to_created_at is not None and session.summary_up_to_msg_id:
+    if not session.summary_up_to_msg_id:
+        return None, None  # 从未压缩：无下界
+    if session.summary_up_to_created_at is not None:
         return session.summary_up_to_created_at, session.summary_up_to_msg_id
-    if session.summary_up_to_msg_id:
-        cursor_row = (await db.execute(
-            select(Message.created_at, Message.id).where(Message.id == session.summary_up_to_msg_id)
-        )).first()
-        if cursor_row is None:
-            return None, None
-        return cursor_row.created_at, cursor_row.id
-    return None, None
+    cursor_row = (await db.execute(
+        select(Message.created_at, Message.id).where(Message.id == session.summary_up_to_msg_id)
+    )).first()
+    if cursor_row is None:
+        return None, None  # 游标消息已删（CASCADE）
+    return cursor_row.created_at, cursor_row.id
+
+
+def _after_cursor(cursor_ts: float | None, cursor_id: str | None):
+    """keyset 下界谓词：``created_at > ts OR (== ts AND id > id)``。
+
+    (created_at, id) 复合序是本模块核心不变式（读侧尾部与压缩增量区间共享），
+    谓词单点维护——两份手写拷贝改一处漏一处就是静默漏读/漏压。无下界返回 None
+    （调用方不加 where）。
+    """
+    if cursor_ts is None or cursor_id is None:
+        return None
+    return or_(
+        Message.created_at > cursor_ts,
+        and_(Message.created_at == cursor_ts, Message.id > cursor_id),
+    )
+
+
+def _window_keep_msgs(window_size: int) -> int:
+    """压缩豁免窗口（条数）= window_size 轮 × 2 条（一轮 = user+assistant 两条）。
+
+    触发器（读侧积压估算，传 ``get_settings().summary.window_size``）与压缩器
+    （boundary 定位，传 manager 实例的 ``self._window_size``）共用这一处换算；
+    「×2」是两方必须同步的口径，配置源按各自调用链明示。
+    """
+    return window_size * 2
 
 
 async def load_uncompressed_tail(
@@ -558,24 +584,23 @@ async def load_uncompressed_tail(
     user_id 非空时按归属过滤（session 不属于该用户返回 []，防 B 用户带 A 的
     session_id 越权读 A 的会话原文注入自己上下文）。返回 ``[{role, content}]``
     升序，可直接作 conversation_history。
+
+    取行只 select 归属列 + 游标两列（与 get_summary 的全行查询各取所需——本函数
+    不读 summary blob，不拉它）。
     """
-    if user_id:
-        session = (await db.execute(
-            select(Session).where(Session.id == session_id, Session.user_id == user_id)
-        )).scalars().first()
-    else:
-        session = await db.get(Session, session_id)
-    if not session:
+    row = (await db.execute(
+        select(Session.user_id, Session.summary_up_to_msg_id, Session.summary_up_to_created_at)
+        .where(Session.id == session_id)
+    )).first()
+    if row is None or (user_id and str(row.user_id or "") != str(user_id)):
         return []
-    cursor_ts, cursor_id = await _resolve_cursor(db, session)
+    cursor_ts, cursor_id = await _resolve_cursor(db, row)
     stmt = select(Message.role, Message.content).where(
         Message.session_id == session_id
     ).order_by(Message.created_at, Message.id)
-    if cursor_ts is not None and cursor_id is not None:
-        stmt = stmt.where(or_(
-            Message.created_at > cursor_ts,
-            and_(Message.created_at == cursor_ts, Message.id > cursor_id),
-        ))
+    _lower = _after_cursor(cursor_ts, cursor_id)
+    if _lower is not None:
+        stmt = stmt.where(_lower)
     return [{"role": r, "content": c} for r, c in (await db.execute(stmt)).all()]
 
 
@@ -684,8 +709,9 @@ class SessionSummaryManager:
             )
             return False
 
-        # 2) 窗口保留最近 window_size 轮（user+assistant 配对）；消息不足以留窗口则不压
-        window_msg_count = self._window_size * 2
+        # 2) 窗口保留最近 window_size 轮（user+assistant 配对）；消息不足以留窗口则不压。
+        #    窗口条数与读侧触发器共用 _window_keep_msgs 单点换算。
+        window_msg_count = _window_keep_msgs(self._window_size)
         if total_msgs <= window_msg_count:
             return False
 
@@ -703,7 +729,7 @@ class SessionSummaryManager:
         #    _resolve_cursor（含存量 NULL 兼容路径与游标消息被删退全量）
         cursor_ts, cursor_id = await _resolve_cursor(db, session)
 
-        # 5) keyset 取增量区间 (cursor, boundary]
+        # 5) keyset 取增量区间 (cursor, boundary]；下界谓词与读侧尾部共用 _after_cursor
         upper = or_(
             Message.created_at < boundary.created_at,
             and_(Message.created_at == boundary.created_at, Message.id <= boundary.id),
@@ -713,11 +739,9 @@ class SessionSummaryManager:
             .where(Message.session_id == session_id, upper)
             .order_by(Message.created_at, Message.id)
         )
-        if cursor_ts is not None and cursor_id is not None:
-            stmt = stmt.where(or_(
-                Message.created_at > cursor_ts,
-                and_(Message.created_at == cursor_ts, Message.id > cursor_id),
-            ))
+        _lower = _after_cursor(cursor_ts, cursor_id)
+        if _lower is not None:
+            stmt = stmt.where(_lower)
 
         new_messages = list((await db.execute(stmt)).scalars().all())
         if not new_messages:
@@ -729,10 +753,11 @@ class SessionSummaryManager:
         #    的问题：长工具轮照样顶爆窗口而轮数不变，且按条数计与 token 无关。
         #    force 绕闸（溢出当轮同步兜底）。
         span_tokens = sum(_estimate_tokens(m.content or "") for m in new_messages)
-        if not force and span_tokens < get_settings().summary.compact_trigger_tokens:
+        trigger = get_settings().summary.compact_trigger_tokens
+        if not force and span_tokens < trigger:
             logger.debug(
                 "[L2] skip compress session=%s span_tokens=%d < trigger=%d",
-                session_id, span_tokens, get_settings().summary.compact_trigger_tokens,
+                session_id, span_tokens, trigger,
             )
             return False
 
@@ -949,18 +974,16 @@ def trigger_compress_if_heavy(session_id: str, tail: list[dict]) -> bool:
     顺手数 token 判断，越阈值才排队压缩。对齐 LangMem：只有越阈值那次才烧 LLM，
     平时零成本。fire-and-forget，返回是否已排队。
 
-    统计段与压缩闸同口径——只数**积压**（尾部去掉最近 window_size*2 条窗口，
+    统计段与压缩闸同口径——只数**积压**（尾部去掉最近 _window_keep_msgs() 条窗口，
     窗口内消息压缩 boundary 也不收）。若数整个尾部，长会话窗口自身超阈值时
     会每轮排队空转（闸处 no-op 但已白跑锁 + 三条查询）。
     """
     cfg = get_settings().summary
-    window_keep = cfg.window_size * 2
+    window_keep = _window_keep_msgs(cfg.window_size)
     backlog = tail[:-window_keep] if len(tail) > window_keep else []
     backlog_tokens = sum(_estimate_tokens(str(m.get("content") or "")) for m in backlog)
     if backlog_tokens < cfg.compact_trigger_tokens:
         return False
-    import asyncio
-
     asyncio.create_task(_compress_in_background(session_id))
     logger.info(
         "[L2] backlog heavy session=%s backlog_msgs=%d backlog_tokens=%d >= trigger=%d; compress queued",
@@ -972,8 +995,6 @@ def trigger_compress_if_heavy(session_id: str, tail: list[dict]) -> bool:
 async def _compress_in_background(session_id: str) -> None:
     """异步执行 L2 压缩（读侧触发；不阻塞主链路）。"""
     try:
-        from core.db.database import AsyncSessionLocal
-
         async with AsyncSessionLocal() as db:
             await get_summary_manager().maybe_compress(db, session_id)
     except Exception:

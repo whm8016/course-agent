@@ -75,44 +75,38 @@ _STOP_NOTE = "_（已停止生成）_"
 _STOP_EMPTY_NOTE = "_（已停止生成，未产生回答）_"
 
 
-async def _force_advance_l2_cursor(turn_id: str, context: UnifiedContext) -> bool:
-    """溢出兜底：当轮同步强制压缩，推进 L2 游标（被裁历史进摘要卡）。
+def _is_persistent_session(session_id: str | None, turn_id: str) -> bool:
+    """是否挂在真实持久会话上：start_turn 对无会话 turn 用 turn_id 占位
+    session_id（无 Session 行），落盘/溢出兜底等都以本谓词单点判定。"""
+    return bool(session_id) and session_id != turn_id
 
-    maybe_compress(force=True) 绕过频率/token 闸但仍受三层并发锁与 OCC 保护——
-    别的 worker 正在压同 session 时让路返回 False（其结果同样会推进游标，本轮
-    退回原裁剪方案）。占位会话（session_id==turn_id）与 DB 异常均安全让路。
+
+async def _sync_compress_and_reload(turn_id: str, context: UnifiedContext) -> str:
+    """溢出兜底一步：当轮同步强制压缩推进 L2 游标，并重载摘要卡文本。
+
+    maybe_compress(force=True) 绕过 token 闸但仍受三层并发锁与 OCC 保护——别的
+    worker 正在压同 session 时让路返回 ""（其结果同样会推进游标，本轮退回原裁剪
+    方案）。单 DB 会话内压缩 + 重载：读的正是刚 commit 的同一行，省一次会话开闭
+    与跨会话重读（该路径内联在首 token 之前，直接计入首字延迟）。
     """
     session_id = context.session_id or ""
-    if not session_id or session_id == turn_id:
-        return False
+    if not _is_persistent_session(session_id, turn_id):
+        return ""
     try:
         from core.db.database import AsyncSessionLocal
         from core.memory.session_summary import get_summary_manager
 
+        mgr = get_summary_manager()
         async with AsyncSessionLocal() as db:
-            return await get_summary_manager().maybe_compress(db, session_id, force=True)
+            if not await mgr.maybe_compress(db, session_id, force=True):
+                return ""
+            return await mgr.get_summary(
+                db, session_id, user_id=context.user_id or None
+            )
     except Exception:
         logger.warning(
             "TurnRuntime: force L2 compress failed turn_id=%s session=%s",
             turn_id, session_id, exc_info=True,
-        )
-        return False
-
-
-async def _load_session_summary_text(context: UnifiedContext) -> str:
-    """重载 session 的 L2 摘要卡文本（同步压缩推进游标后重新 plan 用）。best-effort。"""
-    try:
-        from core.db.database import AsyncSessionLocal
-        from core.memory.session_summary import get_summary_manager
-
-        async with AsyncSessionLocal() as db:
-            return await get_summary_manager().get_summary(
-                db, context.session_id or "", user_id=str(context.user_id or "") or None
-            )
-    except Exception:
-        logger.warning(
-            "TurnRuntime: reload L2 summary failed session=%s",
-            context.session_id or "", exc_info=True,
         )
         return ""
 
@@ -122,16 +116,10 @@ def _persist_attachments_meta(context: UnifiedContext) -> list[dict] | None:
 
     与 api/sessions 持久化同口径：只存元数据，base64/file_path（服务端内部路径）不落。
     """
-    atts: list[dict] = []
-    for a in context.attachments or []:
-        row = {
-            "type": getattr(a.type, "value", a.type) or "image",
-            "url": a.url,
-            "mime_type": a.mime_type,
-            "filename": a.filename,
-        }
-        atts.append({k: v for k, v in row.items() if v is not None})
-    return atts or None
+    return [
+        a.model_dump(include={"type", "url", "mime_type", "filename"}, exclude_none=True, mode="json")
+        for a in (context.attachments or [])
+    ] or None
 
 
 async def _persist_turn_rows(
@@ -168,32 +156,31 @@ async def _persist_turn_rows(
     """
     ctx = execution.context
     session_id = ctx.session_id or ""
-    if not session_id or session_id == execution.turn_id:
+    if not _is_persistent_session(session_id, execution.turn_id):
         return  # 无持久会话（游客/占位 session），无行可落
     try:
-        from core.db.database import AsyncSessionLocal, Session as DbSession
-        from core.memory.memory import add_message
+        from core.db.database import AsyncSessionLocal
+        from core.memory.memory import add_message, get_session
 
         async with AsyncSessionLocal() as db:
-            session_row = await db.get(DbSession, session_id)
+            session_row = await get_session(db, session_id)
             if session_row is None:
                 return  # Session 行不存在（异常路径），跳过避免 FK 违约
-            if str(session_row.user_id or "") != str(ctx.user_id or ""):
+            if str(session_row.get("user_id") or "") != str(ctx.user_id or ""):
                 logger.warning(
                     "TurnRuntime: persist skipped, session %s not owned by turn user %s",
                     session_id, ctx.user_id,
                 )
                 return  # 归属不符：写侧与读侧同口径（防越权写他人会话）
 
-            user_meta = {}
             atts = _persist_attachments_meta(ctx)
-            if atts:
-                user_meta["attachments"] = atts
             ts_user = time.time()
             await add_message(
                 db, session_id, "user", ctx.user_message or "", "text",
-                metadata=user_meta or None, turn_id=execution.turn_id,
-                created_at=ts_user,
+                metadata={"attachments": atts} if atts else None,
+                turn_id=execution.turn_id, created_at=ts_user,
+                course_id=session_row.get("course_id") or "",
+                touch_session=False,  # 一回合 touch 一次，由 assistant 行收尾
             )
 
             # assistant 行正文：quiz 能力题目走 metadata.quiz（前端 QuizCard 渲染口径，
@@ -227,6 +214,7 @@ async def _persist_turn_rows(
                 db, session_id, "assistant", content, "text",
                 metadata=asst_meta, turn_id=execution.turn_id,
                 created_at=max(time.time(), ts_user + 1e-6),
+                course_id=session_row.get("course_id") or "",
             )
             await db.commit()
         logger.info(
@@ -294,13 +282,8 @@ class TurnRuntimeManager:
             # 原文里，违反不变式。此时同步强制压缩推进游标（被裁消息进卡），再按新卡
             # 重新裁剪。正常轮不触发（未裁不动），零额外延迟。一次性不循环：窗口内的
             # 近消息压缩也救不了（boundary 保留窗口），残余溢出交给轮内 enforce 级联。
-            if (
-                _plan.dropped_beyond_cursor
-                and context.session_id
-                and context.session_id != turn_id
-                and await _force_advance_l2_cursor(turn_id, context)
-            ):
-                _summary2 = await _load_session_summary_text(context)
+            if _plan.dropped_beyond_cursor and _is_persistent_session(context.session_id, turn_id):
+                _summary2 = await _sync_compress_and_reload(turn_id, context)
                 if _summary2:
                     _plan = plan_turn(
                         history=context.conversation_history,  # 原始 history（尚未被裁剪结果覆盖）
@@ -311,17 +294,14 @@ class TurnRuntimeManager:
                     # context.session_summary，不换会用到旧卡（埋点陈旧一轮）
                     context.session_summary = _summary2
                 else:
+                    # 让路（他方在压）/压缩失败/重载为空：按原裁剪方案走，被裁消息
+                    # 当轮不可见——记 WARN 可观测（下轮读侧触发会再压）
                     logger.warning(
-                        "TurnRuntime: overflow fallback compressed but summary reload empty; "
-                        "turn_id=%s trimmed messages beyond cursor uncovered this round",
+                        "TurnRuntime: overflow fallback let-through (compress in "
+                        "progress/failed); turn_id=%s trimmed messages beyond cursor "
+                        "uncovered this round",
                         turn_id,
                     )
-            elif _plan.dropped_beyond_cursor and context.session_id and context.session_id != turn_id:
-                logger.warning(
-                    "TurnRuntime: overflow fallback let-through (compress in progress/failed); "
-                    "turn_id=%s trimmed messages beyond cursor uncovered this round",
-                    turn_id,
-                )
             context.conversation_history = _plan.keep_history
             context.metadata["_budget_plan"] = _plan
             if _plan.carry_forward_added:
@@ -705,18 +685,18 @@ class TurnRuntimeManager:
                 # await，落盘整体失效。shield 再防一层：执行期间的 cancel 注入（用户停止/
                 # 断流的二次 cancel）只打断外层收尾（publish/cooldown——取消语义下本就不跑），
                 # 内层落盘保证跑完；捕下注入继续走 close，订阅者不悬挂。
-                _persist_task = asyncio.ensure_future(_persist_turn_rows(
-                    execution,
-                    agent_output=agent_output,
-                    token_text="".join(token_parts),
-                    cancelled=turn_cancelled,
-                    error_text=turn_error,
-                    done_metadata=done_metadata,
-                    result_metadata=result_metadata,
-                    result_questions=result_questions,
-                ))
                 try:
-                    await asyncio.shield(_persist_task)
+                    await asyncio.shield(_persist_turn_rows(
+                        execution,
+                        agent_output=agent_output,
+                        # token 拼接只在取消轮被读（正常轮 ANSWER 已含全文），不白付 O(全文) join
+                        token_text="".join(token_parts) if turn_cancelled else "",
+                        cancelled=turn_cancelled,
+                        error_text=turn_error,
+                        done_metadata=done_metadata,
+                        result_metadata=result_metadata,
+                        result_questions=result_questions,
+                    ))
                 except asyncio.CancelledError:
                     pass  # 落盘在后台继续；继续收尾（close bus 释放订阅者）
                 if not execution.bus._closed:

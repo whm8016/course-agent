@@ -112,6 +112,20 @@ async def delete_session(db: AsyncSession, session_id: str):
 # Message CRUD (async)
 # ---------------------------------------------------------------------------
 
+def _row_dict(r: Message, metadata: dict | None = None) -> dict:
+    """Message 行 -> API dict（幂等命中/插入返回/get_messages 三处共用）。"""
+    return {
+        "id": r.id,
+        "session_id": r.session_id,
+        "role": r.role,
+        "content": r.content,
+        "msg_type": r.msg_type,
+        "metadata": metadata if metadata is not None else json.loads(r.metadata_ or "{}"),
+        "created_at": r.created_at,
+        "turn_id": r.turn_id,
+    }
+
+
 async def add_message(
     db: AsyncSession,
     session_id: str,
@@ -121,6 +135,8 @@ async def add_message(
     metadata: dict | None = None,
     turn_id: str | None = None,
     created_at: float | None = None,
+    course_id: str | None = None,
+    touch_session: bool = True,
 ) -> dict:
     """写入一条消息行。
 
@@ -131,6 +147,10 @@ async def add_message(
     created_at 可显式传入（服务端回合日志用：同回合 user/assistant 两行传严格
     递增戳，保证 keyset/展示排序 (created_at, id) 下 user 在前——随机 id 做不了
     同回合内的确定性 tiebreak）。
+
+    course_id / touch_session 供批量写者省往返：调用方已持有 Session 行时传
+    course_id 免去逐行反查；一行会话多消息时只让最后一行 touch（updated_at
+    每回合动一次即可）。
     """
     now = time.time() if created_at is None else created_at
     if turn_id:
@@ -142,21 +162,13 @@ async def add_message(
             )
         )).scalars().first()
         if existing is not None:
-            return {
-                "id": existing.id,
-                "session_id": existing.session_id,
-                "role": existing.role,
-                "content": existing.content,
-                "msg_type": existing.msg_type,
-                "metadata": json.loads(existing.metadata_ or "{}"),
-                "created_at": existing.created_at,
-                "turn_id": existing.turn_id,
-            }
+            return _row_dict(existing)
     meta_json = json.dumps(metadata or {}, ensure_ascii=False)
     # P1：写时落盘 course_id（反查 Session，省去读侧 JOIN；宪法原则 3）
-    course_id = (await db.execute(
-        select(Session.course_id).where(Session.id == session_id)
-    )).scalar_one_or_none() or ""
+    if course_id is None:
+        course_id = (await db.execute(
+            select(Session.course_id).where(Session.id == session_id)
+        )).scalar_one_or_none() or ""
     msg = Message(
         id=uuid.uuid4().hex[:16],
         session_id=session_id,
@@ -169,20 +181,12 @@ async def add_message(
         created_at=now,
     )
     db.add(msg)
-    await db.execute(
-        update(Session).where(Session.id == session_id).values(updated_at=now)
-    )
+    if touch_session:
+        await db.execute(
+            update(Session).where(Session.id == session_id).values(updated_at=now)
+        )
     await db.flush()
-    return {
-        "id": msg.id,
-        "session_id": msg.session_id,
-        "role": msg.role,
-        "content": msg.content,
-        "msg_type": msg.msg_type,
-        "metadata": metadata or {},
-        "created_at": msg.created_at,
-        "turn_id": msg.turn_id,
-    }
+    return _row_dict(msg, metadata or {})
 
 
 async def get_messages(db: AsyncSession, session_id: str) -> list[dict]:
@@ -192,17 +196,4 @@ async def get_messages(db: AsyncSession, session_id: str) -> list[dict]:
         .where(Message.session_id == session_id)
         .order_by(Message.created_at.asc(), Message.id.asc())
     )
-    rows = result.scalars().all()
-    out = []
-    for r in rows:
-        out.append({
-            "id": r.id,
-            "session_id": r.session_id,
-            "role": r.role,
-            "content": r.content,
-            "msg_type": r.msg_type,
-            "metadata": json.loads(r.metadata_ or "{}"),
-            "created_at": r.created_at,
-            "turn_id": r.turn_id,
-        })
-    return out
+    return [_row_dict(r) for r in result.scalars().all()]

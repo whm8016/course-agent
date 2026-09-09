@@ -17,8 +17,8 @@ _maybe_compress_locked 跑真 SQL；OCC 冲突与跨进程锁用 mock（确定�
 from __future__ import annotations
 
 import asyncio
-import sys
 import os
+import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -37,9 +37,9 @@ _BUFFER = 0
 
 def _msgs(n: int, heavy: bool = False):
     """n 条消息 (id m00..m{n-1}，created_at=1000+i)，role 交替；heavy=每条 ~2000 token。"""
-    content = ("长" * 2000) if heavy else None
     return [
-        (f"m{i:02d}", "user" if i % 2 == 0 else "assistant", content or f"c{i}", 1000.0 + i)
+        (f"m{i:02d}", "user" if i % 2 == 0 else "assistant",
+         ("长" * 2000) if heavy else f"c{i}", 1000.0 + i)
         for i in range(n)
     ]
 
