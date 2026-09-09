@@ -75,6 +75,48 @@ _STOP_NOTE = "_（已停止生成）_"
 _STOP_EMPTY_NOTE = "_（已停止生成，未产生回答）_"
 
 
+async def _force_advance_l2_cursor(turn_id: str, context: UnifiedContext) -> bool:
+    """溢出兜底：当轮同步强制压缩，推进 L2 游标（被裁历史进摘要卡）。
+
+    maybe_compress(force=True) 绕过频率/token 闸但仍受三层并发锁与 OCC 保护——
+    别的 worker 正在压同 session 时让路返回 False（其结果同样会推进游标，本轮
+    退回原裁剪方案）。占位会话（session_id==turn_id）与 DB 异常均安全让路。
+    """
+    session_id = context.session_id or ""
+    if not session_id or session_id == turn_id:
+        return False
+    try:
+        from core.db.database import AsyncSessionLocal
+        from core.memory.session_summary import get_summary_manager
+
+        async with AsyncSessionLocal() as db:
+            return await get_summary_manager().maybe_compress(db, session_id, force=True)
+    except Exception:
+        logger.warning(
+            "TurnRuntime: force L2 compress failed turn_id=%s session=%s",
+            turn_id, session_id, exc_info=True,
+        )
+        return False
+
+
+async def _load_session_summary_text(context: UnifiedContext) -> str:
+    """重载 session 的 L2 摘要卡文本（同步压缩推进游标后重新 plan 用）。best-effort。"""
+    try:
+        from core.db.database import AsyncSessionLocal
+        from core.memory.session_summary import get_summary_manager
+
+        async with AsyncSessionLocal() as db:
+            return await get_summary_manager().get_summary(
+                db, context.session_id or "", user_id=str(context.user_id or "") or None
+            )
+    except Exception:
+        logger.warning(
+            "TurnRuntime: reload L2 summary failed session=%s",
+            context.session_id or "", exc_info=True,
+        )
+        return ""
+
+
 def _persist_attachments_meta(context: UnifiedContext) -> list[dict] | None:
     """context.attachments -> user 行 metadata.attachments（前端 AttachmentInfo 形状）。
 
@@ -230,6 +272,24 @@ class TurnRuntimeManager:
                 model=_turn_model,
                 session_summary_text=context.session_summary or "",
             )
+            # 溢出当轮同步兜底（对齐 Letta 溢出时先 summarize_messages_inplace 再重试）：
+            # 读侧只装游标之后的消息，裁掉即越游标——被裁消息既不在摘要卡里也不在本轮
+            # 原文里，违反不变式。此时同步强制压缩推进游标（被裁消息进卡），再按新卡
+            # 重新裁剪。正常轮不触发（未裁不动），零额外延迟。一次性不循环：窗口内的
+            # 近消息压缩也救不了（boundary 保留窗口），残余溢出交给轮内 enforce 级联。
+            if (
+                _plan.dropped_beyond_cursor
+                and context.session_id
+                and context.session_id != turn_id
+                and await _force_advance_l2_cursor(turn_id, context)
+            ):
+                _summary2 = await _load_session_summary_text(context)
+                if _summary2:
+                    _plan = plan_turn(
+                        history=context.conversation_history,  # 原始 history（尚未被裁剪结果覆盖）
+                        model=_turn_model,
+                        session_summary_text=_summary2,
+                    )
             context.conversation_history = _plan.keep_history
             context.metadata["_budget_plan"] = _plan
             if _plan.carry_forward_added:

@@ -638,12 +638,16 @@ class SessionSummaryManager:
         self,
         db: AsyncSession,
         session_id: str,
+        *,
+        force: bool = False,
     ) -> bool:
         """判断是否需要压缩，如需要则执行压缩。
 
         Args:
             db: 数据库会话
             session_id: 会话 ID
+            force: 绕过频率/token 闸（溢出当轮同步兜底用——读侧裁剪越游标时必须
+                立刻把被裁消息压进卡）。三层并发锁与 OCC 写回不受 force 影响。
 
         Returns:
             是否执行了压缩
@@ -673,7 +677,7 @@ class SessionSummaryManager:
                     logger.info("[L2] compress SKIP session=%s reason=locked-by-other-worker", session_id)
                     return False
             try:
-                return await self._maybe_compress_locked(db, session_id)
+                return await self._maybe_compress_locked(db, session_id, force=force)
             finally:
                 if acquired:  # 只有真抢到才释放（降级/被占都不动别人的锁）
                     try:
@@ -685,9 +689,12 @@ class SessionSummaryManager:
         self,
         db: AsyncSession,
         session_id: str,
+        *,
+        force: bool = False,
     ) -> bool:
         """实际的压缩逻辑（已持进程内锁 + 可选 Redis 锁，由 maybe_compress 调用）。
 
+        force=True 绕过第 6 步的频率闸（溢出当轮同步兜底），其余守卫不变。
         读路径全 SQL 化，开销与会话长度解耦：
           1) 廉价守卫 COUNT(*) 短路--绝大多数轮次在此返回，一次索引 count 即可；
           2) keyset 定位 boundary（窗口外最后一条 = 压缩上界），DESC offset 取 1 行；
@@ -758,9 +765,9 @@ class SessionSummaryManager:
         # 6) 频率闸：本轮新增不足 compress_interval 轮（一轮 = user+assistant 两条）
         #    -> 跳过（下轮再压）。首次压缩（无游标）同样受闸——旧逻辑 last_msg_id 为空
         #    时整道闸被绕过，窗口刚越阈值就半截对话送压缩；压缩失败又不推进游标，
-        #    下轮重压同一批，LangSmith 上表现为高频重复调用。
+        #    下轮重压同一批，LangSmith 上表现为高频重复调用。force 绕闸（同步兜底）。
         gate_msgs = self._compress_interval * 2
-        if len(new_messages) < gate_msgs:
+        if not force and len(new_messages) < gate_msgs:
             logger.debug(
                 "[L2] skip compress session=%s new_msgs=%d < interval=%d rounds (= %d msgs)",
                 session_id, len(new_messages), self._compress_interval, gate_msgs,

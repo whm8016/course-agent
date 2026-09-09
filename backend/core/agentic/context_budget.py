@@ -81,12 +81,17 @@ def cap_dynamic_slices(
 class TurnBudgetPlan:
     """回合前预算规划产物，随 context.metadata["_budget_plan"] 跨调用传递。
 
-    keep_history        裁剪后历史（carry_forward 时首位可能前插 <session_summary> system 消息）
-    dropped_count       被裁掉的历史消息数
-    carry_forward_added 是否前插了摘要续接块（是则 turn_runtime 清空 ctx.session_summary 避免双付）
-    target_input_tokens 软阈值/质量线（= compute_budgets 的 soft_trigger；超了才裁）。eval getattr 兼容字段
-    mecw                有效上下文窗口（= resolve_effective_window；三级解析）。eval getattr 兼容字段
-    hard_ceiling        硬天花板/安全线（L3 降级与反应式兜底用）
+    keep_history           裁剪后历史（carry_forward 时首位可能前插 <session_summary> system 消息）
+    dropped_count          被裁掉的历史消息数
+    carry_forward_added    是否前插了摘要续接块（是则 turn_runtime 清空 ctx.session_summary 避免双付）
+    dropped_beyond_cursor  本次裁剪是否丢掉摘要游标之后（未被压缩卡覆盖）的消息。
+                           读侧（load_uncompressed_tail）只装游标之后的消息 ⇒ 被裁即越游标
+                           ——那些消息既不在卡里也不在本轮原文里，违反不变式，调用方
+                           （turn_runtime）据此触发当轮同步压缩兜底。游客/body.history 无
+                           游标概念，恒 False（无会话可压）。默认 False 兼容旧构造。
+    target_input_tokens    软阈值/质量线（= compute_budgets 的 soft_trigger；超了才裁）。eval getattr 兼容字段
+    mecw                   有效上下文窗口（= resolve_effective_window；三级解析）。eval getattr 兼容字段
+    hard_ceiling           硬天花板/安全线（L3 降级与反应式兜底用）
     """
 
     keep_history: list[dict[str, Any]]
@@ -95,6 +100,7 @@ class TurnBudgetPlan:
     target_input_tokens: int
     mecw: int
     hard_ceiling: int
+    dropped_beyond_cursor: bool = False
 
 
 @dataclasses.dataclass
@@ -344,6 +350,7 @@ def plan_turn(
             keep_history=list(history),
             dropped_count=0,
             carry_forward_added=False,
+            dropped_beyond_cursor=False,
             target_input_tokens=soft_trigger,
             mecw=eff_window,
             hard_ceiling=hard_ceiling,
@@ -365,6 +372,8 @@ def plan_turn(
         keep_history=keep,
         dropped_count=dropped,
         carry_forward_added=carry_added,
+        # 读侧只装游标之后的消息 ⇒ 被裁即越游标（详见 TurnBudgetPlan 字段注释）
+        dropped_beyond_cursor=dropped > 0,
         target_input_tokens=soft_trigger,
         mecw=eff_window,
         hard_ceiling=hard_ceiling,

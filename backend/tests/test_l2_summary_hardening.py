@@ -263,7 +263,7 @@ async def test_cross_process_redis_lock_only_one_proceeds():
     mgr_b = ss.SessionSummaryManager(window_size=_WINDOW, buffer_size=_BUFFER, compress_interval=1)
     entered: list[str] = []
 
-    async def slow_locked(self, db, sid):
+    async def slow_locked(self, db, sid, force=False):
         entered.append(sid)
         await asyncio.sleep(0.1)  # 让另一个 worker 有窗口抢 Redis 锁
         return True
