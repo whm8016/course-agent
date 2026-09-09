@@ -18,6 +18,19 @@ logger = logging.getLogger(__name__)
 # Session CRUD (async, with user_id isolation)
 # ---------------------------------------------------------------------------
 
+def _session_dict(r: Session) -> dict:
+    """Session 行 -> API dict（create/list/get 三处共用，与 _row_dict 同模式）。"""
+    return {
+        "id": r.id,
+        "course_id": r.course_id,
+        "user_id": r.user_id,
+        "title": r.title,
+        "mode": r.mode,
+        "created_at": r.created_at,
+        "updated_at": r.updated_at,
+    }
+
+
 async def create_session(
     db: AsyncSession,
     course_id: str,
@@ -37,15 +50,7 @@ async def create_session(
     )
     db.add(session)
     await db.flush()
-    return {
-        "id": session.id,
-        "course_id": session.course_id,
-        "user_id": session.user_id,
-        "title": session.title,
-        "mode": session.mode,
-        "created_at": session.created_at,
-        "updated_at": session.updated_at,
-    }
+    return _session_dict(session)
 
 
 async def list_sessions(
@@ -56,35 +61,13 @@ async def list_sessions(
         stmt = stmt.where(Session.course_id == course_id)
     stmt = stmt.order_by(Session.updated_at.desc())
     result = await db.execute(stmt)
-    rows = result.scalars().all()
-    return [
-        {
-            "id": r.id,
-            "course_id": r.course_id,
-            "user_id": r.user_id,
-            "title": r.title,
-            "mode": r.mode,
-            "created_at": r.created_at,
-            "updated_at": r.updated_at,
-        }
-        for r in rows
-    ]
+    return [_session_dict(r) for r in result.scalars().all()]
 
 
 async def get_session(db: AsyncSession, session_id: str) -> dict | None:
     result = await db.execute(select(Session).where(Session.id == session_id))
     r = result.scalar_one_or_none()
-    if not r:
-        return None
-    return {
-        "id": r.id,
-        "course_id": r.course_id,
-        "user_id": r.user_id,
-        "title": r.title,
-        "mode": r.mode,
-        "created_at": r.created_at,
-        "updated_at": r.updated_at,
-    }
+    return _session_dict(r) if r else None
 
 
 async def update_session_title(db: AsyncSession, session_id: str, title: str):

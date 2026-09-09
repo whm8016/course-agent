@@ -980,7 +980,7 @@ def trigger_compress_if_heavy(session_id: str, tail: list[dict]) -> bool:
     """
     cfg = get_settings().summary
     window_keep = _window_keep_msgs(cfg.window_size)
-    backlog = tail[:-window_keep] if len(tail) > window_keep else []
+    backlog = tail[:-window_keep]  # 负切片超界（积压空）本就返回 []，无需守卫
     backlog_tokens = sum(_estimate_tokens(str(m.get("content") or "")) for m in backlog)
     if backlog_tokens < cfg.compact_trigger_tokens:
         return False

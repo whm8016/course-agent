@@ -105,7 +105,7 @@ async def _sync_compress_and_reload(turn_id: str, context: UnifiedContext) -> st
             )
     except Exception:
         logger.warning(
-            "TurnRuntime: force L2 compress failed turn_id=%s session=%s",
+            "TurnRuntime: force L2 compress/reload failed turn_id=%s session=%s",
             turn_id, session_id, exc_info=True,
         )
         return ""
@@ -159,14 +159,21 @@ async def _persist_turn_rows(
     if not _is_persistent_session(session_id, execution.turn_id):
         return  # 无持久会话（游客/占位 session），无行可落
     try:
-        from core.db.database import AsyncSessionLocal
-        from core.memory.memory import add_message, get_session
+        from sqlalchemy import select as _select
+
+        from core.db.database import AsyncSessionLocal, Session as DbSession
+        from core.memory.memory import add_message
 
         async with AsyncSessionLocal() as db:
-            session_row = await get_session(db, session_id)
+            # 只取归属 + course_id 两列（与读侧 load_uncompressed_tail 的列裁剪对称，
+            # 不白拉 summary Text blob——本路径每回合必经）
+            session_row = (await db.execute(
+                _select(DbSession.user_id, DbSession.course_id)
+                .where(DbSession.id == session_id)
+            )).first()
             if session_row is None:
                 return  # Session 行不存在（异常路径），跳过避免 FK 违约
-            if str(session_row.get("user_id") or "") != str(ctx.user_id or ""):
+            if str(session_row.user_id or "") != str(ctx.user_id or ""):
                 logger.warning(
                     "TurnRuntime: persist skipped, session %s not owned by turn user %s",
                     session_id, ctx.user_id,
@@ -179,7 +186,7 @@ async def _persist_turn_rows(
                 db, session_id, "user", ctx.user_message or "", "text",
                 metadata={"attachments": atts} if atts else None,
                 turn_id=execution.turn_id, created_at=ts_user,
-                course_id=session_row.get("course_id") or "",
+                course_id=session_row.course_id or "",
                 touch_session=False,  # 一回合 touch 一次，由 assistant 行收尾
             )
 
@@ -214,7 +221,7 @@ async def _persist_turn_rows(
                 db, session_id, "assistant", content, "text",
                 metadata=asst_meta, turn_id=execution.turn_id,
                 created_at=max(time.time(), ts_user + 1e-6),
-                course_id=session_row.get("course_id") or "",
+                course_id=session_row.course_id or "",
             )
             await db.commit()
         logger.info(
@@ -294,12 +301,13 @@ class TurnRuntimeManager:
                     # context.session_summary，不换会用到旧卡（埋点陈旧一轮）
                     context.session_summary = _summary2
                 else:
-                    # 让路（他方在压）/压缩失败/重载为空：按原裁剪方案走，被裁消息
-                    # 当轮不可见——记 WARN 可观测（下轮读侧触发会再压）
+                    # 成因三合一（无法在此区分）：让路（他方在压）/压缩或重载失败/
+                    # 压缩成功但重载为空。按原裁剪方案走，被裁消息当轮不可见——
+                    # 记 WARN 可观测（下轮读侧触发会再压）
                     logger.warning(
-                        "TurnRuntime: overflow fallback let-through (compress in "
-                        "progress/failed); turn_id=%s trimmed messages beyond cursor "
-                        "uncovered this round",
+                        "TurnRuntime: overflow fallback let-through (compress let "
+                        "pass/failed or reload empty); turn_id=%s trimmed messages "
+                        "beyond cursor uncovered this round",
                         turn_id,
                     )
             context.conversation_history = _plan.keep_history
