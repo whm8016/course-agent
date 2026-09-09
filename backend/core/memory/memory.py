@@ -119,8 +119,34 @@ async def add_message(
     content: str,
     msg_type: str = "text",
     metadata: dict | None = None,
+    turn_id: str | None = None,
 ) -> dict:
+    """写入一条消息行。
+
+    turn_id 非空时按 (session_id, turn_id, role) 幂等：已有同键行直接返回它
+    （服务端回合日志重复投递场景），不重复插入。uq_messages_session_turn_role
+    唯一索引是 DB 层兜底。
+    """
     now = time.time()
+    if turn_id:
+        existing = (await db.execute(
+            select(Message).where(
+                Message.session_id == session_id,
+                Message.turn_id == turn_id,
+                Message.role == role,
+            )
+        )).scalars().first()
+        if existing is not None:
+            return {
+                "id": existing.id,
+                "session_id": existing.session_id,
+                "role": existing.role,
+                "content": existing.content,
+                "msg_type": existing.msg_type,
+                "metadata": json.loads(existing.metadata_ or "{}"),
+                "created_at": existing.created_at,
+                "turn_id": existing.turn_id,
+            }
     meta_json = json.dumps(metadata or {}, ensure_ascii=False)
     # P1：写时落盘 course_id（反查 Session，省去读侧 JOIN；宪法原则 3）
     course_id = (await db.execute(
@@ -130,6 +156,7 @@ async def add_message(
         id=uuid.uuid4().hex[:16],
         session_id=session_id,
         course_id=course_id,
+        turn_id=turn_id,
         role=role,
         content=content,
         msg_type=msg_type,
@@ -149,6 +176,7 @@ async def add_message(
         "msg_type": msg.msg_type,
         "metadata": metadata or {},
         "created_at": msg.created_at,
+        "turn_id": msg.turn_id,
     }
 
 
@@ -169,5 +197,6 @@ async def get_messages(db: AsyncSession, session_id: str) -> list[dict]:
             "msg_type": r.msg_type,
             "metadata": json.loads(r.metadata_ or "{}"),
             "created_at": r.created_at,
+            "turn_id": r.turn_id,
         })
     return out

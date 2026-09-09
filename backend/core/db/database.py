@@ -127,6 +127,9 @@ class Message(Base):
     session_id = Column(String(32), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=False)
     # P1：写时落盘 course_id，课程级查询免 JOIN Session（宪法原则 3）
     course_id = Column(String(64), nullable=False, default="")
+    # 服务端权威回合日志：turn_runtime 每回合落 user/assistant 两行，幂等键的 turn 分量。
+    # nullable=True——存量行 NULL（唯一索引中 NULL 互不冲突），新写入恒带值。
+    turn_id = Column(String(32), nullable=True)
     role = Column(String(16), nullable=False)
     content = Column(Text, nullable=False, default="")
     msg_type = Column(String(16), nullable=False, default="text")
@@ -138,6 +141,9 @@ class Message(Base):
     __table_args__ = (
         Index("idx_messages_session", "session_id", "created_at"),
         Index("idx_messages_course", "course_id", "created_at"),
+        # 幂等：同 turn 同角色只允许一行（重复投递冲突跳过）。唯一索引而非表级约束，
+        # 兼容 SQLite ALTER 限制；PG/SQLite 唯一索引中 NULL 互不冲突，存量行安全。
+        Index("uq_messages_session_turn_role", "session_id", "turn_id", "role", unique=True),
     )
 
 

@@ -70,6 +70,117 @@ class _TurnExecution:
     # 在 _TurnExecution 构造时传入。
 
 
+# 取消轮落盘的尾注，与前端 ChatWindow 停止生成时的展示格式逐字一致（重载回放不跳变）。
+_STOP_NOTE = "_（已停止生成）_"
+_STOP_EMPTY_NOTE = "_（已停止生成，未产生回答）_"
+
+
+def _persist_attachments_meta(context: UnifiedContext) -> list[dict] | None:
+    """context.attachments -> user 行 metadata.attachments（前端 AttachmentInfo 形状）。
+
+    与 api/sessions 持久化同口径：只存元数据，base64/file_path（服务端内部路径）不落。
+    """
+    atts: list[dict] = []
+    for a in context.attachments or []:
+        row = {
+            "type": getattr(a.type, "value", a.type) or "image",
+            "url": a.url,
+            "mime_type": a.mime_type,
+            "filename": a.filename,
+        }
+        atts.append({k: v for k, v in row.items() if v is not None})
+    return atts or None
+
+
+async def _persist_turn_rows(
+    execution: _TurnExecution,
+    *,
+    agent_output: str,
+    token_text: str,
+    cancelled: bool,
+    error_text: str | None,
+    done_metadata: dict,
+    result_metadata: dict,
+    result_questions: list | None,
+) -> None:
+    """回合结束把 user/assistant 两行写进 messages（服务端权威回合日志）。
+
+    对标 Letta / Agents SDK：历史由服务端持有，不依赖客户端落库。此前前端流结束后
+    best-effort saveMessage——关标签页/出错/取消轮永久丢失，且早于客户端落库触发的
+    压缩器永远看不到最新一轮。
+
+    幂等：(session_id, turn_id, role) 唯一（add_message 先查短路 + DB 唯一索引兜底）。
+    跳过条件：无 session_id 或 session_id==turn_id（start_turn 对无会话 turn 的占位，
+    无 Session 行可挂）。best-effort：任何异常只告警。
+
+    metadata 对齐前端此前写入集合（ChatWindow saveMessage）：mode/tools_used/truncated/
+    usage/stopped/quiz + user 行 attachments。intent/intent_confidence/retrieve_mode/
+    retrieve_strategy/hallucination/chunks 不落——现行 loop 的 done/tool_result 事件
+    本就不产这些字段（前端此前落库也恒空），放弃而非补造。
+    """
+    ctx = execution.context
+    session_id = ctx.session_id or ""
+    if not session_id or session_id == execution.turn_id:
+        return  # 无持久会话（游客/占位 session），无行可落
+    try:
+        from core.db.database import AsyncSessionLocal, Session as DbSession
+        from core.memory.memory import add_message
+
+        async with AsyncSessionLocal() as db:
+            if await db.get(DbSession, session_id) is None:
+                return  # Session 行不存在（异常路径），跳过避免 FK 违约
+
+            user_meta = {}
+            atts = _persist_attachments_meta(ctx)
+            if atts:
+                user_meta["attachments"] = atts
+            await add_message(
+                db, session_id, "user", ctx.user_message or "", "text",
+                metadata=user_meta or None, turn_id=execution.turn_id,
+            )
+
+            # assistant 行正文：quiz 能力题目走 metadata.quiz（前端 QuizCard 渲染口径，
+            # content 恒空）；取消轮拼 token 部分输出；错误轮记错误文本；其余用完整输出。
+            if result_questions is not None:
+                content = ""
+            elif cancelled:
+                partial = agent_output or token_text
+                content = f"{partial}\n\n{_STOP_NOTE}" if partial else _STOP_EMPTY_NOTE
+            elif error_text is not None:
+                content = f"出错了: {error_text}"
+            else:
+                content = agent_output
+
+            asst_meta: dict = {"mode": done_metadata.get("mode") or ctx.mode or "chat"}
+            if done_metadata.get("tools_used"):
+                asst_meta["tools_used"] = done_metadata["tools_used"]
+            if done_metadata.get("truncated"):
+                asst_meta["truncated"] = True
+            usage = done_metadata.get("usage") or (ctx.metadata or {}).get("llm_usage")
+            if usage:
+                asst_meta["usage"] = usage
+            if result_metadata:
+                asst_meta.update(result_metadata)
+            if result_questions is not None:
+                asst_meta["quiz"] = {"questions": result_questions}
+            if cancelled:
+                asst_meta["stopped"] = True
+            await add_message(
+                db, session_id, "assistant", content, "text",
+                metadata=asst_meta, turn_id=execution.turn_id,
+            )
+            await db.commit()
+        logger.info(
+            "TurnRuntime: persisted turn rows turn_id=%s session=%s cancelled=%s error=%s",
+            execution.turn_id, session_id, cancelled, bool(error_text),
+        )
+    except Exception:
+        logger.warning(
+            "TurnRuntime: persist turn rows failed turn_id=%s session=%s",
+            execution.turn_id, session_id, exc_info=True,
+        )
+
+
 class TurnRuntimeManager:
     """管理 turn 生命周期：创建 → ContextBuilder → orchestrator → fan-out → EventBus。"""
 
@@ -355,8 +466,15 @@ class TurnRuntimeManager:
 
         orchestrator = get_orchestrator()
         answer_parts: list[str] = []
+        # 取消轮的兜底正文来源：TOKEN 流式增量（ANSWER 只在 loop 正常收尾才发，
+        # 取消时 answer_parts 多半为空，部分输出只能从 token 流拼接）。
+        token_parts: list[str] = []
         result_text_parts: list[str] = []
         result_metadata: dict = {}
+        result_questions: list | None = None  # quiz RESULT 的原始题目列表（落库 metadata.quiz 用）
+        done_metadata: dict = {}  # loop/quiz 收尾 done 事件的 metadata（usage/tools_used/...）
+        turn_cancelled = False
+        turn_error: str | None = None
         seq = 0
         first_event_logged = False
         t0 = time.monotonic()
@@ -410,6 +528,10 @@ class TurnRuntimeManager:
                     if event.type == StreamEventType.ANSWER:
                         answer_parts.append(str(event.payload.get("content") or ""))
 
+                    # 收集流式增量（取消轮落盘部分输出用；正常轮 ANSWER 已含全文，不用它）
+                    if event.type == StreamEventType.TOKEN:
+                        token_parts.append(str(event.payload.get("content") or ""))
+
                     # 收集 result 产物（quiz/research 等能力不产 ANSWER、以 result 收尾）：
                     # 抽出可写入文本（research 报告 / quiz 题目），否则这两类能力永远不发
                     # CapabilityCompleteEvent，L3 outbox、巩固触发、L2 压缩全不跑。
@@ -422,14 +544,23 @@ class TurnRuntimeManager:
                             result_text_parts.append(
                                 json.dumps(questions, ensure_ascii=False)
                             )
+                            result_questions = questions
                         meta = event.payload.get("metadata")
                         if isinstance(meta, dict):
                             result_metadata.update(meta)
+
+                    # 收集收尾 done 事件的 metadata（usage/tools_used/truncated/mode），
+                    # 供回合落盘对齐前端此前写入的 metadata 集合。
+                    if event.type == StreamEventType.DONE:
+                        _dm = event.payload.get("metadata")
+                        if isinstance(_dm, dict):
+                            done_metadata.update(_dm)
 
                     # fan-out 给所有 subscribe_turn 订阅者
                     await execution.bus.emit(event)
 
             except asyncio.CancelledError:
+                turn_cancelled = True
                 log_flow("turn.cancel", turn_id=execution.turn_id,
                          elapsed_ms=int((time.monotonic() - t0) * 1000), events=seq)
                 await execution.bus.emit({
@@ -438,6 +569,7 @@ class TurnRuntimeManager:
                     "source": "turn_runtime",
                 })
             except Exception as exc:
+                turn_error = str(exc)
                 logger.exception(
                     "TurnRuntime: turn_id=%s unhandled error: %s",
                     execution.turn_id, exc,
@@ -476,6 +608,20 @@ class TurnRuntimeManager:
                 self._answer_now_events.pop(execution.turn_id, None)
                 if not execution.bus._closed:
                     await execution.bus.close()
+
+                # 服务端权威回合日志：落 user/assistant 两行（幂等 by turn_id，含取消/错误轮）。
+                # 必须先于 CAPABILITY_COMPLETE——读侧（下一轮 load_uncompressed_tail）与
+                # L3 episodic 都依赖 messages 行已就位。best-effort：失败只告警不影响回合收尾。
+                await _persist_turn_rows(
+                    execution,
+                    agent_output=agent_output,
+                    token_text="".join(token_parts),
+                    cancelled=turn_cancelled,
+                    error_text=turn_error,
+                    done_metadata=done_metadata,
+                    result_metadata=result_metadata,
+                    result_questions=result_questions,
+                )
 
                 # 发布 CAPABILITY_COMPLETE 事件（记忆更新等后台任务订阅）
                 if agent_output:

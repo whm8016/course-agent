@@ -12,7 +12,7 @@ import { isImage } from './fileUtils'
 import { useStickToBottom } from '../../lib/stickToBottom'
 import QuizConfigPanel from '../quiz/QuizConfigPanel'
 import { DEFAULT_QUIZ_CONFIG, type QuizConfig } from '../quiz/types'
-import { chatStream, uploadImage, fetchMessages, saveMessage, createSession, updateSessionMode, fetchLlmProfilesSelectable, fetchMyLlmProvider, deleteMyLlmProvider, requestAnswerNow } from '../../services/api'
+import { chatStream, uploadImage, fetchMessages, createSession, updateSessionMode, fetchLlmProfilesSelectable, fetchMyLlmProvider, deleteMyLlmProvider, requestAnswerNow } from '../../services/api'
 import type { LlmProfileSelectable, UserProviderView } from '../../services/api'
 import {
   connectQuestionGenerate,
@@ -707,12 +707,8 @@ export default function ChatWindow({
               metadata: { quiz: quizData },
             }
             update((prev) => [...prev, assistantMsg])
-            // 落库持久化（与研究模式 finishWithReport 一致）：否则切走会话再回来，
-            // fetchMessages 从库重拉时会因为这条题目消息从未存过而消失。
-            if (activeSessionId && collectedQuestions.length > 0) {
-              saveMessage(activeSessionId, 'user', userMsg.content, 'text').catch(() => {})
-              saveMessage(activeSessionId, 'assistant', '', 'text', { quiz: quizData }).catch(() => {})
-            }
+            // 落库由后端 turn_runtime 在回合结束时统一写（服务端权威回合日志），
+            // 前端不再 saveMessage——切走会话再回来 fetchMessages 重拉即有。
             setQuizStreamQuestions([])
             setQuizTraces([])
             quizCloseRef.current?.()
@@ -806,10 +802,7 @@ export default function ChatWindow({
         ...prev,
         { role: 'assistant', content: reportContent, metadata: { mode: 'research' } },
       ])
-      if (activeSessionId) {
-        saveMessage(activeSessionId, 'user', topic, 'text').catch(() => {})
-        saveMessage(activeSessionId, 'assistant', reportContent, 'text', { mode: 'research' }).catch(() => {})
-      }
+      // 落库由后端 turn_runtime 在回合结束时统一写（服务端权威回合日志），前端不双写。
     }
 
     // ask_user 暂停标志（断线重连判定）+ 重连防循环（至多一次）。本地 let 跨 connect() 共享。
@@ -1232,26 +1225,9 @@ export default function ChatWindow({
       return [...prev, assistantMsg]
     })
 
-    if (activeSessionId && !displayContent.startsWith('出错了')) {
-      try {
-        await saveMessage(activeSessionId, 'user', userMsg.content, 'text', attachments.length > 0 ? { attachments } : undefined)
-        await saveMessage(activeSessionId, 'assistant', displayContent, 'text', {
-          intent,
-          intent_confidence: intentConfidence || undefined,
-          mode: resolvedMode,
-          tools_used: toolsUsed,
-          chunks: ragChunks.length > 0 ? ragChunks : undefined,
-          quiz: quizData,
-          retrieve_mode: retrieveMode || undefined,
-          retrieve_strategy: retrieveStrategy || undefined,
-          hallucination,
-          stopped: wasAborted || undefined,
-          usage,
-        })
-      } catch {
-        // persistence is best-effort
-      }
-    }
+    // 落库由后端 turn_runtime 在回合结束时统一写（服务端权威回合日志，含取消/错误轮），
+    // 前端不再 saveMessage 双写。metadata（mode/tools_used/usage/quiz/stopped/attachments）
+    // 由后端从 done/result 事件收集，与此前前端写入集合对齐。
 
     setLoading(false)
     setIsStopping(false)
