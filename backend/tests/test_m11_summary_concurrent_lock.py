@@ -37,6 +37,14 @@ def _reset_locks():
     ss._compress_locks.clear()
 
 
+@pytest.fixture(autouse=True)
+def _low_trigger(monkeypatch):
+    """压低 token 闸（mock 消息 content 很短，默认 6000 会把流程拦在锁语义之前）。"""
+    from settings import get_settings
+
+    monkeypatch.setattr(get_settings().summary, "compact_trigger_tokens", 1)
+
+
 def _make_session_with_messages(msg_count: int, window_size: int = 10):
     """构造一个 mock Session + msg_count 条 Message，使阈值判断进入压缩分支。"""
     session = MagicMock()
@@ -84,7 +92,7 @@ def _make_db(session, messages, scalar_side_effect=None):
 
 async def test_concurrent_compress_same_session_only_one_runs():
     """同 session 并发 maybe_compress：只有持锁者执行 _do_compress + commit，另一让路。"""
-    mgr = ss.SessionSummaryManager(window_size=10, buffer_size=2, compress_interval=1)
+    mgr = ss.SessionSummaryManager(window_size=10, buffer_size=2)
     session, messages = _make_session_with_messages(22, window_size=10)
     db = _make_db(session, messages)
 
@@ -114,7 +122,7 @@ async def test_concurrent_compress_same_session_only_one_runs():
 
 async def test_different_sessions_compress_concurrently():
     """不同 session 的锁互相隔离，可并发压缩（不误伤吞吐）。"""
-    mgr = ss.SessionSummaryManager(window_size=10, buffer_size=2, compress_interval=1)
+    mgr = ss.SessionSummaryManager(window_size=10, buffer_size=2)
     session_a, msgs_a = _make_session_with_messages(22)
     session_b, msgs_b = _make_session_with_messages(22)
     db_a, db_b = _make_db(session_a, msgs_a), _make_db(session_b, msgs_b)
@@ -143,7 +151,7 @@ async def test_compress_after_release_succeeds():
     新实现写回走 Core UPDATE（不原地改写 mock session 游标），故用 COUNT 短路模拟
     「无需再压」——游标推进 / 无增量的语义由 test_l2_summary_hardening 真实库覆盖。
     """
-    mgr = ss.SessionSummaryManager(window_size=10, buffer_size=2, compress_interval=1)
+    mgr = ss.SessionSummaryManager(window_size=10, buffer_size=2)
     session, messages = _make_session_with_messages(22)
     # 第一次 scalar=22（进入压缩）；第二次 scalar=5（低于阈值 12 → COUNT 短路）
     db = _make_db(session, messages, scalar_side_effect=[22, 5])

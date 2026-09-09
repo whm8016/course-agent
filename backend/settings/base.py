@@ -764,7 +764,11 @@ class SummaryConfig(BaseModel):
 
     window_size: int = 5
     buffer_size: int = 2
-    compress_interval: int = 3
+    # 压缩触发 token 阈值（L2 返修：替代已删的 compress_interval 轮数闸）。口径对齐
+    # LangMem max_tokens_before_summary：增量区间 (cursor, boundary] 的估测 token
+    # 超过此值才烧 LLM，平时零成本。轮数闸的问题是长工具轮照样顶爆窗口而轮数不变。
+    # 默认 6000 ≈ 中文 6000 字：窗口（10 条短消息）常态低于它，积压越界才压。
+    compact_trigger_tokens: int = 6000
     # 跨进程压缩锁：生产 gunicorn -w 4 下，模块级 asyncio.Lock 只够单进程；
     # Redis per-session SET NX EX 防多 worker 重复烧 LLM。memory://（测试）或关闭时降级不加锁。
     distributed_lock_enabled: TruthyBool = True

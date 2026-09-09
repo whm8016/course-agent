@@ -96,7 +96,11 @@ async def chat(
     _session_summary = ""
     if session_id:
         try:
-            from core.memory.session_summary import get_summary_manager, load_uncompressed_tail
+            from core.memory.session_summary import (
+                get_summary_manager,
+                load_uncompressed_tail,
+                trigger_compress_if_heavy,
+            )
             summary_mgr = get_summary_manager()
             async with session_scope() as db:
                 _session_summary = await summary_mgr.get_summary(
@@ -105,6 +109,8 @@ async def chat(
                 history = await load_uncompressed_tail(
                     db, session_id, user_id=str(user["id"])
                 )
+            # 尾部超 token 阈值 -> 排队异步压缩（下轮生效；不阻塞本轮）
+            trigger_compress_if_heavy(session_id, history)
             if _session_summary:
                 logger.info(
                     "[chat] L2 summary loaded user_id=%s session=%s summary_len=%d",

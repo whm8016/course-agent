@@ -1,8 +1,9 @@
 """L2 摘要 v2（slot key + 时间戳裁决 + 显著度淘汰）单测。
 
 不依赖真实 LLM：mock async_openai_client.chat.completions.create 控制输出，验证
-解析/合并/淘汰/渲染的纯逻辑 + _do_compress 的重试与降级路径 + get_summary 的 v2->文本转换。
-摘要质量（LLM 抽得好不好）待真环境；本文件只验「逻辑正确 + 降级不阻塞」。
+解析/合并/淘汰/渲染的纯逻辑 + _do_compress 的双温重试（降级路径已删：失败返回
+None 不推游标）+ get_summary 的 v2->文本转换。
+摘要质量（LLM 抽得好不好）待真环境；本文件只验「逻辑正确 + 失败不阻塞」。
 """
 from __future__ import annotations
 
@@ -331,8 +332,11 @@ async def test_do_compress_retries_then_succeeds():
 
 
 @pytest.mark.asyncio
-async def test_do_compress_falls_back_to_text_on_bad_json():
-    """LLM 连续返回非 JSON -> 重试一次（temp=0）后降级 _do_compress_text。"""
+async def test_do_compress_bad_json_returns_none_no_fallback():
+    """LLM 连续返回非 JSON -> 双温重试两次后返回 None（不推游标、下轮重试）。
+
+    L2 返修：读侧已保证游标之后消息不丢，自由文本降级路径（_do_compress_text，
+    第 3 次 LLM 调用）已删——失败时不推游标即不丢数据，无需当场再烧一次调用。"""
     mgr = SessionSummaryManager()
     temps = []
 
@@ -343,15 +347,11 @@ async def test_do_compress_falls_back_to_text_on_bad_json():
         resp.choices[0].message.content = "这不是JSON，重试也没用"
         return resp
 
-    async def fake_text(existing, msgs, track=None):
-        return "降级文本摘要"
-
     with patch.object(ss, "async_openai_client", _mock_client_with(fake_create)):
-        with patch.object(mgr, "_do_compress_text", new=AsyncMock(side_effect=fake_text)):
-            out = await mgr._do_compress("", _mk_messages())
+        out = await mgr._do_compress("", _mk_messages())
 
-    assert temps == [0.3, 0.0]          # 结构化试了两次（首试 + temp=0 重试）
-    assert out == "降级文本摘要"          # 降级到旧文本逻辑
+    assert temps == [0.3, 0.0]  # 恰好两次（首试 + temp=0 重试），无第 3 次降级调用
+    assert out is None           # 不推游标，下轮重试
 
 
 # ── 思考开关注入（flash 出厂开思考 -> content 空，LangSmith 线上事故回归）────
@@ -394,19 +394,6 @@ async def test_do_compress_disables_thinking_and_uses_extract_model(monkeypatch)
     assert captured[0]["model"] == "deepseek-v4-flash"          # 不再用对话主模型
     assert captured[0]["extra_body"] == {"thinking": {"type": "disabled"}}
     assert "reasoning_effort" not in captured[0]
-
-
-@pytest.mark.asyncio
-async def test_do_compress_text_disables_thinking(monkeypatch):
-    """降级文本路径同样关思考：开思考时正文挤不进 content，只会拿到空摘要。"""
-    mgr, captured = _thinking_env(monkeypatch, "deepseek-v4-flash")
-
-    with patch.object(ss, "async_openai_client", _capture_client(captured, "自由文本摘要")):
-        out = await mgr._do_compress_text("", _mk_messages())
-
-    assert out == "自由文本摘要"
-    assert captured[0]["model"] == "deepseek-v4-flash"
-    assert captured[0]["extra_body"] == {"thinking": {"type": "disabled"}}
 
 
 @pytest.mark.asyncio

@@ -179,7 +179,11 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
     _session_summary = ""
     if session_id:
         try:
-            from core.memory.session_summary import get_summary_manager, load_uncompressed_tail
+            from core.memory.session_summary import (
+                get_summary_manager,
+                load_uncompressed_tail,
+                trigger_compress_if_heavy,
+            )
             async with AsyncSessionLocal() as db:
                 _session_summary = await get_summary_manager().get_summary(
                     db, session_id, user_id=str(user["id"])
@@ -187,6 +191,8 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
                 history = await load_uncompressed_tail(
                     db, session_id, user_id=str(user["id"])
                 )
+            # 尾部超 token 阈值 -> 排队异步压缩（下轮生效；不阻塞本轮）
+            trigger_compress_if_heavy(session_id, history)
             if _session_summary:
                 logger.info(
                     "[ws.run] L2 summary loaded user_id=%s session=%s len=%d",

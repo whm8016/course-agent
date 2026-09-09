@@ -15,7 +15,11 @@ logger = logging.getLogger(__name__)
 
 # ---- EventBus：turn 完成后的记忆更新订阅者 ----
 async def _on_capability_complete(event) -> None:
-    """CAPABILITY_COMPLETE：写 episodic 原始层（L3 outbox，取代 Redis buffer）+ L2 摘要压缩。"""
+    """CAPABILITY_COMPLETE：写 episodic 原始层（L3 outbox，取代 Redis buffer）+ 巩固触发。
+
+    L2 压缩触发已移到读侧（session_summary.trigger_compress_if_heavy——读侧载入尾部
+    顺手数 token，越阈值才压），不再挂在回合完成事件上。
+    """
     try:
         from core.memory.episodic import record_episode
 
@@ -56,27 +60,6 @@ async def _on_capability_complete(event) -> None:
                 await consolidation.reset_importance(event.user_id, event.course_id)
     except Exception:
         logger.warning("EventBus: consolidation trigger failed", exc_info=True)
-
-    # L2: 触发 session summary 增量压缩（异步，不阻塞主链路）
-    session_id = getattr(event, "session_id", "") or event.metadata.get("session_id", "") or ""
-    if session_id:
-        import asyncio
-        asyncio.create_task(_maybe_compress_summary(session_id))
-
-
-async def _maybe_compress_summary(session_id: str) -> None:
-    """异步执行 L2 摘要压缩（不阻塞主链路）。"""
-    try:
-        from core.memory.session_summary import get_summary_manager
-        from core.db.database import AsyncSessionLocal
-
-        summary_mgr = get_summary_manager()
-        async with AsyncSessionLocal() as db:
-            compressed = await summary_mgr.maybe_compress(db, session_id)
-            if compressed:
-                logger.info("[L2] session summary compressed session=%s", session_id)
-    except Exception:
-        logger.warning("[L2] session summary compress failed session=%s", session_id, exc_info=True)
 
 
 async def _on_complete_record_learning_event(event) -> None:
