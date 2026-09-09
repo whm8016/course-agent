@@ -71,7 +71,6 @@ router = APIRouter(prefix="/run", tags=["run"])
 
 _VALID_CAPABILITIES = {"chat", "deep_solve", "deep_research", "quiz"}
 _SETTINGS = get_settings()
-_MAX_HISTORY = _SETTINGS.run_history_max_length
 _MAX_MESSAGE = _SETTINGS.chat_message_max_length
 
 
@@ -161,9 +160,6 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
         await websocket.close()
         return
 
-    if len(history) > _MAX_HISTORY:
-        history = history[-_MAX_HISTORY:]
-
     # ---- 6. 课程权限校验 ----
     if course_id:
         try:
@@ -174,16 +170,21 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
             await websocket.close()
             return
 
-    # ---- 6.5 读 Session Summary（L2）：与 SSE（api/chat.py）对齐，补 WS 链路缺口 ----
-    # WS payload 可带 session_id（顶层或 metadata）；quiz/research 等无会话场景不传则
-    # 不注入 L2（行为不变）。best-effort：加载失败不阻塞 turn。
+    # ---- 6.5 读 L2 双通道（与 SSE api/chat.py 对齐）：摘要卡 + 游标之后全部原文 ----
+    # 不变式：任一条会话消息要么在摘要卡里、要么在本轮原文里。WS payload 可带
+    # session_id（顶层或 metadata）；quiz/research 等无会话场景不传则回落 payload
+    # history（行为同旧）。历史长度口径统一交给 token 预算，不再按条数截断。
+    # best-effort：加载失败不阻塞 turn。
     session_id: str = str(payload.get("session_id") or metadata.get("session_id") or "")
     _session_summary = ""
     if session_id:
         try:
-            from core.memory.session_summary import get_summary_manager
+            from core.memory.session_summary import get_summary_manager, load_uncompressed_tail
             async with AsyncSessionLocal() as db:
                 _session_summary = await get_summary_manager().get_summary(
+                    db, session_id, user_id=str(user["id"])
+                )
+                history = await load_uncompressed_tail(
                     db, session_id, user_id=str(user["id"])
                 )
             if _session_summary:
@@ -192,7 +193,7 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
                     user["id"], session_id, len(_session_summary),
                 )
         except Exception as e:
-            logger.warning("[ws.run] L2 summary load failed: %s", e)
+            logger.warning("[ws.run] L2 summary/history tail load failed: %s", e)
 
     # ---- 7. 构造 UnifiedContext ----
     metadata.setdefault("question", question)

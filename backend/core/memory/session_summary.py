@@ -558,6 +558,62 @@ def _load_meta(raw) -> dict:
         return {}
 
 
+async def _resolve_cursor(db: AsyncSession, session: Session) -> tuple[float | None, str | None]:
+    """Session 行的 L2 游标 -> keyset 下界 (created_at, id)。
+
+    新游标路径（summary_up_to_created_at 已回填）直取；存量行 NULL 走 msg_id 反查
+    created_at 的兼容路径；游标消息已被删（CASCADE）-> (None, None) 即无下界。
+    压缩增量区间与读侧尾部载入共用。
+    """
+    if session.summary_up_to_created_at is not None and session.summary_up_to_msg_id:
+        return session.summary_up_to_created_at, session.summary_up_to_msg_id
+    if session.summary_up_to_msg_id:
+        cursor_row = (await db.execute(
+            select(Message.created_at, Message.id).where(Message.id == session.summary_up_to_msg_id)
+        )).first()
+        if cursor_row is None:
+            return None, None
+        return cursor_row.created_at, cursor_row.id
+    return None, None
+
+
+async def load_uncompressed_tail(
+    db: AsyncSession,
+    session_id: str,
+    *,
+    user_id: str | None = None,
+) -> list[dict]:
+    """读侧：载入摘要游标之后的全部会话原文（L2 返修步骤 2）。
+
+    语义对齐 LangMem ``messages[total_summarized_messages:]``：摘要卡覆盖游标之前，
+    本函数兜住游标之后——两者合集即全部历史，与压缩何时跑无关（目标不变式）。
+    取代读侧按条数砍 ``history[-10:]``/``[-20:]`` 的旧口径（写侧游标推进与读侧
+    截断不同源，存在 1-2 轮真空）。
+
+    user_id 非空时按归属过滤（session 不属于该用户返回 []，防 B 用户带 A 的
+    session_id 越权读 A 的会话原文注入自己上下文）。返回 ``[{role, content}]``
+    升序，可直接作 conversation_history。
+    """
+    if user_id:
+        session = (await db.execute(
+            select(Session).where(Session.id == session_id, Session.user_id == user_id)
+        )).scalars().first()
+    else:
+        session = await db.get(Session, session_id)
+    if not session:
+        return []
+    cursor_ts, cursor_id = await _resolve_cursor(db, session)
+    stmt = select(Message.role, Message.content).where(
+        Message.session_id == session_id
+    ).order_by(Message.created_at, Message.id)
+    if cursor_ts is not None and cursor_id is not None:
+        stmt = stmt.where(or_(
+            Message.created_at > cursor_ts,
+            and_(Message.created_at == cursor_ts, Message.id > cursor_id),
+        ))
+    return [{"role": r, "content": c} for r, c in (await db.execute(stmt)).all()]
+
+
 class SessionSummaryManager:
     """Session L2 摘要管理器。"""
 
@@ -646,8 +702,6 @@ class SessionSummaryManager:
             return False
 
         existing_summary = session.summary or ""
-        last_msg_id = session.summary_up_to_msg_id
-        last_created_at = session.summary_up_to_created_at
         old_version = session.summary_version if session.summary_version is not None else 0
 
         # 1) 廉价守卫：只 COUNT，不取数据（走 idx_messages_session）
@@ -676,22 +730,9 @@ class SessionSummaryManager:
         if boundary is None:
             return False
 
-        # 4) 解析 keyset 下界游标 (cursor_ts, cursor_id)
-        if last_created_at is not None and last_msg_id:
-            # 新游标路径：summary_up_to_created_at 已回填，直接用
-            cursor_ts, cursor_id = last_created_at, last_msg_id
-        elif last_msg_id:
-            # 兼容路径：存量行 summary_up_to_created_at 为 NULL，按 msg_id 查 created_at
-            cursor_row = (await db.execute(
-                select(Message.created_at, Message.id).where(Message.id == last_msg_id)
-            )).first()
-            if cursor_row is None:
-                # 游标消息已被删（CASCADE）-> 退化全量重压到 boundary
-                cursor_ts, cursor_id = None, None
-            else:
-                cursor_ts, cursor_id = cursor_row.created_at, cursor_row.id
-        else:
-            cursor_ts, cursor_id = None, None  # 首次压缩：无下界
+        # 4) 解析 keyset 下界游标 (cursor_ts, cursor_id)——与读侧尾部载入共用
+        #    _resolve_cursor（含存量 NULL 兼容路径与游标消息被删退全量）
+        cursor_ts, cursor_id = await _resolve_cursor(db, session)
 
         # 5) keyset 取增量区间 (cursor, boundary]
         upper = or_(

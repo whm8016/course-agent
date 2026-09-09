@@ -825,11 +825,10 @@ class Settings(BaseSettings):
     backend_workers: int = 4  # 承接原 _os.getenv("BACKEND_WORKERS")，供 LRU 缩放
     max_upload_mb: int = 10
     max_kb_upload_mb: int = 50
-    # 对话输入上限：chat（HTTP /api/chat）与 run（WS /run/{cap}）共用 message 长度；
-    # history 两入口取值不同（HTTP 短、流式长），故分别配置——勿盲目合并。
+    # 对话输入上限：chat（HTTP /api/chat）与 run（WS /run/{cap}）共用 message 长度。
+    # history 不再按条数截断（chat_history_max_length/run_history_max_length 已删）：
+    # 有 session_id 走 L2 游标尾部全量原文 + token 预算裁剪，游客回落 body.history。
     chat_message_max_length: int = 2000
-    chat_history_max_length: int = 10
-    run_history_max_length: int = 20
     # langsmith 扁平字段（langchain SDK 读 os.environ 扁平名，例外）
     langsmith_tracing: TruthyBool = False
     langsmith_api_key: StrippedSecret = SecretStr("")

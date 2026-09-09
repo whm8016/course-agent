@@ -28,14 +28,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 MAX_MESSAGE_LENGTH = 2000
-MAX_HISTORY_LENGTH = 10
 
 
 class ChatRequest(BaseModel):
     course_id: str = Field(default="", description="课程 ID（空=自由问答，不接入知识库）")
     message: str = Field(default="", description="用户消息")
     chat_mode: str = Field(default="chat", description="模式：chat / deep_solve / deep_research / quiz")
-    history: list[dict[str, Any]] = Field(default_factory=list, description="历史消息列表")
+    history: list[dict[str, Any]] = Field(default_factory=list, description="历史消息列表（仅游客/无会话回落用；有 session_id 时服务端按 L2 游标载入尾部全量原文）")
     session_id: str | None = Field(default=None, description="会话 ID（可选）")
     image_path: str | None = Field(default=None, description="图片上传路径（可选，向后兼容旧单图入口）")
     attachments: list[Attachment] = Field(default_factory=list, description="附件列表（图片，支持多图）")
@@ -76,8 +75,6 @@ async def chat(
 
     if len(message) > MAX_MESSAGE_LENGTH:
         message = message[:MAX_MESSAGE_LENGTH]
-    if len(history) > MAX_HISTORY_LENGTH:
-        history = history[-MAX_HISTORY_LENGTH:]
 
     log_flow("http.chat.start", user_id=str(user["id"]), course_id=course_id,
              mode=mode, session_id=session_id or "", question=message[:120],
@@ -92,14 +89,20 @@ async def chat(
         "[chat] memory probe user_id=%s has_memory=%s", user["id"], _has_memory
     )
 
-    # 读 Session Summary（L2）：早期对话摘要。传 user_id 做归属过滤，防越权读他人摘要。
+    # 读 L2 双通道（一次 DB 会话取两样）：摘要卡（游标之前的压缩）+ 游标之后全部原文。
+    # 不变式：任一条会话消息要么在摘要卡里、要么在本轮原文里——读侧兜底，与压缩何时跑
+    # 无关。传 user_id 做归属过滤，防越权读他人摘要/会话原文。无 session_id（游客）回落
+    # body.history，历史长度口径统一交给 token 预算（不再按条数截断）。
     _session_summary = ""
     if session_id:
         try:
-            from core.memory.session_summary import get_summary_manager
+            from core.memory.session_summary import get_summary_manager, load_uncompressed_tail
             summary_mgr = get_summary_manager()
             async with session_scope() as db:
                 _session_summary = await summary_mgr.get_summary(
+                    db, session_id, user_id=str(user["id"])
+                )
+                history = await load_uncompressed_tail(
                     db, session_id, user_id=str(user["id"])
                 )
             if _session_summary:
@@ -108,7 +111,7 @@ async def chat(
                     user["id"], session_id, len(_session_summary)
                 )
         except Exception as e:
-            logger.warning("[chat] L2 summary load failed: %s", e)
+            logger.warning("[chat] L2 summary/history tail load failed: %s", e)
 
     # 记忆读写工具的挂载由 resolve() 统一处理（always_on 注册标记），无需在此合并；
     # 这样 SSE/WS/bot 三条 chat 入口行为一致，前端 tools 透传即可。

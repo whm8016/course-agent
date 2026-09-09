@@ -55,8 +55,8 @@ function rowToMessage(row: ApiMessageRow): Message {
 }
 
 /** 前端消息 → 后端 history 线格式（chat SSE 与 quiz/research 两条 WS 共用，三处一致）。
- * 只取 role/content——图片/附件等展示字段不出端；后端只取末尾 run_history_max_length
- * （=20）条，更早历史由 session_id 走 L2 摘要通道。 */
+ * 只取 role/content——图片/附件等展示字段不出端；有 session_id 时后端按 L2 游标
+ * 载入尾部全量原文（本 payload 仅游客/加载失败回落用），长度由 token 预算裁剪。 */
 function toWsHistory(messages: Message[]): { role: string; content: string }[] {
   return messages.map((m) => ({ role: m.role, content: m.content }))
 }
