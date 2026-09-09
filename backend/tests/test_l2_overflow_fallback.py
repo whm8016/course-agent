@@ -24,11 +24,31 @@ from services.session import turn_runtime as tr
 _SID = "sess-overflow-1"
 
 
+class _SilentBus:
+    """哑 EventBus：publish 即返，不派发任何订阅者。"""
+
+    async def publish(self, event) -> None:
+        return None
+
+
+def _silent_bus():
+    return _SilentBus()
+
+
 class _DoneOrch:
     """伪 orchestrator：直接吐 DONE 收尾。"""
 
     async def handle(self, ctx):
         yield StreamEvent(type=StreamEventType.DONE, payload={})
+
+
+@pytest.fixture(autouse=True)
+def _no_langsmith(monkeypatch):
+    """钉死 tracing：本机 .env 开着 LANGSMITH_TRACING=true 时 turn 根 run 真打
+    LangSmith（Clash 代理下常卡死）——测试不打外网。"""
+    from core.observability import langsmith_trace as lt
+
+    monkeypatch.setattr(lt, "_TRACING_ON", False)
 
 
 def _seed_msgs(n: int):
@@ -80,6 +100,7 @@ async def test_overflow_triggers_sync_compress_and_replan(client):
     from core.memory import session_summary as ss
 
     with patch("core.orchestrator.get_orchestrator", return_value=_DoneOrch()), \
+         patch("events.event_bus.get_event_bus", _silent_bus), \
          patch("services.session.turn_runtime.get_settings", return_value=fake_settings), \
          patch("core.agentic.context_budget.compute_budgets", lambda m: (100, 150)), \
          patch.object(ss.SessionSummaryManager, "_do_compress", new=AsyncMock(side_effect=fake_compress)) as mocked:

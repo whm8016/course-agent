@@ -21,6 +21,15 @@ from core.stream import StreamEvent, StreamEventType
 from services.session.turn_runtime import TurnRuntimeManager
 
 
+@pytest.fixture(autouse=True)
+def _no_langsmith(monkeypatch):
+    """钉死 tracing：本机 .env 开着 LANGSMITH_TRACING=true，turn 根 run 会真向
+    LangSmith 上传（Clash 代理下常卡死、且 await task 后挂死可见化）——测试不打外网。"""
+    from core.observability import langsmith_trace as lt
+
+    monkeypatch.setattr(lt, "_TRACING_ON", False)
+
+
 @pytest.fixture
 async def db():
     from core.db.database import close_db, init_db
@@ -94,6 +103,13 @@ async def test_cooldown_updates_existing_row(db):
 # ── turn_runtime 成功后才落盘 ────────────────────────────────────────────────
 
 
+class _SilentBus:
+    """哑 EventBus：publish 即返，不派发任何订阅者。"""
+
+    async def publish(self, event) -> None:
+        return None
+
+
 class _Orch:
     def __init__(self, events):
         self._events = events
@@ -119,6 +135,12 @@ async def _run_turn_with(events, ctx_metadata=None):
         "core.orchestrator.get_orchestrator", return_value=_Orch(events)
     ), patch(
         "core.memory.proactive.commit_stitch_cooldown", _fake_commit
+    ), patch(
+        # 哑 EventBus：真 publish 会 fire-and-forget 派发全局订阅者（全量顺序下
+        # main lifespan 已注册），订阅者卡真 Redis（.env 生产值+Clash）会让本测试
+        # loop teardown 的 _cancel_all_tasks 永收不干净——挂死。本文件只考冷却语义。
+        "events.event_bus.get_event_bus",
+        lambda: _SilentBus(),
     ), patch(
         "services.session.turn_runtime.get_settings",
         return_value=type(

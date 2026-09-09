@@ -25,6 +25,13 @@ _SID = "sess-persist-1"
 _TID = "turn0001persist0000000000ab"  # 32 位内、与 session_id 不同
 
 
+class _SilentBus:
+    """哑 EventBus：publish 即返，不派发任何订阅者。"""
+
+    async def publish(self, event) -> None:
+        return None
+
+
 class _Orch:
     """伪 orchestrator：按脚本吐事件；可选拖尾抛 CancelledError / RuntimeError。"""
 
@@ -58,7 +65,10 @@ def _ctx(**kw) -> UnifiedContext:
 async def _run_turn(events, ctx, *, turn_id=_TID, cancel=False, error=None):
     mgr = tr.TurnRuntimeManager()
     orch = _Orch(events, raises_cancel=cancel, raises_error=error)
-    with patch("core.orchestrator.get_orchestrator", return_value=orch):
+    with patch("core.orchestrator.get_orchestrator", return_value=orch), patch(
+        # 哑 EventBus：防全局订阅者（全量顺序下已注册）卡真 Redis 拖死 loop teardown
+        "events.event_bus.get_event_bus", lambda: _SilentBus(),
+    ):
         await mgr._run_turn(tr._TurnExecution(turn_id=turn_id, context=ctx))
 
 
@@ -69,6 +79,16 @@ async def _rows(sid=_SID):
             .order_by(Message.created_at, Message.id)
         )).scalars().all()
         return [(r.role, r.turn_id, r.content, json.loads(r.metadata_ or "{}")) for r in rs]
+
+
+@pytest.fixture(autouse=True)
+def _no_langsmith(monkeypatch):
+    """钉死 tracing：本机 .env 开着 LANGSMITH_TRACING=true 时 turn 根 run 真打
+    LangSmith（Clash 代理下常卡死）——测试不打外网（test_context_trim_observability
+    同款钉法）。"""
+    from core.observability import langsmith_trace as lt
+
+    monkeypatch.setattr(lt, "_TRACING_ON", False)
 
 
 @pytest.fixture
