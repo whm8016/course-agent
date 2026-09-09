@@ -942,26 +942,29 @@ def get_summary_manager() -> SessionSummaryManager:
 
 
 def trigger_compress_if_heavy(session_id: str, tail: list[dict]) -> bool:
-    """读侧压缩触发器：尾部 token 超阈值时 create_task 异步压缩（下轮生效）。
+    """读侧压缩触发器：可压缩积压超阈值时 create_task 异步压缩（下轮生效）。
 
     L2 返修：触发点从 CAPABILITY_COMPLETE 每轮探测（COUNT + boundary + 增量查询
     三条盲跑 SQL）移到读侧——读侧本来就要载入尾部（load_uncompressed_tail），
     顺手数 token 判断，越阈值才排队压缩。对齐 LangMem：只有越阈值那次才烧 LLM，
     平时零成本。fire-and-forget，返回是否已排队。
 
-    注意这是「排队建议」：真正的闸在 _maybe_compress_locked 内（增量区间 token，
-    防止窗口本身超阈值时每轮排队空转）；并发/重复由三层锁 + OCC 兜住。
+    统计段与压缩闸同口径——只数**积压**（尾部去掉最近 window_size*2 条窗口，
+    窗口内消息压缩 boundary 也不收）。若数整个尾部，长会话窗口自身超阈值时
+    会每轮排队空转（闸处 no-op 但已白跑锁 + 三条查询）。
     """
     cfg = get_settings().summary
-    total = sum(_estimate_tokens(str(m.get("content") or "")) for m in tail)
-    if total < cfg.compact_trigger_tokens:
+    window_keep = cfg.window_size * 2
+    backlog = tail[:-window_keep] if len(tail) > window_keep else []
+    backlog_tokens = sum(_estimate_tokens(str(m.get("content") or "")) for m in backlog)
+    if backlog_tokens < cfg.compact_trigger_tokens:
         return False
     import asyncio
 
     asyncio.create_task(_compress_in_background(session_id))
     logger.info(
-        "[L2] tail heavy session=%s tail_tokens=%d >= trigger=%d; compress queued",
-        session_id, total, cfg.compact_trigger_tokens,
+        "[L2] backlog heavy session=%s backlog_msgs=%d backlog_tokens=%d >= trigger=%d; compress queued",
+        session_id, len(backlog), backlog_tokens, cfg.compact_trigger_tokens,
     )
     return True
 

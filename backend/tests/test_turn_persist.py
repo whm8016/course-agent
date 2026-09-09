@@ -219,3 +219,80 @@ async def test_missing_session_row_skips_persist(client):
         _ctx(session_id="no-such-session"),
     )
     assert await _rows("no-such-session") == []
+
+
+@pytest.mark.asyncio
+async def test_persist_skips_foreign_session(client):
+    """P1 回归：session 不属于本 turn 用户（session_id 来自请求体）→ 写侧拒落，
+    与读侧 load_uncompressed_tail 的 user_id 过滤同口径——防 B 向 A 的会话写行。"""
+    db = AsyncSessionLocal()
+    db.add(Session(id="sess-foreign", course_id="c1", user_id="owner-u", title="t"))
+    await db.commit()
+    await db.close()
+
+    await _run_turn(
+        [_ev(StreamEventType.ANSWER, content="x"),
+         _ev(StreamEventType.DONE, metadata={"mode": "chat"})],
+        _ctx(session_id="sess-foreign"),  # ctx.user_id="u1" ≠ owner-u
+    )
+    assert await _rows("sess-foreign") == []
+
+
+@pytest.mark.asyncio
+async def test_same_turn_rows_created_at_strictly_increasing(seeded_session):
+    """P1 回归：同回合 user/assistant 两行 created_at 严格递增——keyset 游标与
+    展示排序按 (created_at, id)，同 ts + 随机 id 会乱序甚至被 keyset 永久排除。"""
+    async with AsyncSessionLocal() as db2:
+        rs = (await db2.execute(
+            select(Message.created_at, Message.role)
+            .where(Message.session_id == _SID)
+            .order_by(Message.created_at, Message.id)
+        )).all()
+    assert len(rs) == 0  # seed 后无消息
+    await _run_turn(
+        [_ev(StreamEventType.ANSWER, content="答"),
+         _ev(StreamEventType.DONE, metadata={"mode": "chat"})],
+        _ctx(),
+    )
+    async with AsyncSessionLocal() as db2:
+        rs = (await db2.execute(
+            select(Message.created_at, Message.role)
+            .where(Message.session_id == _SID)
+            .order_by(Message.created_at, Message.id)
+        )).all()
+    assert [r.role for r in rs] == ["user", "assistant"]
+    assert rs[1].created_at > rs[0].created_at  # 严格递增，非随机 id 决定
+
+
+@pytest.mark.asyncio
+async def test_persist_survives_api_layer_cancel(seeded_session):
+    """P0 回归：API 层订阅流一结束就 cancel_turn（chat.py SSE finally / run.py
+    尾部的真实行为）——persist 先于 bus.close() 且 shield 包裹，两行必须落库。
+
+    此前 persist 在 close 之后：close 唤醒订阅者 → API cancel 注入 persist 的
+    DB await（CancelledError 不被 except Exception 捕）→ 落盘整体失效。
+    """
+    mgr = tr.TurnRuntimeManager()
+    events = [
+        _ev(StreamEventType.ANSWER, content="正常回答"),
+        _ev(StreamEventType.DONE, metadata={"mode": "chat"}),
+    ]
+    orch = _Orch(events)
+    with patch("core.orchestrator.get_orchestrator", return_value=orch), patch(
+        "events.event_bus.get_event_bus", lambda: _SilentBus(),
+    ):
+        turn_id = await mgr.start_turn(_ctx())
+        async for _ev2 in mgr.subscribe_turn(turn_id):
+            pass  # 流结束（bus.close() 投的终止信号）
+        await mgr.cancel_turn(turn_id)  # API 层随后必做的 cancel
+
+    # 不 await task（API 层同样不 await）——轮询等 shield 后台落盘完成
+    rows: list = []
+    for _ in range(200):
+        rows = await _rows()
+        if len(rows) >= 2:
+            break
+        await asyncio.sleep(0.05)
+    assert len(rows) == 2
+    assert rows[0][0] == "user" and rows[1][0] == "assistant"
+    mgr._executions.pop(turn_id, None)

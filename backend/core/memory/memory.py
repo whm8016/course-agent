@@ -120,14 +120,19 @@ async def add_message(
     msg_type: str = "text",
     metadata: dict | None = None,
     turn_id: str | None = None,
+    created_at: float | None = None,
 ) -> dict:
     """写入一条消息行。
 
     turn_id 非空时按 (session_id, turn_id, role) 幂等：已有同键行直接返回它
     （服务端回合日志重复投递场景），不重复插入。uq_messages_session_turn_role
     唯一索引是 DB 层兜底。
+
+    created_at 可显式传入（服务端回合日志用：同回合 user/assistant 两行传严格
+    递增戳，保证 keyset/展示排序 (created_at, id) 下 user 在前——随机 id 做不了
+    同回合内的确定性 tiebreak）。
     """
-    now = time.time()
+    now = time.time() if created_at is None else created_at
     if turn_id:
         existing = (await db.execute(
             select(Message).where(
@@ -181,10 +186,11 @@ async def add_message(
 
 
 async def get_messages(db: AsyncSession, session_id: str) -> list[dict]:
+    # 排序带 id tiebreak：created_at 相同（同回合两行/时钟分辨率）时随机 id 会乱序
     result = await db.execute(
         select(Message)
         .where(Message.session_id == session_id)
-        .order_by(Message.created_at.asc())
+        .order_by(Message.created_at.asc(), Message.id.asc())
     )
     rows = result.scalars().all()
     out = []

@@ -271,9 +271,9 @@ async def test_occ_conflict_returns_false_and_rollback(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_trigger_if_heavy_light_tail_never_queues(monkeypatch):
-    """短闲聊尾部（token < 阈值）→ 不排队、后台压缩零调用（LangMem 平时零成本）。"""
+    """短闲聊尾部（积压 token < 阈值）→ 不排队、后台压缩零调用（LangMem 平时零成本）。"""
     _set_trigger(monkeypatch, 1000)
-    tail = [{"role": "user", "content": "好的"}] * 10  # ~30 token
+    tail = [{"role": "user", "content": "好的"}] * 12  # 积压 2 条 ~6 token
     with patch.object(ss, "_compress_in_background", new=AsyncMock()) as bg:
         assert ss.trigger_compress_if_heavy("sess-light", tail) is False
         await asyncio.sleep(0)  # 让事件循环转一圈，确认无 task 被创建
@@ -281,14 +281,30 @@ async def test_trigger_if_heavy_light_tail_never_queues(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_trigger_if_heavy_long_tool_output_queues(monkeypatch):
-    """单轮长工具输出（尾部 token ≥ 阈值）→ 排队异步压缩（下轮生效）。"""
+async def test_trigger_if_heavy_backlog_exceeding_threshold_queues(monkeypatch):
+    """积压（窗口外）token ≥ 阈值 → 排队异步压缩（下轮生效）。"""
     _set_trigger(monkeypatch, 1000)
-    tail = [{"role": "assistant", "content": "工具输出" * 300}]  # ~1200 token
+    # 12 条：窗口保留 10 条，积压 2 条各 ~800 token ≥ 1000
+    tail = [{"role": "assistant", "content": "工具输出" * 200}] * 12
     with patch.object(ss, "_compress_in_background", new=AsyncMock()) as bg:
         assert ss.trigger_compress_if_heavy("sess-heavy", tail) is True
         await asyncio.sleep(0.01)  # create_task 已排队，等它跑到 mock
         bg.assert_awaited_once_with("sess-heavy")
+
+
+@pytest.mark.asyncio
+async def test_trigger_skips_when_only_window_is_heavy(monkeypatch):
+    """P1 回归：窗口自身（最近 window_size*2 条）超阈值但积压为空 → 不排队。
+
+    统计段须与压缩闸同口径（增量区间）：若数整个尾部，长会话每轮都会排队
+    空转一次（闸处 no-op，但锁 + 三条查询已白跑）。"""
+    _set_trigger(monkeypatch, 1000)
+    window_keep = get_settings().summary.window_size * 2  # 默认 10
+    tail = [{"role": "assistant", "content": "很长的窗口消息" * 300}] * window_keep
+    with patch.object(ss, "_compress_in_background", new=AsyncMock()) as bg:
+        assert ss.trigger_compress_if_heavy("sess-window-heavy", tail) is False
+        await asyncio.sleep(0)
+        bg.assert_not_awaited()
 
 
 @pytest.mark.asyncio

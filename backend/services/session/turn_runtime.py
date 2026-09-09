@@ -153,7 +153,13 @@ async def _persist_turn_rows(
 
     幂等：(session_id, turn_id, role) 唯一（add_message 先查短路 + DB 唯一索引兜底）。
     跳过条件：无 session_id 或 session_id==turn_id（start_turn 对无会话 turn 的占位，
-    无 Session 行可挂）。best-effort：任何异常只告警。
+    无 Session 行可挂）、Session 行不存在（防 FK 违约）、**归属不符**（session 不属于
+    本 turn 的 user_id——session_id 来自请求体，写侧必须与读侧（load_uncompressed_tail
+    的 user_id 过滤）同口径防 B 用户向 A 的会话写行）。best-effort：任何异常只告警。
+
+    时序：两行 created_at 严格递增（assistant >= user + 1e-6）——keyset 游标与
+    展示排序都按 (created_at, id)，Windows time.time() 背靠背调用相等率高，
+    同 ts + 随机 id 会让 assistant 排到 user 前甚至被 keyset 下界永久排除。
 
     metadata 对齐前端此前写入集合（ChatWindow saveMessage）：mode/tools_used/truncated/
     usage/stopped/quiz + user 行 attachments。intent/intent_confidence/retrieve_mode/
@@ -169,16 +175,25 @@ async def _persist_turn_rows(
         from core.memory.memory import add_message
 
         async with AsyncSessionLocal() as db:
-            if await db.get(DbSession, session_id) is None:
+            session_row = await db.get(DbSession, session_id)
+            if session_row is None:
                 return  # Session 行不存在（异常路径），跳过避免 FK 违约
+            if str(session_row.user_id or "") != str(ctx.user_id or ""):
+                logger.warning(
+                    "TurnRuntime: persist skipped, session %s not owned by turn user %s",
+                    session_id, ctx.user_id,
+                )
+                return  # 归属不符：写侧与读侧同口径（防越权写他人会话）
 
             user_meta = {}
             atts = _persist_attachments_meta(ctx)
             if atts:
                 user_meta["attachments"] = atts
+            ts_user = time.time()
             await add_message(
                 db, session_id, "user", ctx.user_message or "", "text",
                 metadata=user_meta or None, turn_id=execution.turn_id,
+                created_at=ts_user,
             )
 
             # assistant 行正文：quiz 能力题目走 metadata.quiz（前端 QuizCard 渲染口径，
@@ -207,9 +222,11 @@ async def _persist_turn_rows(
                 asst_meta["quiz"] = {"questions": result_questions}
             if cancelled:
                 asst_meta["stopped"] = True
+            # assistant 行时间戳严格大于 user 行（同回合顺序由时间戳而非随机 id 决定）
             await add_message(
                 db, session_id, "assistant", content, "text",
                 metadata=asst_meta, turn_id=execution.turn_id,
+                created_at=max(time.time(), ts_user + 1e-6),
             )
             await db.commit()
         logger.info(
@@ -290,6 +307,21 @@ class TurnRuntimeManager:
                         model=_turn_model,
                         session_summary_text=_summary2,
                     )
+                    # 摘要切片换重载后的新卡：下方 carry 前插与 preview 捕获都读
+                    # context.session_summary，不换会用到旧卡（埋点陈旧一轮）
+                    context.session_summary = _summary2
+                else:
+                    logger.warning(
+                        "TurnRuntime: overflow fallback compressed but summary reload empty; "
+                        "turn_id=%s trimmed messages beyond cursor uncovered this round",
+                        turn_id,
+                    )
+            elif _plan.dropped_beyond_cursor and context.session_id and context.session_id != turn_id:
+                logger.warning(
+                    "TurnRuntime: overflow fallback let-through (compress in progress/failed); "
+                    "turn_id=%s trimmed messages beyond cursor uncovered this round",
+                    turn_id,
+                )
             context.conversation_history = _plan.keep_history
             context.metadata["_budget_plan"] = _plan
             if _plan.carry_forward_added:
@@ -666,13 +698,14 @@ class TurnRuntimeManager:
                 reply_channel.cleanup(execution.turn_id)
                 # 清理 answer_now 信号（turn 已结束，后续 request_answer_now 返回 False）
                 self._answer_now_events.pop(execution.turn_id, None)
-                if not execution.bus._closed:
-                    await execution.bus.close()
 
                 # 服务端权威回合日志：落 user/assistant 两行（幂等 by turn_id，含取消/错误轮）。
-                # 必须先于 CAPABILITY_COMPLETE——读侧（下一轮 load_uncompressed_tail）与
-                # L3 episodic 都依赖 messages 行已就位。best-effort：失败只告警不影响回合收尾。
-                await _persist_turn_rows(
+                # 必须先于 bus.close()——API 层（chat.py SSE finally / run.py 尾部）在订阅流
+                # 一结束就 cancel_turn，close 之后才 persist 的话 cancel 会注入落盘的 DB
+                # await，落盘整体失效。shield 再防一层：执行期间的 cancel 注入（用户停止/
+                # 断流的二次 cancel）只打断外层收尾（publish/cooldown——取消语义下本就不跑），
+                # 内层落盘保证跑完；捕下注入继续走 close，订阅者不悬挂。
+                _persist_task = asyncio.ensure_future(_persist_turn_rows(
                     execution,
                     agent_output=agent_output,
                     token_text="".join(token_parts),
@@ -681,7 +714,13 @@ class TurnRuntimeManager:
                     done_metadata=done_metadata,
                     result_metadata=result_metadata,
                     result_questions=result_questions,
-                )
+                ))
+                try:
+                    await asyncio.shield(_persist_task)
+                except asyncio.CancelledError:
+                    pass  # 落盘在后台继续；继续收尾（close bus 释放订阅者）
+                if not execution.bus._closed:
+                    await execution.bus.close()
 
                 # 发布 CAPABILITY_COMPLETE 事件（记忆更新等后台任务订阅）
                 if agent_output:
