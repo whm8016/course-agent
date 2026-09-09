@@ -301,13 +301,13 @@ class TurnRuntimeManager:
                     # context.session_summary，不换会用到旧卡（埋点陈旧一轮）
                     context.session_summary = _summary2
                 else:
-                    # 成因三合一（无法在此区分）：让路（他方在压）/压缩或重载失败/
-                    # 压缩成功但重载为空。按原裁剪方案走，被裁消息当轮不可见——
-                    # 记 WARN 可观测（下轮读侧触发会再压）
+                    # 成因不逐一区分（maybe_compress 返回 False 的各种路径：锁让路/
+                    # 条数守卫拒压/压缩或重载失败/重载为空）。按原裁剪方案走，被裁
+                    # 消息当轮不可见——记 WARN 可观测（下轮读侧触发会再压）
                     logger.warning(
-                        "TurnRuntime: overflow fallback let-through (compress let "
-                        "pass/failed or reload empty); turn_id=%s trimmed messages "
-                        "beyond cursor uncovered this round",
+                        "TurnRuntime: overflow fallback ineffective (compress "
+                        "declined/failed or reload empty); turn_id=%s trimmed "
+                        "messages beyond cursor uncovered this round",
                         turn_id,
                     )
             context.conversation_history = _plan.keep_history
