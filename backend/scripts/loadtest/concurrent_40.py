@@ -190,7 +190,14 @@ async def student_runner(
         r = await ask_once(client, base, headers, course_id, question,
                            stu["username"], q_idx, timeout_s)
         mark = "PASS" if r.pass_ else "FAIL"
-        err = f" err={r.error_detail}" if (r.got_error or not r.pass_) else ""
+        flags = []
+        if r.got_error:
+            flags.append("error_event")
+        if r.no_done:
+            flags.append("no_done")
+        if not r.pass_:
+            flags.append(r.error_detail[:80])
+        err = f" [{'|'.join(flags)}]" if flags else ""
         ttft = f"{r.ttft_ms:.0f}ms" if r.ttft_ms is not None else "-"
         print(f"[{mark}] {r.student} Q{q_idx:02d} {r.status:10s} "
               f"ttft={ttft:>8s} total={r.total_ms:7.0f}ms{err}")
@@ -282,7 +289,8 @@ async def main(args: argparse.Namespace) -> int:
             "total_p95_ms": round(pct(totals, .95)) if totals else None,
             "results": [{
                 "student": r.student, "q": r.q_idx, "status": r.status,
-                "http": r.http_status,
+                "http": r.http_status, "got_error": r.got_error,
+                "no_done": r.no_done,
                 "ttft_ms": round(r.ttft_ms) if r.ttft_ms is not None else None,
                 "total_ms": round(r.total_ms), "error": r.error_detail,
             } for r in flat],
@@ -298,8 +306,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--students", type=int, default=20)
     p.add_argument("--per-student", type=int, default=2)
     p.add_argument("--timeout", type=float, default=120.0,
-                   help="单问墙钟总时长上限秒（wait_for 兜底；client 级 read timeout 同值，"
-                        "防服务端'滴 token 式挂死'永不触发读超时）")
+                   help="单问墙钟总时长上限秒（ask_once 内 asyncio.timeout 兜底；client 级"
+                        " read timeout 同值，防服务端'滴 token 式挂死'永不触发读超时）")
     p.add_argument("--out", default=os.path.join(here, "concurrent_40_result.json"))
     return p.parse_args()
 
