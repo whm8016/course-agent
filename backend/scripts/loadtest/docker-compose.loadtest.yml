@@ -35,9 +35,12 @@ x-backend-common: &backend-common
   build:
     context: ../..        # = backend/（从 backend/scripts/loadtest/ 往上两级）；Dockerfile 即 backend/Dockerfile
     dockerfile: Dockerfile
-  # 逐字节对齐生产 docker-compose.yml:64（gunicorn -k UvicornWorker -w4）；gunicorn 默认就不记
-  # access log（accesslog 默认 None）无需额外参数——曾误加不存在的 --no-access-log 致启动失败。
-  command: ["sh", "-c", "uv run --no-dev gunicorn main:app -k uvicorn.workers.UvicornWorker -w $${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
+  # 逐字节对齐生产 docker-compose.yml backend.command（2026-09-10 复核同步）：
+  # multiproc 目录清建（缺目录多进程指标构造 FileNotFoundError）+ alembic 迁移循环
+  # （表结构唯一来源，lifespan init_db 覆盖不了 030 zhparser 等 44 天内新增迁移）
+  # + gunicorn -k UvicornWorker -w4（gunicorn 默认不记 access log，勿加 --no-access-log）。
+  # PROMETHEUS_MULTIPROC_DIR 由 backend/Dockerfile ENV 提供，无需在此重复。
+  command: ["sh", "-c", "mkdir -p /dev/shm/prometheus_multiproc && rm -rf /dev/shm/prometheus_multiproc/* && until .venv/bin/alembic upgrade head; do echo 'alembic failed, retrying in 5s...'; sleep 5; done && .venv/bin/gunicorn main:app -k uvicorn.workers.UvicornWorker -w $${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
   env_file:
     - .env.loadtest
   depends_on:
@@ -58,7 +61,13 @@ x-backend-common: &backend-common
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    # 对齐生产（2026-09-10 复核）：自建镜像 pgvector:pg16 + SCWS/zhparser 编译。
+    # alembic 030 硬依赖 CREATE EXTENSION zhparser（官方 pgvector 镜像迁移必挂）；
+    # sparse 检索路的 tsvector 中文分词也靠它。与生产 docker-compose.yml 的 postgres
+    # 同一份 Dockerfile（仓库根 postgres/，从本目录往上三级）。
+    build:
+      context: ../../../postgres
+      dockerfile: Dockerfile
     environment:
       POSTGRES_DB: course_agent_loadtest
       POSTGRES_USER: postgres
@@ -107,14 +116,17 @@ services:
 
   # worker：arq 后台任务进程（对齐生产 docker-compose.yml 的 worker 服务）。
   # 消费 run_indexing / run_llamaindex_build / flush_all_pending_job + cron_flush_memory。
-  # 不复用 *backend-common（那含 /api/health healthcheck，arq 没有）；无 healthcheck（生产也没有）。
+  # 不复用 *backend-common（那含 /api/health healthcheck，arq 没有）。
+  # 2026-09-10 对齐生产：command 加 multiproc 目录 + stop_grace_period 60s（SIGTERM 宽限，
+  # 大任务优雅释放索引锁，compose 默认 10s 会被 SIGKILL）+ /proc 扫描 healthcheck。
   worker:
     build:
       context: ../..      # 同 backend，复用 backend/Dockerfile
       dockerfile: Dockerfile
     env_file:
       - .env.loadtest
-    command: ["uv", "run", "--no-dev", "python", "-m", "arq", "worker.WorkerSettings"]
+    stop_grace_period: 60s
+    command: ["sh", "-c", "mkdir -p /dev/shm/prometheus_multiproc && rm -rf /dev/shm/prometheus_multiproc/* && exec .venv/bin/python -m arq worker.WorkerSettings"]
     depends_on:
       postgres:
         condition: service_healthy
@@ -123,6 +135,14 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
+    # worker 不监听 HTTP，健康检查扫 /proc 找 arq 进程（对齐生产原文）：
+    # 主进程崩溃随容器退出由 restart 兜底，这里抓 PID1 在但 arq 子进程没了的僵死态。
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import glob,sys; sys.exit(0 if any(b'arq' in open(p,'rb').read() for p in glob.glob('/proc/[0-9]*/cmdline')) else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # nginx 前置代理（对齐生产链路 nginx→backend）：buffering off 保证 SSE/TTFT 真实。
   # upstream 单 backend（见 nginx.loadtest.conf）。
