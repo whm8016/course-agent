@@ -39,7 +39,7 @@ docker compose -f docker-compose.loadtest.yml ps          # 等 backend + worker
 ## 1. 造数据（seed，缓存 token）
 
 ```bash
-./backend/venv/Scripts/python.exe backend/scripts/loadtest/seed.py \
+./backend/.venv/Scripts/python.exe backend/scripts/loadtest/seed.py \
     --students 20 --courses 3 --out tokens.json
 ```
 
@@ -71,9 +71,11 @@ locust -f backend/scripts/loadtest/locustfile.py --host http://localhost:8000 \
 | Locust Web UI（8089）| 实时 RPS / P50/P95 / 失败率，按 `chat_ttft` `chat_total` `quiz_ttft` `*_total` 分类 |
 | Prometheus（9090）| PromQL 查 ca_* 业务指标 |
 | Grafana（3000，admin/admin）| 加 Prometheus 数据源 + 自建看板 |
-| 单 worker 指标 | `curl http://localhost:8102/metrics \| grep ca_` |
+| 聚合 worker 指标 | `curl http://localhost:8102/metrics \| grep ca_` |
 
-> ⚠️ **/metrics 只看得到 4 个 worker 之一**：项目用普通 prometheus_client（未接 `prometheus_multiprocess`），gunicorn 4 worker 各独立 REGISTRY，抓取只命中其一。**不影响 Locust 客户端测的总 RPS/P95/失败率**（那些才是 go/no-go 核心）。要看全量 worker 指标需接 multiprocess（生产代码改动，另议）。
+> 2026-09-10 复核更新：backend/Dockerfile 已设 `PROMETHEUS_MULTIPROC_DIR` + backend/worker
+> command 均建 `/dev/shm/prometheus_multiproc`，`/metrics` 走 MultiProcessCollector 聚合
+> gunicorn 4 worker 全量指标——旧版"只看得到 4 worker 之一"的说法已过时。
 
 **关键 PromQL**：
 
@@ -131,7 +133,7 @@ docker compose -f docker-compose.loadtest.yml down -v   # -v 清 pg 数据卷，
 - **对齐生产**：生产 `docker-compose.yml` 就是 1 backend(gunicorn -w4) + worker(arq) + frontend nginx。压测逐项复刻，压的就是要上线的东西。之前的"4 容器各 1 worker"是不存在的多 Pod 形态，已废弃。
 - **必须有 worker**：KB 索引 / LLamaIndex 构建 / mem flush 由 arq worker 消费（`worker.py:269`），web 进程只投递（`main.py:280`）不消费。不加 worker 这些链路跑不了、不真实，H-7~H-9 也无法复验。
 - **保留 nginx**：生产链路 nginx→backend，nginx `proxy_buffering off` 保证 SSE 首 token 实时透传、TTFT 真实。删 nginx 会漏测这层（生产 `frontend/nginx.conf` 的 buffering 已修为 off）。
-- **metrics 看 1/4 是已知 trade-off**：未接 prometheus_multiprocess，不修（另议）；不影响 go/no-go 核心指标。
+- **metrics 已走 multiprocess 聚合**（2026-09-10 复核）：Dockerfile 设 `PROMETHEUS_MULTIPROC_DIR`、command 建目录，4 worker 指标全量可见；旧"只看 1/4"的说法作废。
 
 ## 故障排查
 

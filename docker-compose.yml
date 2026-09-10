@@ -116,10 +116,12 @@ services:
     # 但 ENV 不创建目录）。缺目录会让多进程模式下指标构造 FileNotFoundError（eval 注释已记录
     # 同坑）→ 模块体中途失败被驱逐 → ARQ 重试二次 import 撞 Duplicated timeseries。
     command: ["sh", "-c", "mkdir -p /dev/shm/prometheus_multiproc && rm -rf /dev/shm/prometheus_multiproc/* && exec .venv/bin/python -m arq worker.WorkerSettings"]
-    # worker 不监听 HTTP，健康检查用 /proc 扫描 arq 进程是否存活（镜像无 procps/pgrep；
-    # 主进程崩溃本就随容器退出+restart 兜底，这里抓的是 PID1 在但 arq 子进程没了的僵死态）。
+    # worker 不监听 HTTP，健康检查查 PID1 cmdline 是否 arq（镜像无 procps/pgrep）。
+    # 勿改回扫全部 /proc/*/cmdline 的写法：检查进程自身的 cmdline 就含字面量 arq，
+    # 恒真重言式（2026-09-10 压测套件复审发现后与 loadtest 侧同批修复）。
+    # command 用 exec 起 arq → PID1 即 arq：arq 死则容器死、由 restart 兜底。
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import glob,sys; sys.exit(0 if any(b'arq' in open(p,'rb').read() for p in glob.glob('/proc/[0-9]*/cmdline')) else 1)\""]
+      test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0 if b'arq' in open('/proc/1/cmdline','rb').read() else 1)\""]
       interval: 30s
       timeout: 5s
       retries: 3

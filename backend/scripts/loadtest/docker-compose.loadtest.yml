@@ -12,9 +12,9 @@
 #        （worker.py:269）。不加它则 KB 索引/记忆 flush 链路跑不了、且 H-7~H-9 无法复验。
 #     3. nginx：保留作前置代理（生产链路 nginx→backend），buffering off 保证 SSE/TTFT 真实。
 #
-# 已知 trade-off：项目用普通 prometheus_client（未接 prometheus_multiprocess），gunicorn 4 worker
-#   各独立 REGISTRY，/metrics 默认只能抓到 4 个 worker 之一。但不影响 Locust 客户端测的总
-#   RPS/P95/失败率（go/no-go 核心）。要看全量需接 multiprocess（生产代码改动，另议）。
+# 已知 trade-off（2026-09-10 复核更新）：backend/Dockerfile 已设 PROMETHEUS_MULTIPROC_DIR
+#   + backend/worker command 均建 /dev/shm/prometheus_multiproc，/metrics 走 MultiProcessCollector
+#   聚合 4 worker 全量指标（RUNBOOK 第3节"只看 1/4"的旧说法已过时）。
 #
 # build：压测容器 build 自 backend/Dockerfile（与生产一致），而非已删除的单体根 Dockerfile。
 #
@@ -135,10 +135,11 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
-    # worker 不监听 HTTP，健康检查扫 /proc 找 arq 进程（对齐生产原文）：
-    # 主进程崩溃随容器退出由 restart 兜底，这里抓 PID1 在但 arq 子进程没了的僵死态。
+    # worker 不监听 HTTP，健康检查查 PID1 cmdline 是否 arq。生产的写法扫全部 /proc/...
+    # 的 cmdline 找 b'arq'，但检查进程自身 cmdline 就含字面量 arq——恒真重言式（生产同病，
+    # 建议一并修）。command 用 exec 起 arq，PID1 即 arq：arq 死则容器死、restart 兜底。
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import glob,sys; sys.exit(0 if any(b'arq' in open(p,'rb').read() for p in glob.glob('/proc/[0-9]*/cmdline')) else 1)\""]
+      test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0 if b'arq' in open('/proc/1/cmdline','rb').read() else 1)\""]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -10,6 +10,8 @@
   token/answer 事件 → 有效内容；done → 正常收尾；
   error 事件 → 合法响应（fire success，但单独计数并列明细——上线验收中值得人工看）；
   连接断开且无任何事件 = silence → FAIL（真正的静默 bug，H-15 要 0）。
+  另单列 no_done 计数：有内容但既无 done 也无 error（干净 EOF 截断，H-15 口径算
+  PASS——与 locustfile 可比——但可能是 is_disconnected 误报截断，验收时需人工看）。
 
 请求体对齐 locustfile.chat_sse：chat_mode=chat + tools=[]（纯压 chat 流式链路，
 不查 KB/不调工具）；schema 见 api/chat.py:33 ChatRequest（session_id 可选不传，
@@ -29,7 +31,7 @@ import math
 import os
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpx
 
@@ -88,8 +90,9 @@ class AskResult:
     ttft_ms: float | None = None   # 首 token/answer 延迟；无内容则 None
     total_ms: float = 0.0
     got_error: bool = False        # 收到 error 事件（合法响应，单独计数供人工看）
+    no_done: bool = False          # 有内容但无 done/error 收尾（截断嫌疑，H-15 口径仍 PASS）
     error_detail: str = ""
-    note: str = field(default="")  # 问题摘要
+    note: str = ""                 # 问题摘要
 
     @property
     def pass_(self) -> bool:
@@ -106,7 +109,11 @@ async def ask_once(
     q_idx: int,
     timeout_s: float,
 ) -> AskResult:
-    """单次 SSE 提问。事件判定语义与 locustfile._finish 一致（H-15）。"""
+    """单次 SSE 提问。事件判定语义与 locustfile._finish 一致（H-15）。
+    超时两层：client 级 httpx.Timeout（相邻 SSE 读间隔，构造见 main）+ asyncio.timeout
+    单问墙钟——read timeout 只限相邻两次读之间，服务端"每隔 N 秒滴一个 token"的挂死
+    不会触发它，没有墙钟兜底整个验收会无限挂起。不传 per-request timeout：标量会
+    整体覆盖 client 级 Timeout 让 connect=10 失效（httpx build_request 实测行为）。"""
     body = {
         "course_id": course_id,
         "message": question,
@@ -118,9 +125,9 @@ async def ask_once(
     res = AskResult(student=student, q_idx=q_idx, status="exception",
                     note=question[:18])
     try:
-        async with client.stream("POST", f"{base}/api/chat",
-                                 headers=headers, json=body,
-                                 timeout=timeout_s) as r:
+        async with asyncio.timeout(timeout_s), \
+                client.stream("POST", f"{base}/api/chat",
+                              headers=headers, json=body) as r:
             res.http_status = r.status_code
             if r.status_code != 200:
                 snippet = (await r.aread())[:120].decode("utf-8", "replace")
@@ -151,8 +158,12 @@ async def ask_once(
             if got_content or got_done or got_error:
                 res.status = "ok"
                 res.got_error = got_error
+                res.no_done = got_content and not (got_done or got_error)
             else:
                 res.status = "silent"   # 连接走完但无任何有效事件（H-15 真失败）
+    except TimeoutError:   # asyncio.timeout 墙钟（3.11+ 即内建 TimeoutError；httpx.ReadTimeout 自成体系不被此捕获）
+        res.total_ms = (time.perf_counter() - t0) * 1000
+        res.error_detail = f"wall-clock >{timeout_s:.0f}s"
     except Exception as exc:
         res.total_ms = (time.perf_counter() - t0) * 1000
         res.error_detail = f"{type(exc).__name__}: {exc}"[:160]
@@ -175,8 +186,9 @@ async def student_runner(
     out: list[AskResult] = []
     for j in range(per_student):
         q_idx = idx * per_student + j
-        r = await ask_once(client, base, headers, course_id,
-                           QUESTIONS[q_idx], stu["username"], q_idx, timeout_s)
+        question = QUESTIONS[q_idx]
+        r = await ask_once(client, base, headers, course_id, question,
+                           stu["username"], q_idx, timeout_s)
         mark = "PASS" if r.pass_ else "FAIL"
         err = f" err={r.error_detail}" if (r.got_error or not r.pass_) else ""
         ttft = f"{r.ttft_ms:.0f}ms" if r.ttft_ms is not None else "-"
@@ -195,6 +207,15 @@ def pct(sorted_vals: list[float], p: float) -> float:
 
 
 async def main(args: argparse.Namespace) -> int:
+    total_n = args.students * args.per_student
+    if args.students < 1 or args.per_student < 1:
+        print("students/per-student 必须 ≥1")
+        return 2
+    if total_n > len(QUESTIONS):
+        # QUESTIONS 按 q_idx 直接索引，越界会穿透 gather 打飞全部在飞结果
+        print(f"students×per-student={total_n} 超过题库 {len(QUESTIONS)} 题，"
+              f"请扩充 QUESTIONS 或调小参数")
+        return 2
     with open(args.tokens, encoding="utf-8") as f:
         data = json.load(f)
     students = data["students"]
@@ -203,7 +224,6 @@ async def main(args: argparse.Namespace) -> int:
         return 2
     students = students[:args.students]
     base = data["base_url"].rstrip("/")
-    total_n = args.students * args.per_student
     print(f"==== 上线验收：{args.students} 学生并发 × {args.per_student} 问 "
           f"= {total_n} 次（base={base}）====")
     t0 = time.perf_counter()
@@ -224,37 +244,46 @@ async def main(args: argparse.Namespace) -> int:
     bad_http = sum(r.status.startswith("http_") for r in flat)
     exceptions = sum(r.status == "exception" for r in flat)
     err_events = sum(r.got_error for r in flat)
+    no_done = sum(r.no_done for r in flat)
     ttfts = sorted(r.ttft_ms for r in flat if r.ttft_ms is not None)
-    totals = sorted(r.total_ms for r in flat)
+    # 延迟分布只看成功样本：失败请求混入会使分位数失真（30s 排队 500 拉高、秒回 429 拉低）
+    totals = sorted(r.total_ms for r in flat if r.status == "ok")
 
     print(f"\n---- 汇总（墙钟 {wall:.1f}s）----")
     print(f"{passed}/{total_n} PASS   FAIL: 非200={bad_http} silence={silent} "
-          f"异常={exceptions}   error事件={err_events}")
+          f"异常={exceptions}   error事件={err_events} 无done截断={no_done}")
     if ttfts:
         print(f"TTFT  P50={pct(ttfts, .50):8.0f}ms  P95={pct(ttfts, .95):8.0f}ms "
               f"max={ttfts[-1]:.0f}ms")
-    print(f"total P50={pct(totals, .50):8.0f}ms  P95={pct(totals, .95):8.0f}ms "
-          f"max={totals[-1]:.0f}ms")
+    if totals:   # 全失败跑法（排障场景）下无成功样本
+        print(f"total P50={pct(totals, .50):8.0f}ms  P95={pct(totals, .95):8.0f}ms "
+              f"max={totals[-1]:.0f}ms")
     if err_events:
         print("error 事件明细（合法响应，需人工确认成因）：")
         for r in flat:
             if r.got_error:
                 print(f"  {r.student} Q{r.q_idx:02d}: {r.error_detail}")
     verdict = "PASS" if passed == total_n else "FAIL"
-    warn = "（含 error 事件，成因见上）" if err_events else ""
+    warns = []
+    if err_events:
+        warns.append("含 error 事件，成因见上")
+    if no_done:
+        warns.append(f"{no_done} 问有内容无 done（截断嫌疑）")
+    warn = f"（{'；'.join(warns)}）" if warns else ""
     print(f"\n==== 上线验收判定：{verdict} {warn} ====")
     with open(args.out, "w", encoding="utf-8") as f:
         json.dump({
             "verdict": verdict, "total": total_n, "passed": passed,
             "silent": silent, "bad_http": bad_http, "exceptions": exceptions,
-            "error_events": err_events, "wall_sec": round(wall, 1),
+            "error_events": err_events, "no_done": no_done, "wall_sec": round(wall, 1),
             "ttft_p50_ms": round(pct(ttfts, .50)) if ttfts else None,
             "ttft_p95_ms": round(pct(ttfts, .95)) if ttfts else None,
-            "total_p50_ms": round(pct(totals, .50)),
-            "total_p95_ms": round(pct(totals, .95)),
+            "total_p50_ms": round(pct(totals, .50)) if totals else None,
+            "total_p95_ms": round(pct(totals, .95)) if totals else None,
             "results": [{
                 "student": r.student, "q": r.q_idx, "status": r.status,
-                "http": r.http_status, "ttft_ms": round(r.ttft_ms) if r.ttft_ms else None,
+                "http": r.http_status,
+                "ttft_ms": round(r.ttft_ms) if r.ttft_ms is not None else None,
                 "total_ms": round(r.total_ms), "error": r.error_detail,
             } for r in flat],
         }, f, ensure_ascii=False, indent=2)
@@ -269,7 +298,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--students", type=int, default=20)
     p.add_argument("--per-student", type=int, default=2)
     p.add_argument("--timeout", type=float, default=120.0,
-                   help="单问总超时秒（真打 LLM 首字可能慢）")
+                   help="单问墙钟总时长上限秒（wait_for 兜底；client 级 read timeout 同值，"
+                        "防服务端'滴 token 式挂死'永不触发读超时）")
     p.add_argument("--out", default=os.path.join(here, "concurrent_40_result.json"))
     return p.parse_args()
 
