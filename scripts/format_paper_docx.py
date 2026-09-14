@@ -4,11 +4,16 @@
 用法: python scripts/format_paper_docx.py <输入.md> <输出.docx>
 
 做三件事:
-1. 基于 pandoc 默认 reference.docx 重写样式: 宋体正文(五号)/黑体标题/
+1. 基于 pandoc 默认 reference.docx 重写样式: 宋体正文(小四)/黑体标题/
    Times New Roman 西文/全黑配色/三线表/首行缩进2字/1.5倍行距。
 2. pandoc 转换。
-3. 后处理 document.xml: 题目/作者/单位/图表题居中, 首页注释与参考文献
-   小五号, 参考文献悬挂缩进, 图片限宽 14.5cm。
+3. 后处理 document.xml: 题目/作者/单位/图表题居中, 首页注释小五号,
+   参考文献悬挂缩进, 图片限宽 14.5cm。
+
+字号规格(Word 投稿版): 中文标题黑体小二18pt / 副标题与一级标题黑体四号14pt /
+作者楷体四号14pt / 二级标题黑体小四12pt / 正文宋体小四12pt /
+摘要关键词小四(标签黑体) / 图表题五号加粗 / 表内与参考文献五号 /
+收稿日期等首页注释小五9pt。
 """
 from __future__ import annotations
 
@@ -41,10 +46,10 @@ DOC_DEFAULTS = (
     "<w:docDefaults><w:rPrDefault><w:rPr>"
     '<w:rFonts w:ascii="Times New Roman" w:hAnsi="Times New Roman"'
     ' w:eastAsia="SimSun" w:cs="Times New Roman"/>'
-    '<w:color w:val="000000"/><w:sz w:val="21"/><w:szCs w:val="21"/>'
+    '<w:color w:val="000000"/><w:sz w:val="24"/><w:szCs w:val="24"/>'
     "</w:rPr></w:rPrDefault><w:pPrDefault><w:pPr>"
     '<w:spacing w:after="0" w:line="360" w:lineRule="auto"/>'
-    '<w:ind w:firstLineChars="200" w:firstLine="420"/>'
+    '<w:ind w:firstLineChars="200" w:firstLine="480"/>'
     '<w:jc w:val="both"/>'
     "</w:pPr></w:pPrDefault></w:docDefaults>"
 )
@@ -54,49 +59,49 @@ HEI = (
     ' w:eastAsia="SimHei"/>'
 )
 
+
+def _heading(sid: str, name: str, sz: int, before: int, after: int) -> str:
+    return (
+        f'<w:style w:type="paragraph" w:styleId="{sid}">'
+        f'<w:name w:val="{name}"/><w:basedOn w:val="Normal"/>'
+        f'<w:next w:val="BodyText"/>'
+        f'<w:pPr><w:keepNext/><w:spacing w:before="{before}" w:after="{after}"/>'
+        f'<w:ind w:firstLine="0"/></w:pPr>'
+        f"<w:rPr>{HEI}<w:b w:val=\"0\"/><w:sz w:val=\"{sz}\"/><w:szCs w:val=\"{sz}\"/></w:rPr>"
+        f"</w:style>"
+    )
+
+
 STYLE_REPLACEMENTS = {
+    # 中文标题: 黑体小二 18pt 居中
     "Title": (
         '<w:style w:type="paragraph" w:styleId="Title">'
         '<w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="BodyText"/>'
         '<w:pPr><w:spacing w:before="240" w:after="120"/><w:jc w:val="center"/>'
         '<w:ind w:firstLine="0"/></w:pPr>'
-        f"<w:rPr>{HEI}<w:b w:val=\"0\"/><w:sz w:val=\"32\"/><w:szCs w:val=\"32\"/></w:rPr>"
+        f"<w:rPr>{HEI}<w:b w:val=\"0\"/><w:sz w:val=\"36\"/><w:szCs w:val=\"36\"/></w:rPr>"
         "</w:style>"
     ),
-    "Heading1": (
-        '<w:style w:type="paragraph" w:styleId="Heading1">'
-        '<w:name w:val="heading 1"/><w:basedOn w:val="Normal"/>'
-        '<w:next w:val="BodyText"/>'
-        '<w:pPr><w:keepNext/><w:spacing w:before="240" w:after="120"/>'
-        '<w:ind w:firstLine="0"/></w:pPr>'
-        f"<w:rPr>{HEI}<w:b w:val=\"0\"/><w:sz w:val=\"24\"/><w:szCs w:val=\"24\"/></w:rPr>"
-        "</w:style>"
-    ),
-    "Heading2": (
-        '<w:style w:type="paragraph" w:styleId="Heading2">'
-        '<w:name w:val="heading 2"/><w:basedOn w:val="Normal"/>'
-        '<w:next w:val="BodyText"/>'
-        '<w:pPr><w:keepNext/><w:spacing w:before="120" w:after="60"/>'
-        '<w:ind w:firstLine="0"/></w:pPr>'
-        f"<w:rPr>{HEI}<w:b w:val=\"0\"/><w:sz w:val=\"21\"/><w:szCs w:val=\"21\"/></w:rPr>"
-        "</w:style>"
-    ),
-    # 表格单元格: 小五号 + 单倍行距 + 不缩进
+    # 一级标题: 黑体四号 14pt; 二级: 黑体小四 12pt; 三级: 黑体五号 10.5pt
+    "Heading1": _heading("Heading1", "heading 1", 28, 240, 120),
+    "Heading2": _heading("Heading2", "heading 2", 24, 120, 60),
+    "Heading3": _heading("Heading3", "heading 3", 21, 120, 60),
+    # 表格单元格: 五号 + 单倍行距 + 不缩进
     "Compact": (
         '<w:style w:type="paragraph" w:styleId="Compact">'
         '<w:name w:val="Compact"/><w:basedOn w:val="Normal"/>'
         '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>'
         '<w:ind w:firstLine="0"/></w:pPr>'
-        '<w:rPr><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr>'
+        '<w:rPr><w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr>'
         "</w:style>"
     ),
-    # 三线表: 上下粗线 + 表头下细线, 无竖线
+    # 三线表: 上下粗线 + 表头下细线, 无竖线; 表内五号
     "Table": (
         '<w:style w:type="table" w:styleId="Table">'
         '<w:name w:val="Table"/><w:basedOn w:val="TableNormal"/>'
         '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>'
         '<w:ind w:firstLine="0"/></w:pPr>'
-        '<w:rPr><w:sz w:val="18"/><w:szCs w:val="18"/></w:rPr>'
+        '<w:rPr><w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr>'
         "<w:tblPr><w:tblBorders>"
         '<w:top w:val="single" w:sz="12" w:space="0" w:color="000000"/>'
         '<w:bottom w:val="single" w:sz="12" w:space="0" w:color="000000"/>'
@@ -128,7 +133,9 @@ def build_reference() -> Path:
     for sid, block in STYLE_REPLACEMENTS.items():
         pattern = r'<w:style [^>]*w:styleId="%s"[^>]*>.*?</w:style>' % sid
         styles, n = re.subn(pattern, block, styles, flags=re.S)
-        if n != 1:
+        if n == 0:  # 默认模板缺该样式则追加
+            styles = styles.replace("</w:styles>", block + "</w:styles>")
+        elif n > 1:
             raise RuntimeError(f"reference 样式 {sid} 替换异常: {n} 处")
     with zipfile.ZipFile(REFERENCE_DOCX, "w", zipfile.ZIP_DEFLATED) as zout:
         for item in zin.infolist():
@@ -170,29 +177,34 @@ def _set_jc(p, val):
     pPr.append(jc)
 
 
-def _style_runs(p, east=None, ascii_=None, sz=None):
-    """给段落内所有 run 设置字体/字号(半磅)。"""
-    for r in p.findall(w("r")):
-        rPr = r.find(w("rPr"))
-        if rPr is None:
-            rPr = ET.Element(w("rPr"))
-            r.insert(0, rPr)
-        if east or ascii_:
-            for old in rPr.findall(w("rFonts")):
+def _apply_run_style(r, east=None, ascii_=None, sz=None):
+    rPr = r.find(w("rPr"))
+    if rPr is None:
+        rPr = ET.Element(w("rPr"))
+        r.insert(0, rPr)
+    if east or ascii_:
+        for old in rPr.findall(w("rFonts")):
+            rPr.remove(old)
+        fonts = ET.Element(w("rFonts"))
+        fonts.set(w("ascii"), ascii_ or "Times New Roman")
+        fonts.set(w("hAnsi"), ascii_ or "Times New Roman")
+        fonts.set(w("eastAsia"), east or "SimSun")
+        rPr.append(fonts)
+    if sz:
+        for tag in ("sz", "szCs"):
+            for old in rPr.findall(w(tag)):
                 rPr.remove(old)
-            fonts = ET.Element(w("rFonts"))
-            fonts.set(w("ascii"), ascii_ or "Times New Roman")
-            fonts.set(w("hAnsi"), ascii_ or "Times New Roman")
-            fonts.set(w("eastAsia"), east or "SimSun")
-            rPr.append(fonts)
-        if sz:
-            for tag in ("sz", "szCs"):
-                for old in rPr.findall(w(tag)):
-                    rPr.remove(old)
-            for tag in ("sz", "szCs"):
-                el = ET.Element(w(tag))
-                el.set(w("val"), str(sz))
-                rPr.append(el)
+            el = ET.Element(w(tag))
+            el.set(w("val"), str(sz))
+            rPr.append(el)
+
+
+def _style_runs(p, east=None, ascii_=None, sz=None, first_only=False):
+    runs = p.findall(w("r"))
+    if first_only:
+        runs = runs[:1]
+    for r in runs:
+        _apply_run_style(r, east=east, ascii_=ascii_, sz=sz)
 
 
 def classify(text: str) -> str | None:
@@ -222,17 +234,17 @@ def classify(text: str) -> str | None:
 
 
 ACTIONS = {
-    "subtitle":   dict(jc="center", ind={}, east="SimHei", sz=28),
-    "cn_authors": dict(jc="center", ind={}, east="KaiTi", sz=24),
-    "cn_affil":   dict(jc="center", ind={}, sz=18),
-    "en_title":   dict(jc="center", ind={}, sz=24),
-    "en_authors": dict(jc="center", ind={}, sz=21),
-    "en_affil":   dict(jc="center", ind={}, sz=18),
-    "frontmatter": dict(jc="both", ind={}, sz=18),
-    "footnote":   dict(jc="both", ind={}, sz=18),
-    "caption":    dict(jc="center", ind={}, sz=18),
-    "reference":  dict(jc="both", ind={"left": 420, "hanging": 420}, sz=18),
-    "formula":    dict(jc="left", ind={}),
+    "subtitle":    dict(jc="center", ind={}, east="SimHei", sz=28),   # 黑体四号
+    "cn_authors":  dict(jc="center", ind={}, east="KaiTi", sz=28),    # 楷体四号
+    "cn_affil":    dict(jc="center", ind={}, sz=24),                  # 宋体小四
+    "en_title":    dict(jc="center", ind={}, sz=28),                  # 四号加粗
+    "en_authors":  dict(jc="center", ind={}, sz=24),                  # 小四
+    "en_affil":    dict(jc="center", ind={}, sz=21),                  # 五号
+    "frontmatter": dict(jc="both", ind={}, sz=24),                    # 小四不缩进
+    "footnote":    dict(jc="both", ind={}, sz=18),                    # 小五(唯一)
+    "caption":     dict(jc="center", ind={}, sz=21),                  # 五号加粗居中
+    "reference":   dict(jc="both", ind={"left": 420, "hanging": 420}, sz=21),  # 五号悬挂
+    "formula":     dict(jc="left", ind={}),
 }
 
 
@@ -243,7 +255,8 @@ def postprocess_document(doc_xml: bytes) -> tuple[bytes, dict]:
     root = ET.fromstring(raw)
     counts = {}
     for p in root.iter(w("p")):
-        kind = classify(_plain_text(p))
+        text = _plain_text(p)
+        kind = classify(text)
         if kind is None:
             continue
         counts[kind] = counts.get(kind, 0) + 1
@@ -253,6 +266,9 @@ def postprocess_document(doc_xml: bytes) -> tuple[bytes, dict]:
         if "ind" in act:
             _set_ind(p, **act["ind"])
         _style_runs(p, east=act.get("east"), sz=act.get("sz"))
+        # "摘　要"/"关键词"标签四字用黑体(第一个 run 是加粗标签)
+        if kind == "frontmatter" and text.startswith(("摘　要", "关键词")):
+            _style_runs(p, east="SimHei", first_only=True)
     # 图片限宽
     scaled = 0
     for ext in list(root.iter(f"{{{WP}}}extent")) + list(root.iter(f"{{{A}}}ext")):
@@ -286,7 +302,9 @@ def main() -> None:
     build_reference()
     subprocess.run(
         ["pandoc", str(md), "-o", str(out),
-         f"--reference-doc={REFERENCE_DOCX}", "--resource-path=."],
+         f"--reference-doc={REFERENCE_DOCX}", "--resource-path=.",
+         # MD 的 # 是文题而非章节: 升格为 docx Title, ## -> Heading1, ### -> Heading2
+         "--shift-heading-level-by=-1"],
         cwd=ROOT, check=True,
     )
 
