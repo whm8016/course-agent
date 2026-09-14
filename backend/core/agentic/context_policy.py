@@ -29,12 +29,11 @@
 from __future__ import annotations
 
 import contextvars
-import json
 import logging
 import re
 from typing import Any
 
-from core.agentic.context_window import compute_budgets, count_tokens
+from core.agentic.context_window import compute_budgets, count_tokens_messages
 from settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -382,11 +381,9 @@ async def apply_arm(messages: list[dict[str, Any]], model: str, arm: str) -> int
 
 
 def token_estimate(messages: list[dict[str, Any]]) -> int:
-    """便利函数：估算 messages 总 token（content + tool_calls，供测试/日志断言落在窗口预算内）。"""
-    total = 0
-    for m in messages:
-        total += count_tokens(str(m.get("content", "")))
-        tcs = m.get("tool_calls")
-        if tcs:
-            total += count_tokens(json.dumps(tcs, ensure_ascii=False))
-    return total
+    """便利函数：估算 messages 总 token（供测试/日志断言落在窗口预算内）。
+
+    委托 context_window.count_tokens_messages（单一真相源）——旧本体与
+    context_budget._messages_tokens 逐字节重复，已收编统一口径。
+    """
+    return count_tokens_messages(messages)

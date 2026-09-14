@@ -286,9 +286,9 @@ def test_tools_definition_counted_with_extra_constants():
 
 
 def test_legacy_messages_tokens_plus_overhead_equivalence():
-    """兼容锚点：纯文本+tool_calls 消息（无 name/multimodal）上新函数 = 旧 _messages_tokens + 3×条数。
+    """收编锚点：_messages_tokens 与 token_estimate 均委托 count_tokens_messages，三函数完全等价。
 
-    Step2 收编后 _messages_tokens 委托本函数，此断言保证口径迁移是「补结构开销」而非换算法。
+    Step1 时旧口径 = 新口径 - 3×条数（补结构开销而非换算法）；Step2 收编后为恒等。
     """
     msgs = [
         {"role": "system", "content": "你是物理辅导老师。"},
@@ -299,7 +299,8 @@ def test_legacy_messages_tokens_plus_overhead_equivalence():
         {"role": "tool", "content": "牛顿第二运动定律：F = ma ……", "tool_call_id": "c1"},
     ]
     from core.agentic.context_budget import _messages_tokens
-    assert count_tokens_messages(msgs) == _messages_tokens(msgs) + 3 * len(msgs)
+    from core.agentic.context_policy import token_estimate
+    assert count_tokens_messages(msgs) == _messages_tokens(msgs) == token_estimate(msgs)
 
 
 def test_empty_and_none_inputs():

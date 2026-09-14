@@ -23,10 +23,14 @@ Prompt Caching（cache_control read 0.1x）。
 from __future__ import annotations
 
 import dataclasses
-import json
 from typing import Any
 
-from core.agentic.context_window import compute_budgets, count_tokens, resolve_effective_window
+from core.agentic.context_window import (
+    compute_budgets,
+    count_tokens,
+    count_tokens_messages,
+    resolve_effective_window,
+)
 from services.session.context_builder import ContextBuilder
 from settings import get_settings
 
@@ -121,18 +125,13 @@ class EnforceReport:
 
 
 def _messages_tokens(messages: list[dict[str, Any]]) -> int:
-    """messages 列表的总 token 估算（content + tool_calls 序列化）。
+    """messages 列表的总 token 估算。委托 context_window.count_tokens_messages（单一真相源）。
 
-    assistant 工具调用轮常是 content="" + 一大坨 tool_calls，旧实现只计 content ->
-    软阈值判断偏乐观（实际已超窗仍判未超）。tool_calls 按发给 API 的 JSON 序列化计入。
+    旧本体内联只计 content + tool_calls JSON（与 context_policy.token_estimate 逐字节重复，
+    存在静默漂移风险），且漏计每条消息 4-8 token 结构开销与图片 token。现统一走
+    count_tokens_messages 口径：content/tool_calls/multimodal 逐 part + 每消息 +3/name +1。
     """
-    total = 0
-    for m in messages:
-        total += count_tokens(str(m.get("content", "")))
-        tcs = m.get("tool_calls")
-        if tcs:
-            total += count_tokens(json.dumps(tcs, ensure_ascii=False))
-    return total
+    return count_tokens_messages(messages)
 
 
 # -- L1：优先级清理 tool 结果（免费，无 LLM）------------------------------------
