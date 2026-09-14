@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """论文 MD -> 期刊排版风格 DOCX。
 
 用法: python scripts/format_paper_docx.py <输入.md> <输出.docx>
@@ -60,12 +59,13 @@ HEI = (
 )
 
 
-def _heading(sid: str, name: str, sz: int, before: int, after: int) -> str:
+def _heading(sid: str, name: str, sz: int, before: int, after: int, jc: str | None = None) -> str:
+    jc_xml = f'<w:jc w:val="{jc}"/>' if jc else ""
     return (
         f'<w:style w:type="paragraph" w:styleId="{sid}">'
         f'<w:name w:val="{name}"/><w:basedOn w:val="Normal"/>'
         f'<w:next w:val="BodyText"/>'
-        f'<w:pPr><w:keepNext/><w:spacing w:before="{before}" w:after="{after}"/>'
+        f'<w:pPr><w:keepNext/><w:spacing w:before="{before}" w:after="{after}"/>{jc_xml}'
         f'<w:ind w:firstLine="0"/></w:pPr>'
         f"<w:rPr>{HEI}<w:b w:val=\"0\"/><w:sz w:val=\"{sz}\"/><w:szCs w:val=\"{sz}\"/></w:rPr>"
         f"</w:style>"
@@ -74,14 +74,7 @@ def _heading(sid: str, name: str, sz: int, before: int, after: int) -> str:
 
 STYLE_REPLACEMENTS = {
     # 中文标题: 黑体小二 18pt 居中
-    "Title": (
-        '<w:style w:type="paragraph" w:styleId="Title">'
-        '<w:name w:val="Title"/><w:basedOn w:val="Normal"/><w:next w:val="BodyText"/>'
-        '<w:pPr><w:spacing w:before="240" w:after="120"/><w:jc w:val="center"/>'
-        '<w:ind w:firstLine="0"/></w:pPr>'
-        f"<w:rPr>{HEI}<w:b w:val=\"0\"/><w:sz w:val=\"36\"/><w:szCs w:val=\"36\"/></w:rPr>"
-        "</w:style>"
-    ),
+    "Title": _heading("Title", "Title", 36, 240, 120, jc="center"),
     # 一级标题: 黑体四号 14pt; 二级: 黑体小四 12pt; 三级: 黑体五号 10.5pt
     "Heading1": _heading("Heading1", "heading 1", 28, 240, 120),
     "Heading2": _heading("Heading2", "heading 2", 24, 120, 60),
@@ -129,10 +122,10 @@ def build_reference() -> Path:
     ).stdout
     zin = zipfile.ZipFile(io.BytesIO(raw))
     styles = zin.read("word/styles.xml").decode("utf-8")
-    styles = re.sub(r"<w:docDefaults>.*?</w:docDefaults>", DOC_DEFAULTS, styles, flags=re.S)
+    styles = re.sub(r"<w:docDefaults>.*?</w:docDefaults>", DOC_DEFAULTS, styles, flags=re.DOTALL)
     for sid, block in STYLE_REPLACEMENTS.items():
-        pattern = r'<w:style [^>]*w:styleId="%s"[^>]*>.*?</w:style>' % sid
-        styles, n = re.subn(pattern, block, styles, flags=re.S)
+        pattern = rf'<w:style [^>]*w:styleId="{sid}"[^>]*>.*?</w:style>'
+        styles, n = re.subn(pattern, block, styles, flags=re.DOTALL)
         if n == 0:  # 默认模板缺该样式则追加
             styles = styles.replace("</w:styles>", block + "</w:styles>")
         elif n > 1:
@@ -177,18 +170,18 @@ def _set_jc(p, val):
     pPr.append(jc)
 
 
-def _apply_run_style(r, east=None, ascii_=None, sz=None):
+def _apply_run_style(r, east=None, sz=None):
     rPr = r.find(w("rPr"))
     if rPr is None:
         rPr = ET.Element(w("rPr"))
         r.insert(0, rPr)
-    if east or ascii_:
+    if east:
         for old in rPr.findall(w("rFonts")):
             rPr.remove(old)
         fonts = ET.Element(w("rFonts"))
-        fonts.set(w("ascii"), ascii_ or "Times New Roman")
-        fonts.set(w("hAnsi"), ascii_ or "Times New Roman")
-        fonts.set(w("eastAsia"), east or "SimSun")
+        fonts.set(w("ascii"), "Times New Roman")
+        fonts.set(w("hAnsi"), "Times New Roman")
+        fonts.set(w("eastAsia"), east)
         rPr.append(fonts)
     if sz:
         for tag in ("sz", "szCs"):
@@ -199,12 +192,14 @@ def _apply_run_style(r, east=None, ascii_=None, sz=None):
             rPr.append(el)
 
 
-def _style_runs(p, east=None, ascii_=None, sz=None, first_only=False):
+def _style_runs(p, east=None, sz=None, first_only=False):
+    if east is None and sz is None:
+        return  # 无字体/字号要设时不建空 rPr
     runs = p.findall(w("r"))
     if first_only:
         runs = runs[:1]
     for r in runs:
-        _apply_run_style(r, east=east, ascii_=ascii_, sz=sz)
+        _apply_run_style(r, east=east, sz=sz)
 
 
 def classify(text: str) -> str | None:
@@ -214,11 +209,11 @@ def classify(text: str) -> str | None:
         return "cn_authors"
     if text.startswith("（1．"):
         return "cn_affil"
-    if text.startswith("Design and Implementation"):
+    if text.startswith("Design and implementation"):
         return "en_title"
     if text.startswith("WANG Haoming"):
         return "en_authors"
-    if text.startswith("(1. School of Information"):
+    if text.startswith("(1. "):
         return "en_affil"
     if text.startswith(("摘　要", "关键词", "中图分类号", "Abstract", "Keywords")):
         return "frontmatter"
@@ -234,17 +229,17 @@ def classify(text: str) -> str | None:
 
 
 ACTIONS = {
-    "subtitle":    dict(jc="center", ind={}, east="SimHei", sz=28),   # 黑体四号
-    "cn_authors":  dict(jc="center", ind={}, east="KaiTi", sz=28),    # 楷体四号
-    "cn_affil":    dict(jc="center", ind={}, sz=24),                  # 宋体小四
-    "en_title":    dict(jc="center", ind={}, sz=28),                  # 四号加粗
-    "en_authors":  dict(jc="center", ind={}, sz=24),                  # 小四
-    "en_affil":    dict(jc="center", ind={}, sz=21),                  # 五号
-    "frontmatter": dict(jc="both", ind={}, sz=24),                    # 小四不缩进
-    "footnote":    dict(jc="both", ind={}, sz=18),                    # 小五(唯一)
-    "caption":     dict(jc="center", ind={}, sz=21),                  # 五号加粗居中
-    "reference":   dict(jc="both", ind={"left": 420, "hanging": 420}, sz=21),  # 五号悬挂
-    "formula":     dict(jc="left", ind={}),
+    "subtitle":    {"jc": "center", "ind": {}, "east": "SimHei", "sz": 28},   # 黑体四号
+    "cn_authors":  {"jc": "center", "ind": {}, "east": "KaiTi", "sz": 28},    # 楷体四号
+    "cn_affil":    {"jc": "center", "ind": {}, "sz": 24},                     # 宋体小四
+    "en_title":    {"jc": "center", "ind": {}, "sz": 28},                     # 四号加粗
+    "en_authors":  {"jc": "center", "ind": {}, "sz": 24},                     # 小四
+    "en_affil":    {"jc": "center", "ind": {}, "sz": 21},                     # 五号
+    "frontmatter": {"jc": "both", "ind": {}, "sz": 24},                       # 小四不缩进
+    "footnote":    {"jc": "both", "ind": {}, "sz": 18},                       # 小五(唯一)
+    "caption":     {"jc": "center", "ind": {}, "sz": 21},                     # 五号加粗居中
+    "reference":   {"jc": "both", "ind": {"left": 420, "hanging": 420}, "sz": 21},  # 五号悬挂
+    "formula":     {"jc": "left", "ind": {}},
 }
 
 
@@ -263,38 +258,40 @@ def postprocess_document(doc_xml: bytes) -> tuple[bytes, dict]:
         act = ACTIONS[kind]
         if act.get("jc"):
             _set_jc(p, act["jc"])
-        if "ind" in act:
-            _set_ind(p, **act["ind"])
+        _set_ind(p, **act["ind"])
         _style_runs(p, east=act.get("east"), sz=act.get("sz"))
         # "摘　要"/"关键词"标签四字用黑体(第一个 run 是加粗标签)
         if kind == "frontmatter" and text.startswith(("摘　要", "关键词")):
             _style_runs(p, east="SimHei", first_only=True)
+    # 硬锚点零命中 = 版式将静默降级为正文样式, 必须显式告警
+    for required in ("cn_authors", "en_title", "en_authors", "en_affil"):
+        if counts.get(required, 0) == 0:
+            print(f"WARNING: 段落锚点 {required} 未命中, 对应版式未应用", file=sys.stderr)
     # 图片限宽
-    scaled = 0
     for ext in list(root.iter(f"{{{WP}}}extent")) + list(root.iter(f"{{{A}}}ext")):
         cx, cy = int(ext.get("cx")), int(ext.get("cy"))
         if cx > MAX_IMG_EMU:
             ratio = MAX_IMG_EMU / cx
             ext.set("cx", str(MAX_IMG_EMU))
             ext.set("cy", str(int(cy * ratio)))
-            scaled += 1
+            counts["img_scaled"] = counts.get("img_scaled", 0) + 1
     return ET.tostring(root, xml_declaration=True, encoding="UTF-8"), counts
 
 
 def main() -> None:
     if len(sys.argv) != 3:
         sys.exit("用法: python scripts/format_paper_docx.py <输入.md> <输出.docx>")
-    md, out = Path(sys.argv[1]), Path(sys.argv[2])
-    md = md if md.is_absolute() else ROOT / md
-    out = out if out.is_absolute() else ROOT / out
+    # pathlib 的 / 对绝对路径右操作数直接整体替换, 无需分支
+    md, out = ROOT / Path(sys.argv[1]), ROOT / Path(sys.argv[2])
+
+    def _strip_tags(xml: bytes) -> str:
+        return re.sub(r"<[^>]+>", "", xml.decode("utf-8"))
 
     old_text = None
     if out.exists():
         try:
             z = zipfile.ZipFile(out)
-            old_text = re.sub(
-                r"<[^>]+>", "", z.read("word/document.xml").decode("utf-8")
-            )
+            old_text = _strip_tags(z.read("word/document.xml"))
             out.unlink()
         except PermissionError:
             sys.exit(f"输出文件 {out.name} 正被 Word 占用, 请先关闭后重试")
@@ -320,8 +317,7 @@ def main() -> None:
 
     print("段落处理统计:", counts)
     if old_text is not None:
-        new_text = re.sub(r"<[^>]+>", "", new_doc.decode("utf-8"))
-        print("正文内容与旧版一致:", old_text == new_text)
+        print("正文内容与旧版一致:", old_text == _strip_tags(new_doc))
     print("输出:", out.resolve(), f"({out.stat().st_size/1024:.0f} KB)")
 
 
