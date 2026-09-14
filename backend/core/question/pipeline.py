@@ -28,6 +28,7 @@ from core.agentic.loop import run_agent_loop
 from core.context import UnifiedContext
 from core.llm.json_extract import extract_json_from_llm
 from core.observability import log_flow
+from core.observability.cost import TokenUsage
 from core.pipeline_common import (
     build_common_context_layers,
     describe_images,
@@ -68,6 +69,10 @@ class QuizPipeline:
         log_flow("question.pipeline.start", count=count, requirement=requirement[:120])
         import time as _time
         _t_total = _time.perf_counter()
+        # 各子 loop（explore/plan/每题生成/critic）真实 usage 收集：emit_terminal_events=False
+        # 不发 done.usage，前端看不到子 loop 用量——DB 侧早已逐 loop 落账（record_llm_usage
+        # 无条件执行），此处纯可见性补齐，聚合进 result 事件 metadata.usage。
+        usage_sink: list[TokenUsage] = []
 
         # 解析对话供应商 runtime + 通用上下文层（四条 pipeline 共享步骤，pipeline_common）
         rt = await resolve_profile_runtime(context.llm_profile_id, context.user_id)
@@ -122,6 +127,7 @@ class QuizPipeline:
                 binding=rt.binding,
             )
             exploration_trace = explore_outcome.final_text
+        usage_sink.append(explore_outcome.total_usage)
         log_flow("question.stage.explore",
                  elapsed_ms=int((_time.perf_counter() - _t_stage) * 1000),
                  tools_used=explore_outcome.tools_used)
@@ -168,6 +174,7 @@ class QuizPipeline:
                 binding=rt.binding,
             )
             templates = _parse_templates(plan_outcome.final_text, count)
+        usage_sink.append(plan_outcome.total_usage)
         # 蓝图命中薄弱点的题数（评测对账用；weak_ids 空时恒 0）
         weak_ids = {w["topic_id"] for w in weak_topics}
         weak_targeted = sum(1 for t in templates if t.get("target_topic_id") in weak_ids)
@@ -251,6 +258,7 @@ class QuizPipeline:
                         # M-8：单题 LLM 调用异常（超时 / 网络 / provider 抖动）不中断整批
                         logger.exception("quiz 第 %d 题生成异常", idx)
                         return None, await _fail(tmpl, "generation_error")
+                    usage_sink.append(outcome.total_usage)
                     q = _parse_question(outcome.final_text, tmpl)
                     # M-9：内容级校验——空题干/空答案/choice 答案不命中 options 视为无效
                     if not _validate_question(q):
@@ -274,7 +282,8 @@ class QuizPipeline:
                     # 单题容错（reason="critic_failed"），其余题照常。
                     for attempt in range(_CRITIC_MAX_RETRIES + 1):
                         issues = await _run_critic(
-                            q, critic_system, context, layers, rt, stream
+                            q, critic_system, context, layers, rt, stream,
+                            usage_sink=usage_sink,
                         )
                         if not issues:
                             break
@@ -318,6 +327,10 @@ class QuizPipeline:
         log_flow("question.stage.quiz",
                  elapsed_ms=int((_time.perf_counter() - _t_stage) * 1000),
                  generated=len(questions), errors=len(errors))
+        # 子 loop 用量聚合（真实 usage，quiz Capability 塞进 result 事件供前端展示）
+        total_usage = TokenUsage()
+        for u in usage_sink:
+            total_usage = total_usage.add(u)
         log_flow("question.pipeline.complete",
                  elapsed_ms=int((_time.perf_counter() - _t_total) * 1000),
                  questions=len(questions))
@@ -337,6 +350,13 @@ class QuizPipeline:
                 "critic_passed": critic_counts["passed"],
                 "critic_regenerated": critic_counts["regenerated"],
                 "critic_failed": critic_counts["failed"],
+                # 全部子 loop 真实用量（emit_terminal_events=False 时前端唯一可见渠道）
+                "usage": {
+                    "input_tokens": total_usage.input_tokens,
+                    "output_tokens": total_usage.output_tokens,
+                    "cache_read_tokens": total_usage.cache_read_tokens,
+                    "collected": bool(usage_sink),
+                },
             },
         }
 
@@ -468,6 +488,7 @@ async def _run_critic(
     layers,
     rt,
     stream: StreamBus,
+    usage_sink: list | None = None,
 ) -> list[str]:
     """独立 critic 校验轮：只给题目本身（看不到探索摘要/生成过程），返回问题清单。
 
@@ -560,6 +581,8 @@ async def _run_critic(
                 "[quiz] critic 调用失败（fail-open，仅沙箱结论生效）", exc_info=True
             )
             return []
+        if usage_sink is not None:
+            usage_sink.append(outcome.total_usage)
         data = extract_json_from_llm(outcome.final_text)
         if not isinstance(data, dict) or "pass" not in data:
             logger.warning(

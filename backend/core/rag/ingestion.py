@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from settings import get_settings
+
+from core.agentic.context_window import count_tokens  # 进度展示 token 口径（统一估算器）
 INGEST_CHUNK_OVERLAP = get_settings().chunking.ingest_overlap
 INGEST_CHUNK_SIZE = get_settings().chunking.ingest_size
 LIGHTRAG_INGEST_BATCH_SIZE = get_settings().lightrag.ingest_batch_size
@@ -922,7 +924,12 @@ async def _ingest_body(
 
     total = len(all_chunks)
     avg_chars = sum(len(c) for c in all_chunks) / total
-    token_per_chunk = int(_TOKEN_OVERHEAD_PER_CHUNK + avg_chars / 3.5)
+    # 进度展示的 token 口径：正文用 count_tokens 真计数（后台任务非热路径；超大库抽样
+    # 首 100 块防长库全量编码拖慢启动）。旧 avg_chars/3.5 对中文低估约 70%，进度条
+    # token 数严重误导。_TOKEN_OVERHEAD_PER_CHUNK（每 chunk 实体抽取 prompt 模板开销）保留。
+    _sample = all_chunks[:100] if total > 10_000 else all_chunks
+    avg_tokens = sum(count_tokens(c) for c in _sample) / len(_sample)
+    token_per_chunk = int(_TOKEN_OVERHEAD_PER_CHUNK + avg_tokens)
 
     start = min(resume_from_chunk, total)
     chunks = all_chunks[start:]

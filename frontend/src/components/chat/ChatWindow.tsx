@@ -635,6 +635,8 @@ export default function ChatWindow({
     setQuizError('')
 
     const collectedQuestions: QuizQuestion[] = []
+    // result 事件带回的子 loop 用量（explore/plan/生成/critic 聚合，气泡底部小字显示）
+    let quizResultUsage: MessageUsage | undefined
 
     const reqParts = [topic]
     if (quizConfig.difficulty) reqParts.push(`难度:${quizConfig.difficulty}`)
@@ -689,6 +691,7 @@ export default function ChatWindow({
                 setQuizStreamQuestions((prev) => [...prev, qq])
               })
             }
+            quizResultUsage = (msg as { metadata?: { usage?: MessageUsage } }).metadata?.usage
           } else if (t === 'ask_user_card') {
             setQuizAskUser({
               intro: msg.intro ? String(msg.intro) : undefined,
@@ -704,7 +707,8 @@ export default function ChatWindow({
             const assistantMsg: Message = {
               role: 'assistant',
               content: '',
-              metadata: { quiz: quizData },
+              // 子 loop 用量透传（MessageBubble 气泡底部小字，与聊天模式同口径）
+              metadata: { quiz: quizData, ...(quizResultUsage ? { usage: quizResultUsage } : {}) },
             }
             update((prev) => [...prev, assistantMsg])
             // 落库由后端 turn_runtime 在回合结束时统一写（服务端权威回合日志），
@@ -800,7 +804,12 @@ export default function ChatWindow({
       setResearchTraces([])
       update((prev) => [
         ...prev,
-        { role: 'assistant', content: reportContent, metadata: { mode: 'research' } },
+        {
+          role: 'assistant',
+          content: reportContent,
+          // research 子 loop 用量（result 事件 metadata.usage 透传，MessageBubble 气泡底部小字）
+          metadata: { mode: 'research', ...(resultUsage ? { usage: resultUsage } : {}) },
+        },
       ])
       // 落库由后端 turn_runtime 在回合结束时统一写（服务端权威回合日志），前端不双写。
     }
@@ -808,6 +817,8 @@ export default function ChatWindow({
     // ask_user 暂停标志（断线重连判定）+ 重连防循环（至多一次）。本地 let 跨 connect() 共享。
     let awaitingClarification = false
     let reconnected = false
+    // result 事件带回的子 loop 用量（emit_terminal_events=False 时前端唯一可见渠道）
+    let resultUsage: MessageUsage | undefined
     const connect = (resumeId?: string) => {
       const { close, send } = connectDeepResearch(
         {
@@ -849,6 +860,7 @@ export default function ChatWindow({
             } else if (t === 'result') {
               const r = String(msg.report ?? '')
               if (r) reportContent = r
+              resultUsage = (msg as { metadata?: { usage?: MessageUsage } }).metadata?.usage
               awaitingClarification = false
               finishWithReport()
             } else if (t === 'ask_user_card') {

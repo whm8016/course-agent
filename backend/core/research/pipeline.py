@@ -35,6 +35,7 @@ from core.agentic.loop import run_agent_loop
 from core.context import UnifiedContext
 from core.llm.json_extract import extract_json_from_llm
 from core.observability import log_flow
+from core.observability.cost import TokenUsage
 from core.pipeline_common import (
     build_common_context_layers,
     describe_images,
@@ -232,6 +233,11 @@ class ResearchPipeline:
         self.max_parallel = max(1, int(max_parallel))
         self.block_max_iterations = max(2, int(block_max_iterations))
         self.queue_max_length = max(1, int(queue_max_length))
+        # 各阶段子 loop 真实 usage 收集（rephrase/decompose/每块 research/报告），run()
+        # 末尾聚合进 result 事件 metadata.usage——emit_terminal_events=False 不发 done.usage，
+        # 这是前端看到子 loop 用量的唯一渠道（DB 侧早已逐 loop 落账）。放 __init__ 而非
+        # run()：阶段方法可被测试单独调用。asyncio 单线程并发 append 原子安全。
+        self._usage_sink: list[TokenUsage] = []
 
     # ------------------------------------------------------------------
     # Public entry
@@ -457,6 +463,10 @@ class ResearchPipeline:
         )
         await checkpoint.clear(research_id)  # done：清理 checkpoint（保留也行，这里清）
         stats = queue.statistics()
+        # 各阶段子 loop 用量聚合（真实 usage，deep_research Capability 塞进 result 事件）
+        total_usage = TokenUsage()
+        for u in self._usage_sink:
+            total_usage = total_usage.add(u)
         return {
             "research_id": research_id,
             "topic": refined_topic,
@@ -470,6 +480,13 @@ class ResearchPipeline:
                 "sources": stats["sources"],
                 "kb_name": context.course_id or None,
                 "stages": ["rephrase", "decompose", "researching", "reporting"],
+                # 全部子 loop 真实用量（emit_terminal_events=False 时前端唯一可见渠道）
+                "usage": {
+                    "input_tokens": total_usage.input_tokens,
+                    "output_tokens": total_usage.output_tokens,
+                    "cache_read_tokens": total_usage.cache_read_tokens,
+                    "collected": bool(self._usage_sink),
+                },
             },
         }
 
@@ -515,6 +532,7 @@ class ResearchPipeline:
             binding=self._rt.binding,
             emit_terminal_events=False,
         )
+        self._usage_sink.append(outcome.total_usage)
         refined = (outcome.final_text or "").strip()
         return refined or topic
 
@@ -555,6 +573,7 @@ class ResearchPipeline:
             binding=self._rt.binding,
             emit_terminal_events=False,
         )
+        self._usage_sink.append(outcome.total_usage)
         return _parse_sub_topics(outcome.final_text, topic, self.num_subtopics)
 
     # ------------------------------------------------------------------
@@ -742,6 +761,7 @@ class ResearchPipeline:
                                  block.block_id, attempt, DEFAULT_BLOCK_MAX_TRIES)
                 final_stream = child_stream  # 留作兜底 flush（让前端能看到最后一次的轨迹）
                 continue
+            self._usage_sink.append(outcome.total_usage)
             final_outcome = outcome
             final_stream = child_stream
             if outcome.completed and _block_self_check(outcome.final_text or "", has_retrieval):
@@ -902,6 +922,7 @@ class ResearchPipeline:
             binding=self._rt.binding,
             emit_terminal_events=False,
         )
+        self._usage_sink.append(outcome.total_usage)
         data = extract_json_from_llm(outcome.final_text)
         if isinstance(data, dict) and (data.get("title") or data.get("sections")):
             return data
@@ -1054,6 +1075,7 @@ class ResearchPipeline:
             binding=self._rt.binding,
             emit_terminal_events=False,
         )
+        self._usage_sink.append(outcome.total_usage)
         return (outcome.final_text or "").strip()
 
 

@@ -52,6 +52,7 @@ export default function UsagePanel({ usage, dim }: Props) {
       <div className="bg-surface rounded-[var(--radius)] border border-line overflow-hidden">
         <div className="px-4 py-3 border-b border-line text-xs text-ink-soft">
           按{dimLabel}成本排行（共 {usage.rows.length} 项，按 cost 降序）
+          <span className="ml-2 text-muted">成本按价目表快照估算，token 以端点回报为准</span>
         </div>
         <div className="divide-y divide-line">
           {usage.rows.map((r, i) => {
