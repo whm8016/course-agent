@@ -261,6 +261,7 @@ async def enforce(
     messages: list[dict[str, Any]],
     model: str,
     plan: TurnBudgetPlan | None = None,
+    tools: list[dict[str, Any]] | None = None,
 ) -> EnforceReport:
     """轮内三级级联执行器（loop 每轮调一次）。永远先用最便宜的手段，只有不够才升级。
 
@@ -270,24 +271,29 @@ async def enforce(
     L3 硬降级（免费）：仍超 hard_ceiling 时丢弃最旧 20% 消息组，保证请求一定发得出去。
 
     plan 当前未用（回合前 plan_turn 已做反应式裁剪），保留参数供后续 per-turn 策略。
+    tools：本轮请求携带的工具定义 schema（对标 LiteLLM _count_extra 把 tools 计入请求前
+    预算——schema 是请求的真实组成部分，教学 agent 十几个工具 ≈3-8k token，不计则 soft
+    判断偏乐观）。None=不带 tools 的请求（旧行为）；报告的 tokens_before/after 均含 tools。
     """
     cfg = get_settings().context_budget
     soft_trigger, hard_ceiling = compute_budgets(model)
-    before = _messages_tokens(messages)
+    tools_extra = count_tokens_messages([], tools=tools) if tools else 0
+    before = _messages_tokens(messages) + tools_extra
     total = before
     cleared = 0
     summary_added = False
     dropped = 0
     summary_text = ""
 
-    # L1：清旧 tool 结果（免费）。捕获被清原文供 L2 摘要复用。
+    # L1：清旧 tool 结果（免费）。捕获被清原文供 L2 摘要复用。evict 目标扣除 tools_extra
+    # （messages 须清到「soft - schema 体积」以下，含 tools 的请求总体量才回到 soft 内）。
     captured: list[str] = []
     if total > soft_trigger:
         cleared = evict_tool_results(
-            messages, cfg.keep_recent_turns, soft_trigger,
+            messages, cfg.keep_recent_turns, soft_trigger - tools_extra,
             exclude_tools=cfg.exclude_tools, captured_originals=captured,
         )
-        total = _messages_tokens(messages)
+        total = _messages_tokens(messages) + tools_extra
 
     # L2：LLM 摘要续接（仍超软阈值）。把 L1 清掉的原文压成摘要前插为 system 消息（carry-forward 式）。
     if total > soft_trigger and captured:
@@ -301,14 +307,14 @@ async def enforce(
                 "content": f"<context_summary>\n{summary}\n</context_summary>",
             })
             summary_added = True
-            total = _messages_tokens(messages)
+            total = _messages_tokens(messages) + tools_extra
         summary_text = summary
 
     # L3：硬降级（仍超硬天花板）。丢最旧 20% 消息组，保请求发得出去。
     dropped_previews: list[str] = []
     if total > hard_ceiling:
         dropped = drop_oldest_turn_group(messages, captured_originals=dropped_previews)
-        total = _messages_tokens(messages)
+        total = _messages_tokens(messages) + tools_extra
 
     return EnforceReport(
         tokens_before=before,

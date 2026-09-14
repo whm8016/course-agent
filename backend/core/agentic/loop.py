@@ -576,7 +576,8 @@ async def run_agent_loop(
                     else:
                         from core.agentic.context_budget import enforce as _cb_enforce_ans
                         _ans_report = await _cb_enforce_ans(
-                            ans_messages, model, context.metadata.get("_budget_plan")
+                            ans_messages, model, context.metadata.get("_budget_plan"),
+                            tools=tool_schemas,  # answer_now 请求仍带完整 schema（tool_choice=none），预算须含
                         )
                         # 裁剪上报与正常轮同口径：answer_now 恰是上下文最肥、裁剪最重的时刻，
                         # 不上报则是 LangSmith 上观测最盲的裁剪（复审 P1）。
@@ -623,9 +624,12 @@ async def run_agent_loop(
                     context.metadata.get("_cp_extra_llm_calls", 0) + _extra
                 )
         else:
-            # 级联执行器（取代旧 coordinator/policy/snip 三路互斥）
+            # 级联执行器（取代旧 coordinator/policy/snip 三路互斥）。tools=schemas：
+            # schema 是本轮请求的真实组成部分（最后一轮 schemas=None 对齐请求不带 tools）
             from core.agentic.context_budget import enforce as _cb_enforce
-            _trim_report = await _cb_enforce(messages, model, context.metadata.get("_budget_plan"))
+            _trim_report = await _cb_enforce(
+                messages, model, context.metadata.get("_budget_plan"), tools=schemas
+            )
             if _trim_report.cleared_tool_results:
                 _round_cleared = _trim_report.cleared_tool_results
                 context.metadata["_cb_cleared_tool_results"] = (

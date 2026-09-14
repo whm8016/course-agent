@@ -207,6 +207,54 @@ async def test_enforce_noop_under_soft(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_enforce_tools_counted_in_budget(monkeypatch):
+    """tools 定义计入请求前预算（对标 LiteLLM _count_extra）：messages 未超但含 tools
+    超 soft -> L1 触发清理。修复前 schema 体积（教学 agent 十几个工具 ≈3-8k token）
+    完全不计，soft 判断偏乐观。"""
+    from core.agentic import context_policy as cp
+    from core.agentic.context_window import count_tokens_messages
+
+    monkeypatch.setattr(get_settings().context_budget, "keep_recent_turns", 1)
+    # 防真 LLM 调用：即便 L1 清后仍超 soft，摘要 mock 返回空串 = 不插入（summary_added=False）
+    async def fake_summarize(text, model):
+        return ""
+    monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
+
+    msgs = [
+        {"role": "system", "content": "s"},
+        _assistant_with_tools("c1"),
+        {"role": "tool", "name": "rag", "content": "检索结果：" + "课程材料引用。 " * 200},
+        _assistant_with_tools("c2"),
+        {"role": "tool", "name": "rag", "content": "recent"},
+    ]
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": f"academic_tool_{i}",
+            "description": "Search course materials and return relevant chunk references. " * 40,
+            "parameters": {"type": "object", "properties": {"q": {"type": "string"}}},
+        },
+    } for i in range(4)]
+    # soft 夹在 messages 与 messages+tools 之间（同源函数计算，免疫 tokenizer 波动）
+    msgs_tokens = count_tokens_messages(msgs)
+    tools_extra = count_tokens_messages([], tools=tools)
+    assert tools_extra > 100  # schema 确有体积
+    soft = msgs_tokens + tools_extra // 2
+    monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (soft, 200000))
+
+    # 对照：不带 tools 时 messages < soft，L1 不触发
+    msgs_plain = [dict(m) for m in msgs]
+    report_plain = await enforce(msgs_plain, "qwen-plus", plan=None)
+    assert report_plain.cleared_tool_results == 0
+
+    # 带 tools：总量超 soft -> L1 触发清 older tool 结果
+    report = await enforce(msgs, "qwen-plus", plan=None, tools=tools)
+    assert report.cleared_tool_results == 1
+    assert report.tokens_before == msgs_tokens + tools_extra  # 报告口径含 tools（请求真实体积）
+    assert report_plain.tokens_before == msgs_tokens          # 对照组不含 tools
+
+
+@pytest.mark.asyncio
 async def test_enforce_l1_clears(monkeypatch):
     """超软阈值 -> L1 清旧 tool 结果，L1 够则不升级 L2/L3。"""
     monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (100, 200))
