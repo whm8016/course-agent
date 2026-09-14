@@ -213,7 +213,7 @@ class TestRerankFn:
 
     async def test_token_budget_drops_tail(self):
         """max_request_tokens 超限时丢弃尾部候选，减少送 API 的条数。"""
-        # 每条约 3000 字符 ≈ 2000 token；预算 5000 → 只装得下 2 条
+        # 每条约 3000 字符 ≈ 2000+ token（tiktoken 口径）；预算 5000 → 只装得下 1-2 条
         docs = [_doc(i, content="x" * 3000) for i in range(20)]
         fn, captured, patchers = _patched_fn(max_request_tokens=5000)
         try:
@@ -222,6 +222,28 @@ class TestRerankFn:
             for p in patchers:
                 p.stop()
         assert len(captured["docs"]) < 20  # 预算丢尾生效
+
+    async def test_token_budget_tiktoken_not_chars_div_1_5(self):
+        """口径快照：预算保护用 tiktoken 真计数，非 len/1.5 粗估。
+
+        旧口径对 600 字符英文估 400 token（高估 2.7 倍，无谓丢候选）；tiktoken 实测 ~150。
+        钉住换算防止退回字符粗估（那对中文低估 33%，有 400 风险）。
+        """
+        from core.agentic.context_window import count_tokens
+
+        doc = ("The law of universal gravitation states that every particle attracts "
+               "every other particle with a force. " * 6)[:600]
+        est = count_tokens(doc)
+        assert 100 <= est <= 200  # 旧口径恒为 400
+        # 端到端：预算 250（tiktoken 装得下 1 条，旧口径 400 装不下）→ 送 1 条而非 0
+        docs = [_doc(i, content=doc) for i in range(3)]
+        fn, captured, patchers = _patched_fn(max_request_tokens=est + 5)
+        try:
+            await fn("query", docs, top_n=5)
+        finally:
+            for p in patchers:
+                p.stop()
+        assert len(captured["docs"]) == 1
 
     async def test_index_mapback_and_score_override(self):
         """API 结果按 index 映回原 dict，relevance_score 覆写 score（量纲统一）。"""

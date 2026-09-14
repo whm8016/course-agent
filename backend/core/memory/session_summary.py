@@ -32,6 +32,7 @@ from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from settings import get_settings
+from core.agentic.context_window import count_tokens
 from core.analytics.token_usage import track_llm_response
 from core.db.database import AsyncSessionLocal, Message, Session
 from core.llm.llm import client as async_openai_client
@@ -454,9 +455,15 @@ def _salience(it: SummaryItem, now_ts: float, half_life_s: float) -> float:
     return _KIND_WEIGHTS.get(it.k, 1.0) * recency * frequency
 
 
-def _estimate_tokens(text: str) -> int:
-    """粗估 token 数（中文 1 字 ≈ 1 token；ASCII 偏高估，安全）。用于预算淘汰。"""
-    return max(1, len(text or ""))
+def _estimate_tokens(text: Any) -> int:
+    """token 估算（统一口径）。委托 context_window.count_tokens（tiktoken cl100k + len//4 降级）。
+
+    旧实现 len(text)（1 字符=1 token）：中文近似可用但英文/ASCII 高估 3-4 倍——span_tokens
+    （对 compact_trigger_tokens）与 _evict_by_budget（对 inject_token_budget）都是 token 量纲
+    的绝对预算，与上下文窗口同单位，须与全仓估算器同口径。str() 强转保持旧 len() 对
+    非 str content（DB JSON 列等）的宽容。
+    """
+    return count_tokens(str(text or "")) or 1
 
 
 def _evict_by_budget(

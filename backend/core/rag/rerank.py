@@ -18,6 +18,7 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
+from core.agentic.context_window import count_tokens
 from settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -26,12 +27,6 @@ logger = logging.getLogger(__name__)
 _DASHSCOPE_RERANK_URL = (
     "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
 )
-# 粗估 token：中文约 1.5 字符/token（与 settings.RerankConfig 的成本估算口径一致）。
-_CHARS_PER_TOKEN = 1.5
-
-
-def _estimate_tokens(text: str) -> int:
-    return int(len(text) / _CHARS_PER_TOKEN)
 
 
 async def _call_rerank_api(
@@ -123,10 +118,11 @@ def build_rerank_fn(*, force: bool = False) -> Callable[..., Awaitable[list[dict
 
         # 2. token 预算保护：query + 每个 doc 累加，超 max_request_tokens 则丢尾部候选避 400。
         #    默认规模（20×~1200 token）只用到约 25,000，不触发；是 candidate_top_n 被调大时的兜底。
-        used = _estimate_tokens(query or "")
+        #    口径 = count_tokens（tiktoken，全仓统一估算器）。旧 len/1.5 粗估中文低估 33%（400 风险）。
+        used = count_tokens(query or "")
         budget_pool: list[dict] = []
         for d in pool:
-            t = _estimate_tokens(d.get("content") or "")
+            t = count_tokens(d.get("content") or "")
             if used + t > max_request_tokens:
                 break
             used += t

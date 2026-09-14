@@ -182,6 +182,23 @@ def test_evict_empty_returns_empty():
                                now_ts=1.0, half_life_s=3600) == []
 
 
+# ── _estimate_tokens 口径（统一估算器）─────────────────────────────────────
+
+def test_estimate_tokens_tiktoken_not_char_count():
+    """口径快照：委托 count_tokens（tiktoken），非 len 字符数。
+
+    旧口径 1 字符=1 token：英文高估 3-4 倍（span_tokens 虚高致无谓早压）。tiktoken 对
+    下述英文段估 ~20 token（旧口径 76）。中文侧 cl100k ≈ 1-1.3 token/字，与旧口径接近。
+    """
+    from core.agentic.context_window import count_tokens
+
+    english = "The student asked about Newton's second law and momentum conservation. "
+    assert ss._estimate_tokens(english) == count_tokens(english)
+    assert ss._estimate_tokens(english) < 40          # 旧口径恒为 len=68
+    assert ss._estimate_tokens("牛顿第") == count_tokens("牛顿第")  # 中文走同口径
+    assert ss._estimate_tokens("") == 1               # 空串兜底 1（保留旧语义）
+
+
 # ── _render_items（v2 -> 可读文本注入）──────────────────────────────────────
 
 def test_render_items_renders_sections():

@@ -177,7 +177,10 @@ class LLMConfig(BaseModel):
     reasoning_effort: str = ""
     # 生成参数 / 超时（收编原硬编码）
     temperature: float = 0.7
-    max_tokens: int = 8192
+    # 输出上限：16384（2026-09 8192→16384，深度解题长推导曾撞顶被 finish_reason=length
+    # 无声掐断）。此值同时是 context_budget 输出预留的权威源（context_window.compute_budgets），
+    # agent loop 的 create kwargs 与预算公式都必须从这里读，勿在调用方另立数字。
+    max_tokens: int = 16384
     timeout_sec: int = 120
     # retry
     retry_max: int = 3
@@ -589,7 +592,7 @@ class RerankConfig(BaseModel):
     # candidate_top_n=20 送精排，尾部候选原样保留不参与重排序（见 core/rag/rerank.py）。
     # 20 是按单门课程语料量级定的档（arXiv:2606.21553 用 RRF top-20）；可调。
     candidate_top_n: int = 20
-    # 请求 token 上限（按 字符数/1.5 粗估累加，超则丢尾部候选避 400）。低于 qwen3-rerank 的
+    # 请求 token 上限（count_tokens tiktoken 口径累加，超则丢尾部候选避 400）。低于 qwen3-rerank 的
     # 120,000 留余量；默认规模（20 doc × ~1200 token）只用到约 25,000，是「有人把
     # candidate_top_n 调到 100」的兜底。
     max_request_tokens: int = 100_000
