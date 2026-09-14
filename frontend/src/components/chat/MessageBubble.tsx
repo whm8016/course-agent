@@ -241,8 +241,18 @@ export default function MessageBubble({ message, thinkingSteps, courseId, sessio
           </div>
         )}
         {message.metadata?.usage && (() => {
-          // 本轮 token 用量小字（输入/输出/缓存命中率；美元仅 expose_cost_to_student 开启时带）
+          // 本轮 token 用量小字（输入/输出/缓存命中率；美元仅 expose_cost_to_student 开启时带）。
+          // collected=false：本轮未拿到真实 usage（端点不支持统计），显示「未采集」而非「输入 0 · 输出 0」
+          // ——缺失被当真实 0 是误导；全 0 且已采集（真实零成本轮）则整行不渲染。
           const u = message.metadata!.usage!
+          if (u.collected === false) {
+            return (
+              <div className="mt-1.5 text-[11px] text-muted/70">
+                本轮用量未采集（端点不支持统计）
+              </div>
+            )
+          }
+          if (u.input_tokens === 0 && u.output_tokens === 0) return null
           const hit = u.input_tokens > 0 ? Math.round((u.cache_read_tokens / u.input_tokens) * 100) : null
           return (
             <div className="mt-1.5 text-[11px] text-muted/70">

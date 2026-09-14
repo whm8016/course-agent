@@ -85,6 +85,17 @@ LLM_COST_USD_TOTAL = _metric(
     labelnames=["model", "course_id", "mode"],
 )
 
+# LLM 真实 usage 缺失计数（usage_missing）。端点不支持 stream_options 被剥参重试 /
+# 流尾无 usage 块等场景下，该轮 token 记 0（缺失≠真实 0，缺失不补估算只可观测——
+# 见 cost.observe_usage_missing）。缺失率突增 = 端点行为变化信号。
+# reason ∈ stream_options_unsupported / usage_absent。
+LLM_USAGE_MISSING_TOTAL = _metric(
+    Counter,
+    "ca_llm_usage_missing_total",
+    "LLM rounds where real usage was not collected (recorded as 0, not estimated)",
+    labelnames=["model", "reason"],
+)
+
 # --------------------------------------------------------------------------
 # Tool dispatch
 # --------------------------------------------------------------------------

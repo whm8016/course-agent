@@ -206,46 +206,39 @@ async def test_one_round_usage_none_when_provider_omits_it(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Anthropic _run 端到端：message_start/message_delta 攒 usage → message_stop 合成块
+# usage 缺失可观测化：observe_usage_missing（缺失≠真实 0，缺失不补估算只计数）
 # ---------------------------------------------------------------------------
 
-class _FakeAnthropicMessages:
-    """模拟 anthropic 的 messages.stream(**kwargs) async 上下文管理器。"""
+def test_observe_usage_missing_increments_counter():
+    """stream_options_unsupported 等确知原因的缺失打 Counter{model,reason}，None model 落空串。"""
+    from core.observability import cost as cost_mod
+    from core.observability.metrics import REGISTRY
 
-    def __init__(self, events):
-        self._events = list(events)
-
-    def stream(self, **kwargs):
-        outer = self
-
-        class _CM:
-            async def __aenter__(self_inner):
-                return outer
-
-            async def __aexit__(self_inner, *exc):
-                return False
-
-            def __aiter__(self_inner):
-                return self
-
-        return _CM()
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        if self._events:
-            return self._events.pop(0)
-        raise StopAsyncIteration
+    before = REGISTRY.get_sample_value(
+        "ca_llm_usage_missing_total",
+        {"model": "old-dashscope-model", "reason": "stream_options_unsupported"},
+    ) or 0.0
+    cost_mod.observe_usage_missing("old-dashscope-model", "stream_options_unsupported")
+    cost_mod.observe_usage_missing(None, "stream_options_unsupported")
+    after = REGISTRY.get_sample_value(
+        "ca_llm_usage_missing_total",
+        {"model": "old-dashscope-model", "reason": "stream_options_unsupported"},
+    )
+    assert after == before + 1
+    # None model 归一为空串 label（不炸、不丢样本）
+    assert REGISTRY.get_sample_value(
+        "ca_llm_usage_missing_total",
+        {"model": "", "reason": "stream_options_unsupported"},
+    ) is not None
 
 
-class _FakeAnthropicClient:
-    def __init__(self, events):
-        self.messages = _FakeAnthropicMessages(events)
-
+# ---------------------------------------------------------------------------
+# Anthropic _run 端到端：message_start/message_delta 攒 usage → message_stop 合成块
+# （流式假件 anthropic_fake_client_cls 由 conftest 共享，与 test_anthropic_adapter 同源）
+# ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_anthropic_stream_emits_usage_chunk_from_events():
+async def test_anthropic_stream_emits_usage_chunk_from_events(anthropic_fake_client_cls):
     events = [
         SimpleNamespace(  # message_start：input + cache_read + cache_creation（Anthropic 三字段互斥）
             type="message_start",
@@ -258,16 +251,15 @@ async def test_anthropic_stream_emits_usage_chunk_from_events():
             type="content_block_delta",
             delta=SimpleNamespace(type="text_delta", text="hi"),
         ),
-        SimpleNamespace(  # message_delta：output
+        SimpleNamespace(  # message_delta：output + 最终 stop_reason
             type="message_delta",
             usage=SimpleNamespace(output_tokens=50),
         ),
-        SimpleNamespace(  # message_stop
+        SimpleNamespace(  # message_stop：只有 type 字段（SDK 事实，无 message/stop_reason）
             type="message_stop",
-            message=SimpleNamespace(stop_reason="end_turn"),
         ),
     ]
-    stream = _AnthropicStream(client=_FakeAnthropicClient(events), create_kwargs={})
+    stream = _AnthropicStream(client=anthropic_fake_client_cls(events), create_kwargs={})
     chunks = []
     async for chunk in stream:
         chunks.append(chunk)

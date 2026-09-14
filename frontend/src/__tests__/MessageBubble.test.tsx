@@ -58,3 +58,48 @@ describe('MessageBubble 流式 Markdown 渲染', () => {
     expect(container.querySelector('h2')?.textContent).toBe('标题')
   })
 })
+
+describe('MessageBubble 用量小字（usage collected 口径）', () => {
+  const mkUsage = (usage: object): Message => ({
+    role: 'assistant',
+    content: '答案',
+    metadata: { usage },
+  } as Message)
+
+  it('collected=false 显示「未采集」而非「输入 0 · 输出 0」', () => {
+    const { container } = render(
+      <MessageBubble
+        message={mkUsage({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, collected: false })}
+      />,
+    )
+    expect(container.textContent).toContain('本轮用量未采集')
+    expect(container.textContent).not.toContain('输入 0')
+  })
+
+  it('collected=true 正常显示输入/输出', () => {
+    const { container } = render(
+      <MessageBubble
+        message={mkUsage({ input_tokens: 1200, output_tokens: 340, cache_read_tokens: 800, collected: true })}
+      />,
+    )
+    expect(container.textContent).toContain('输入')
+    expect(container.textContent).toContain('缓存命中')
+  })
+
+  it('全 0 且已采集（collected=true）整行不渲染', () => {
+    const { container } = render(
+      <MessageBubble
+        message={mkUsage({ input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, collected: true })}
+      />,
+    )
+    expect(container.textContent).not.toContain('输入')
+    expect(container.textContent).not.toContain('未采集')
+  })
+
+  it('旧事件无 collected 字段保持旧行为（有数显数）', () => {
+    const { container } = render(
+      <MessageBubble message={mkUsage({ input_tokens: 500, output_tokens: 100, cache_read_tokens: 0 })} />,
+    )
+    expect(container.textContent).toContain('输入')
+  })
+})

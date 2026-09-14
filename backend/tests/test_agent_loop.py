@@ -702,13 +702,18 @@ async def test_truncation_flagged_when_finish_reason_length(ctx, bus):
 
     with patch("core.agentic.loop._default_client") as mock_client:
         mock_client.chat.completions.create = _fake_create
-        await run_agent_loop(
+        outcome = await run_agent_loop(
             context=ctx, stream=bus, system_prompt="你是课程助教。",
             tool_schemas=None,
         )
 
-    # 输出上限：8192 → 16384（qwen-plus 思考模式允许至 32768，取稳妥值）
-    assert captured["max_tokens"] == 16384
+    # 输出上限：读 settings.llm.max_tokens 单源（默认已从 8192 提到 16384），不在调用方另立数字
+    from settings import get_settings
+    assert captured["max_tokens"] == get_settings().llm.max_tokens
+    assert captured["max_tokens"] == 16384  # 锁默认值提升（撞此默认曾致深度解题格式残缺）
+
+    # 管道内子 loop 无 done 事件，靠 LoopOutcome.truncated 拿信号
+    assert outcome.truncated is True
 
     events = await _collect_events(bus)
     done_events = [e for e in events if e["type"] == "done"]
@@ -716,8 +721,56 @@ async def test_truncation_flagged_when_finish_reason_length(ctx, bus):
     assert done_events[0]["metadata"].get("truncated") is True, \
         "finish_reason=length 必须在 done.metadata 带 truncated=True"
 
-    # 对照：正常 stop 的轮 done.metadata.truncated 应为 False（或至少不为 True）
-    # ——由 test_finish_round_no_tools 等既有场景隐式覆盖，此处只锁 length 路径。
+
+# ---------------------------------------------------------------------------
+# 场景 9b：usage 缺失可观测化（collected 标志——缺失≠真实 0）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_done_usage_collected_true_when_usage_chunk_present(ctx, bus):
+    """流末有 usage 块（mock chunk.usage 为 MagicMock，normalize 得非零值）→ collected=True。"""
+    finish_chunks = [_make_chunk("答案"), _make_chunk(finish_reason="stop")]
+
+    mock_stream = MagicMock()
+    mock_stream.__aiter__ = lambda self: _async_iter(finish_chunks)
+
+    with patch("core.agentic.loop._default_client") as mock_client:
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_stream)
+        outcome = await run_agent_loop(
+            context=ctx, stream=bus, system_prompt="你是课程助教。", tool_schemas=None,
+        )
+
+    events = await _collect_events(bus)
+    done = [e for e in events if e["type"] == "done"][0]
+    assert done["metadata"]["usage"]["collected"] is True
+    assert outcome.total_usage.input_tokens >= 0  # 真实捕获路径下非负
+
+
+@pytest.mark.asyncio
+async def test_done_usage_collected_false_when_provider_omits_usage(ctx, bus):
+    """整轮无 usage 块（端点不支持 stream_options 被剥等）→ token 全 0 且 collected=False。
+
+    修复前：前端气泡显示「输入 0 · 输出 0」——缺失被当真实 0。修复后前端按
+    collected=False 显示「未采集」。
+    """
+    finish_chunks = [_make_chunk("答案"), _make_chunk(finish_reason="stop")]
+    for c in finish_chunks:
+        c.usage = None  # 显式钉 None（MagicMock 默认属性访问返回新 MagicMock）
+
+    mock_stream = MagicMock()
+    mock_stream.__aiter__ = lambda self: _async_iter(finish_chunks)
+
+    with patch("core.agentic.loop._default_client") as mock_client:
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_stream)
+        outcome = await run_agent_loop(
+            context=ctx, stream=bus, system_prompt="你是课程助教。", tool_schemas=None,
+        )
+
+    assert outcome.total_usage.input_tokens == 0
+    assert outcome.total_usage.output_tokens == 0
+    events = await _collect_events(bus)
+    done = [e for e in events if e["type"] == "done"][0]
+    assert done["metadata"]["usage"]["collected"] is False
 
 
 # ---------------------------------------------------------------------------

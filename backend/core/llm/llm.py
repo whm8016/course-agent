@@ -45,7 +45,11 @@ _client = get_llm_client(
 
 # LangSmith tracing：统一经 wrap_openai_client（对 AsyncOpenAI/AsyncAzureOpenAI 生效，
 # Anthropic 适配器自动跳过）。fallback/profile client 也走同一函数（见下方 / provider_factory）。
-from core.observability.langsmith_trace import is_tracing_enabled, wrap_openai_client
+from core.observability.langsmith_trace import (
+    is_tracing_enabled,
+    ls_extra,
+    wrap_openai_client,
+)
 
 from openai import AsyncOpenAI as _AsyncOpenAI  # noqa: E402
 
@@ -238,6 +242,9 @@ async def _create_with_image_fallback(
                     logger.info(
                         "成本采集降级：%s 端点不支持 stream_options，已剥离重试（本轮无 usage）", mdl
                     )
+                    # 缺失≠真实 0：打点可观测（缺失率突增=端点行为变化信号），不补估算
+                    from core.observability.cost import observe_usage_missing
+                    observe_usage_missing(mdl, "stream_options_unsupported")
                     return await client.chat.completions.create(**kwargs)
                 raise
         return _call_with_image_fallback
@@ -284,22 +291,30 @@ async def _make_chat_completion(
     messages: list[dict],
     stream: bool = False,
     temperature: float = 0.7,
-    max_tokens: int = 8192,
+    max_tokens: int | None = None,
     binding: str = LLM_BINDING,
+    langsmith_name: str | None = None,
 ) -> dict:
     """执行 LLM 调用（retry+熔断+图片降级已下沉到 _create_with_image_fallback）。
 
     本函数为 chat_complete 等历史调用方保留签名薄封装；可靠性不再在此层包装，
     否则会与 _create_with_image_fallback 内的 with_retry_and_circuit 双重叠加
-    （retry 套 retry、failure 双重计数）。
+    （retry 套 retry、failure 双重计数）。max_tokens 缺省走 settings.llm.max_tokens
+    单源（勿在签名里另立默认数字，与 agent loop / 预算公式保持同一真相）。
+
+    langsmith_name 非空时经 ls_extra 给本次 create 打独立 run 名（如 ctx_summary），
+    用于在 LangSmith 里把压缩等辅助调用从 course_agent_chat 主流量中筛出；未启用
+    追踪时 ls_extra 返回空 dict，kwargs 逐字节不变。
     """
     kwargs = {
         "model": model,
         "messages": messages,
         "stream": stream,
         "temperature": temperature,
-        "max_tokens": max_tokens,
+        "max_tokens": max_tokens or get_settings().llm.max_tokens,
     }
+    if langsmith_name:
+        kwargs.update(ls_extra(langsmith_name))
     return await _create_with_image_fallback(client, kwargs, binding, model)
 
 
@@ -309,8 +324,9 @@ async def chat_complete(
     user_message: str,
     model: str | None = None,
     temperature: float = 0.7,
-    max_tokens: int = 2048,
+    max_tokens: int | None = None,
     track: dict[str, str] | None = None,
+    langsmith_name: str | None = None,
 ) -> str:
     """
     非流式 LLM 调用（带可靠性增强）
@@ -321,10 +337,12 @@ async def chat_complete(
         user_message: 用户消息
         model: 模型名称（可选，默认使用 TEXT_MODEL）
         temperature: 温度参数
-        max_tokens: 最大 token 数
+        max_tokens: 最大 token 数（缺省走 settings.llm.max_tokens 单源，勿另立默认数字）
         track: 可选 usage 埋点维度 dict（user_id/course_id/session_id/turn_id/mode），
             传入则 resp.usage 经 track_llm_response 埋 Prometheus + 落用量明细；不传
             行为零变化（usage 照旧丢弃）。供不走 agent loop 的辅助调用点计费。
+        langsmith_name: 可选 LangSmith run 名（如 ctx_summary），把本辅助调用从
+            course_agent_chat 主流量中区分出来；未启用追踪时不产生任何效果。
 
     返回：
         LLM 生成的完整回复
@@ -342,6 +360,7 @@ async def chat_complete(
             stream=False,
             temperature=temperature,
             max_tokens=max_tokens,
+            langsmith_name=langsmith_name,
         )
         if track is not None:
             # 函数内 lazy import（先例 loop.py 的 record_llm_usage）：token_usage 依赖

@@ -212,3 +212,14 @@ def observe_cost(model: str, course_id: Any, mode: Any, cost_usd: float) -> None
         course_id=str(course_id or ""),
         mode=str(mode or ""),
     ).inc(cost_usd)
+
+
+def observe_usage_missing(model: str | None, reason: str) -> None:
+    """真实 usage 缺失埋 Counter（ca_llm_usage_missing_total{model,reason}）。
+
+    缺失轮 token 照记 0（账目 append-only，缺失不补估算——估算值会污染价目快照账本与
+    quota 决策），但缺失本身必须可观测：缺失率突增 = 端点行为变化信号。
+    reason: stream_options_unsupported（端点不支持被剥参重试）/ usage_absent（流尾无 usage 块）。
+    """
+    from core.observability.metrics import LLM_USAGE_MISSING_TOTAL
+    LLM_USAGE_MISSING_TOTAL.labels(model=str(model or ""), reason=reason).inc()

@@ -23,7 +23,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from settings import get_settings
 LLM_BINDING = get_settings().llm.binding
@@ -44,6 +44,9 @@ from core.observability.cost import (
 )
 from core.observability.metrics import observe_llm_round
 from core.stream_bus import StreamBus
+
+if TYPE_CHECKING:
+    from core.agentic.context_budget import EnforceReport
 
 logger = logging.getLogger(__name__)
 
@@ -153,11 +156,10 @@ async def _one_round(
         "messages": messages,
         "stream": True,
         "temperature": temperature,
-        # 输出上限：8192→16384——深度解题长推导（Markdown+LaTeX 分步解答）曾频繁撞
-        # 8192 被 finish_reason=length 无声掐断（格式残缺）。qwen-plus 思考模式允许至
-        # 32768，取稳妥值；DeepSeek 档思考计入此额度，仍可能截断——由下方 finish_reason
-        # 捕获兜底（truncated 标记 + WARNING 日志），截断不再静默。
-        "max_tokens": 16384,
+        # 输出上限单源 settings.llm.max_tokens（16384 的来由与 compute_budgets 同源约束
+        # 见 settings/base.py 定义处）。仍可能截断的档（DeepSeek 思考计入输出额度）由下方
+        # finish_reason 捕获兜底（truncated 标记 + WARNING 日志）。
+        "max_tokens": get_settings().llm.max_tokens,
         # 成本可观测性：末块携带 usage（OpenAI 原生 / Anthropic 适配器合成等价块）。
         # 不支持的端点会在 _create_with_image_fallback 内被剥除并重试（见 llm.py）。
         "stream_options": {"include_usage": True},
@@ -177,7 +179,7 @@ async def _one_round(
     _tool_call_seen = False              # 本轮 delta 是否出现过 tool_calls（出现后停发答案 token）
     _tag_leak_seen = False               # 本轮 content 是否嗅探到 DSML 标签泄漏（见 _strip_dsml_tags）
     round_usage: TokenUsage | None = None  # 本轮 usage（从末块捕获），provider 不支持时保持 None
-    _finish_reason: str | None = None    # 本轮结束原因（末块携带）；"length"=输出上限截断
+    truncated = False                     # 本轮是否撞输出上限被截断（末块 finish_reason=="length"）
 
     # H-16：自配/profile client（llm_client 非 None）不接入全局熔断器。
     # 判定信号 = _one_round 的 llm_client 参数：None → 全局默认 client（平台所有未自配
@@ -217,11 +219,10 @@ async def _one_round(
         choices = getattr(chunk, "choices", None) or []
         if not choices:
             continue
-        # 截断可见性：末块携带 finish_reason（"stop"=正常 / "length"=撞输出上限被掐断）。
-        # 取最后一个非空值；此前全程无检测，length 截断被当完整答案静默发出。
-        _fr = getattr(choices[0], "finish_reason", None)
-        if _fr:
-            _finish_reason = str(_fr)
+        # 截断可见性：末块 finish_reason=="length"（Anthropic 方言已由适配器归一为 length）
+        # = 撞输出上限被掐断；此前全程无检测，截断被当完整答案静默发出
+        if getattr(choices[0], "finish_reason", None) == "length":
+            truncated = True
         delta = getattr(choices[0], "delta", None)
         if delta is None:
             continue
@@ -318,7 +319,6 @@ async def _one_round(
         ))
 
     _elapsed_ms = int((time.perf_counter() - _t_start) * 1000)
-    truncated = _finish_reason == "length"
     if truncated:
         log_flow(
             "agent_loop.answer_truncated",
@@ -420,6 +420,29 @@ def _format_reply(raw_reply: dict[str, Any]) -> str:
     return "User answered: " + "; ".join(parts) if parts else "User skipped."
 
 
+def _emit_trim_report(report: "EnforceReport", iteration: int) -> None:
+    """把一次轮内裁剪的 EnforceReport 上报为 context.trim.in_turn 子 run。
+
+    answer_now 直接回答与正常轮两处同口径调用（此前两段近乎逐字重复，改上报字段
+    必漏一处）；零裁剪静默跳过；tracing 关时 record_context_trim 内部直接返回。
+    """
+    if not (report.cleared_tool_results or report.dropped_messages or report.summary_added):
+        return
+    from core.observability.langsmith_trace import record_context_trim
+    record_context_trim(
+        stage="in_turn",
+        coordinator_enabled=get_settings().context_budget.coordinator_enabled,
+        iteration=iteration,
+        dropped_tool_results=report.cleared_tool_results,
+        dropped_messages=report.dropped_messages,
+        summary_added=report.summary_added,
+        dropped_preview="\n---\n".join(
+            report.cleared_originals + report.dropped_originals
+        ),
+        summary_text=report.summary_text,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 对外接口
 # ---------------------------------------------------------------------------
@@ -505,6 +528,7 @@ async def run_agent_loop(
     messages = _build_messages(system_prompt, context, binding=eff_binding, extra_context=extra_context, doc_texts=_doc_text_joined)
     tools_used: list[str] = []
     turn_usage = TokenUsage()  # 本 loop 累积 usage（成本采集汇总），done 时埋 cost Counter
+    usage_collected = False    # 本 loop 是否至少一轮拿到真实 usage（缺失≠真实 0，前端据此显示"未采集"而非 0）
     final_text = ""
     first_ttft_ms: int | None = None   # 首轮（第一次模型调用）ttft，chat.turn_breakdown 数据源
     first_round_ms = 0                 # 首轮整段耗时
@@ -551,7 +575,12 @@ async def run_agent_loop(
                         await context_policy.apply_arm(ans_messages, model, _ans_arm)
                     else:
                         from core.agentic.context_budget import enforce as _cb_enforce_ans
-                        await _cb_enforce_ans(ans_messages, model, context.metadata.get("_budget_plan"))
+                        _ans_report = await _cb_enforce_ans(
+                            ans_messages, model, context.metadata.get("_budget_plan")
+                        )
+                        # 裁剪上报与正常轮同口径：answer_now 恰是上下文最肥、裁剪最重的时刻，
+                        # 不上报则是 LangSmith 上观测最盲的裁剪（复审 P1）。
+                        _emit_trim_report(_ans_report, iteration)
                     # 传 tool_schemas + tool_choice="none"：明确"工具在但不准调"，走 DeepSeek
                     # 原生 FC 通道的"禁用"语义，从源头避免 tools=None 时模型吐 DSML 文本标签。
                     # （即使偶发退化，_one_round 内的 DSML 嗅探+strip 仍兜底。）
@@ -562,6 +591,7 @@ async def run_agent_loop(
                     final_text = result.content
                     final_truncated = result.truncated
                     turn_usage = turn_usage.add(result.usage)
+                    usage_collected = usage_collected or result.usage is not None
                     # 首轮计时：answer_now 可在任意 iteration 触发，仅当此前无首轮记录
                     # （first_round_ms==0）才算"第一次模型调用"；多轮工具后点"立即回答"
                     # 不覆盖真正的首轮值。失败路径（下方 except）不记，保持 0=未记录。
@@ -585,6 +615,7 @@ async def run_agent_loop(
         _round_masked = 0
         _round_dropped = 0
         _round_summary = False
+        _trim_report = None  # 级联分支的 EnforceReport（正文 preview 供 LangSmith 上报）
         if arm is not None:
             _extra = await context_policy.apply_arm(messages, model, arm)
             if _extra:
@@ -594,23 +625,23 @@ async def run_agent_loop(
         else:
             # 级联执行器（取代旧 coordinator/policy/snip 三路互斥）
             from core.agentic.context_budget import enforce as _cb_enforce
-            _report = await _cb_enforce(messages, model, context.metadata.get("_budget_plan"))
-            if _report.cleared_tool_results:
-                _round_cleared = _report.cleared_tool_results
+            _trim_report = await _cb_enforce(messages, model, context.metadata.get("_budget_plan"))
+            if _trim_report.cleared_tool_results:
+                _round_cleared = _trim_report.cleared_tool_results
                 context.metadata["_cb_cleared_tool_results"] = (
                     context.metadata.get("_cb_cleared_tool_results", 0)
-                    + _report.cleared_tool_results
+                    + _trim_report.cleared_tool_results
                 )
-            if _report.summary_added:
+            if _trim_report.summary_added:
                 _round_summary = True
                 context.metadata["_cb_summary_added"] = (
                     context.metadata.get("_cb_summary_added", 0) + 1
                 )
-            if _report.dropped_messages:
-                _round_dropped = _report.dropped_messages
+            if _trim_report.dropped_messages:
+                _round_dropped = _trim_report.dropped_messages
                 context.metadata["_cb_dropped_messages"] = (
                     context.metadata.get("_cb_dropped_messages", 0)
-                    + _report.dropped_messages
+                    + _trim_report.dropped_messages
                 )
         # 本轮 reasoning 的 stage：首轮=分析问题(thinking)，工具后=整理证据(observing)。
         # 用 stage 区分，避免前端按 stage 分组时同 stage 多轮互相覆盖。
@@ -622,31 +653,20 @@ async def run_agent_loop(
                  masked_turns=_round_masked,
                  dropped_messages=_round_dropped,
                  summary_added=_round_summary)
-        if _round_cleared or _round_masked or _round_dropped or _round_summary:
-            # 之前这层裁剪完全不上报--LangSmith 只能看到裁完之后的 messages，看不到删了什么。
-            from core.observability.langsmith_trace import record_context_trim
-            record_context_trim(
-                stage="in_turn",
-                coordinator_enabled=get_settings().context_budget.coordinator_enabled,
-                iteration=iteration,
-                dropped_tool_results=_round_cleared,
-                masked_turns=_round_masked,
-                dropped_messages=_round_dropped,
-                summary_added=_round_summary,
-            )
+        # 之前这层裁剪完全不上报--LangSmith 只能看到裁完之后的 messages，看不到删了什么。
+        # 正文（L1 清理原文/L3 丢弃 preview/L2 摘要）统一经 _emit_trim_report 上报，与
+        # answer_now 分支同口径；评测臂（arm 分支）就地掩码/摘要不产生 EnforceReport
+        # （_trim_report=None），自然不上报。masked_turns 全仓无非 0 来源，不再传（默认 0）。
+        if _trim_report is not None:
+            _emit_trim_report(_trim_report, iteration)
 
         try:
             # 每轮都真流式：content 边收边透传（_one_round 内 _tool_call_seen 防工具轮串话）。
             # 这样正常对话（模型首轮即作答、不调工具）也能逐字流式，而非等整段生成完再切片。
-            #
-            # 旁白防漏（deep_solve，expect_final_answer 非空时）：工具轮前的分析旁白曾
-            # 赶在 tool_calls 信号之前作为 token 事件漏进回答框（真流式无法预判本轮是否
-            # 调工具）。改由调用方按业务状态判断：预期工具轮（如 solve 状态机未 all_done）
-            # 不传 live_sink → 本轮 content 全程缓冲，轮末有 tool_calls 则旁白走下方
-            # not streamed_live 分支发 thinking 事件进思考小框；预期答案轮或最后一轮
-            # （强制作答）恢复真流式。None = 恒真流式，chat/quiz/research 行为零变化。
+            # 旁白防漏：预期工具轮（expect_final_answer()==False）不传 live_sink → 旁白轮末
+            # 走 thinking 进思考小框；完整语义见 expect_final_answer 参数 docstring。
             _live = stream if (
-                expect_final_answer is None or is_final_round or bool(expect_final_answer())
+                expect_final_answer is None or is_final_round or expect_final_answer()
             ) else None
             result = await _one_round(
                 messages, schemas, model, client,
@@ -663,6 +683,7 @@ async def run_agent_loop(
             )
             # 成本采集：累积本轮 usage（provider 不支持采集时 result.usage 为 None，add 等价不变）
             turn_usage = turn_usage.add(result.usage)
+            usage_collected = usage_collected or result.usage is not None
             # 首轮计时（chat.turn_breakdown 数据源）：iteration==0 才记，后续轮不覆盖
             if iteration == 0:
                 first_ttft_ms, first_round_ms = result.ttft_ms, result.elapsed_ms
@@ -784,6 +805,7 @@ async def run_agent_loop(
              input_tokens=turn_usage.input_tokens,
              output_tokens=turn_usage.output_tokens,
              cache_read_tokens=turn_usage.cache_read_tokens,
+             usage_collected=usage_collected,  # False=全 loop 未拿到真实 usage（token 数为 0 是缺失非免费）
              cost_usd=loop_cost)
     # cost 维度 Counter（label 含 course_id/mode，需 context，故在 loop 层而非 _one_round 层埋）
     observe_cost(model, context.course_id, context.mode, loop_cost)
@@ -815,6 +837,7 @@ async def run_agent_loop(
         "input_tokens": turn_usage.input_tokens,
         "output_tokens": turn_usage.output_tokens,
         "cache_read_tokens": turn_usage.cache_read_tokens,
+        "collected": usage_collected,
     }
     context.metadata["llm_cost_usd"] = loop_cost
 
@@ -837,10 +860,13 @@ async def run_agent_loop(
                 "answer_now": answer_now_triggered,  # 是否因"立即回答"提前收尾（前端区分/埋点）
                 "truncated": final_truncated,  # 最终答案是否被 max_tokens 掐断（前端提示"回答不完整"）
                 # 本轮 token 用量（学生端气泡底部小字）。美元成本仅 expose_cost_to_student 开启时带。
+                # collected=False（端点不支持 usage 采集等）时 token 数为 0 是缺失而非免费，
+                # 前端据此显示「未采集」而非「输入 0 · 输出 0」。
                 "usage": {
                     "input_tokens": turn_usage.input_tokens,
                     "output_tokens": turn_usage.output_tokens,
                     "cache_read_tokens": turn_usage.cache_read_tokens,
+                    "collected": usage_collected,
                     **(
                         {"cost_usd": loop_cost}
                         if get_settings().usage_tracking.expose_cost_to_student
@@ -858,4 +884,5 @@ async def run_agent_loop(
         total_usage=turn_usage,
         first_ttft_ms=first_ttft_ms,
         first_round_ms=first_round_ms,
+        truncated=final_truncated,
     )

@@ -114,10 +114,13 @@ export interface Message {
 
 // 本轮 token 用量（done 事件 metadata.usage 透传，学生端气泡底部小字）。
 // cost_usd 仅 expose_cost_to_student 开启时存在；token 数始终可见。
+// collected=false 表示本轮未拿到真实 usage（端点不支持 stream_options 等），token 数
+// 为 0 是缺失而非免费，气泡显示「未采集」而非「输入 0 · 输出 0」；旧事件无此字段。
 export interface MessageUsage {
   input_tokens: number
   output_tokens: number
   cache_read_tokens: number
+  collected?: boolean
   cost_usd?: number
 }
 
