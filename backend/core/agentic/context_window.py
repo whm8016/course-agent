@@ -30,7 +30,9 @@ arXiv:2512.02445「标称窗口不可信」）：
 """
 from __future__ import annotations
 
+import json
 import logging
+from typing import Any
 
 from core.agentic.window_probe import read_probe_cache
 from core.observability import log_flow
@@ -65,6 +67,61 @@ def count_tokens(text: str) -> int:
     if enc:
         return len(enc.encode(text))
     return max(1, len(text) // 4)
+
+
+# ---------------------------------------------------------------------------
+# messages 级 token 估算（单一真相源）。对标 LiteLLM token_counter 主循环
+# （litellm_core_utils/token_counter.py）：估算只服务请求前决策，账目以真实 usage 为准。
+# ---------------------------------------------------------------------------
+# 对标 LiteLLM _MessageCountParams：每条消息 ChatML 包装开销 +3、name 字段再 +1
+_MSG_OVERHEAD_TOKENS = 3
+_MSG_NAME_OVERHEAD_TOKENS = 1
+# image part 记常数而非 base64 全文编码（本仓拿不到宽高；qwen-vl 高档 ~1284 / OpenAI 高分辨率
+# ~1105，取保守高档。LiteLLM calculate_img_tokens 按宽高计算，此处退化常数）
+_IMAGE_TOKEN_ESTIMATE = 1280
+# tools 定义侧结构常数，对标 LiteLLM _count_extra：+9 定义开销 +3 priming，有 system 消息再 -4
+_TOOLS_EXTRA_TOKENS = 9
+_TOOLS_PRIMING_TOKENS = 3
+_TOOLS_SYSTEM_DISCOUNT_TOKENS = 4
+
+
+def count_tokens_messages(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> int:
+    """messages（+可选 tools 定义）总 token 估算——全仓请求前决策的统一口径。
+
+    对标 LiteLLM ``token_counter(messages=..., tools=...)`` 的处理顺序（逐消息逐字段 +
+    结构开销 + tools 计入），两处有意偏离（注释与测试锚定，勿"修"回去）：
+    - 不带 model 参数：全仓单 cl100k（LiteLLM 对 Qwen/DeepSeek 本也 fallback cl100k）；
+    - tool_calls 数完整 JSON 序列化而非仅 arguments 字符串（更保守=高估方向，安全）。
+
+    image part（OpenAI image_url 形态）记常数——旧口径 str(content) 会把 base64 全文
+    当文本编码（一张 500KB 图 ≈ 17 万 token），带图轮必然误判超阈值、触发过度裁剪。
+    """
+    total = 0
+    for m in messages:
+        total += _MSG_OVERHEAD_TOKENS
+        if m.get("name"):
+            total += _MSG_NAME_OVERHEAD_TOKENS
+        content = m.get("content")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    if part.get("type") == "image_url":
+                        total += _IMAGE_TOKEN_ESTIMATE
+                    elif "text" in part:
+                        total += count_tokens(str(part.get("text") or ""))
+                elif isinstance(part, str):
+                    total += count_tokens(part)
+        else:
+            total += count_tokens(str(content or ""))
+        tcs = m.get("tool_calls")
+        if tcs:
+            total += count_tokens(json.dumps(tcs, ensure_ascii=False))
+    if tools:
+        total += count_tokens(json.dumps(tools, ensure_ascii=False))
+        total += _TOOLS_EXTRA_TOKENS + _TOOLS_PRIMING_TOKENS
+        if any(m.get("role") == "system" for m in messages):
+            total -= _TOOLS_SYSTEM_DISCOUNT_TOKENS
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +216,7 @@ _MODEL_WINDOWS: dict[str, int] = {
 
 # heuristic 兜底参数（对标 DeepTutor default_context_window_for_model）
 _HEURISTIC_FLOOR = 16384        # 未知模型窗口下界（太小连 system prompt 都放不下）
-_HEURISTIC_MAX_TOKENS_MULT = 4  # 输出上限的倍数估算窗口（max_tokens=8192 -> 32768，与旧 _DEFAULT_WINDOW 一致）
+_HEURISTIC_MAX_TOKENS_MULT = 4  # 输出上限的倍数估算窗口（settings.llm.max_tokens ×4，随单源默认走）
 
 
 def resolve_effective_window_with_source(

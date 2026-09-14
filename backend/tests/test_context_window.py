@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 
 import pytest
@@ -17,6 +18,7 @@ import pytest
 from core.agentic import context_window, window_probe
 from core.agentic.context_window import (
     compute_budgets,
+    count_tokens_messages,
     resolve_effective_window,
     resolve_effective_window_with_source,
 )
@@ -73,6 +75,8 @@ def test_heuristic_floor_when_tiny_max_tokens(monkeypatch):
 def test_none_model_falls_to_heuristic(monkeypatch):
     """model=None（未传模型名）走 heuristic。"""
     monkeypatch.setattr(context_window.get_settings().llm, "context_window", None)
+    # 钉住 max_tokens（默认已提至 16384，heuristic=max(16384, mt*4)）——测公式不测默认值
+    monkeypatch.setattr(context_window.get_settings().llm, "max_tokens", 8192)
     assert resolve_effective_window(None) == 32768
 
 
@@ -151,8 +155,10 @@ def test_with_source_explicit_beats_probe(monkeypatch):
 # compute_budgets 双阈值（减法留白）
 # ---------------------------------------------------------------------------
 
-def test_compute_budgets_qwen_plus():
+def test_compute_budgets_qwen_plus(monkeypatch):
     """大窗口模型：soft=rot上限(128k)（比例线 500k > 128k 被上限钳住），hard=窗口-reserve-safety。"""
+    # 钉住 max_tokens（默认已提至 16384）——测公式与 settings 的关系，不锁默认值
+    monkeypatch.setattr(context_window.get_settings().llm, "max_tokens", 8192)
     soft, hard = compute_budgets("qwen-plus")
     # window=1_000_000, reserve=min(8192,20000)=8192, safety=4096 -> hard=987712
     assert hard == 1_000_000 - 8192 - 4096
@@ -160,8 +166,9 @@ def test_compute_budgets_qwen_plus():
     assert soft <= hard
 
 
-def test_compute_budgets_small_window_soft_bound_by_ratio():
+def test_compute_budgets_small_window_soft_bound_by_ratio(monkeypatch):
     """小窗口模型：比例线(window*0.5) < 硬天花板 -> soft 被比例线钳住（更保守，符合 RULER 小窗口有效长度低）。"""
+    monkeypatch.setattr(context_window.get_settings().llm, "max_tokens", 8192)
     # qwen-max window=32768 -> hard=32768-8192-4096=20480, 比例线=16384, soft=min(128000,16384,20480)=16384
     soft, hard = compute_budgets("qwen-max")
     assert hard == 20480
@@ -180,6 +187,7 @@ def test_compute_budgets_soft_never_exceeds_hard():
 def test_compute_budgets_explicit_window(monkeypatch):
     """显式 context_window 覆盖后，预算基于该窗口计算。"""
     monkeypatch.setattr(context_window.get_settings().llm, "context_window", 200000)
+    monkeypatch.setattr(context_window.get_settings().llm, "max_tokens", 8192)
     soft, hard = compute_budgets("anything")
     assert hard == 200000 - 8192 - 4096
     assert soft == 100000  # min(128000, 200000*0.5=100000, 187712) 比例线生效
@@ -200,3 +208,105 @@ def test_compute_budgets_quality_ratio_one_degrades_to_two_way_min(monkeypatch):
     # window=1_000_000, hard=987712, 比例线=1_000_000（最大，不约束）, rot=128000
     assert soft == min(128000, hard)  # 退化为两取 min（比例线不约束）
     assert soft == 128000
+
+
+# ---------------------------------------------------------------------------
+# count_tokens_messages（messages 级统一估算器，对标 LiteLLM token_counter 主循环）
+# ---------------------------------------------------------------------------
+
+def test_msg_overhead_tokens_added():
+    """每条消息 +3 结构开销：10 条短消息总数 = 内容 token + 30（锚定 _MSG_OVERHEAD_TOKENS）。"""
+    msgs = [{"role": "user", "content": "hi"} for _ in range(10)]
+    body = context_window.count_tokens("hi") * 10
+    assert count_tokens_messages(msgs) == body + 10 * 3
+
+
+def test_name_field_overhead():
+    """有 name 字段的消息比无 name 多 1（对标 LiteLLM tokens_per_name）。"""
+    plain = count_tokens_messages([{"role": "user", "content": "hi"}])
+    named = count_tokens_messages([{"role": "user", "name": " searcher", "content": "hi"}])
+    assert named == plain + 1
+
+
+def test_tool_calls_counted_as_json():
+    """tool_calls 按发给 API 的 JSON 序列化计入（保留旧口径，比 LiteLLM 仅数 arguments 更保守）。"""
+    tcs = [{"id": "call_1", "type": "function",
+            "function": {"name": "search", "arguments": "{\"q\": \"牛顿第二定律\"}"}}]
+    msgs = [{"role": "assistant", "content": "", "tool_calls": tcs}]
+    assert count_tokens_messages(msgs) == context_window.count_tokens(
+        json.dumps(tcs, ensure_ascii=False)) + 3
+
+
+def test_multimodal_image_counted_as_constant_not_base64():
+    """带图消息：image part 记常数而非 base64 全文编码。
+
+    修 str(content) 爆表 bug：旧 _messages_tokens 对 list content 做 str() 会把
+    1MB base64 编出数十万 token，带图轮必然误判超阈值、触发过度裁剪。
+    """
+    big_b64 = "A" * 1_000_000
+    msgs_big = [{"role": "user", "content": [
+        {"type": "text", "text": "描述这张图"},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{big_b64}"}},
+    ]}]
+    total = count_tokens_messages(msgs_big)
+    assert total < 5_000  # 旧口径此消息 > 25 万 token
+
+    small_b64 = "B" * 1_000
+    msgs_small = [{"role": "user", "content": [
+        {"type": "text", "text": "描述这张图"},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{small_b64}"}},
+    ]}]
+    # 常数口径：两张不同大小的图计数相同
+    assert count_tokens_messages(msgs_small) == total
+    # 图片常数本身可叠加：两张图 = 两份常数
+    msgs_two = [{"role": "user", "content": [
+        {"type": "text", "text": "描述这张图"},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{big_b64}"}},
+        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{big_b64}"}},
+    ]}]
+    assert count_tokens_messages(msgs_two) == total + 1280
+
+
+def test_tools_definition_counted_with_extra_constants():
+    """tools 定义计入（对标 LiteLLM _count_extra）：+序列化本体 +9 +3；有 system 消息再 -4。"""
+    tools = [{"type": "function", "function": {
+        "name": "get_weather", "description": "Get the current weather",
+        "parameters": {"type": "object", "properties": {"location": {"type": "string"}}}}}]
+    serialized = context_window.count_tokens(json.dumps(tools, ensure_ascii=False))
+
+    base = count_tokens_messages([{"role": "user", "content": "hi"}])
+    assert count_tokens_messages([{"role": "user", "content": "hi"}], tools=tools) \
+        == base + serialized + 9 + 3  # 无 system 消息
+
+    base_sys = count_tokens_messages(
+        [{"role": "system", "content": "You are helpful."}, {"role": "user", "content": "hi"}])
+    assert count_tokens_messages(
+        [{"role": "system", "content": "You are helpful."}, {"role": "user", "content": "hi"}],
+        tools=tools) == base_sys + serialized + 9 + 3 - 4  # 有 system -4
+
+
+def test_legacy_messages_tokens_plus_overhead_equivalence():
+    """兼容锚点：纯文本+tool_calls 消息（无 name/multimodal）上新函数 = 旧 _messages_tokens + 3×条数。
+
+    Step2 收编后 _messages_tokens 委托本函数，此断言保证口径迁移是「补结构开销」而非换算法。
+    """
+    msgs = [
+        {"role": "system", "content": "你是物理辅导老师。"},
+        {"role": "user", "content": "什么是牛顿第二定律？"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "search", "arguments": "{\"q\": \"F=ma\"}"}}]},
+        {"role": "tool", "content": "牛顿第二运动定律：F = ma ……", "tool_call_id": "c1"},
+    ]
+    from core.agentic.context_budget import _messages_tokens
+    assert count_tokens_messages(msgs) == _messages_tokens(msgs) + 3 * len(msgs)
+
+
+def test_empty_and_none_inputs():
+    """空消息列表 / content=None / tools=None 边界。"""
+    assert count_tokens_messages([]) == 0
+    assert count_tokens_messages([{"role": "assistant", "content": None}]) == 3
+    assert count_tokens_messages([{"role": "user", "content": "hi"}], tools=None) \
+        == count_tokens_messages([{"role": "user", "content": "hi"}])
+    assert count_tokens_messages([{"role": "user", "content": "hi"}], tools=[]) \
+        == count_tokens_messages([{"role": "user", "content": "hi"}])

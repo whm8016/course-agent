@@ -19,10 +19,10 @@ from core.observability import log_flow
 
 logger = logging.getLogger(__name__)
 
-# count_tokens / _get_encoding 已下沉到 core.agentic.context_window（治 core/agentic
-# 反向 import services 的层级违规）。此处 re-export 保向后兼容（test 等仍用
+# count_tokens / count_tokens_messages / _get_encoding 已下沉到 core.agentic.context_window
+# （治 core/agentic 反向 import services 的层级违规）。此处 re-export 保向后兼容（test 等仍用
 # `from services.session.context_builder import count_tokens`）。
-from core.agentic.context_window import count_tokens  # noqa: E402,F401
+from core.agentic.context_window import count_tokens, count_tokens_messages  # noqa: E402,F401
 
 
 # 历史预算占有效窗口的比例（resolve_budget 委托 context_window 解析窗口后按此折算）。
@@ -36,8 +36,8 @@ def resolve_budget(model: str | None = None) -> int:
 
     窗口解析委托 ``context_window.resolve_effective_window``（三级：显式配置 -> 模型名模式 ->
     heuristic 兜底+告警）。默认路径（coordinator_enabled=False）仍走此函数裁历史，行为与旧实现
-    逐字节一致（已知模型窗口不变；未知模型改走 heuristic 但默认 max_tokens=8192 -> 32768=旧值，
-    仅多了告警）。
+    逐字节一致（已知模型窗口不变；未知模型改走 heuristic，窗口随 settings.llm.max_tokens
+    单源走 ×4 估算，仅多了告警）。
     """
     from core.agentic.context_window import resolve_effective_window
 
