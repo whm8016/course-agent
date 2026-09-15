@@ -19,8 +19,9 @@ from sqlalchemy.exc import IntegrityError
 
 logger = logging.getLogger(__name__)
 
-# importance 启发式信号（零 LLM）
-_QUESTION_SIGNALS = ("?", "？", "什么", "为什么", "怎么", "如何", "哪里", "是否", "对吗", "对不对")
+# importance 启发式信号（零 LLM）。
+# 不含疑问词信号：课场景几乎句句是问句，+0.25 恒真等于普遍抬分，单一轮就能
+# 打满巩固阈值（曾导致实质问答每轮 promote 进 mem0）。
 _ERROR_SIGNALS = ("不对", "错了", "不理解", "不懂", "搞错", "纠正", "混淆", "记错", "弄错")
 _WEIGHTY_TOOLS = {"rag", "solve", "web_search", "retrieve"}
 
@@ -32,10 +33,11 @@ def estimate_importance(
 
     信号叠加（封顶 1.0）：
       - 消息长度（实质内容越多越重要，最多 0.3）
-      - 疑问词（学生在提问 = 学习信号，+0.25）
       - 纠错/困惑词（错题、误解 = 掌握度关键证据，+0.25）
       - 触发重量级工具 rag/solve/web_search（实质检索求解，+0.2）
       - 深度模式 quiz/deep_research/deep_solve 比闲聊更重要（+0.1）
+
+    单轮典型 0.3~0.5；巩固阈值默认 1.2 → 约 3~4 实质轮 promote 一次。
 
     供巩固 job 排序与触发阈值使用，绝不进热路径 LLM 调用。
     """
@@ -44,8 +46,6 @@ def estimate_importance(
     a = agent_output or ""
 
     score += min((len(u) + len(a)) / 2000.0, 1.0) * 0.3
-    if any(s in u for s in _QUESTION_SIGNALS):
-        score += 0.25
     if any(s in u for s in _ERROR_SIGNALS):
         score += 0.25
     if tools_used and any(t in _WEIGHTY_TOOLS for t in tools_used):

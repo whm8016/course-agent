@@ -36,8 +36,11 @@ _JUDGE_TIMEOUT_SECONDS = 120  # 单段超时；超时段按判定不可用处理
 # 必超时 → 回 pending → cron 5min 后再捞再超时，队列空转掌握度永远落不了库。
 # 120s 容得下长思考；最坏整次巩固 = 20 段 / 并发 4 × 120s = 600s，远低于 ARQ
 # job_timeout 36000s，不构成新风险。
-# pending 超过此秒数 → cron safety net 兜底 enqueue（session 空闲等价触发）
-_PENDING_STALE_SECONDS = 300
+# pending 超过此秒数 → cron safety net 兜底 enqueue（session 空闲等价触发）。
+# 1800=30min：与阈值 1.2 配套的「攒一攒」口径——阈值路径负责会话中段每 3~4 轮
+# promote，此窗只兜会话尾巴。旧值 300 让任何 pending 5min 内必被捞走，阈值形同虚设
+# （曾导致实质问答几乎每轮进 mem0）。
+_PENDING_STALE_SECONDS = 1800
 # processing 超过此秒数（用 created_at 近似，正常 promote 仅需数秒）→ 视崩溃遗留回 pending
 _PROCESSING_TIMEOUT_SECONDS = 600
 

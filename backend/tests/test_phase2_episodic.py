@@ -26,13 +26,23 @@ def test_importance_short_acknowledgment_low():
     assert score < 0.1
 
 
-def test_importance_question_gets_boost():
-    """疑问词加 0.25。"""
+def test_importance_question_signal_removed():
+    """问句不再单独加分：课场景几乎句句是问句，+0.25 恒真曾让单轮打满巩固阈值。"""
     long_ans = "导数是变化率" * 50
-    base = episodic.estimate_importance(user_message="导数", agent_output=long_ans)
-    q = episodic.estimate_importance(user_message="什么是导数", agent_output=long_ans)
-    assert q > base
-    assert q >= 0.25
+    base = episodic.estimate_importance(user_message="导数定义如下", agent_output=long_ans)
+    q = episodic.estimate_importance(user_message="什么是导数？", agent_output=long_ans)
+    assert q == base  # 同长度下问句与陈述句同分
+
+
+def test_importance_typical_rag_turn_scale():
+    """刻度回归：典型实质检索问答（问句 + rag + 中等长度回答）单轮 ≈0.25~0.5，
+    不再一两轮打满 1.2 巩固阈值（攒 3~4 轮 promote 一次）。"""
+    score = episodic.estimate_importance(
+        user_message="什么是欧姆定律？",
+        agent_output="欧姆定律指出导体中电流与电压成正比、与电阻成反比。" * 20,
+        tools_used=("rag",),
+    )
+    assert 0.2 <= score <= 0.5
 
 
 def test_importance_error_signal_boost():
@@ -59,15 +69,19 @@ def test_importance_tools_used_boost():
     assert with_tool > no_tool
 
 
-def test_importance_capped_at_one():
-    """所有信号叠加封顶 1.0。"""
+def test_importance_single_turn_ceiling():
+    """全信号叠满的单轮上限 = 0.85（长度0.3 + 纠错0.25 + 工具0.2 + 深度模式0.1）。
+
+    删问句信号后单轮永远够不到 1.2 巩固阈值（promote 至少 2 轮起步）；
+    min(1.0) 封顶保留为防御（未来加信号仍生效）。
+    """
     score = episodic.estimate_importance(
-        user_message="为什么这里错了？怎么纠正" + "长" * 3000,
+        user_message="我这里算错了，需要纠正" + "长" * 3000,
         agent_output="长" * 3000,
         mode="quiz",
         tools_used=["rag", "solve"],
     )
-    assert score == 1.0
+    assert score == 0.85
 
 
 # ── record_episode（DB 集成）─────────────────────────────────────────────────
@@ -93,7 +107,7 @@ async def test_record_episode_inserts_pending(db):
     ep = rows[0]
     assert ep.status == "pending"
     assert ep.session_id == "s1" and ep.turn_id == "t1"
-    assert ep.importance > 0  # 含疑问词「什么」
+    assert ep.importance > 0  # 长度项（问句信号已删）
 
 
 async def test_record_episode_idempotent_on_duplicate(db):

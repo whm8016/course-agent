@@ -758,8 +758,11 @@ class Mem0Config(BaseModel):
     flush_idle_timeout: float = 120.0
     flush_scan_interval: int = 30
     # L3 巩固（Phase 3）：热路径累计 importance 超此阈值 → enqueue consolidate_memory。
-    # 对齐 Generative Agents 的 reflection 累计触发；5min cron safety net 兜底长期 pending。
-    consolidation_importance_threshold: float = 0.7
+    # 对齐 Generative Agents 的 reflection 累计触发；cron safety net 兜底长期 pending
+    # （_PENDING_STALE_SECONDS，consolidation.py）。默认 1.2：删问句信号后单轮实质
+    # 问答 ≈0.3~0.5，1.2 ≈ 3~4 实质轮 promote 一次；旧值 0.7 叠加问句 +0.25（课场景
+    # 恒真）导致几乎每轮 promote，mem0 近重复条目挤占读侧 top-k（mem0 v2 无去重安全网）。
+    consolidation_importance_threshold: float = 1.2
 
 
 class SummaryConfig(BaseModel):

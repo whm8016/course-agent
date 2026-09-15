@@ -270,3 +270,50 @@ async def test_add_importance_accumulates_via_redis():
     assert val == 0.9
     pipe.incrbyfloat.assert_called_once_with("mem_importance:u1:c1", 0.4)
     pipe.expire.assert_called_once_with("mem_importance:u1:c1", 86400)
+
+
+# ── cron 兜底窗（worker.cron_consolidate_memory）────────────────────────────
+
+
+async def test_cron_consolidate_stale_window(db):
+    """兜底窗回归：pending 挂 5min（<1800s）不捞；超 30min 才兜底 enqueue。
+
+    旧窗 300s 让任何 pending 5min 内必被捞走，阈值形同虚设（每轮问答都进 mem0）。
+    另验崩溃遗留：processing 超 _PROCESSING_TIMEOUT_SECONDS（600s）回 pending。
+    """
+    import time
+
+    from core.db.database import AsyncSessionLocal, MemoryEpisode
+    from sqlalchemy import select
+    from worker import cron_consolidate_memory
+
+    now = time.time()
+    await _seed([
+        # 5min 前的 pending：阈值路径负责，cron 不捞
+        MemoryEpisode(user_id="u_fresh", course_id="c1", session_id="s", turn_id="t1",
+                      user_msg="q", assistant_msg="a", status="pending", created_at=now - 300),
+        # 31min 前的 pending：超兜底窗，cron 捞走
+        MemoryEpisode(user_id="u_stale", course_id="c1", session_id="s", turn_id="t2",
+                      user_msg="q", assistant_msg="a", status="pending", created_at=now - 1900),
+        # 崩溃遗留 processing（11min 前 > 600s 超时）：回 pending；本轮不 enqueue
+        #（回 pending 后 created_at 仍只有 11min，未到 30min 窗）
+        MemoryEpisode(user_id="u_orphan", course_id="c1", session_id="s", turn_id="t3",
+                      user_msg="q", assistant_msg="a", status="processing", created_at=now - 700),
+    ])
+    pool = MagicMock()
+    pool.enqueue_job = AsyncMock()
+    with patch("core.arq_pool.get_arq_pool", AsyncMock(return_value=pool)):
+        await cron_consolidate_memory(ctx=None)
+
+    pool.enqueue_job.assert_awaited_once_with(
+        "consolidate_memory", user_id="u_stale", course_id="c1"
+    )
+    async with AsyncSessionLocal() as s:
+        orphan = (await s.execute(
+            select(MemoryEpisode).where(MemoryEpisode.user_id == "u_orphan")
+        )).scalar_one()
+        fresh = (await s.execute(
+            select(MemoryEpisode).where(MemoryEpisode.user_id == "u_fresh")
+        )).scalar_one()
+    assert orphan.status == "pending"   # 崩溃遗留被翻回
+    assert fresh.status == "pending"    # 窗内 pending 原样不动

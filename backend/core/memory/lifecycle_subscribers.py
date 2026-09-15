@@ -53,10 +53,12 @@ async def _on_capability_complete(event) -> None:
             threshold = get_settings().mem0.consolidation_importance_threshold
             if accumulated >= threshold:
                 pool = await get_arq_pool()
-                if pool is not None:
-                    await pool.enqueue_job(
-                        "consolidate_memory", user_id=event.user_id, course_id=event.course_id
-                    )
+                if pool is None:
+                    # ARQ 池不可用：不清零累计分，池恢复后续攒（清了就白丢，只剩 cron 兜底）
+                    return
+                await pool.enqueue_job(
+                    "consolidate_memory", user_id=event.user_id, course_id=event.course_id
+                )
                 await consolidation.reset_importance(event.user_id, event.course_id)
     except Exception:
         logger.warning("EventBus: consolidation trigger failed", exc_info=True)
