@@ -39,6 +39,9 @@ def _outcome(text: str) -> MagicMock:
     m = MagicMock()
     m.final_text = text
     m.tools_used = []
+    # total_usage 显式给真值：pipeline 的 usage 聚合做 samples 比较，MagicMock 属性会炸
+    from core.observability.cost import TokenUsage
+    m.total_usage = TokenUsage(input_tokens=100, output_tokens=20)
     return m
 
 
