@@ -49,6 +49,7 @@ def _mock_loop_dispatch(explore_text, plan_payload, qid_outputs):
     qid_outputs: {question_id: "<json 文本>" 或 "RAISE"}。
     """
     async def _fake(**kwargs):
+        from core.observability.cost import TokenUsage
         um = (kwargs.get("context").user_message or "")
         if "请生成第" in um:  # quiz：从 blueprint 抽 question_id
             try:
@@ -59,10 +60,14 @@ def _mock_loop_dispatch(explore_text, plan_payload, qid_outputs):
             out = qid_outputs.get(qid, "")
             if out == "RAISE":
                 raise RuntimeError(f"模拟 {qid} LLM 超时")
-            return MagicMock(rounds=1, tools_used=[], final_text=out)
+            # total_usage 显式给真值：pipeline 的 usage 聚合做 samples 比较，MagicMock 属性会炸
+            return MagicMock(rounds=1, tools_used=[], final_text=out,
+                             total_usage=TokenUsage(input_tokens=100, output_tokens=20))
         if "请规划" in um:  # plan
-            return MagicMock(rounds=1, tools_used=[], final_text=plan_payload)
-        return MagicMock(rounds=1, tools_used=[], final_text=explore_text)  # explore
+            return MagicMock(rounds=1, tools_used=[], final_text=plan_payload,
+                             total_usage=TokenUsage(input_tokens=100, output_tokens=20))
+        return MagicMock(rounds=1, tools_used=[], final_text=explore_text,
+                         total_usage=TokenUsage(input_tokens=100, output_tokens=20))  # explore
 
     return _fake
 

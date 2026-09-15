@@ -34,25 +34,63 @@ class TokenUsage:
     cache_read_tokens = prompt cache 命中量（OpenAI cached_tokens /
     Anthropic cache_read_input_tokens）。cache 命中的 input 同时计入 input_tokens
     （provider 习惯把命中部分也算在 prompt_tokens 里），成本侧按更便宜的 cache 价档算。
+    samples = 累积时采到真实 usage 的次数（add 时 other 非 None 则 +1）——"是否采到过"
+    属于累积测量值的属性而非调用方旁路状态；token 全 0 且 samples==0 即缺失（端点不支持
+    stream_options 等），samples>0 且全 0 才是真实零成本轮。estimate_cost/record_llm_usage
+    无视此字段（带默认值，向后兼容）。
     """
 
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    samples: int = 0
 
     def add(self, other: TokenUsage | None) -> TokenUsage:
-        """返回 self + other 的新实例（other 为 None 时返回 self 的等价副本）。"""
+        """返回 self + other 的新实例（other 为 None 时返回 self 的等价副本，samples 不变）。
+
+        samples 纯加法：单次采集对象由 ``_normalize_usage`` 构造时置 samples=1（"我是
+        一次采集"），累积器再被 sum() 折叠时不会重复计数。
+        """
         if other is None:
-            return TokenUsage(self.input_tokens, self.output_tokens, self.cache_read_tokens)
+            return TokenUsage(self.input_tokens, self.output_tokens, self.cache_read_tokens, self.samples)
         return TokenUsage(
             input_tokens=self.input_tokens + other.input_tokens,
             output_tokens=self.output_tokens + other.output_tokens,
             cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
+            samples=self.samples + other.samples,
         )
+
+    @classmethod
+    def sum(cls, usages) -> TokenUsage:
+        """聚合一组 usage（None 元素跳过）。子 pipeline 多 loop 用量汇总的单一真相源。"""
+        total = cls()
+        for u in usages:
+            total = total.add(u)
+        return total
+
+
+def usage_payload(usage: TokenUsage, cost_usd: float | None = None) -> dict[str, Any]:
+    """TokenUsage → 前端事件 usage dict（done 事件 / quiz/research result 事件共用）。
+
+    字段清单与前端 MessageUsage（frontend/src/types/index.ts）逐字段对应——三处消费点
+    共用本函数，杜绝手写 dict 拷贝漂移。collected 派生自 samples（见 TokenUsage docstring）。
+    """
+    payload: dict[str, Any] = {
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cache_read_tokens": usage.cache_read_tokens,
+        "collected": usage.samples > 0,
+    }
+    if cost_usd is not None:
+        payload["cost_usd"] = cost_usd
+    return payload
 
 
 def _normalize_usage(usage: Any) -> TokenUsage | None:
-    """把 OpenAI 形态的 usage 对象归一为 TokenUsage；prompt/completion 均缺失返回 None。"""
+    """把 OpenAI 形态的 usage 对象归一为 TokenUsage；prompt/completion 均缺失返回 None。
+
+    samples=1：归一产物代表一次真实采集（TokenUsage.samples 语义见 dataclass docstring）。
+    """
     prompt = getattr(usage, "prompt_tokens", None)
     completion = getattr(usage, "completion_tokens", None)
     if prompt is None and completion is None:
@@ -63,6 +101,7 @@ def _normalize_usage(usage: Any) -> TokenUsage | None:
         input_tokens=int(prompt or 0),
         output_tokens=int(completion or 0),
         cache_read_tokens=int(cached or 0),
+        samples=1,
     )
 
 
@@ -219,7 +258,11 @@ def observe_usage_missing(model: str | None, reason: str) -> None:
 
     缺失轮 token 照记 0（账目 append-only，缺失不补估算——估算值会污染价目快照账本与
     quota 决策），但缺失本身必须可观测：缺失率突增 = 端点行为变化信号。
-    reason: stream_options_unsupported（端点不支持被剥参重试）/ usage_absent（流尾无 usage 块）。
+
+    reason 目前只有 stream_options_unsupported（端点不支持被剥参重试，llm.py 与
+    question/agent_base.py 两个剥参点打）。原因不明的缺失（流尾无 usage 块）**不打本
+    Counter**——同一轮若已被剥参打点会双计；它经 TokenUsage.samples=0（loop done 的
+    collected=False / log_flow usage_collected）可观测。新增确知原因的缺失点时在此登记。
     """
     from core.observability.metrics import LLM_USAGE_MISSING_TOTAL
     LLM_USAGE_MISSING_TOTAL.labels(model=str(model or ""), reason=reason).inc()

@@ -691,7 +691,7 @@ export default function ChatWindow({
                 setQuizStreamQuestions((prev) => [...prev, qq])
               })
             }
-            quizResultUsage = (msg as { metadata?: { usage?: MessageUsage } }).metadata?.usage
+            quizResultUsage = msg.metadata?.usage
           } else if (t === 'ask_user_card') {
             setQuizAskUser({
               intro: msg.intro ? String(msg.intro) : undefined,
@@ -860,7 +860,7 @@ export default function ChatWindow({
             } else if (t === 'result') {
               const r = String(msg.report ?? '')
               if (r) reportContent = r
-              resultUsage = (msg as { metadata?: { usage?: MessageUsage } }).metadata?.usage
+              resultUsage = msg.metadata?.usage
               awaitingClarification = false
               finishWithReport()
             } else if (t === 'ask_user_card') {

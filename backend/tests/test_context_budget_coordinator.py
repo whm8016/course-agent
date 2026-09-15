@@ -237,7 +237,9 @@ async def test_enforce_tools_counted_in_budget(monkeypatch):
     } for i in range(4)]
     # soft 夹在 messages 与 messages+tools 之间（同源函数计算，免疫 tokenizer 波动）
     msgs_tokens = count_tokens_messages(msgs)
+    joint_tokens = count_tokens_messages(msgs, tools=tools)
     tools_extra = count_tokens_messages([], tools=tools)
+    assert joint_tokens == msgs_tokens + tools_extra - 4  # 联合调用含 system×tools 的 -4 折扣
     assert tools_extra > 100  # schema 确有体积
     soft = msgs_tokens + tools_extra // 2
     monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (soft, 200000))
@@ -250,8 +252,8 @@ async def test_enforce_tools_counted_in_budget(monkeypatch):
     # 带 tools：总量超 soft -> L1 触发清 older tool 结果
     report = await enforce(msgs, "qwen-plus", plan=None, tools=tools)
     assert report.cleared_tool_results == 1
-    assert report.tokens_before == msgs_tokens + tools_extra  # 报告口径含 tools（请求真实体积）
-    assert report_plain.tokens_before == msgs_tokens          # 对照组不含 tools
+    assert report.tokens_before == joint_tokens  # 报告口径含 tools（请求真实体积）
+    assert report_plain.tokens_before == msgs_tokens  # 对照组不含 tools
 
 
 @pytest.mark.asyncio

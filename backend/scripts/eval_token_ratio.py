@@ -122,9 +122,14 @@ def build_round(i: int) -> tuple[list[dict], list[dict] | None]:
 # ---------------------------------------------------------------------------
 
 async def _real_input_tokens(messages: list[dict], tools: list[dict] | None) -> tuple[int, int]:
-    """流式打一发，返回 (real_input_tokens, cache_read_tokens)。cached>0 的样本由上层丢弃。"""
+    """流式打一发，返回 (real_input_tokens, cache_read_tokens)。cached>0 的样本由上层丢弃。
+
+    usage 读取复用生产归一函数 usage_from_response_chunk（loop._one_round 同款）——
+    验收口径必须与被验收的生产捕获是同一份代码，仿写会静默漂移。
+    """
     import openai
 
+    from core.observability.cost import usage_from_response_chunk
     from settings import get_settings
 
     s = get_settings().llm
@@ -142,14 +147,12 @@ async def _real_input_tokens(messages: list[dict], tools: list[dict] | None) -> 
             kwargs["tool_choice"] = "none"  # 只要 token 计数，不让模型真调工具
         usage = None
         async for chunk in await client.chat.completions.create(**kwargs):
-            u = getattr(chunk, "usage", None)
-            if u is not None and getattr(u, "prompt_tokens", None) is not None:
-                usage = u
+            _u = usage_from_response_chunk(chunk)
+            if _u is not None:
+                usage = _u
         if usage is None:
             raise RuntimeError("流末无 usage 块（端点不支持 stream_options？）")
-        details = getattr(usage, "prompt_tokens_details", None)
-        cached = int(getattr(details, "cached_tokens", 0) or 0) if details else 0
-        return int(usage.prompt_tokens), cached
+        return usage.input_tokens, usage.cache_read_tokens
     finally:
         await client.close()
 

@@ -28,7 +28,7 @@ from core.agentic.loop import run_agent_loop
 from core.context import UnifiedContext
 from core.llm.json_extract import extract_json_from_llm
 from core.observability import log_flow
-from core.observability.cost import TokenUsage
+from core.observability.cost import TokenUsage, usage_payload
 from core.pipeline_common import (
     build_common_context_layers,
     describe_images,
@@ -327,10 +327,10 @@ class QuizPipeline:
         log_flow("question.stage.quiz",
                  elapsed_ms=int((_time.perf_counter() - _t_stage) * 1000),
                  generated=len(questions), errors=len(errors))
-        # 子 loop 用量聚合（真实 usage，quiz Capability 塞进 result 事件供前端展示）
-        total_usage = TokenUsage()
-        for u in usage_sink:
-            total_usage = total_usage.add(u)
+        # 子 loop 用量聚合（真实 usage，quiz Capability 塞进 result 事件供前端展示）。
+        # collected 派生自 samples（usage_payload 内）——全端点不支持采集时与 chat 模式
+        # 同口径显示「未采集」，而非 bool(sink) 的"跑过 loop 就算采集过"。
+        total_usage = TokenUsage.sum(usage_sink)
         log_flow("question.pipeline.complete",
                  elapsed_ms=int((_time.perf_counter() - _t_total) * 1000),
                  questions=len(questions))
@@ -351,12 +351,7 @@ class QuizPipeline:
                 "critic_regenerated": critic_counts["regenerated"],
                 "critic_failed": critic_counts["failed"],
                 # 全部子 loop 真实用量（emit_terminal_events=False 时前端唯一可见渠道）
-                "usage": {
-                    "input_tokens": total_usage.input_tokens,
-                    "output_tokens": total_usage.output_tokens,
-                    "cache_read_tokens": total_usage.cache_read_tokens,
-                    "collected": bool(usage_sink),
-                },
+                "usage": usage_payload(total_usage),
             },
         }
 
@@ -488,7 +483,7 @@ async def _run_critic(
     layers,
     rt,
     stream: StreamBus,
-    usage_sink: list | None = None,
+    usage_sink: list[TokenUsage] | None = None,
 ) -> list[str]:
     """独立 critic 校验轮：只给题目本身（看不到探索摘要/生成过程），返回问题清单。
 

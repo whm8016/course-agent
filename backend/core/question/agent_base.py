@@ -146,12 +146,15 @@ class QuestionAgentBase:
     async def _create_stream(self, req: dict[str, Any]):
         """create + stream_options 安全降级：端点不支持时报 400 而非静默忽略，
         剥掉重试一次（丢本轮 usage 但保流式不挂，与 llm._create_with_image_fallback
-        同套路；此处直连 client 享受不到那层的降级，本地复用同一判定函数）。"""
+        同套路；此处直连 client 享受不到那层的降级，本地复用同一判定函数）。
+        剥参点与 llm.py 同款打 usage_missing（辅助调用面的缺失也要进 Counter）。"""
         try:
             return await _openai_client.chat.completions.create(**req)
         except Exception as exc:
             if "stream_options" not in req or not _is_stream_options_unsupported(exc):
                 raise
             req.pop("stream_options", None)
+            from core.observability.cost import observe_usage_missing
+            observe_usage_missing(None, "stream_options_unsupported")
             self.logger.info("quiz followup：端点不支持 stream_options，已剥离重试（本轮无 usage）")
             return await _openai_client.chat.completions.create(**req)

@@ -264,7 +264,7 @@ def test_multimodal_image_counted_as_constant_not_base64():
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{big_b64}"}},
         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{big_b64}"}},
     ]}]
-    assert count_tokens_messages(msgs_two) == total + 1280
+    assert count_tokens_messages(msgs_two) == total + context_window._IMAGE_TOKEN_ESTIMATE
 
 
 def test_tools_definition_counted_with_extra_constants():

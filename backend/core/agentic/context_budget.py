@@ -277,23 +277,25 @@ async def enforce(
     """
     cfg = get_settings().context_budget
     soft_trigger, hard_ceiling = compute_budgets(model)
+    # 总量 = count_tokens_messages(messages, tools=tools)：messages+tools 联合计数正是
+    # 该函数的设计用途（含 system×tools 的 -4 折扣），避免手拆两段再手贴 N 次 tools_extra。
+    # tools_extra 单独保留一份，仅供 L1 evict 目标扣减（messages 须清到 soft - schema 以下）。
     tools_extra = count_tokens_messages([], tools=tools) if tools else 0
-    before = _messages_tokens(messages) + tools_extra
+    before = count_tokens_messages(messages, tools=tools)
     total = before
     cleared = 0
     summary_added = False
     dropped = 0
     summary_text = ""
 
-    # L1：清旧 tool 结果（免费）。捕获被清原文供 L2 摘要复用。evict 目标扣除 tools_extra
-    # （messages 须清到「soft - schema 体积」以下，含 tools 的请求总体量才回到 soft 内）。
+    # L1：清旧 tool 结果（免费）。捕获被清原文供 L2 摘要复用。
     captured: list[str] = []
     if total > soft_trigger:
         cleared = evict_tool_results(
             messages, cfg.keep_recent_turns, soft_trigger - tools_extra,
             exclude_tools=cfg.exclude_tools, captured_originals=captured,
         )
-        total = _messages_tokens(messages) + tools_extra
+        total = count_tokens_messages(messages, tools=tools)
 
     # L2：LLM 摘要续接（仍超软阈值）。把 L1 清掉的原文压成摘要前插为 system 消息（carry-forward 式）。
     if total > soft_trigger and captured:
@@ -307,14 +309,14 @@ async def enforce(
                 "content": f"<context_summary>\n{summary}\n</context_summary>",
             })
             summary_added = True
-            total = _messages_tokens(messages) + tools_extra
+            total = count_tokens_messages(messages, tools=tools)
         summary_text = summary
 
     # L3：硬降级（仍超硬天花板）。丢最旧 20% 消息组，保请求发得出去。
     dropped_previews: list[str] = []
     if total > hard_ceiling:
         dropped = drop_oldest_turn_group(messages, captured_originals=dropped_previews)
-        total = _messages_tokens(messages) + tools_extra
+        total = count_tokens_messages(messages, tools=tools)
 
     return EnforceReport(
         tokens_before=before,

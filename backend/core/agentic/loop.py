@@ -41,6 +41,7 @@ from core.observability.cost import (
     observe_cost,
     observe_usage,
     usage_from_response_chunk,
+    usage_payload,
 )
 from core.observability.metrics import observe_llm_round
 from core.stream_bus import StreamBus
@@ -527,8 +528,8 @@ async def run_agent_loop(
         _doc_text_joined = "\n\n".join(_doc_texts)
     messages = _build_messages(system_prompt, context, binding=eff_binding, extra_context=extra_context, doc_texts=_doc_text_joined)
     tools_used: list[str] = []
-    turn_usage = TokenUsage()  # 本 loop 累积 usage（成本采集汇总），done 时埋 cost Counter
-    usage_collected = False    # 本 loop 是否至少一轮拿到真实 usage（缺失≠真实 0，前端据此显示"未采集"而非 0）
+    turn_usage = TokenUsage()  # 本 loop 累积 usage（成本采集汇总），done 时埋 cost Counter。
+    # 是否采到过真实 usage 看 turn_usage.samples（缺失≠真实 0，前端据此显示"未采集"而非 0）
     final_text = ""
     first_ttft_ms: int | None = None   # 首轮（第一次模型调用）ttft，chat.turn_breakdown 数据源
     first_round_ms = 0                 # 首轮整段耗时
@@ -592,7 +593,6 @@ async def run_agent_loop(
                     final_text = result.content
                     final_truncated = result.truncated
                     turn_usage = turn_usage.add(result.usage)
-                    usage_collected = usage_collected or result.usage is not None
                     # 首轮计时：answer_now 可在任意 iteration 触发，仅当此前无首轮记录
                     # （first_round_ms==0）才算"第一次模型调用"；多轮工具后点"立即回答"
                     # 不覆盖真正的首轮值。失败路径（下方 except）不记，保持 0=未记录。
@@ -687,7 +687,6 @@ async def run_agent_loop(
             )
             # 成本采集：累积本轮 usage（provider 不支持采集时 result.usage 为 None，add 等价不变）
             turn_usage = turn_usage.add(result.usage)
-            usage_collected = usage_collected or result.usage is not None
             # 首轮计时（chat.turn_breakdown 数据源）：iteration==0 才记，后续轮不覆盖
             if iteration == 0:
                 first_ttft_ms, first_round_ms = result.ttft_ms, result.elapsed_ms
@@ -809,7 +808,7 @@ async def run_agent_loop(
              input_tokens=turn_usage.input_tokens,
              output_tokens=turn_usage.output_tokens,
              cache_read_tokens=turn_usage.cache_read_tokens,
-             usage_collected=usage_collected,  # False=全 loop 未拿到真实 usage（token 数为 0 是缺失非免费）
+             usage_collected=turn_usage.samples > 0,  # False=全 loop 未拿到真实 usage（token 数为 0 是缺失非免费）
              cost_usd=loop_cost)
     # cost 维度 Counter（label 含 course_id/mode，需 context，故在 loop 层而非 _one_round 层埋）
     observe_cost(model, context.course_id, context.mode, loop_cost)
@@ -837,12 +836,7 @@ async def run_agent_loop(
     # 写 turn 共享 context.metadata，供 turn_runtime 汇总进 turn.complete 日志。chat/quiz/
     # deep_solve 单 loop 即全 turn；research 多 fork 子 loop 各写各的 fork 副本（不回传父
     # context），全 turn 成本以 Counter 聚合值为准（Counter 跨 loop 单调累加）。
-    context.metadata["llm_usage"] = {
-        "input_tokens": turn_usage.input_tokens,
-        "output_tokens": turn_usage.output_tokens,
-        "cache_read_tokens": turn_usage.cache_read_tokens,
-        "collected": usage_collected,
-    }
+    context.metadata["llm_usage"] = usage_payload(turn_usage)
     context.metadata["llm_cost_usd"] = loop_cost
 
     # M-4 空回复兜底：循环走完仍无最终文字（轮次预算耗尽且最后一轮模型既没吐文字也没正常 break，
@@ -865,18 +859,12 @@ async def run_agent_loop(
                 "truncated": final_truncated,  # 最终答案是否被 max_tokens 掐断（前端提示"回答不完整"）
                 # 本轮 token 用量（学生端气泡底部小字）。美元成本仅 expose_cost_to_student 开启时带。
                 # collected=False（端点不支持 usage 采集等）时 token 数为 0 是缺失而非免费，
-                # 前端据此显示「未采集」而非「输入 0 · 输出 0」。
-                "usage": {
-                    "input_tokens": turn_usage.input_tokens,
-                    "output_tokens": turn_usage.output_tokens,
-                    "cache_read_tokens": turn_usage.cache_read_tokens,
-                    "collected": usage_collected,
-                    **(
-                        {"cost_usd": loop_cost}
-                        if get_settings().usage_tracking.expose_cost_to_student
-                        else {}
-                    ),
-                },
+                # 前端据此显示「未采集」而非「输入 0 · 输出 0」。payload 构造统一走
+                # cost.usage_payload（与 quiz/research result 事件同源，杜绝手写 dict 漂移）。
+                "usage": usage_payload(
+                    turn_usage,
+                    cost_usd=loop_cost if get_settings().usage_tracking.expose_cost_to_student else None,
+                ),
             },
         })
 

@@ -35,7 +35,7 @@ from core.agentic.loop import run_agent_loop
 from core.context import UnifiedContext
 from core.llm.json_extract import extract_json_from_llm
 from core.observability import log_flow
-from core.observability.cost import TokenUsage
+from core.observability.cost import TokenUsage, usage_payload
 from core.pipeline_common import (
     build_common_context_layers,
     describe_images,
@@ -463,10 +463,9 @@ class ResearchPipeline:
         )
         await checkpoint.clear(research_id)  # done：清理 checkpoint（保留也行，这里清）
         stats = queue.statistics()
-        # 各阶段子 loop 用量聚合（真实 usage，deep_research Capability 塞进 result 事件）
-        total_usage = TokenUsage()
-        for u in self._usage_sink:
-            total_usage = total_usage.add(u)
+        # 各阶段子 loop 用量聚合（真实 usage，deep_research Capability 塞进 result 事件）。
+        # collected 派生自 samples——全端点不支持采集时与 chat 模式同口径显示「未采集」。
+        total_usage = TokenUsage.sum(self._usage_sink)
         return {
             "research_id": research_id,
             "topic": refined_topic,
@@ -481,12 +480,7 @@ class ResearchPipeline:
                 "kb_name": context.course_id or None,
                 "stages": ["rephrase", "decompose", "researching", "reporting"],
                 # 全部子 loop 真实用量（emit_terminal_events=False 时前端唯一可见渠道）
-                "usage": {
-                    "input_tokens": total_usage.input_tokens,
-                    "output_tokens": total_usage.output_tokens,
-                    "cache_read_tokens": total_usage.cache_read_tokens,
-                    "collected": bool(self._usage_sink),
-                },
+                "usage": usage_payload(total_usage),
             },
         }
 

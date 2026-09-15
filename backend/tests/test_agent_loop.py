@@ -727,35 +727,18 @@ async def test_truncation_flagged_when_finish_reason_length(ctx, bus):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_done_usage_collected_true_when_usage_chunk_present(ctx, bus):
-    """流末有 usage 块（mock chunk.usage 为 MagicMock，normalize 得非零值）→ collected=True。"""
-    finish_chunks = [_make_chunk("答案"), _make_chunk(finish_reason="stop")]
+@pytest.mark.parametrize("has_usage", [True, False])
+async def test_done_usage_collected_flag(ctx, bus, has_usage):
+    """整轮有无 usage 块 → done.usage.collected 与 token 数的口径。
 
-    mock_stream = MagicMock()
-    mock_stream.__aiter__ = lambda self: _async_iter(finish_chunks)
-
-    with patch("core.agentic.loop._default_client") as mock_client:
-        mock_client.chat.completions.create = AsyncMock(return_value=mock_stream)
-        outcome = await run_agent_loop(
-            context=ctx, stream=bus, system_prompt="你是课程助教。", tool_schemas=None,
-        )
-
-    events = await _collect_events(bus)
-    done = [e for e in events if e["type"] == "done"][0]
-    assert done["metadata"]["usage"]["collected"] is True
-    assert outcome.total_usage.input_tokens >= 0  # 真实捕获路径下非负
-
-
-@pytest.mark.asyncio
-async def test_done_usage_collected_false_when_provider_omits_usage(ctx, bus):
-    """整轮无 usage 块（端点不支持 stream_options 被剥等）→ token 全 0 且 collected=False。
-
-    修复前：前端气泡显示「输入 0 · 输出 0」——缺失被当真实 0。修复后前端按
-    collected=False 显示「未采集」。
+    has_usage=False（端点不支持 stream_options 被剥等）：token 全 0 且 collected=False。
+    修复前前端气泡显示「输入 0 · 输出 0」——缺失被当真实 0；修复后按 collected=False
+    显示「未采集」。mock chunk.usage 为 MagicMock 时 normalize 得非零值 → collected=True。
     """
     finish_chunks = [_make_chunk("答案"), _make_chunk(finish_reason="stop")]
-    for c in finish_chunks:
-        c.usage = None  # 显式钉 None（MagicMock 默认属性访问返回新 MagicMock）
+    if not has_usage:
+        for c in finish_chunks:
+            c.usage = None  # 显式钉 None（MagicMock 默认属性访问返回新 MagicMock）
 
     mock_stream = MagicMock()
     mock_stream.__aiter__ = lambda self: _async_iter(finish_chunks)
@@ -766,11 +749,15 @@ async def test_done_usage_collected_false_when_provider_omits_usage(ctx, bus):
             context=ctx, stream=bus, system_prompt="你是课程助教。", tool_schemas=None,
         )
 
-    assert outcome.total_usage.input_tokens == 0
-    assert outcome.total_usage.output_tokens == 0
     events = await _collect_events(bus)
     done = [e for e in events if e["type"] == "done"][0]
-    assert done["metadata"]["usage"]["collected"] is False
+    if has_usage:
+        assert done["metadata"]["usage"]["collected"] is True
+        assert outcome.total_usage.input_tokens > 0
+    else:
+        assert done["metadata"]["usage"]["collected"] is False
+        assert outcome.total_usage.input_tokens == 0
+        assert outcome.total_usage.output_tokens == 0
 
 
 # ---------------------------------------------------------------------------

@@ -43,7 +43,7 @@ def _openai_usage_obj(prompt, completion, cached=None):
 def test_usage_from_openai_chunk_with_cache():
     chunk = SimpleNamespace(choices=[], usage=_openai_usage_obj(120, 80, cached=40))
     u = usage_from_response_chunk(chunk)
-    assert u == TokenUsage(input_tokens=120, output_tokens=80, cache_read_tokens=40)
+    assert u == TokenUsage(input_tokens=120, output_tokens=80, cache_read_tokens=40, samples=1)
 
 
 def test_usage_from_chunk_without_usage_attr():
@@ -59,7 +59,7 @@ def test_usage_from_chunk_with_none_usage():
 def test_usage_from_chunk_without_cache_details():
     chunk = SimpleNamespace(choices=[], usage=_openai_usage_obj(50, 10))
     u = usage_from_response_chunk(chunk)
-    assert u == TokenUsage(input_tokens=50, output_tokens=10, cache_read_tokens=0)
+    assert u == TokenUsage(input_tokens=50, output_tokens=10, cache_read_tokens=0, samples=1)
 
 
 def test_cache_hit_rate_computable():
@@ -78,7 +78,7 @@ def test_anthropic_synthesized_chunk_read_back_by_normalizer():
     """Anthropic 适配器合成的 usage 块必须能被同一套 usage_from_response_chunk 读回——
     这是「loop 侧一套代码读两类 provider」的契约保证。"""
     chunk = _openai_usage_chunk(input_tokens=10, output_tokens=5, cache_read=3)
-    assert usage_from_response_chunk(chunk) == TokenUsage(10, 5, 3)
+    assert usage_from_response_chunk(chunk) == TokenUsage(10, 5, 3, 1)  # samples=1：归一产物即一次采集
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +187,7 @@ async def test_one_round_captures_usage_and_sends_stream_options(monkeypatch):
     # 1) kwargs 确实请求了 include_usage
     assert captured.get("stream_options") == {"include_usage": True}
     # 2) usage 从末块正确捕获（未被空-choices 跳过）
-    assert result.usage == TokenUsage(input_tokens=120, output_tokens=80, cache_read_tokens=40)
+    assert result.usage == TokenUsage(input_tokens=120, output_tokens=80, cache_read_tokens=40, samples=1)
     # 3) 正文不受影响
     assert result.content == "hello"
 
@@ -267,7 +267,7 @@ async def test_anthropic_stream_emits_usage_chunk_from_events(anthropic_fake_cli
     # 末块必须是合成的 usage 块，且能被 normalizer 读回正确值。
     # 折算后为 OpenAI 子集语义：input = 100+30+20 = 150（总输入），cache_read = 30（命中子集）。
     assert usage_from_response_chunk(chunks[-1]) == TokenUsage(
-        input_tokens=150, output_tokens=50, cache_read_tokens=30,
+        input_tokens=150, output_tokens=50, cache_read_tokens=30, samples=1,
     )
     # 文本块仍在（验证 usage 合成没破坏正文流）
     assert any(
@@ -296,7 +296,7 @@ def test_anthropic_nonstream_response_carries_folded_usage():
     out = _response_to_openai(resp)
     # usage_from_response（非流式归一）能读回：input=100+30+20、cached=30
     from core.observability.cost import usage_from_response
-    assert usage_from_response(out) == TokenUsage(150, 50, 30)
+    assert usage_from_response(out) == TokenUsage(150, 50, 30, 1)
     # 正文不受影响
     assert out.choices[0].message.content == "ok"
     # 真实模型名透传（计费按实际模型查价）
@@ -310,4 +310,5 @@ def test_anthropic_nonstream_response_without_usage():
 
     resp = SimpleNamespace(content=[SimpleNamespace(type="text", text="x")])
     out = _response_to_openai(resp)
-    assert usage_from_response(out) == TokenUsage(0, 0, 0)
+    # adapter 合成的 0 值 usage 形态上算一次采集（samples=1）；真缺失（无 usage 块）不走这里
+    assert usage_from_response(out) == TokenUsage(0, 0, 0, 1)

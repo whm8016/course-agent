@@ -1,6 +1,6 @@
 /** WebSocket 出题 & 深度研究服务 */
 import { getToken } from './auth'
-import type { AttachmentInfo } from '../types'
+import type { AgentMetadata, AttachmentInfo } from '../types'
 
 export interface QuestionRequirement {
   knowledge_point: string
@@ -37,6 +37,8 @@ export interface QuestionFollowupPayload {
 
 export interface QuestionGenMessage {
   type: string
+  /** result 事件携带聚合 usage 等元信息（与 chat 的 done.metadata 同源，后端 usage_payload） */
+  metadata?: AgentMetadata
   [key: string]: unknown
 }
 
@@ -105,6 +107,8 @@ export interface DeepResearchPayload {
 
 export interface DeepResearchMessage {
   type: string
+  /** result 事件携带聚合 usage 等元信息（与 chat 的 done.metadata 同源，后端 usage_payload） */
+  metadata?: AgentMetadata
   [key: string]: unknown
 }
 

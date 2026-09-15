@@ -85,6 +85,27 @@ _TOOLS_PRIMING_TOKENS = 3
 _TOOLS_SYSTEM_DISCOUNT_TOKENS = 4
 
 
+def _content_tokens(content: Any) -> int:
+    """单条消息 content 的 token 计数（scalar / multimodal parts 逐 part）。
+
+    image part（OpenAI image_url 形态）记常数——旧口径 str(content) 会把 base64 全文
+    当文本编码（一张 500KB 图 ≈ 17 万 token），带图轮必然误判超阈值、触发过度裁剪。
+    str() 强转对 None / 非 str content（DB JSON 列等）保持宽容。
+    """
+    if isinstance(content, list):
+        total = 0
+        for part in content:
+            if isinstance(part, dict):
+                if part.get("type") == "image_url":
+                    total += _IMAGE_TOKEN_ESTIMATE
+                elif "text" in part:
+                    total += count_tokens(str(part.get("text") or ""))
+            elif isinstance(part, str):
+                total += count_tokens(part)
+        return total
+    return count_tokens(str(content or ""))
+
+
 def count_tokens_messages(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None) -> int:
     """messages（+可选 tools 定义）总 token 估算——全仓请求前决策的统一口径。
 
@@ -92,27 +113,13 @@ def count_tokens_messages(messages: list[dict[str, Any]], tools: list[dict[str, 
     结构开销 + tools 计入），两处有意偏离（注释与测试锚定，勿"修"回去）：
     - 不带 model 参数：全仓单 cl100k（LiteLLM 对 Qwen/DeepSeek 本也 fallback cl100k）；
     - tool_calls 数完整 JSON 序列化而非仅 arguments 字符串（更保守=高估方向，安全）。
-
-    image part（OpenAI image_url 形态）记常数——旧口径 str(content) 会把 base64 全文
-    当文本编码（一张 500KB 图 ≈ 17 万 token），带图轮必然误判超阈值、触发过度裁剪。
     """
     total = 0
     for m in messages:
         total += _MSG_OVERHEAD_TOKENS
         if m.get("name"):
             total += _MSG_NAME_OVERHEAD_TOKENS
-        content = m.get("content")
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict):
-                    if part.get("type") == "image_url":
-                        total += _IMAGE_TOKEN_ESTIMATE
-                    elif "text" in part:
-                        total += count_tokens(str(part.get("text") or ""))
-                elif isinstance(part, str):
-                    total += count_tokens(part)
-        else:
-            total += count_tokens(str(content or ""))
+        total += _content_tokens(m.get("content"))
         tcs = m.get("tool_calls")
         if tcs:
             total += count_tokens(json.dumps(tcs, ensure_ascii=False))
