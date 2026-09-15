@@ -29,15 +29,16 @@ _WEIGHTY_TOOLS = {"rag", "solve", "web_search", "retrieve"}
 def estimate_importance(
     *, user_message: str, agent_output: str, mode: str = "", tools_used=()
 ) -> float:
-    """零 LLM 启发式估计一轮对话的教学重要性（0.0-1.0）。
+    """零 LLM 启发式估计一轮对话的教学重要性。
 
-    信号叠加（封顶 1.0）：
+    信号叠加（四项全满 = 0.85；min(1.0) 为未来新信号保留的防御封顶）：
       - 消息长度（实质内容越多越重要，最多 0.3）
       - 纠错/困惑词（错题、误解 = 掌握度关键证据，+0.25）
       - 触发重量级工具 rag/solve/web_search（实质检索求解，+0.2）
       - 深度模式 quiz/deep_research/deep_solve 比闲聊更重要（+0.1）
 
-    单轮典型 0.3~0.5；巩固阈值默认 1.2 → 约 3~4 实质轮 promote 一次。
+    单轮实质问答 ≈0.25~0.5；与巩固阈值的刻度关系（阈值须大于单轮满分，
+    ≈3~4 实质轮 promote 一次）见 settings.mem0.consolidation_importance_threshold。
 
     供巩固 job 排序与触发阈值使用，绝不进热路径 LLM 调用。
     """

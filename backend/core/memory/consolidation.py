@@ -78,7 +78,11 @@ async def add_importance(user_id: str, course_id: str, delta: float) -> float:
 
 
 async def reset_importance(user_id: str, course_id: str) -> None:
-    """巩固触发后清零累计（下一轮重新攒）。"""
+    """巩固触发后清零累计（下一轮重新攒）。
+
+    仅在 enqueue 成功后调用——触发决定但 enqueue 失败/被跳过时清零会把攒的分白丢
+    （由调用方 lifecycle_subscribers 以 pool None 早退保证）。
+    """
     from core.memory.redis_pool import get_redis as _get_redis
 
     r = _get_redis()

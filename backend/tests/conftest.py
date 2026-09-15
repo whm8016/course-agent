@@ -63,6 +63,18 @@ async def client():
 
 
 @pytest.fixture
+async def db():
+    """纯 core 层测试的裸 DB 生命周期（不带 httpx client）。
+
+    此前同款 fixture 在 16+ 测试文件内逐份复制；同名模块级 fixture 会遮蔽本份
+    （旧文件不迁移也不受影响），新文件请直接用这份，勿再复制。
+    """
+    await init_db()
+    yield
+    await close_db()
+
+
+@pytest.fixture
 async def auth_headers(client: AsyncClient):
     username = f"u{os.urandom(4).hex()}"
     r = await client.post(
@@ -142,3 +154,46 @@ async def enrolled_user_headers(client: AsyncClient, course_with_code: dict):
     )
     assert r2.status_code == 200, r2.text
     return headers
+
+
+# ---------------------------------------------------------------------------
+# Anthropic 流式假件（test_llm_cost / test_anthropic_adapter 共用）
+# ---------------------------------------------------------------------------
+# 模拟 anthropic SDK 契约：client.messages.stream(**kwargs) 返回 async 上下文
+# 管理器，其 __aiter__ 逐个吐事件（message_start / content_block_delta /
+# message_delta / message_stop）。SDK 事实：message_stop 只有 type 字段，真实
+# stop_reason 住在最后一个 message_delta 的 delta.stop_reason。
+class _FakeAnthropicAsyncStream:
+    def __init__(self, events):
+        self._events = list(events)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._events:
+            return self._events.pop(0)
+        raise StopAsyncIteration
+
+
+class FakeAnthropicClient:
+    """events 序列 → _AnthropicStream 可直接消费的假 client。"""
+
+    def __init__(self, events):
+        self._events = list(events)
+        self.messages = self  # stream 方法即 messages.stream
+
+    def stream(self, **kwargs):
+        return _FakeAnthropicAsyncStream(self._events)
+
+
+@pytest.fixture
+def anthropic_fake_client_cls():
+    """跨文件共享的 Anthropic 流式假件类（conftest 非 fixture 符号无法 import，故挂 fixture）。"""
+    return FakeAnthropicClient
