@@ -66,7 +66,7 @@ def _heading(sid: str, name: str, sz: int, before: int, after: int, jc: str | No
         f'<w:name w:val="{name}"/><w:basedOn w:val="Normal"/>'
         f'<w:next w:val="BodyText"/>'
         f'<w:pPr><w:keepNext/><w:spacing w:before="{before}" w:after="{after}"/>{jc_xml}'
-        f'<w:ind w:firstLine="0"/></w:pPr>'
+        f'<w:ind w:firstLine="0" w:firstLineChars="0"/></w:pPr>'
         f"<w:rPr>{HEI}<w:b w:val=\"0\"/><w:sz w:val=\"{sz}\"/><w:szCs w:val=\"{sz}\"/></w:rPr>"
         f"</w:style>"
     )
@@ -84,7 +84,7 @@ STYLE_REPLACEMENTS = {
         '<w:style w:type="paragraph" w:styleId="Compact">'
         '<w:name w:val="Compact"/><w:basedOn w:val="Normal"/>'
         '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>'
-        '<w:ind w:firstLine="0"/></w:pPr>'
+        '<w:ind w:firstLine="0" w:firstLineChars="0"/></w:pPr>'
         '<w:rPr><w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr>'
         "</w:style>"
     ),
@@ -93,7 +93,7 @@ STYLE_REPLACEMENTS = {
         '<w:style w:type="table" w:styleId="Table">'
         '<w:name w:val="Table"/><w:basedOn w:val="TableNormal"/>'
         '<w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/>'
-        '<w:ind w:firstLine="0"/></w:pPr>'
+        '<w:ind w:firstLine="0" w:firstLineChars="0"/></w:pPr>'
         '<w:rPr><w:sz w:val="21"/><w:szCs w:val="21"/></w:rPr>'
         "<w:tblPr><w:tblBorders>"
         '<w:top w:val="single" w:sz="12" w:space="0" w:color="000000"/>'
@@ -156,7 +156,12 @@ def _set_ind(p, **attrs):
     for old in pPr.findall(w("ind")):
         pPr.remove(old)
     ind = ET.Element(w("ind"))
-    for k, v in attrs.items():
+    if "hanging" in attrs:  # 悬挂缩进: left+hanging 组合, 不与 firstLine 并存
+        vals = {"left": attrs["left"], "hanging": attrs["hanging"], "hangingChars": 200}
+    else:  # 默认连字数缩进一起清零(中文版 Word 中 firstLineChars 优先于 firstLine)
+        vals = {"firstLine": 0, "firstLineChars": 0}
+        vals.update(attrs)
+    for k, v in vals.items():
         ind.set(w(k), str(v))
     pPr.append(ind)
 
@@ -243,6 +248,108 @@ ACTIONS = {
 }
 
 
+# ---------------------------------------------------------------- 表格重排
+
+PAGE_TEXT_DXA = 9_037  # A4 版心宽 ≈ 15.9 cm
+
+
+def _units(text: str) -> int:
+    """视觉宽度: 中日韩字符计 2, 其余计 1。"""
+    return sum(2 if ord(ch) > 0x2E80 else 1 for ch in text)
+
+
+def _restyle_cell_paragraph(p, align: str):
+    """单元格段落显式化: 五号/单倍行距/无缩进/按列对齐(pPr 按 schema 顺序重建)。"""
+    pPr = p.find(w("pPr"))
+    pStyle = pPr.find(w("pStyle")) if pPr is not None else None
+    if pPr is not None:
+        for old in list(pPr):
+            pPr.remove(old)
+    else:
+        pPr = ET.Element(w("pPr"))
+        p.insert(0, pPr)
+    if pStyle is not None:
+        pPr.append(pStyle)
+    spacing = ET.Element(w("spacing"))
+    spacing.set(w("after"), "0")
+    spacing.set(w("line"), "240")
+    spacing.set(w("lineRule"), "auto")
+    pPr.append(spacing)
+    ind = ET.Element(w("ind"))
+    ind.set(w("firstLine"), "0")
+    ind.set(w("firstLineChars"), "0")
+    pPr.append(ind)
+    jc = ET.Element(w("jc"))
+    jc.set(w("val"), align)
+    pPr.append(jc)
+    for r in p.findall(w("r")):
+        _apply_run_style(r, sz=21)
+
+
+def _restyle_tables(root, counts: dict):
+    """pandoc 的 auto 窄表在 Word 里左置且首列易折行: 按内容重算列宽、
+    整表居中、固定布局; 表头居中, 窄列居中宽列左对齐。"""
+    for tbl in root.iter(w("tbl")):
+        rows = tbl.findall(w("tr"))
+        grid = tbl.find(w("tblGrid"))
+        if not rows or grid is None:
+            continue
+        cols = grid.findall(w("gridCol"))
+        ncols = len(cols)
+        if ncols == 0:
+            continue
+        col_units = [0] * ncols
+        for tr in rows:
+            for ci, tc in enumerate(tr.findall(w("tc"))[:ncols]):
+                text = "".join(t.text or "" for t in tc.iter(w("t")))
+                col_units[ci] = max(col_units[ci], _units(text))
+        col_dxa = [min(4400, max(900, u * 105 + 230)) for u in col_units]
+        total = sum(col_dxa)
+        if total > PAGE_TEXT_DXA:  # 超版心按比例收窄
+            scale = PAGE_TEXT_DXA / total
+            col_dxa = [int(d * scale) for d in col_dxa]
+            total = sum(col_dxa)
+        for gc, dxa in zip(cols, col_dxa):
+            gc.set(w("w"), str(dxa))
+        tblPr = tbl.find(w("tblPr"))
+        tblW = tblPr.find(w("tblW"))
+        tblW.set(w("w"), str(total))
+        tblW.set(w("type"), "dxa")
+        jc = ET.Element(w("jc"))
+        jc.set(w("val"), "center")
+        layout = tblPr.find(w("tblLayout"))
+        if layout is not None:
+            layout.set(w("type"), "fixed")
+            tblPr.insert(list(tblPr).index(layout), jc)
+        else:
+            look = tblPr.find(w("tblLook"))
+            pos = list(tblPr).index(look) if look is not None else len(list(tblPr))
+            tblPr.insert(pos, jc)
+            layout = ET.Element(w("tblLayout"))
+            layout.set(w("type"), "fixed")
+            tblPr.insert(pos + 1, layout)
+        for ri, tr in enumerate(rows):
+            for ci, tc in enumerate(tr.findall(w("tc"))[:ncols]):
+                tcPr = tc.find(w("tcPr"))
+                if tcPr is None:
+                    tcPr = ET.Element(w("tcPr"))
+                    tc.insert(0, tcPr)
+                tcW = tcPr.find(w("tcW"))
+                if tcW is None:
+                    tcW = ET.Element(w("tcW"))
+                    tcPr.insert(0, tcW)
+                tcW.set(w("w"), str(col_dxa[ci]))
+                tcW.set(w("type"), "dxa")
+                if tcPr.find(w("vAlign")) is None:
+                    va = ET.Element(w("vAlign"))
+                    va.set(w("val"), "center")
+                    tcPr.append(va)
+                align = "center" if (ri == 0 or col_units[ci] <= 12) else "left"
+                for p in tc.findall(w("p")):
+                    _restyle_cell_paragraph(p, align)
+        counts["tables_restyled"] = counts.get("tables_restyled", 0) + 1
+
+
 def postprocess_document(doc_xml: bytes) -> tuple[bytes, dict]:
     raw = doc_xml.decode("utf-8")
     for prefix, uri in re.findall(r'xmlns:(\w+)="([^"]+)"', raw):
@@ -256,9 +363,9 @@ def postprocess_document(doc_xml: bytes) -> tuple[bytes, dict]:
             continue
         counts[kind] = counts.get(kind, 0) + 1
         act = ACTIONS[kind]
+        _set_ind(p, **act["ind"])
         if act.get("jc"):
             _set_jc(p, act["jc"])
-        _set_ind(p, **act["ind"])
         _style_runs(p, east=act.get("east"), sz=act.get("sz"))
         # "摘　要"/"关键词"标签四字用黑体(第一个 run 是加粗标签)
         if kind == "frontmatter" and text.startswith(("摘　要", "关键词")):
@@ -275,6 +382,7 @@ def postprocess_document(doc_xml: bytes) -> tuple[bytes, dict]:
             ext.set("cx", str(MAX_IMG_EMU))
             ext.set("cy", str(int(cy * ratio)))
             counts["img_scaled"] = counts.get("img_scaled", 0) + 1
+    _restyle_tables(root, counts)
     return ET.tostring(root, xml_declaration=True, encoding="UTF-8"), counts
 
 
