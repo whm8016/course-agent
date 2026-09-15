@@ -11,7 +11,10 @@ Elo 折叠进 knowledge_mastery（mastery_state.fold_observations）。infer_sig
 预算约束：单次巩固判定段数上限 _JUDGE_SEGMENTS_PER_RUN（超出的段留 pending 等下轮，
 掌握度晚一轮到账无害）+ 信号量并发 + 单段超时；判定失败不影响 mem0 与 done 标记。
 
-幂等性：mem0.add 内部做事实抽取/去重，重复巩固同一段不产生重复事实；故崩溃重试安全。
+幂等性：claim_pending 条件 UPDATE 保证 episode 不被双领；但 mem0 v2 是 ADD-only
+（MD5 精确去重仅 infer=True 且参考窗口 top-10；event 槽 infer=False 零去重）——
+崩溃重试/孤儿回滚后重复升格同一段会产生重复行，无库层安全网。靠触发降频
+（阈值 1.2 + cron 兜底窗 1800s）压低重复面；勿以「mem0 会去重」为由放宽重试。
 """
 from __future__ import annotations
 

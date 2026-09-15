@@ -28,9 +28,11 @@ def test_importance_short_acknowledgment_low():
 
 def test_importance_question_signal_removed():
     """问句不再单独加分：课场景几乎句句是问句，+0.25 恒真曾让单轮打满巩固阈值。"""
+    plain, question = "导数定义如下", "什么是导数？"
+    assert len(plain) == len(question)  # 长度项是唯一剩余输入差，必须同长才可比
     long_ans = "导数是变化率" * 50
-    base = episodic.estimate_importance(user_message="导数定义如下", agent_output=long_ans)
-    q = episodic.estimate_importance(user_message="什么是导数？", agent_output=long_ans)
+    base = episodic.estimate_importance(user_message=plain, agent_output=long_ans)
+    q = episodic.estimate_importance(user_message=question, agent_output=long_ans)
     assert q == base  # 同长度下问句与陈述句同分
 
 

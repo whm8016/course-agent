@@ -238,8 +238,9 @@ async def build_course_topic_graph(ctx, course_id: str, force: bool = False) -> 
 async def consolidate_memory(ctx, user_id: str, course_id: str = "") -> None:
     """消费某 user(+course) 的 episodic pending → mem0 语义层升格。
 
-    事件驱动触发（main.py _on_capability_complete）：importance 累计超阈值。
-    幂等：mem0.add 内部去重，崩溃重试不产生重复事实。
+    事件驱动触发（lifecycle_subscribers._on_capability_complete）：importance 累计超阈值。
+    幂等边界：claim 条件 UPDATE 防 episode 双领；mem0 v2 ADD-only 无库层去重
+    （infer=False event 槽零去重），崩溃重试重复升格同段会产生重复行——触发已降频压面。
     """
     import time
     t0 = time.perf_counter()
