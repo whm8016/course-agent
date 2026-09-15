@@ -330,6 +330,8 @@ class QuizPipeline:
         # 子 loop 用量聚合（真实 usage，quiz Capability 塞进 result 事件供前端展示）。
         # collected 派生自 samples（usage_payload 内）——全端点不支持采集时与 chat 模式
         # 同口径显示「未采集」，而非 bool(sink) 的"跑过 loop 就算采集过"。
+        # 不带 cost_usd（有意取舍）：子 loop 跨 explore/plan/生成/critic 多阶段，与 chat
+        # 单 loop 气泡的计价口径不同；学生端美元展示仅 chat 模式（expose_cost_to_student）。
         total_usage = TokenUsage.sum(usage_sink)
         log_flow("question.pipeline.complete",
                  elapsed_ms=int((_time.perf_counter() - _t_total) * 1000),

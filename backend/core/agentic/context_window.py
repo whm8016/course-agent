@@ -96,7 +96,10 @@ def _content_tokens(content: Any) -> int:
         total = 0
         for part in content:
             if isinstance(part, dict):
-                if part.get("type") == "image_url":
+                # 两种线上形态都计常数：OpenAI image_url 与 Anthropic {"type":"image",source}——
+                # prepare_multimodal_messages 在 _build_messages 阶段就按 binding 注入对应形态
+                # （multimodal.py:107-119），enforce 估算时 messages 里可能是任一形态
+                if part.get("type") in ("image_url", "image"):
                     total += _IMAGE_TOKEN_ESTIMATE
                 elif "text" in part:
                     total += count_tokens(str(part.get("text") or ""))

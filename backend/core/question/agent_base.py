@@ -155,6 +155,6 @@ class QuestionAgentBase:
                 raise
             req.pop("stream_options", None)
             from core.observability.cost import observe_usage_missing
-            observe_usage_missing(None, "stream_options_unsupported")
+            observe_usage_missing(str(req.get("model") or ""), "stream_options_unsupported")
             self.logger.info("quiz followup：端点不支持 stream_options，已剥离重试（本轮无 usage）")
             return await _openai_client.chat.completions.create(**req)

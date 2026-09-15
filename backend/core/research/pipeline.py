@@ -465,6 +465,9 @@ class ResearchPipeline:
         stats = queue.statistics()
         # 各阶段子 loop 用量聚合（真实 usage，deep_research Capability 塞进 result 事件）。
         # collected 派生自 samples——全端点不支持采集时与 chat 模式同口径显示「未采集」。
+        # 已知边界（有意取舍）：resume 续跑新建实例，sink 只含续跑阶段（完整账目在 DB
+        # llm_usage_records，按 research 多 loop SUM 即全量）；不带 cost_usd（子 loop 跨
+        # 多 stage/model 计价，与 chat 单 loop 气泡不同口径）。
         total_usage = TokenUsage.sum(self._usage_sink)
         return {
             "research_id": research_id,

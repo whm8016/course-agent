@@ -258,6 +258,13 @@ def test_multimodal_image_counted_as_constant_not_base64():
     ]}]
     # 常数口径：两张不同大小的图计数相同
     assert count_tokens_messages(msgs_small) == total
+    # Anthropic 线上形态 {"type":"image","source":...} 同常数（prepare_multimodal_messages
+    # 在 _build_messages 阶段按 binding 注入，enforce 估算时可能是任一形态）
+    msgs_anthropic = [{"role": "user", "content": [
+        {"type": "text", "text": "描述这张图"},
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": big_b64}},
+    ]}]
+    assert count_tokens_messages(msgs_anthropic) == total
     # 图片常数本身可叠加：两张图 = 两份常数
     msgs_two = [{"role": "user", "content": [
         {"type": "text", "text": "描述这张图"},

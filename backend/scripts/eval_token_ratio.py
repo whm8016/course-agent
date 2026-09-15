@@ -184,7 +184,12 @@ async def run(rounds: int, mock: bool) -> int:
         if cached > 0:
             print(f"[{i+1:2d}/{rounds}] cache_read={cached}>0，丢弃（采样条件：首轮无缓存）")
             continue
-        ratio = est / real if real else float("inf")
+        if real <= 0:
+            # 端点回报 prompt_tokens=0 的坏样本：以 inf 入样会污染 median/max 直接翻转判定，
+            # 与采样失败同口径丢弃
+            print(f"[{i+1:2d}/{rounds}] real=0（坏样本），丢弃")
+            continue
+        ratio = est / real
         ratios.append(ratio)
         print(f"[{i+1:2d}/{rounds}] 形态{i % 4} est={est:6d} real={real:6d} ratio={ratio:.3f}")
 
