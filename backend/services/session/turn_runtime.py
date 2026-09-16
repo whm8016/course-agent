@@ -339,7 +339,7 @@ class TurnRuntimeManager:
         # keep_history 都保留原消息对象引用）。供 _run_turn 里 context.trim.pretrim 子 run
         # 上报——此前回合前裁剪只有计数挂在 turn 根 run metadata，删了什么内容无从查证。
         # 零裁剪轮跳过（差集白算，且 _run_turn 只在 dropped>0 时读此键）；preview 格式
-        # 与 L3 共用 context_budget.msg_preview，钉住同一形态防漂移。
+        # 与 ③收缩循环丢轮共用 context_budget.msg_preview，钉住同一形态防漂移。
         if context.metadata["_ctx_pretrim"]["dropped"]:
             from core.agentic.context_budget import msg_preview
 

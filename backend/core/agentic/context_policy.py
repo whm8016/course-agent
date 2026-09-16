@@ -24,7 +24,8 @@
 
 【默认行为】``mask_old_observations``/``apply``/``apply_arm`` 供评测臂（``set_arm`` per-task
 覆盖）与 ``context_policy.apply`` 路径使用。生产轮内主路径已统一走 ``context_budget.enforce``
-三级级联（L1 清旧 tool 结果->L2 LLM 摘要->L3 丢最旧 20%）；本模块的掩码/摘要作为评测对照臂保留。
+单 pass 压缩（①清旧 tool 结果->②折叠进唯一 checkpoint->③收缩循环）；本模块的掩码/摘要
+作为评测对照臂保留（``_split_turns``/``cap_tool_result`` 等基元被 context_budget 顶层复用）。
 """
 from __future__ import annotations
 
@@ -258,7 +259,7 @@ async def apply(messages: list[dict[str, Any]], model: str) -> int:
 
     单条 cap（``cap_tool_result``）已在 ``tool_dispatch`` 入口完成——单条结果产生即裁，
     本处不重复（避免冗余）。本函数就地修改 messages。被 ``settings.context_policy.enabled``
-    守卫；loop 轮内主路径已统一走 ``context_budget.enforce`` 三级级联，本函数供 apply 路径与评测臂使用。
+    守卫；loop 轮内主路径已统一走 ``context_budget.enforce`` 单 pass 压缩，本函数供 apply 路径与评测臂使用。
 
     返回本轮被掩码的轮数（``masked_turns``），供 loop 累加进 ``context.metadata`` 做压缩量
     记账（与 coordinator 臂的 ``_cb_cleared_tool_results`` 对照）。未超预算返回 0。

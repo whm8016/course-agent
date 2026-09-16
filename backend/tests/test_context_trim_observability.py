@@ -72,12 +72,12 @@ def test_record_context_trim_outputs_body_and_truncation(monkeypatch):
                            compacted_tokens=123, checkpoint_idx=2)
     assert recorded[1]["outputs"]["compacted_tokens"] == 123
     assert recorded[1]["outputs"]["checkpoint_idx"] == 2
-    # 未传正文/折叠字段 -> 默认值（老调用点行为兼容，不 KeyError）
+    # 未传正文/折叠字段 -> 默认值（老调用点行为兼容，不 KeyError）；哨兵与 EnforceReport 同口径
     lt.record_context_trim(stage="in_turn", coordinator_enabled=True, iteration=0)
     assert recorded[2]["outputs"]["dropped_preview"] == ""
     assert recorded[2]["outputs"]["summary_text"] == ""
     assert recorded[2]["outputs"]["compacted_tokens"] == 0
-    assert recorded[2]["outputs"]["checkpoint_idx"] is None
+    assert recorded[2]["outputs"]["checkpoint_idx"] == -1
 
 
 # ---------------------------------------------------------------------------

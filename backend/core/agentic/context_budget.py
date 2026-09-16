@@ -35,7 +35,17 @@ from __future__ import annotations
 import dataclasses
 from typing import Any
 
+from core.agentic.context_policy import (
+    _OMIT_PLACEHOLDER,
+    _is_source_para,
+    _split_paragraphs,
+    _split_turns,
+    _summarize_masked_text,
+    _truncate_at_sentence,
+    cap_tool_result,
+)
 from core.agentic.context_window import (
+    _TOOLS_SYSTEM_DISCOUNT_TOKENS,
     compute_budgets,
     count_tokens,
     count_tokens_messages,
@@ -159,12 +169,52 @@ _SHRINK_HISTORY_KEEP_CHARS = 500  # ③c：历史消息最后手段截断保留�
 _FOLD_PREVIEW_CHARS = 600       # ②折叠：单条消息进摘要输入的 preview 上限
 
 _COMPACTED_TAG = "<compacted>"
-_CLEAR_TOMBSTONE = "[cleared: {name}]"
+_COMPACTED_CLOSE = "</compacted>"
+# 墓碑前缀从模板派生（判墓碑的两处不手写字面量，改模板不漏判）
+_CLEAR_PREFIX = "[cleared:"
+_CLEAR_TOMBSTONE = _CLEAR_PREFIX + " {name}]"
+
+
+def _protected_from(n_turns: int, keep_recent_turns: int) -> int:
+    """保护窗起点（轮索引）：最近 keep_recent_turns 轮原样保留；keep<=0 = 不保护任何 tool 轮。
+
+    ①清理与 ②折叠共用同一公式——两者错位会出现「①已清成墓碑但 ②没折叠进 checkpoint」
+    的漏网区（墓碑文本混进折叠输入）。保护窗是压缩器的核心安全属性，改语义只许改这里。
+    """
+    return n_turns - keep_recent_turns if keep_recent_turns > 0 else n_turns
+
+
+def _is_tombstone(content: Any) -> bool:
+    """tool 结果是否已被 ①清成墓碑。前缀从 _CLEAR_TOMBSTONE 模板派生，改模板不漏判。"""
+    return str(content or "").startswith(_CLEAR_PREFIX)
+
+
+def _exclude_lower(exclude_tools: list[str] | None = None) -> set[str]:
+    """exclude_tools 归一化为小写集合；None 回落 settings 白名单。①清理与 ③a 共用。"""
+    if exclude_tools is None:
+        exclude_tools = get_settings().context_budget.exclude_tools
+    return {(n or "").lower() for n in exclude_tools}
+
+
+def _make_checkpoint(summary: str) -> dict[str, Any]:
+    """构造 checkpoint 消息（信封唯一写入点，与 _locate_checkpoint 的解析成对）。"""
+    return {"role": "system", "content": f"{_COMPACTED_TAG}\n{summary}\n{_COMPACTED_CLOSE}"}
 
 
 def _is_checkpoint(msg: dict[str, Any]) -> bool:
-    """消息是否是轮内压缩 checkpoint（唯一摘要载体）。"""
-    return msg.get("role") == "system" and str(msg.get("content") or "").startswith(_COMPACTED_TAG)
+    """消息是否是轮内压缩 checkpoint（唯一摘要载体）。
+
+    须完整信封（首尾标签齐）而非仅前缀匹配：前导里还有 <session_summary>/
+    extra_context 等 system 消息注入点，KB 检索文本若恰以 "<compacted>" 开头不能被
+    误认成 checkpoint——其正文会被当旧摘要续写、真 checkpoint 被当重复滤掉（内容
+    触发的静默状态污染）。
+    """
+    c = str(msg.get("content") or "")
+    return (
+        msg.get("role") == "system"
+        and c.startswith(_COMPACTED_TAG)
+        and c.endswith(_COMPACTED_CLOSE)
+    )
 
 
 def _locate_checkpoint(messages: list[dict[str, Any]]) -> tuple[int, str]:
@@ -177,10 +227,7 @@ def _locate_checkpoint(messages: list[dict[str, Any]]) -> tuple[int, str]:
     for i, m in enumerate(messages):
         if _is_checkpoint(m):
             body = str(m.get("content") or "")
-            text = body[len(_COMPACTED_TAG):].strip()
-            if text.endswith("</compacted>"):
-                text = text[: -len("</compacted>")].strip()
-            return i, text
+            return i, body[len(_COMPACTED_TAG):-len(_COMPACTED_CLOSE)].strip()
     return -1, ""
 
 
@@ -205,35 +252,33 @@ def clear_old_tool_results(
     不含 role=tool 不受影响。captured_originals 非空时按时间序记 id(msg)->被清原文
     （供 ②折叠用原文而非墓碑）。就地改 messages，返回清理条数。
     """
-    from core.agentic.context_policy import _is_source_para, _split_paragraphs, _split_turns
-
     turns = _split_turns(messages)
     if len(turns) <= 1:
         return 0
-    protected_from = len(turns) - keep_recent_turns if keep_recent_turns > 0 else len(turns)
-    protected_from = max(1, protected_from)
+    protected_from = _protected_from(len(turns), keep_recent_turns)
     if protected_from <= 1:
         return 0  # 无保护窗外的轮可清
 
-    if exclude_tools is None:
-        exclude_tools = get_settings().context_budget.exclude_tools
-    exclude_lower = {(n or "").lower() for n in exclude_tools}
-
+    exclude = _exclude_lower(exclude_tools)
     candidates: list[dict[str, Any]] = []
     gain = 0
+    tomb_tokens: dict[str, int] = {}  # 墓碑 token 按 tool 名 memo（循环不变量，别每候选重编）
     for turn in turns[1:protected_from]:
         for msg in turn:
             if msg.get("role") != "tool":
                 continue
-            if (msg.get("name") or "").lower() in exclude_lower:
+            if (msg.get("name") or "").lower() in exclude:
                 continue
             c = str(msg.get("content") or "")
-            if not c or c.startswith("[cleared:"):
+            if not c or _is_tombstone(c):
                 continue
             if any(_is_source_para(p) for p in _split_paragraphs(c)):
                 continue  # RAG 来源引用段保留原地
+            name = msg.get("name") or "tool"
+            if name not in tomb_tokens:
+                tomb_tokens[name] = count_tokens(_CLEAR_TOMBSTONE.format(name=name))
             candidates.append(msg)
-            gain += count_tokens(c) - count_tokens(_CLEAR_TOMBSTONE.format(name=msg.get("name") or "tool"))
+            gain += count_tokens(c) - tomb_tokens[name]
     if not candidates or gain < _CLEAR_AT_LEAST_TOKENS:
         return 0
     for msg in candidates:
@@ -248,7 +293,7 @@ async def _fold_uncompacted(
     model: str,
     protected_from: int,
     captured_map: dict[int, str],
-) -> tuple[bool, str, int]:
+) -> tuple[bool, str, int, int]:
     """②折叠（一次 LLM）：把 checkpoint 与保护窗之间的完整轮折叠续写进唯一 checkpoint。
 
     替换语义（对标 Anthropic compact「compaction block 之前的内容被忽略」+ OpenHands
@@ -261,40 +306,40 @@ async def _fold_uncompacted(
     turns[0] 与保护窗永不动。区段可回收 token 不足 _MIN_FOLD_GAIN_TOKENS 跳过
     （minimum_progress 防抖）；摘要失败返回 False（区段保留原样，信息不丢）。
 
-    返回 (是否折叠, checkpoint 新正文, 回收 token)。
+    返回 (是否折叠, checkpoint 新正文, 回收 token, 新 checkpoint 索引)。
     """
-    from core.agentic.context_policy import _split_turns, _summarize_masked_text
-
     turns = _split_turns(messages)
     seg_msgs = [m for t in turns[1:protected_from] for m in t]
     if not seg_msgs:
-        return False, "", 0
+        return False, "", 0, -1
     ck_idx, ck_text = _locate_checkpoint(messages)
     seg_tokens = count_tokens_messages(seg_msgs)
     old_ck_tokens = count_tokens_messages([messages[ck_idx]]) if ck_idx >= 0 else 0
     if seg_tokens + old_ck_tokens < _MIN_FOLD_GAIN_TOKENS:
-        return False, "", 0
+        return False, "", 0, -1
 
-    # 折叠输入 = 旧 checkpoint 正文 + 区段逐消息 preview（tool 用清理前原文，非墓碑）
+    # 折叠输入 = 旧 checkpoint 正文 + 区段逐消息 preview（tool 用清理前原文，非墓碑；
+    # 格式复用 msg_preview，600 字/工具名标签——别另起 inline 格式与观测 preview 漂移）
     parts: list[str] = [ck_text] if ck_text else []
     for m in seg_msgs:
         if m.get("role") == "tool":
             text = captured_map.get(id(m)) or str(m.get("content") or "")
-            parts.append(f"[{(m.get('name') or 'tool')}] {text[:_FOLD_PREVIEW_CHARS]}")
+            parts.append(msg_preview(m, chars=_FOLD_PREVIEW_CHARS,
+                                     label=(m.get("name") or "tool"), text=text))
         else:
-            parts.append(f"[{m.get('role')}] {str(m.get('content') or '')[:_FOLD_PREVIEW_CHARS]}")
+            parts.append(msg_preview(m, chars=_FOLD_PREVIEW_CHARS))
     summary = await _summarize_masked_text("\n\n".join(parts), model)
     if not summary:
-        return False, "", 0
+        return False, "", 0, -1
 
-    # 区段是 messages 的连续切片（_split_turns 保序）；旧 checkpoint 在前导内，换新
-    start = next(i for i, m in enumerate(messages) if id(m) == id(seg_msgs[0]))
-    end = start + len(seg_msgs)
-    checkpoint_msg = {"role": "system", "content": f"{_COMPACTED_TAG}\n{summary}\n</compacted>"}
-    prefix = [m for m in messages[:start] if not _is_checkpoint(m)]
-    messages[:] = prefix + [checkpoint_msg] + messages[end:]
+    # 区段是 messages 的连续切片且 flatten(turns)==messages 保序：区段起点=前导长度，
+    # 无需 id 扫描；旧 checkpoint 在前导内，按已知索引剔除换新
+    start = len(turns[0])
+    checkpoint_msg = _make_checkpoint(summary)
+    prefix = [m for i, m in enumerate(messages[:start]) if i != ck_idx]
+    messages[:] = prefix + [checkpoint_msg] + messages[start + len(seg_msgs):]
     reclaimed = seg_tokens + old_ck_tokens - count_tokens_messages([checkpoint_msg])
-    return True, summary, max(reclaimed, 0)
+    return True, summary, max(reclaimed, 0), len(prefix)
 
 
 def _drop_oldest_turn(
@@ -302,12 +347,10 @@ def _drop_oldest_turn(
 ) -> int:
     """丢掉最旧的一个非前导 tool 轮（turns[1]），保 tool_use<->tool_result 配对。
 
-    drop_oldest_turn_group 的单轮原语：③b 每次丢一轮、重算、再决定是否继续；前导
-    turns[0]（system+历史+当前 user）不动；至少保留 1 个 tool 轮（全丢则本轮工具
-    上下文清零）。返回丢弃条数（0=无可丢）。
+    ③b 的单轮原语：每次丢一轮、重算、再决定是否继续；前导 turns[0]（system+历史+
+    当前 user）不动；至少保留 1 个 tool 轮（全丢则本轮工具上下文清零）。返回丢弃
+    条数（0=无可丢）。
     """
-    from core.agentic.context_policy import _split_turns
-
     turns = _split_turns(messages)
     if len(turns) <= 2:
         return 0
@@ -327,24 +370,21 @@ def drop_oldest_turn_group(
 ) -> int:
     """L3 式硬降级：丢弃最旧的 fraction（默认 20%）消息组（按 turn 切）。
 
-    loop.py 413 反应式兜底沿用本入口（语义不变：丢最旧 20%、保前导）。内部复用
-    _drop_oldest_turn 单轮原语。captured_originals 非空时把被丢消息 preview append
-    进去（msg_preview 格式），供 LangSmith 上报"删了什么"。返回丢弃条数。
+    loop.py 413 反应式兜底沿用本入口（语义不变：丢最旧 20%、保前导、至少留 1 个
+    tool 轮）。一次切轮一次拼接（不逐轮重切）；③b 收缩用的是单轮原语
+    _drop_oldest_turn。captured_originals 非空时把被丢消息 preview append 进去
+    （msg_preview 格式），供 LangSmith 上报"删了什么"。返回丢弃条数。
     """
-    from core.agentic.context_policy import _split_turns
-
     turns = _split_turns(messages)
     if len(turns) <= 2:  # 仅 1 个 tool 轮 + 前导，无余量可丢
         return 0
     droppable = len(turns) - 1
     drop_n = min(max(1, int(droppable * fraction)), droppable)
-    previews: list[str] = []
-    dropped = 0
-    for _ in range(drop_n):
-        dropped += _drop_oldest_turn(messages, captured_previews=previews)
+    dropped_msgs = [m for t in turns[1:1 + drop_n] for m in t]
     if captured_originals is not None:
-        captured_originals.extend(previews)
-    return dropped
+        captured_originals.extend(msg_preview(m) for m in dropped_msgs)
+    messages[:] = [m for t in (turns[:1] + turns[1 + drop_n:]) for m in t]
+    return len(dropped_msgs)
 
 
 def _shrink_cap_tool_results(messages: list[dict[str, Any]]) -> int:
@@ -353,18 +393,16 @@ def _shrink_cap_tool_results(messages: list[dict[str, Any]]) -> int:
     排除墓碑与白名单（ask_user 用户答复不做硬截）；短于 _SHRINK_TOOL_MIN_CHARS 的
     不值得截。每步只截一条（循环重算决定下一条）。返回 1=截了 / 0=无可截。
     """
-    from core.agentic.context_policy import cap_tool_result
-
-    exclude_lower = {(n or "").lower() for n in get_settings().context_budget.exclude_tools}
+    exclude = _exclude_lower()
     best: dict[str, Any] | None = None
     best_len = _SHRINK_TOOL_MIN_CHARS
     for m in messages:
         if m.get("role") != "tool":
             continue
-        if (m.get("name") or "").lower() in exclude_lower:
+        if (m.get("name") or "").lower() in exclude:
             continue
         c = m.get("content")
-        if not isinstance(c, str) or c.startswith("[cleared:"):
+        if not isinstance(c, str) or _is_tombstone(c):
             continue
         if len(c) > best_len:
             best, best_len = m, len(c)
@@ -379,19 +417,18 @@ def _shrink_truncate_history(
 ) -> int:
     """③c（最后手段）：把前导里最旧的一条超长历史消息截到 _SHRINK_HISTORY_KEEP_CHARS。
 
-    只动 user/assistant 且 content 为 str 的历史消息（多模态 list 不动）；前导末尾的
-    当前 user 消息（本轮问题）不动。每步只截一条。返回 1=截了 / 0=无可截。
+    前导 = _split_turns 的 turns[0]（轮边界谓词复用，不另写一份判定）；只动
+    user/assistant 且 content 为 str 的历史消息（多模态 list 不动）；前导末尾的当前
+    user 消息（本轮问题）不动。system 消息（<compacted>/<session_summary> 摘要块）
+    豁免是有意的——摘要是不可重建信息，截断即毁。截断点复用 _truncate_at_sentence
+    句子边界 + _OMIT_PLACEHOLDER 省略标注（与 cap_tool_result 同一标注约定，总长
+    严格 <= KEEP）。每步只截一条。返回 1=截了 / 0=无可截。
     """
-    lead_end = next(
-        (i for i, m in enumerate(messages)
-         if m.get("role") == "assistant" and m.get("tool_calls")),
-        len(messages),
-    )
+    lead = _split_turns(messages)[0]
     last_user_idx = max(
-        (i for i, m in enumerate(messages[:lead_end]) if m.get("role") == "user"),
-        default=-1,
+        (i for i, m in enumerate(lead) if m.get("role") == "user"), default=-1
     )
-    for i, m in enumerate(messages[:lead_end]):
+    for i, m in enumerate(lead):
         if i == last_user_idx:
             continue
         if m.get("role") not in ("user", "assistant"):
@@ -400,18 +437,30 @@ def _shrink_truncate_history(
         if isinstance(c, str) and len(c) > _SHRINK_HISTORY_KEEP_CHARS:
             if captured_previews is not None:
                 captured_previews.append(msg_preview(m))
-            m["content"] = c[:_SHRINK_HISTORY_KEEP_CHARS] + "…[早期历史已截断]"
+            marker = _OMIT_PLACEHOLDER.format(n=len(c) - _SHRINK_HISTORY_KEEP_CHARS)
+            m["content"] = (
+                _truncate_at_sentence(c, _SHRINK_HISTORY_KEEP_CHARS - len(marker)) + marker
+            )
             return 1
     return 0
 
 
-def msg_preview(m: dict[str, Any]) -> str:
-    """单条消息的观测 preview（``[role] 正文前 200 字``）。
+def msg_preview(
+    m: dict[str, Any],
+    *,
+    chars: int = 200,
+    label: str | None = None,
+    text: str | None = None,
+) -> str:
+    """单条消息的观测 preview（``[label] 正文前 chars 字``，label 默认 role）。
 
-    L3 dropped_originals 与 turn_runtime 回合前裁剪 preview 共用——把格式钉进代码，
-    避免 LangSmith 上 in_turn 与 pretrim 的 preview 各改各的、静默漂移。
+    ③b/③c dropped_originals 与 turn_runtime 回合前裁剪 preview 共用（默认 200 字）；
+    ②折叠输入复用同一格式（chars=600、tool 消息用工具名做标签、text 覆盖正文以喂
+    captured 原文）——钉死一个格式函数，防各处 preview 静默漂移。
     """
-    return f"[{m.get('role')}] {str(m.get('content') or '')[:200]}"
+    label = label or str(m.get("role"))
+    body = text if text is not None else str(m.get("content") or "")
+    return f"[{label}] {body[:chars]}"
 
 
 async def enforce(
@@ -448,9 +497,19 @@ async def enforce(
     """
     cfg = get_settings().context_budget
     soft_trigger, hard_ceiling = compute_budgets(model)
-    # 总量 = count_tokens_messages(messages, tools=tools)：messages+tools 联合计数正是
-    # 该函数的设计用途（含 system×tools 的 -4 折扣）。
-    before = count_tokens_messages(messages, tools=tools)
+    # tools 计入请求预算（schema 3-8k token）：本调用内 tools 不变，schema 只编码一次，
+    # 各步重估只数 messages（-4 折扣口径见 count_tokens_messages；本调用内 system 消息
+    # 只增不减，折扣条件不变）。
+    tools_extra = 0
+    if tools:
+        tools_extra = count_tokens_messages([], tools=tools)
+        if any(m.get("role") == "system" for m in messages):
+            tools_extra -= _TOOLS_SYSTEM_DISCOUNT_TOKENS
+
+    def _total() -> int:
+        return count_tokens_messages(messages) + tools_extra
+
+    before = _total()
     total = before
     cleared = 0
     summary_added = False
@@ -470,24 +529,18 @@ async def enforce(
             exclude_tools=cfg.exclude_tools, captured_originals=captured,
         )
         if cleared:
-            total = count_tokens_messages(messages, tools=tools)
+            total = _total()
 
-        # ②折叠（仍超软阈值才花 LLM 钱）。
+        # ②折叠（仍超软阈值才花 LLM 钱）。保护窗起点与 ①共用 _protected_from。
         if total > soft_trigger:
-            from core.agentic.context_policy import _split_turns
-
             turns = _split_turns(messages)
-            protected_from = (
-                len(turns) - cfg.keep_recent_turns if cfg.keep_recent_turns > 0 else len(turns)
-            )
-            protected_from = max(1, protected_from)
-            folded, summary_text, compacted_tokens = await _fold_uncompacted(
+            protected_from = _protected_from(len(turns), cfg.keep_recent_turns)
+            folded, summary_text, compacted_tokens, checkpoint_idx = await _fold_uncompacted(
                 messages, model, protected_from, captured,
             )
             if folded:
                 summary_added = True
-                total = count_tokens_messages(messages, tools=tools)
-                checkpoint_idx = _locate_checkpoint(messages)[0]
+                total = _total()
 
     # ③收缩循环（超硬天花板）：逐级降级，每步恰好一个动作后重算，构造性收敛到 fit。
     # dropped 只计 ③b 丢的消息条数；③c 是截断不是丢弃（preview 仍入观测）。
@@ -501,7 +554,7 @@ async def enforce(
                 pass
             else:
                 break  # 三级都无动作：无可收缩（如 system prompt 本身超限）
-            total = count_tokens_messages(messages, tools=tools)
+            total = _total()
             if total <= hard_ceiling:
                 break
         if total > hard_ceiling:

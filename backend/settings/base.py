@@ -326,7 +326,7 @@ class ContextPolicyConfig(BaseModel):
     .env 前缀 CONTEXT_POLICY__*。
     """
 
-    # 总开关（dormant）：上下文管理重构后 loop 轮内主路径统一走 context_budget.enforce 三级级联，
+    # 总开关（dormant）：上下文管理重构后 loop 轮内主路径统一走 context_budget.enforce 单 pass 压缩，
     # 不再按此开关分支。保留供 eval_turn_budget 旧臂位 patch 与 context_policy.apply 路径回退。
     enabled: TruthyBool = True
     keep_recent_turns: int = 3      # 保留最近 M 轮 role=tool 原文，更早掩码（mask_old_observations，评测臂用）
@@ -337,19 +337,21 @@ class ContextPolicyConfig(BaseModel):
 
 
 class ContextBudgetConfig(BaseModel):
-    """通用上下文管理：绝对阈值 + 减法留白 + 三级级联 + 反应式兜底。
+    """通用上下文管理：绝对阈值 + 减法留白 + 轮内单 pass 压缩 + 反应式兜底。
 
     调研依据：Claude Code 五级压缩级联（microcompact->collapse->auto-compact->reactive->
     熔断）、Anthropic Context Management API 参数语义（compact 150k / tool clearing 100k
-    keep=3 + exclude_tools 白名单）、context rot 论文（arXiv:2606.29718：compaction+trimming
+    keep=3 + exclude_tools 白名单）、OpenHands condenser（forgotten/summary 顶替 +
+    minimum_progress 防抖）、context rot 论文（arXiv:2606.29718：compaction+trimming
     组合最优、阈值越低 rot 越轻但成本越高，64k 为成本可接受上界）、When Refusals Fail
     （arXiv:2512.02445：标称窗口不可信，1M 窗口模型 100k 即掉 50%+ 性能）。
 
     双阈值（硬天花板减法留白，预留量是绝对量不随窗口缩放；软阈值=窗口比例线与绝对上限三取 min）：
       硬天花板 = effective_window - min(max_output, output_reserve_tokens) - safety_margin_tokens
       软阈值   = min(rot_threshold_tokens, effective_window * quality_ratio, 硬天花板)
-    软阈值驱动主动压缩（L1 清旧 tool 结果->L2 LLM 摘要->L3 丢最旧 20% 消息组），硬天花板
-    驱动反应式兜底（413 超限紧急 L3 + 熔断）。env 前缀 CONTEXT_BUDGET__*。
+    软阈值驱动主动压缩（①清旧 tool 结果->②折叠进唯一 checkpoint->③收缩循环，见
+    context_budget.enforce），硬天花板驱动反应式兜底（413 超限紧急丢最旧 20% + 熔断）。
+    env 前缀 CONTEXT_BUDGET__*。
     """
 
     token_accounting_enabled: TruthyBool = True   # system prompt 告警按 token 口径 + 逐切片分解
@@ -362,9 +364,9 @@ class ContextBudgetConfig(BaseModel):
     output_reserve_tokens: int = 20000         # 输出预留上限：reserve = min(max_output, 此值)
     safety_margin_tokens: int = 4096           # 安全余量：tokenizer 差异/多模态/工具结果突增缓冲
 
-    # -- 三级级联 --
-    keep_recent_turns: int = 3                 # L1 保留最近 N 轮 tool 原文（对齐 Anthropic keep=3、论文 keep-latest）
-    exclude_tools: list[str] = Field(default_factory=lambda: ["ask_user"])  # L1 白名单：永不清理的 tool（不可重建输入）
+    # -- 轮内单 pass 压缩（enforce）--
+    keep_recent_turns: int = 3                 # ①清理/②折叠保护最近 N 轮 tool 原文（对齐 Anthropic keep=3、论文 keep-latest）
+    exclude_tools: list[str] = Field(default_factory=lambda: ["ask_user"])  # 清理白名单：永不清理的 tool（不可重建输入）
     max_consecutive_failures: int = 3          # 反应式兜底连续失败熔断阈值（Claude Code MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES=3）
 
     # -- 窗口探测（对标 DeepTutor detect_context_window：GET /models 递归扫字段）--
@@ -374,13 +376,13 @@ class ContextBudgetConfig(BaseModel):
     probe_timeout_s: float = 12.0               # GET /models 超时（对齐 DeepTutor；供应商不可达时尽快放弃）
     probe_cache_ttl_s: int = 604800             # 探测缓存 TTL（7 天；模型窗口变更频率低）
 
-    # -- 兼容字段（保留供 eval_turn_budget 旧臂位读取；新级联统一 L1->L2->L3 不再分支）--
+    # -- 兼容字段（保留供 eval_turn_budget 旧臂位读取；enforce 单 pass 不再分支）--
     # L2 返修后默认开：读侧已改为游标尾部全量原文（不再按条数截断），历史长度口径统一
     # 由 plan_turn 按 token 预算裁剪，且裁掉时把 L2 摘要卡前插历史续接（carry-forward，
     # 对齐 Claude Code）；关=回落旧 resolve_budget 20% 窗口裁历史。
     coordinator_enabled: TruthyBool = True
     carry_forward_location: str = "history_prefix"
-    eviction_strategy: str = "cascade"              # dormant：新级联恒走 L1->L2->L3，不再按此分支
+    eviction_strategy: str = "cascade"              # dormant：enforce 单 pass 恒走①②③，不再按此分支
 
 
 class KbSeedConfig(BaseModel):

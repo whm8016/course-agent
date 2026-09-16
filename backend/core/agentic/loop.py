@@ -378,11 +378,11 @@ _CTX_LEN_KEYWORDS = (
 
 
 def _is_context_length_error(exc: Exception) -> bool:
-    """判断异常是否是上下文超长错误（供反应式兜底决定是否紧急 L3 降级重试）。
+    """判断异常是否是上下文超长错误（供反应式兜底决定是否紧急丢最旧消息组重试）。
 
     reliability 层把不可重试错误包成 LLMRetryError，原错误挂在 __cause__；故沿因果链
     （__cause__/__context__）查消息关键词与状态码 413。不用裸 400（太宽--schema 等其它
-    BadRequest 也走 400，会误触发 L3 丢消息）。对标 Claude Code Reactive Compact 触发条件。
+    BadRequest 也走 400，会误触发紧急丢消息）。对标 Claude Code Reactive Compact 触发条件。
     """
     cur: Exception | None = exc
     seen: set[int] = set()
@@ -666,7 +666,7 @@ async def run_agent_loop(
                  dropped_messages=_round_dropped,
                  summary_added=_round_summary)
         # 之前这层裁剪完全不上报--LangSmith 只能看到裁完之后的 messages，看不到删了什么。
-        # 正文（L1 清理原文/L3 丢弃 preview/L2 摘要）统一经 _emit_trim_report 上报，与
+        # 正文（①清理原文/③丢弃 preview/②checkpoint 摘要）统一经 _emit_trim_report 上报，与
         # answer_now 分支同口径；评测臂（arm 分支）就地掩码/摘要不产生 EnforceReport
         # （_trim_report=None），自然不上报。masked_turns 全仓无非 0 来源，不再传（默认 0）。
         if _trim_report is not None:
