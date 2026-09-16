@@ -495,9 +495,12 @@ async def enforce(
     """
     cfg = get_settings().context_budget
     soft_trigger, hard_ceiling = compute_budgets(model)
-    # tools 计入请求预算（schema 3-8k token）：本调用内 tools 与 system 消息集不变，
-    # 经 tools_extra_tokens（单一真相源，含 -4 折扣）只编码一次，各步重估只数 messages。
-    tools_extra = tools_extra_tokens(tools or [], messages)
+    # tools 计入请求预算（schema 3-8k token）：本调用内 tools 不变、system 消息只增
+    # 不减（①只动 tool；②折叠删旧 checkpoint system 换新、仅首轮净新增；③不动
+    # system）——经 tools_extra_tokens（单一真相源，含 -4 折扣）只编码一次，各步重估
+    # 只数 messages 后再加本值；入口无 system 时缓存值比重估高 4 token，方向保守
+    # （更早触顶）。
+    tools_extra = tools_extra_tokens(tools, messages)
 
     def _total() -> int:
         return count_tokens_messages(messages) + tools_extra

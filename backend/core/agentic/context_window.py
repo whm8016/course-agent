@@ -126,13 +126,12 @@ def count_tokens_messages(messages: list[dict[str, Any]], tools: list[dict[str, 
         tcs = m.get("tool_calls")
         if tcs:
             total += count_tokens(json.dumps(tcs, ensure_ascii=False))
-    if tools:
-        total += tools_extra_tokens(tools, messages)
+    total += tools_extra_tokens(tools, messages)
     return total
 
 
 def tools_extra_tokens(
-    tools: list[dict[str, Any]], messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None, messages: list[dict[str, Any]]
 ) -> int:
     """tools 定义的请求前 token 开销：schema JSON + 结构常数（+9 定义/+3 priming），
     messages 里存在 system 消息再 -4（对标 LiteLLM _count_extra 的 system×tools 折扣）。
@@ -326,9 +325,4 @@ def compute_budgets(model: str | None) -> tuple[int, int]:
     return soft_trigger, hard_ceiling
 
 
-__all__ = [
-    "resolve_effective_window",
-    "resolve_effective_window_with_source",
-    "compute_budgets",
-    "tools_extra_tokens",
-]
+__all__ = ["resolve_effective_window", "resolve_effective_window_with_source", "compute_budgets"]
