@@ -36,20 +36,20 @@ import dataclasses
 from typing import Any
 
 from core.agentic.context_policy import (
-    _OMIT_PLACEHOLDER,
-    _is_source_para,
-    _split_paragraphs,
-    _split_turns,
-    _summarize_masked_text,
-    _truncate_at_sentence,
+    OMIT_PLACEHOLDER,
+    is_source_para,
+    split_paragraphs,
+    split_turns,
+    summarize_masked_text,
+    truncate_at_sentence,
     cap_tool_result,
 )
 from core.agentic.context_window import (
-    _TOOLS_SYSTEM_DISCOUNT_TOKENS,
     compute_budgets,
     count_tokens,
     count_tokens_messages,
     resolve_effective_window,
+    tools_extra_tokens,
 )
 from services.session.context_builder import ContextBuilder
 from settings import get_settings
@@ -184,9 +184,9 @@ def _protected_from(n_turns: int, keep_recent_turns: int) -> int:
     return n_turns - keep_recent_turns if keep_recent_turns > 0 else n_turns
 
 
-def _is_tombstone(content: Any) -> bool:
+def _is_tombstone(c: str) -> bool:
     """tool 结果是否已被 ①清成墓碑。前缀从 _CLEAR_TOMBSTONE 模板派生，改模板不漏判。"""
-    return str(content or "").startswith(_CLEAR_PREFIX)
+    return c.startswith(_CLEAR_PREFIX)
 
 
 def _exclude_lower(exclude_tools: list[str] | None = None) -> set[str]:
@@ -209,12 +209,10 @@ def _is_checkpoint(msg: dict[str, Any]) -> bool:
     误认成 checkpoint——其正文会被当旧摘要续写、真 checkpoint 被当重复滤掉（内容
     触发的静默状态污染）。
     """
+    if msg.get("role") != "system":
+        return False  # 先按 role 短路：多模态 list content 不做 str() repr（base64 载荷可达 MB）
     c = str(msg.get("content") or "")
-    return (
-        msg.get("role") == "system"
-        and c.startswith(_COMPACTED_TAG)
-        and c.endswith(_COMPACTED_CLOSE)
-    )
+    return c.startswith(_COMPACTED_TAG) and c.endswith(_COMPACTED_CLOSE)
 
 
 def _locate_checkpoint(messages: list[dict[str, Any]]) -> tuple[int, str]:
@@ -244,15 +242,15 @@ def clear_old_tool_results(
     前缀，清过的墓碑逐字不再变 -> prefix cache 可重新命中）、keep 最近 N 轮原文、
     exclude_tools 白名单（ask_user 等不可重建输入）永不清理。与旧 evict_tool_results
     的差异：删 score 散点优先级（Anthropic/OpenHands/Claude Code 三家对标皆无此设计，
-    散点清理会让已清区永不收敛）；RAG 来源引用段（_is_source_para）降级为跳过不清、
+    散点清理会让已清区永不收敛）；RAG 来源引用段（is_source_para）降级为跳过不清、
     保留在原地；一次性清掉全部候选——可清量不足 _CLEAR_AT_LEAST_TOKENS 时整体跳过
     （clear_at_least：小步清理只会反复打断缓存，攒够一波再清）。
 
-    复用 context_policy._split_turns 切轮；前导 turns[0]（system+历史+当前 user）天然
+    复用 context_policy.split_turns 切轮；前导 turns[0]（system+历史+当前 user）天然
     不含 role=tool 不受影响。captured_originals 非空时按时间序记 id(msg)->被清原文
     （供 ②折叠用原文而非墓碑）。就地改 messages，返回清理条数。
     """
-    turns = _split_turns(messages)
+    turns = split_turns(messages)
     if len(turns) <= 1:
         return 0
     protected_from = _protected_from(len(turns), keep_recent_turns)
@@ -262,7 +260,6 @@ def clear_old_tool_results(
     exclude = _exclude_lower(exclude_tools)
     candidates: list[dict[str, Any]] = []
     gain = 0
-    tomb_tokens: dict[str, int] = {}  # 墓碑 token 按 tool 名 memo（循环不变量，别每候选重编）
     for turn in turns[1:protected_from]:
         for msg in turn:
             if msg.get("role") != "tool":
@@ -272,13 +269,12 @@ def clear_old_tool_results(
             c = str(msg.get("content") or "")
             if not c or _is_tombstone(c):
                 continue
-            if any(_is_source_para(p) for p in _split_paragraphs(c)):
+            if any(is_source_para(p) for p in split_paragraphs(c)):
                 continue  # RAG 来源引用段保留原地
             name = msg.get("name") or "tool"
-            if name not in tomb_tokens:
-                tomb_tokens[name] = count_tokens(_CLEAR_TOMBSTONE.format(name=name))
             candidates.append(msg)
-            gain += count_tokens(c) - tomb_tokens[name]
+            # 墓碑 ~10 字的编码量可忽略，不值得 memo（主导成本是上面 count_tokens(c)）
+            gain += count_tokens(c) - count_tokens(_CLEAR_TOMBSTONE.format(name=name))
     if not candidates or gain < _CLEAR_AT_LEAST_TOKENS:
         return 0
     for msg in candidates:
@@ -302,13 +298,13 @@ async def _fold_uncompacted(
     新增第二条摘要（旧 L2 插入语义会累积多条 <context_summary> 且窗口回升）。assistant
     文本进摘要修优先级倒挂：旧 L3 裸丢的恰是模型自己的推理，比工具原始输出更值钱。
 
-    区段按 _split_turns 整轮删，tool_use<->tool_result 配对完整性由构造保证；前导
+    区段按 split_turns 整轮删，tool_use<->tool_result 配对完整性由构造保证；前导
     turns[0] 与保护窗永不动。区段可回收 token 不足 _MIN_FOLD_GAIN_TOKENS 跳过
     （minimum_progress 防抖）；摘要失败返回 False（区段保留原样，信息不丢）。
 
     返回 (是否折叠, checkpoint 新正文, 回收 token, 新 checkpoint 索引)。
     """
-    turns = _split_turns(messages)
+    turns = split_turns(messages)
     seg_msgs = [m for t in turns[1:protected_from] for m in t]
     if not seg_msgs:
         return False, "", 0, -1
@@ -328,7 +324,7 @@ async def _fold_uncompacted(
                                      label=(m.get("name") or "tool"), text=text))
         else:
             parts.append(msg_preview(m, chars=_FOLD_PREVIEW_CHARS))
-    summary = await _summarize_masked_text("\n\n".join(parts), model)
+    summary = await summarize_masked_text("\n\n".join(parts), model)
     if not summary:
         return False, "", 0, -1
 
@@ -351,7 +347,7 @@ def _drop_oldest_turn(
     当前 user）不动；至少保留 1 个 tool 轮（全丢则本轮工具上下文清零）。返回丢弃
     条数（0=无可丢）。
     """
-    turns = _split_turns(messages)
+    turns = split_turns(messages)
     if len(turns) <= 2:
         return 0
     dropped = turns[1]
@@ -368,18 +364,20 @@ def drop_oldest_turn_group(
     fraction: float = 0.2,
     captured_originals: list[str] | None = None,
 ) -> int:
-    """L3 式硬降级：丢弃最旧的 fraction（默认 20%）消息组（按 turn 切）。
+    """③b 的批量入口：丢弃最旧的 fraction（默认 20%）消息组（按 turn 切）。
 
-    loop.py 413 反应式兜底沿用本入口（语义不变：丢最旧 20%、保前导、至少留 1 个
-    tool 轮）。一次切轮一次拼接（不逐轮重切）；③b 收缩用的是单轮原语
+    loop.py 的 413（context-length 拒绝）反应式兜底沿用本入口（语义不变：丢最旧
+    20%、保前导）。一次切轮一次拼接（不逐轮重切）；③b 收缩用的是单轮原语
     _drop_oldest_turn。captured_originals 非空时把被丢消息 preview append 进去
     （msg_preview 格式），供 LangSmith 上报"删了什么"。返回丢弃条数。
     """
-    turns = _split_turns(messages)
+    turns = split_turns(messages)
     if len(turns) <= 2:  # 仅 1 个 tool 轮 + 前导，无余量可丢
         return 0
     droppable = len(turns) - 1
-    drop_n = min(max(1, int(droppable * fraction)), droppable)
+    # 上限 droppable-1：与 _drop_oldest_turn 的 len(turns)<=2 守卫同边界——结构性
+    # 保证至少留 1 个 tool 轮（fraction>=1.0 也不清空），不靠 int(K*fraction)<K 的算术巧合
+    drop_n = min(max(1, int(droppable * fraction)), droppable - 1)
     dropped_msgs = [m for t in turns[1:1 + drop_n] for m in t]
     if captured_originals is not None:
         captured_originals.extend(msg_preview(m) for m in dropped_msgs)
@@ -417,14 +415,14 @@ def _shrink_truncate_history(
 ) -> int:
     """③c（最后手段）：把前导里最旧的一条超长历史消息截到 _SHRINK_HISTORY_KEEP_CHARS。
 
-    前导 = _split_turns 的 turns[0]（轮边界谓词复用，不另写一份判定）；只动
+    前导 = split_turns 的 turns[0]（轮边界谓词复用，不另写一份判定）；只动
     user/assistant 且 content 为 str 的历史消息（多模态 list 不动）；前导末尾的当前
     user 消息（本轮问题）不动。system 消息（<compacted>/<session_summary> 摘要块）
-    豁免是有意的——摘要是不可重建信息，截断即毁。截断点复用 _truncate_at_sentence
-    句子边界 + _OMIT_PLACEHOLDER 省略标注（与 cap_tool_result 同一标注约定，总长
+    豁免是有意的——摘要是不可重建信息，截断即毁。截断点复用 truncate_at_sentence
+    句子边界 + OMIT_PLACEHOLDER 省略标注（与 cap_tool_result 同一标注约定，总长
     严格 <= KEEP）。每步只截一条。返回 1=截了 / 0=无可截。
     """
-    lead = _split_turns(messages)[0]
+    lead = split_turns(messages)[0]
     last_user_idx = max(
         (i for i, m in enumerate(lead) if m.get("role") == "user"), default=-1
     )
@@ -437,9 +435,9 @@ def _shrink_truncate_history(
         if isinstance(c, str) and len(c) > _SHRINK_HISTORY_KEEP_CHARS:
             if captured_previews is not None:
                 captured_previews.append(msg_preview(m))
-            marker = _OMIT_PLACEHOLDER.format(n=len(c) - _SHRINK_HISTORY_KEEP_CHARS)
+            marker = OMIT_PLACEHOLDER.format(n=len(c) - _SHRINK_HISTORY_KEEP_CHARS)
             m["content"] = (
-                _truncate_at_sentence(c, _SHRINK_HISTORY_KEEP_CHARS - len(marker)) + marker
+                truncate_at_sentence(c, _SHRINK_HISTORY_KEEP_CHARS - len(marker)) + marker
             )
             return 1
     return 0
@@ -497,14 +495,9 @@ async def enforce(
     """
     cfg = get_settings().context_budget
     soft_trigger, hard_ceiling = compute_budgets(model)
-    # tools 计入请求预算（schema 3-8k token）：本调用内 tools 不变，schema 只编码一次，
-    # 各步重估只数 messages（-4 折扣口径见 count_tokens_messages；本调用内 system 消息
-    # 只增不减，折扣条件不变）。
-    tools_extra = 0
-    if tools:
-        tools_extra = count_tokens_messages([], tools=tools)
-        if any(m.get("role") == "system" for m in messages):
-            tools_extra -= _TOOLS_SYSTEM_DISCOUNT_TOKENS
+    # tools 计入请求预算（schema 3-8k token）：本调用内 tools 与 system 消息集不变，
+    # 经 tools_extra_tokens（单一真相源，含 -4 折扣）只编码一次，各步重估只数 messages。
+    tools_extra = tools_extra_tokens(tools or [], messages)
 
     def _total() -> int:
         return count_tokens_messages(messages) + tools_extra
@@ -533,7 +526,7 @@ async def enforce(
 
         # ②折叠（仍超软阈值才花 LLM 钱）。保护窗起点与 ①共用 _protected_from。
         if total > soft_trigger:
-            turns = _split_turns(messages)
+            turns = split_turns(messages)
             protected_from = _protected_from(len(turns), cfg.keep_recent_turns)
             folded, summary_text, compacted_tokens, checkpoint_idx = await _fold_uncompacted(
                 messages, model, protected_from, captured,

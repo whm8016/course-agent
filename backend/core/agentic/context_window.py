@@ -127,11 +127,27 @@ def count_tokens_messages(messages: list[dict[str, Any]], tools: list[dict[str, 
         if tcs:
             total += count_tokens(json.dumps(tcs, ensure_ascii=False))
     if tools:
-        total += count_tokens(json.dumps(tools, ensure_ascii=False))
-        total += _TOOLS_EXTRA_TOKENS + _TOOLS_PRIMING_TOKENS
-        if any(m.get("role") == "system" for m in messages):
-            total -= _TOOLS_SYSTEM_DISCOUNT_TOKENS
+        total += tools_extra_tokens(tools, messages)
     return total
+
+
+def tools_extra_tokens(
+    tools: list[dict[str, Any]], messages: list[dict[str, Any]]
+) -> int:
+    """tools 定义的请求前 token 开销：schema JSON + 结构常数（+9 定义/+3 priming），
+    messages 里存在 system 消息再 -4（对标 LiteLLM _count_extra 的 system×tools 折扣）。
+
+    count_tokens_messages 的 tools 尾部抽成单一真相源：context_budget.enforce 的预算
+    估算（schema 每调用只编码一次、逐步重估只数 messages 后再加本值）与本函数共用
+    同一规则——改折扣口径/常数只动这里，不会两处漂移。
+    """
+    if not tools:
+        return 0
+    extra = count_tokens(json.dumps(tools, ensure_ascii=False))
+    extra += _TOOLS_EXTRA_TOKENS + _TOOLS_PRIMING_TOKENS
+    if any(m.get("role") == "system" for m in messages):
+        extra -= _TOOLS_SYSTEM_DISCOUNT_TOKENS
+    return extra
 
 
 # ---------------------------------------------------------------------------
@@ -310,4 +326,9 @@ def compute_budgets(model: str | None) -> tuple[int, int]:
     return soft_trigger, hard_ceiling
 
 
-__all__ = ["resolve_effective_window", "resolve_effective_window_with_source", "compute_budgets"]
+__all__ = [
+    "resolve_effective_window",
+    "resolve_effective_window_with_source",
+    "compute_budgets",
+    "tools_extra_tokens",
+]

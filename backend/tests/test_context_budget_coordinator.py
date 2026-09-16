@@ -48,17 +48,17 @@ def _assert_tool_pairing(messages: list[dict]) -> None:
             assert ok, f"tool 消息 {i} 前出现孤儿配对: {prev.get('role')}"
 
 
-def _enforce_env(monkeypatch, *, soft=100, hard=1_000_000, keep=1, summarize=""):
-    """enforce 测试通用环境：双阈值 + 保护窗 + 两个防抖门限置 0（默认 2000 token 会
-    静默跳过①清理/②折叠，测试要的是确定性触发）+ 摘要 mock。
+def _enforce_env(monkeypatch, *, soft=100, hard=1_000_000, summarize=""):
+    """enforce 测试通用环境：双阈值 + 保护窗(keep=1) + 两个防抖门限置 0（默认 2000
+    token 会静默跳过①清理/②折叠，测试要的是确定性触发）+ 摘要 mock。
 
     mock 靶点是 context_budget 自己的命名空间：模块顶层已绑定
-    context_policy._summarize_masked_text，patch context_policy 侧不生效。
+    context_policy.summarize_masked_text，patch context_policy 侧不生效。
     summarize=None 表示"折叠不应发生，调了即 AssertionError"；传 callable 则收
-    折叠输入文本、返回值作摘要正文（记录型测试用）。返回 mock 函数。
+    折叠输入文本、返回值作摘要正文（记录型测试用）。
     """
     monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (soft, hard))
-    monkeypatch.setattr(get_settings().context_budget, "keep_recent_turns", keep)
+    monkeypatch.setattr(get_settings().context_budget, "keep_recent_turns", 1)
     monkeypatch.setattr(context_budget, "_CLEAR_AT_LEAST_TOKENS", 0)
     monkeypatch.setattr(context_budget, "_MIN_FOLD_GAIN_TOKENS", 0)
     if summarize is None:
@@ -67,8 +67,7 @@ def _enforce_env(monkeypatch, *, soft=100, hard=1_000_000, keep=1, summarize="")
     else:
         async def fake(text, model):
             return summarize(text) if callable(summarize) else summarize
-    monkeypatch.setattr(context_budget, "_summarize_masked_text", fake)
-    return fake
+    monkeypatch.setattr(context_budget, "summarize_masked_text", fake)
 
 
 def _foldable_msgs(aside: str = "") -> list[dict]:

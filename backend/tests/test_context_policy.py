@@ -271,7 +271,7 @@ async def test_apply_arm_summary_only(monkeypatch, small_soft_trigger):
     """summary_only：窗口外每一轮 tool 结果各摘一次（H2 关键臂）。mock 压缩 LLM。"""
     async def fake_summarize(text, model):
         return "摘要"
-    monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
+    monkeypatch.setattr(cp, "summarize_masked_text", fake_summarize)
 
     msgs = _mk_rounds(5)
     extra = await apply_arm(msgs, "fake-model", "summary_only")
@@ -289,7 +289,7 @@ async def test_apply_arm_hybrid_under_threshold_no_summary(monkeypatch, small_so
     async def fake_summarize(text, model):
         called.append(text)
         return "摘要"
-    monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
+    monkeypatch.setattr(cp, "summarize_masked_text", fake_summarize)
 
     extra = await apply_arm(_mk_rounds(5), "fake-model", "hybrid")  # 掩码 2 轮 < 4
     assert extra == 0
@@ -301,7 +301,7 @@ async def test_apply_arm_hybrid_over_threshold(monkeypatch, small_soft_trigger):
     """被掩码轮数 >= 阈值时触发一次整体摘要。"""
     async def fake_summarize(text, model):
         return "摘要"
-    monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
+    monkeypatch.setattr(cp, "summarize_masked_text", fake_summarize)
 
     msgs = _mk_rounds(8)  # 掩码 5 轮 >= 4
     extra = await apply_arm(msgs, "fake-model", "hybrid")

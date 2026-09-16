@@ -25,7 +25,7 @@
 【默认行为】``mask_old_observations``/``apply``/``apply_arm`` 供评测臂（``set_arm`` per-task
 覆盖）与 ``context_policy.apply`` 路径使用。生产轮内主路径已统一走 ``context_budget.enforce``
 单 pass 压缩（①清旧 tool 结果->②折叠进唯一 checkpoint->③收缩循环）；本模块的掩码/摘要
-作为评测对照臂保留（``_split_turns``/``cap_tool_result`` 等基元被 context_budget 顶层复用）。
+作为评测对照臂保留（``split_turns``/``cap_tool_result`` 等基元被 context_budget 顶层复用）。
 """
 from __future__ import annotations
 
@@ -41,30 +41,30 @@ logger = logging.getLogger(__name__)
 
 # 掩码占位符（与旧 _snip_tool_results 的 _MARKER 区分，便于日志区分新旧路径）
 _MASK_MARKER = "[早期工具结果已折叠以节省上下文]"
-_OMIT_PLACEHOLDER = "…[已省略 {n} 字]…"
+OMIT_PLACEHOLDER = "…[已省略 {n} 字]…"
 
 # 段落边界感知截断（cap_tool_result）配置
 _PARA_SPLIT = re.compile(r"\n\s*\n")  # 空行（含连续空白行）切段
 # 尾部来源引用段前缀：截断时优先保留 RAG 来源列表，不被中段省略吃掉
 _SOURCE_PREFIXES = ("来源", "source", "参考", "reference", "引用", "references")
 # 省略标注长度上界（omitted 取 7 位数 9999999，覆盖千万字级，给预算预留够）
-_OMIT_PAD = len(_OMIT_PLACEHOLDER.format(n=9999999))
+_OMIT_PAD = len(OMIT_PLACEHOLDER.format(n=9999999))
 # 句末/分句边界，最后一段放不下时在这些边界截断（按优先级从前到后）
 _SENTENCE_SEPS = ("。", "\n", "；", ";", ".", "!", "?", "！", "？")
 
 
-def _split_paragraphs(content: str) -> list[str]:
+def split_paragraphs(content: str) -> list[str]:
     """按空行把 content 切成段落列表，过滤纯空白段。无空行 → 单元素列表。"""
     return [p for p in _PARA_SPLIT.split(content) if p.strip()]
 
 
-def _is_source_para(para: str) -> bool:
+def is_source_para(para: str) -> bool:
     """段落是否是尾部来源引用（以「来源/Source/参考」等开头，不区分大小写）。"""
     head = para.lstrip().lower()[:24]
     return any(head.startswith(p) for p in _SOURCE_PREFIXES)
 
 
-def _truncate_at_sentence(text: str, budget: int) -> str:
+def truncate_at_sentence(text: str, budget: int) -> str:
     """在 budget 字符内、最近的句末/换行边界处截断；无标点则硬截 budget。
 
     保证返回长度 <= budget，且不从一句话/一个词中间砍断。
@@ -86,7 +86,7 @@ def _cap_head_tail(content: str, max_chars: int) -> str:
     omitted = len(content) - max_chars
     avail = max_chars
     while True:
-        placeholder = _OMIT_PLACEHOLDER.format(n=omitted)
+        placeholder = OMIT_PLACEHOLDER.format(n=omitted)
         avail = max_chars - len(placeholder)
         if avail <= 0:
             return content[:max_chars]
@@ -116,7 +116,7 @@ def cap_tool_result(content: str, max_chars: int) -> str:
     if max_chars <= 0 or len(content) <= max_chars:
         return content
 
-    paras = _split_paragraphs(content)
+    paras = split_paragraphs(content)
     if len(paras) <= 1:
         # 无段落边界 → 头尾各半（旧行为，零回归）
         return _cap_head_tail(content, max_chars)
@@ -124,7 +124,7 @@ def cap_tool_result(content: str, max_chars: int) -> str:
     # 尾部连续来源段优先保留（从末段往前扫，遇到非来源段即停）
     tail_idx = len(paras)
     for i in range(len(paras) - 1, -1, -1):
-        if _is_source_para(paras[i]):
+        if is_source_para(paras[i]):
             tail_idx = i
         else:
             break
@@ -151,14 +151,14 @@ def cap_tool_result(content: str, max_chars: int) -> str:
         else:
             remain = budget - used
             if remain > 0:
-                snippet = _truncate_at_sentence(p, remain)
+                snippet = truncate_at_sentence(p, remain)
                 if snippet:
                     kept.append(snippet)
             break
     head_text = "\n\n".join(kept)
 
     omitted = len(content) - len(head_text) - len(tail_text)
-    omit_str = _OMIT_PLACEHOLDER.format(n=max(omitted, 0))
+    omit_str = OMIT_PLACEHOLDER.format(n=max(omitted, 0))
 
     chunks = [c for c in (head_text, omit_str, tail_text) if c]
     result = "\n\n".join(chunks)
@@ -169,7 +169,7 @@ def cap_tool_result(content: str, max_chars: int) -> str:
     return result
 
 
-def _split_turns(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+def split_turns(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     """按 assistant-with-tool_calls 边界把 messages 切成「轮」。
 
     一轮 = 一个 assistant(tool_calls) + 其后所有 role=tool 结果（直到下一个 assistant）。
@@ -207,7 +207,7 @@ def mask_old_observations(
     """
     if token_estimate(messages) <= soft_trigger:
         return 0
-    turns = _split_turns(messages)
+    turns = split_turns(messages)
     if len(turns) <= 1:
         return 0
     # 最近 keep_recent_turns 轮保真；切片特判 0（=全掩码，但 mask 只动 tool，最终答案不受影响）
@@ -228,7 +228,7 @@ def mask_old_observations(
     return masked_turns
 
 
-async def _summarize_masked_text(masked_text: str, model: str) -> str:
+async def summarize_masked_text(masked_text: str, model: str) -> str:
     """用 fast LLM 把被掩码的多轮工具结果压成摘要。失败返回空串（降级，不阻塞 loop）。"""
     from core.llm.llm import chat_complete
     try:
@@ -275,7 +275,7 @@ async def apply(messages: list[dict[str, Any]], model: str) -> int:
 
     # hybrid 兜底摘要：被掩码轮数达阈值时，把摘要塞进首个被掩码位（结构不变，仅改 content）
     if cfg.summary_enabled and masked_turns >= cfg.summary_threshold and masked_originals:
-        summary = await _summarize_masked_text("\n\n".join(masked_originals)[:20000], model)
+        summary = await summarize_masked_text("\n\n".join(masked_originals)[:20000], model)
         if summary:
             for m in messages:
                 if m.get("content") == _MASK_MARKER:
@@ -322,7 +322,7 @@ async def _summarize_old_turns(
     每轮一次 LLM 调用（extra cost）：摘要塞回该轮首个 tool 消息，其余置占位以保持
     tool_call_id 结构不破坏。返回 LLM 调用次数。
     """
-    turns = _split_turns(messages)
+    turns = split_turns(messages)
     if len(turns) <= keep_recent_turns:
         return 0
     older = turns[:-keep_recent_turns] if keep_recent_turns > 0 else turns
@@ -332,7 +332,7 @@ async def _summarize_old_turns(
         if not tool_msgs:
             continue
         joined = "\n\n".join(str(m["content"]) for m in tool_msgs)[:20000]
-        summary = await _summarize_masked_text(joined, model)
+        summary = await summarize_masked_text(joined, model)
         calls += 1
         if summary:
             tool_msgs[0]["content"] = f"[早期工具结果摘要] {summary}"
@@ -349,7 +349,7 @@ async def apply_arm(messages: list[dict[str, Any]], model: str, arm: str) -> int
     - summary_only：窗口外每轮 tool 结果 LLM 摘要塞回（不掩码），测 H2
     - hybrid：先掩码，被掩码轮数≥阈值才整体摘要（论文最优组合）
 
-    masking/hybrid 复用现有 mask_old_observations/_summarize_masked_text；raw/summary_only
+    masking/hybrid 复用现有 mask_old_observations/summarize_masked_text；raw/summary_only
     为评测新增。就地修改 messages。
     """
     cfg = get_settings().context_policy
@@ -367,7 +367,7 @@ async def apply_arm(messages: list[dict[str, Any]], model: str, arm: str) -> int
             messages, cfg.keep_recent_turns, soft_trigger, masked_originals,
         )
         if masked_turns >= cfg.summary_threshold and masked_originals:
-            summary = await _summarize_masked_text(
+            summary = await summarize_masked_text(
                 "\n\n".join(masked_originals)[:20000], model
             )
             if summary:
