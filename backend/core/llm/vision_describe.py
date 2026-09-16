@@ -89,9 +89,7 @@ async def describe_image_attachments(
     )
 
     cfg = retry_config if retry_config is not None else RetryConfig()
-    # vision 专属熔断器（按 vision_model 注册，独立于对话主链路各 binding——M-21：
-    # 视觉描述是可降级剥图的辅助链路，失败不该打开对话熔断器；并入全局注册表 →
-    # 统一吃 settings、/health/detailed 可见、运维 reset 覆盖）
+    # vision 专属熔断器（M-21 理由见上 docstring）；并入全局注册表吃 settings/health/reset
     breaker = get_llm_circuit_breaker(f"vision:{vision_model}")
 
     descriptions: list[str] = []

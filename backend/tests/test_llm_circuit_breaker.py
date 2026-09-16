@@ -79,35 +79,35 @@ async def _open_breaker(cb: CircuitBreaker) -> None:
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize(
-    ("exc_factory", "expected"),
+    ("exc", "expected"),
     [
         # 异常类型：连接失败/超时/限流——openai 树 + httpx 树 + 内建超时
-        pytest.param(lambda: openai.APIConnectionError(message="conn", request=_REQ), True, id="openai.APIConnectionError"),
-        pytest.param(lambda: openai.APITimeoutError(request=_REQ), True, id="openai.APITimeoutError"),
-        pytest.param(lambda: _status_exc(openai.RateLimitError, 429), True, id="openai.RateLimitError(429)"),
-        pytest.param(lambda: _status_exc(openai.InternalServerError, 500), True, id="openai.InternalServerError(500)"),
-        pytest.param(lambda: _status_exc(openai.InternalServerError, 503), True, id="openai.InternalServerError(503)"),
-        pytest.param(lambda: httpx.ConnectError("connection refused"), True, id="httpx.ConnectError"),
-        pytest.param(lambda: httpx.ConnectTimeout("timed out"), True, id="httpx.ConnectTimeout"),
-        pytest.param(lambda: TimeoutError("async timeout"), True, id="TimeoutError"),
+        pytest.param(openai.APIConnectionError(message="conn", request=_REQ), True, id="openai.APIConnectionError"),
+        pytest.param(openai.APITimeoutError(request=_REQ), True, id="openai.APITimeoutError"),
+        pytest.param(_status_exc(openai.RateLimitError, 429), True, id="openai.RateLimitError(429)"),
+        pytest.param(_status_exc(openai.InternalServerError, 500), True, id="openai.InternalServerError(500)"),
+        pytest.param(_status_exc(openai.InternalServerError, 503), True, id="openai.InternalServerError(503)"),
+        pytest.param(httpx.ConnectError("connection refused"), True, id="httpx.ConnectError"),
+        pytest.param(httpx.ConnectTimeout("timed out"), True, id="httpx.ConnectTimeout"),
+        pytest.param(TimeoutError("async timeout"), True, id="TimeoutError"),
         # 状态码：APIStatusError / HTTPStatusError 同口径——408/429/≥500 计，其余 4xx 不计
-        pytest.param(lambda: _status_exc(openai.BadRequestError, 400), False, id="openai.BadRequestError(400)"),
-        pytest.param(lambda: _status_exc(openai.AuthenticationError, 401), False, id="openai.AuthenticationError(401)"),
-        pytest.param(lambda: _status_exc(openai.NotFoundError, 404), False, id="openai.NotFoundError(404)"),
-        pytest.param(lambda: httpx.HTTPStatusError("bad request", request=_REQ, response=_resp(400)), False, id="httpx.HTTPStatusError(400)"),
-        pytest.param(lambda: httpx.HTTPStatusError("timeout", request=_REQ, response=_resp(408)), True, id="httpx.HTTPStatusError(408)"),
-        pytest.param(lambda: httpx.HTTPStatusError("bad gateway", request=_REQ, response=_resp(502)), True, id="httpx.HTTPStatusError(502)"),
+        pytest.param(_status_exc(openai.BadRequestError, 400), False, id="openai.BadRequestError(400)"),
+        pytest.param(_status_exc(openai.AuthenticationError, 401), False, id="openai.AuthenticationError(401)"),
+        pytest.param(_status_exc(openai.NotFoundError, 404), False, id="openai.NotFoundError(404)"),
+        pytest.param(httpx.HTTPStatusError("bad request", request=_REQ, response=_resp(400)), False, id="httpx.HTTPStatusError(400)"),
+        pytest.param(httpx.HTTPStatusError("timeout", request=_REQ, response=_resp(408)), True, id="httpx.HTTPStatusError(408)"),
+        pytest.param(httpx.HTTPStatusError("bad gateway", request=_REQ, response=_resp(502)), True, id="httpx.HTTPStatusError(502)"),
         # 未知异常兜底：文案命中可重试关键词 → 计入；其余不计（宁漏勿误）
-        pytest.param(lambda: RuntimeError("429 Too Many Requests"), True, id="keyword:429"),
-        pytest.param(lambda: RuntimeError("Connection reset by peer"), True, id="keyword:connection"),
-        pytest.param(lambda: RuntimeError("401 unauthorized"), False, id="keyword:none(401)"),
-        pytest.param(lambda: RuntimeError("invalid image format"), False, id="keyword:none(biz)"),
+        pytest.param(RuntimeError("429 Too Many Requests"), True, id="keyword:429"),
+        pytest.param(RuntimeError("Connection reset by peer"), True, id="keyword:connection"),
+        pytest.param(RuntimeError("401 unauthorized"), False, id="keyword:none(401)"),
+        pytest.param(RuntimeError("invalid image format"), False, id="keyword:none(biz)"),
     ],
 )
-def test_classify_failure_table(exc_factory, expected):
+def test_classify_failure_table(exc, expected):
     """分类表：供应商侧故障计入；调用方错误（400/401/404——换个请求照样成功）
     不计，熔断它们只会误伤健康供应商。"""
-    assert classify_failure(exc_factory()) is expected
+    assert classify_failure(exc) is expected
 
 
 # ---------------------------------------------------------------------------

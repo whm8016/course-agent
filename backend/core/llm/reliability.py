@@ -102,8 +102,12 @@ class CircuitBreakerConfig:
     half_open_success_needed: int = 2    # 合闸（HALF_OPEN→CLOSED）所需成功次数
 
 
-def _status_of(exc: Exception) -> int | None:
-    """提取异常的 HTTP 状态码（openai SDK / httpx / 任何带 status_code 或 response 属性的异常）。"""
+def status_of(exc: Exception) -> int | None:
+    """提取异常的 HTTP 状态码（openai SDK / httpx / 任何带 status_code 或 response 属性的异常）。
+
+    公开给跨模块消费（loop._is_context_length_error 沿因果链查 413 同用此提取），
+    是全仓异常状态码提取的单一真相源。
+    """
     status = (
         getattr(exc, 'status_code', None)
         or getattr(getattr(exc, 'response', None), 'status_code', None)
@@ -130,7 +134,7 @@ def classify_failure(exc: Exception) -> bool:
         return True
     # 2. 状态码：openai.APIStatusError / httpx.HTTPStatusError 及任何带状态码的异常。
     #    openai.InternalServerError(≥500) 在此覆盖；4xx 里 408/429 视为供应商侧。
-    status = _status_of(exc)
+    status = status_of(exc)
     if status is not None:
         return status >= 500 or status in (408, 429)
     # 3. 未知异常兜底：文案命中可重试关键词（timeout/connection/…）视为供应商侧；
@@ -144,7 +148,7 @@ def _is_retryable(exc: Exception, config: RetryConfig) -> bool:
     error_str = str(exc).lower()
     if any(kw in error_str for kw in _RETRYABLE_KEYWORDS):
         return True
-    status = _status_of(exc)
+    status = status_of(exc)
     return status is not None and status in config.retryable_status_codes
 
 

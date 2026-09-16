@@ -22,9 +22,9 @@ from core.llm.reliability import (
     CircuitBreaker,
     CircuitOpenError,
     LLMRetryError,
+    LLM_SERVICE_UNAVAILABLE,
     RetryConfig,
     get_llm_circuit_breaker,
-    llm_user_message,
     with_retry_and_circuit,
 )
 from core.llm.loadtest_mock import maybe_loadtest_mock_stream
@@ -380,7 +380,9 @@ async def chat_complete(
 
     except (CircuitOpenError, LLMRetryError) as e:
         logger.warning("chat_complete: primary+fallback 均失败: %s", e)
-        raise RuntimeError(llm_user_message(e) or str(e)) from e
+        # except 已把类型收窄为这两种，文案必命中常量（llm_user_message 的 or 回退
+        # 只服务于 turn_runtime 的宽 except Exception 边界，那里回退是活分支）
+        raise RuntimeError(LLM_SERVICE_UNAVAILABLE) from e
 
 
 # ============================================================
