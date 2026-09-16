@@ -479,11 +479,7 @@ class TurnRuntimeManager:
                     return False
             else:
                 # 跨 worker：本地无 execution，回落 Redis owner key 做 IDOR 校验
-                owner = await reply_channel.get_turn_owner(turn_id)
-                if not owner or str(owner) != str(user_id):
-                    logger.warning(
-                        "TurnRuntime: submit_user_reply turn_id=%s 跨 worker 归属不符/不存在", turn_id
-                    )
+                if not await self._cross_worker_owner_ok(turn_id, user_id, "submit_user_reply"):
                     return False
         payload: dict = {"text": text or "", "answers": answers, "outline": outline}
         await reply_channel.push_reply(turn_id, payload)
@@ -551,15 +547,10 @@ class TurnRuntimeManager:
                 turn_id,
             )
             return False
-        # 本地无 execution：跨 worker（或已彻底过期）。仿 submit_user_reply 的 owner key 校验。
-        if user_id is not None:
-            owner = await reply_channel.get_turn_owner(turn_id)
-            if not owner or str(owner) != str(user_id):
-                logger.warning(
-                    "TurnRuntime: request_answer_now turn_id=%s 跨 worker 归属不符/不存在",
-                    turn_id,
-                )
-                return False
+        # 本地无 execution：跨 worker（或已彻底过期）。owner key 校验与 submit_user_reply
+        # 共用 _cross_worker_owner_ok（跨 worker IDOR 比对口径单一真相源）。
+        if not await self._cross_worker_owner_ok(turn_id, user_id, "request_answer_now"):
+            return False
         ok = await reply_channel.set_answer_now(turn_id)
         if ok:
             log_flow("turn.answer_now", turn_id=turn_id, cross_worker=True)
@@ -575,6 +566,23 @@ class TurnRuntimeManager:
         if user_id is None:
             return True
         return str(execution.context.user_id or "") == str(user_id)
+
+    @staticmethod
+    async def _cross_worker_owner_ok(turn_id: str, user_id: str | None, action: str) -> bool:
+        """跨 worker 归属判定（submit_user_reply / request_answer_now 共用）：本地
+        _executions miss 时回落 Redis owner key（ca:turn:owner:{turn_id}）比对——与
+        _turn_belongs_to 构成归属校验的「跨 worker 半边」，比对口径（str 强转 + 空
+        owner 拒绝）单一真相源。未提供 user_id 一律放行，口径与 _turn_belongs_to 一致；
+        action 仅用于日志文案。"""
+        if user_id is None:
+            return True
+        owner = await reply_channel.get_turn_owner(turn_id)
+        if not owner or str(owner) != str(user_id):
+            logger.warning(
+                "TurnRuntime: %s turn_id=%s 跨 worker 归属不符/不存在", action, turn_id
+            )
+            return False
+        return True
 
     # ------------------------------------------------------------------
     # 内部实现
@@ -753,8 +761,8 @@ class TurnRuntimeManager:
                 # （≤_ANSWER_NOW_POLL_S）退出并自行吞 CancelledError。cleanup → pop →
                 # cancel 三条同步语句间无 await，不存在「pop 后、cancel 前插入 request」
                 # 的窗口。
-                if answer_now_watcher is not None and not answer_now_watcher.done():
-                    answer_now_watcher.cancel()
+                if answer_now_watcher is not None:
+                    answer_now_watcher.cancel()  # 对已完成的 task 是 no-op
 
                 # 服务端权威回合日志：落 user/assistant 两行（幂等 by turn_id，含取消/错误轮）。
                 # 必须先于 bus.close()——API 层（chat.py SSE finally / run.py 尾部）在订阅流

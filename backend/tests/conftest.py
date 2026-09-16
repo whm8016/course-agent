@@ -197,3 +197,21 @@ class FakeAnthropicClient:
 def anthropic_fake_client_cls():
     """跨文件共享的 Anthropic 流式假件类（conftest 非 fixture 符号无法 import，故挂 fixture）。"""
     return FakeAnthropicClient
+
+
+@pytest.fixture
+def use_redis(monkeypatch):
+    """钉 reply_channel 的 Redis 客户端状态（None=不可用 / Fake 实例=可控 Redis）。
+
+    reply_channel._redis/_redis_checked 是懒加载私有协议，须同时打两个字段才生效，
+    集中挂 fixture 防止散落各测试文件漂移（conftest 非 fixture 符号无法 import，故挂
+    fixture）。注意 conftest 的 DB__REDIS_URL=memory:// 是 setdefault，开发机 shell
+    导出真实值会穿透——涉 Redis 路径的用例须显式 use_redis(...) 钉死。返回 _pin(value)。
+    """
+    import services.session.reply_channel as rc
+
+    def _pin(value):
+        monkeypatch.setattr(rc, "_redis_checked", True)
+        monkeypatch.setattr(rc, "_redis", value)
+
+    return _pin

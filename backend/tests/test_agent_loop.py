@@ -765,17 +765,15 @@ async def test_done_usage_collected_flag(ctx, bus, has_usage):
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_request_answer_now_boundary(monkeypatch):
+async def test_request_answer_now_boundary(use_redis):
     """request_answer_now：未知 turn_id 返回 False；已注册 event set 后返回 True。"""
     import asyncio
 
-    import services.session.reply_channel as rc
     from services.session.turn_runtime import TurnRuntimeManager
 
-    # 防御钉死 Redis 为不可用：conftest 钉 memory:// 是 setdefault，开发机 shell 导出真实
-    # REDIS_URL 时会被绕过——新路径下未知 turn（user_id=None）会真去 SET flag 并返回 True
-    monkeypatch.setattr(rc, "_redis_checked", True)
-    monkeypatch.setattr(rc, "_redis", None)
+    # 钉死 Redis 不可用（见 conftest.use_redis 的 setdefault 穿透说明）：新路径下
+    # 未知 turn（user_id=None）会真去 SET flag 并返回 True，须如实 False
+    use_redis(None)
 
     mgr = TurnRuntimeManager()
     # 未知 turn_id（turn 不存在或已结束）

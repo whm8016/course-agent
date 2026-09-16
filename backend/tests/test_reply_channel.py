@@ -58,25 +58,19 @@ class _FakeRedis:
         return self._kv.get(key)
 
 
-def _use(monkeypatch, redis_value) -> None:
-    """强制 reply_channel._redis_client() 返回 redis_value（None=走进程内回退）。"""
-    monkeypatch.setattr(rc, "_redis_checked", True)
-    monkeypatch.setattr(rc, "_redis", redis_value)
-
-
 @pytest.mark.asyncio
-async def test_redis_path_push_then_wait(monkeypatch):
+async def test_redis_path_push_then_wait(use_redis):
     """Redis 路径：push 后 wait 收到同一 payload（_FakeRedis 共享态=跨进程投递）。"""
-    _use(monkeypatch, _FakeRedis())
+    use_redis(_FakeRedis())
     await rc.push_reply("t_redis", {"text": "你好", "answers": None})
     got = await rc.wait_reply("t_redis", timeout=1)
     assert got == {"text": "你好", "answers": None}
 
 
 @pytest.mark.asyncio
-async def test_redis_path_wait_blocks_until_push(monkeypatch):
+async def test_redis_path_wait_blocks_until_push(use_redis):
     """waiter 先阻塞，另一任务 push 后被唤醒（真 BLPOP 阻塞→唤醒语义）。"""
-    _use(monkeypatch, _FakeRedis())
+    use_redis(_FakeRedis())
     out: dict = {}
 
     async def _wait():
@@ -91,9 +85,9 @@ async def test_redis_path_wait_blocks_until_push(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fallback_when_redis_unavailable(monkeypatch):
+async def test_fallback_when_redis_unavailable(monkeypatch, use_redis):
     """Redis 不可用（None）→ 回退进程内队列，同进程 push/wait 仍通。"""
-    _use(monkeypatch, None)
+    use_redis(None)
     monkeypatch.setattr(rc, "_fallback_queues", {})  # 隔离本测试
     await rc.push_reply("t_fb", {"text": "x"})
     got = await rc.wait_reply("t_fb", timeout=1)
@@ -101,11 +95,11 @@ async def test_fallback_when_redis_unavailable(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_owner_key_idor(monkeypatch):
+async def test_owner_key_idor(monkeypatch, use_redis):
     """跨 worker submit_user_reply：本地无 _executions，按 owner key 比对；他人/未知被拒。"""
     from services.session.turn_runtime import TurnRuntimeManager
 
-    _use(monkeypatch, None)  # owner/reply 都走进程内回退
+    use_redis(None)  # owner/reply 都走进程内回退
     monkeypatch.setattr(rc, "_fallback_owners", {})
     monkeypatch.setattr(rc, "_fallback_queues", {})
 
@@ -125,10 +119,10 @@ async def test_owner_key_idor(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_answer_now_flag_roundtrip(monkeypatch):
+async def test_answer_now_flag_roundtrip(use_redis):
     """answer_now 标志位：set→True、check→True、未知 id→False；键名/值/TTL 符合约定。"""
     fake = _FakeRedis()
-    _use(monkeypatch, fake)
+    use_redis(fake)
     assert await rc.set_answer_now("t_ans") is True
     assert await rc.check_answer_now("t_ans") is True
     assert await rc.check_answer_now("t_ans_other") is False
@@ -137,28 +131,28 @@ async def test_answer_now_flag_roundtrip(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_answer_now_flag_no_redis_returns_false(monkeypatch):
+async def test_answer_now_flag_no_redis_returns_false(use_redis):
     """无 Redis（memory://）→ set/check 均 False，无进程内回退（同进程路径已由本地 ev.set 覆盖）。"""
-    _use(monkeypatch, None)
+    use_redis(None)
     assert await rc.set_answer_now("t_noredis") is False
     assert await rc.check_answer_now("t_noredis") is False
 
 
 @pytest.mark.asyncio
-async def test_redis_available_predicate(monkeypatch):
+async def test_redis_available_predicate(use_redis):
     """redis_available()：配置了真实 Redis → True；None → False。"""
-    _use(monkeypatch, _FakeRedis())
+    use_redis(_FakeRedis())
     assert rc.redis_available() is True
-    _use(monkeypatch, None)
+    use_redis(None)
     assert rc.redis_available() is False
 
 
 @pytest.mark.asyncio
-async def test_answer_now_cross_worker_owner_three_states(monkeypatch):
+async def test_answer_now_cross_worker_owner_three_states(use_redis):
     """跨 worker request_answer_now：本地无 _executions，按 owner key 比对；他人被拒且拒绝发生在 SET 之前。"""
     from services.session.turn_runtime import TurnRuntimeManager
 
-    _use(monkeypatch, _FakeRedis())
+    use_redis(_FakeRedis())
     await rc.set_turn_owner("t_x", "userA")
 
     mgr = TurnRuntimeManager()  # _executions 空 → 模拟 turn 在另一 worker
@@ -176,14 +170,14 @@ async def test_answer_now_cross_worker_owner_three_states(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_answer_now_dead_turn_execution_window(monkeypatch):
+async def test_answer_now_dead_turn_execution_window(use_redis):
     """死 turn 短路：execution 在（300s 回放窗内）而 ev 已清 → 即使归属本人、即使 Redis 可用也 False，
     且不得落入 Redis 路径（不置 flag）——否则跨 worker 会比修复前同 worker 更谎报 200。"""
     from types import SimpleNamespace
 
     from services.session.turn_runtime import TurnRuntimeManager
 
-    _use(monkeypatch, _FakeRedis())
+    use_redis(_FakeRedis())
     mgr = TurnRuntimeManager()
     mgr._executions["t_dead"] = SimpleNamespace(context=SimpleNamespace(user_id="uA"))
     assert await mgr.request_answer_now("t_dead", user_id="uA") is False
@@ -193,15 +187,18 @@ async def test_answer_now_dead_turn_execution_window(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_answer_now_same_worker_fast_path_skips_redis(monkeypatch):
-    """同 worker 快路径：ev 命中直接 set，不写 Redis 标志。"""
-    import asyncio
+async def test_answer_now_same_worker_fast_path_and_idor(use_redis):
+    """同 worker：① 快路径——ev 命中直接 set，不写 Redis 标志；② IDOR——归属不符
+    则拒绝且 ev 不被置，钉住「归属校验在 ev 检查之前」的分支序（防 B 用户直连
+    set A 的本地 ev）。"""
     from types import SimpleNamespace
 
     from services.session.turn_runtime import TurnRuntimeManager
 
-    _use(monkeypatch, _FakeRedis())
+    use_redis(_FakeRedis())
     mgr = TurnRuntimeManager()
+
+    # ① 快路径：本人触发
     mgr._executions["t_fast"] = SimpleNamespace(context=SimpleNamespace(user_id="uA"))
     ev = asyncio.Event()
     mgr._answer_now_events["t_fast"] = ev
@@ -209,65 +206,47 @@ async def test_answer_now_same_worker_fast_path_skips_redis(monkeypatch):
     assert ev.is_set() is True
     assert await rc.check_answer_now("t_fast") is False
 
-
-@pytest.mark.asyncio
-async def test_answer_now_same_worker_idor(monkeypatch):
-    """同 worker IDOR：execution+ev 都在但归属不符 → False 且 ev 不被置——钉住
-    「归属校验在 ev 检查之前」的分支序（防 B 用户直连 set A 的本地 ev）。"""
-    import asyncio
-    from types import SimpleNamespace
-
-    from services.session.turn_runtime import TurnRuntimeManager
-
-    _use(monkeypatch, _FakeRedis())
-    mgr = TurnRuntimeManager()
+    # ② IDOR：B 用户对 A 的 turn
     mgr._executions["t_idor2"] = SimpleNamespace(context=SimpleNamespace(user_id="uA"))
-    ev = asyncio.Event()
-    mgr._answer_now_events["t_idor2"] = ev
+    ev2 = asyncio.Event()
+    mgr._answer_now_events["t_idor2"] = ev2
     assert await mgr.request_answer_now("t_idor2", user_id="uB") is False
-    assert ev.is_set() is False
+    assert ev2.is_set() is False
     assert await rc.check_answer_now("t_idor2") is False
 
 
 @pytest.mark.asyncio
-async def test_answer_now_watcher_sets_local_event(monkeypatch):
+async def test_answer_now_watcher_sets_local_event(monkeypatch, use_redis):
     """watcher：Redis flag 置位后置本地 ev，随后自退（退出途①）。"""
-    import asyncio
-
     import services.session.turn_runtime as trt
-    from services.session.turn_runtime import TurnRuntimeManager
 
     monkeypatch.setattr(trt, "_ANSWER_NOW_POLL_S", 0.05)
-    _use(monkeypatch, _FakeRedis())
-    mgr = TurnRuntimeManager()
+    use_redis(_FakeRedis())
+    mgr = trt.TurnRuntimeManager()
     ev = asyncio.Event()
     watcher = asyncio.create_task(mgr._watch_answer_now_flag("t_w", ev))
     await asyncio.sleep(0.1)  # 让 watcher 先空转一轮
     await rc.set_answer_now("t_w")
     await asyncio.wait_for(ev.wait(), 1)
     await asyncio.wait_for(watcher, 1)  # 置位后自退
-    assert watcher.done()
 
 
 @pytest.mark.asyncio
-async def test_answer_now_watcher_exit_and_cancel(monkeypatch):
+async def test_answer_now_watcher_exit_and_cancel(monkeypatch, use_redis):
     """watcher 退出：本地 ev 已置 → while 不成立自退（退出途②）；sleep 中 cancel → 吞
     CancelledError 正常返回（退出途③，无未检索异常）。"""
-    import asyncio
-
     import services.session.turn_runtime as trt
-    from services.session.turn_runtime import TurnRuntimeManager
 
     monkeypatch.setattr(trt, "_ANSWER_NOW_POLL_S", 0.05)
-    _use(monkeypatch, _FakeRedis())
-    mgr = TurnRuntimeManager()
+    use_redis(_FakeRedis())
+    mgr = trt.TurnRuntimeManager()
 
     # ① 直连路径置 ev → watcher 自退
     ev1 = asyncio.Event()
     w1 = asyncio.create_task(mgr._watch_answer_now_flag("t_w1", ev1))
     ev1.set()
     await asyncio.wait_for(w1, 1)
-    assert w1.done()
+    assert w1.cancelled() is False
 
     # ② sleep 中 cancel → 正常返回（CancelledError 被吞）
     ev2 = asyncio.Event()
