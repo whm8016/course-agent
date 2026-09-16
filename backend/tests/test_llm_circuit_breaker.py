@@ -51,10 +51,8 @@ def _fast_cb(
     *,
     window: int = 4,
     minimum_calls: int = 2,
-    rate: float = 0.5,
     open_timeout: float = 0.0,
     probes: int = 3,
-    success_needed: int = 2,
 ) -> CircuitBreaker:
     """小阈值快速触发的熔断器（open_timeout=0 → OPEN 后下一次调用即转 HALF_OPEN）。"""
     return CircuitBreaker(
@@ -62,67 +60,54 @@ def _fast_cb(
         config=CircuitBreakerConfig(
             window_size=window,
             minimum_calls=minimum_calls,
-            failure_rate_threshold=rate,
             open_timeout=open_timeout,
             half_open_probes=probes,
-            half_open_success_needed=success_needed,
         ),
     )
 
 
-async def _open_breaker(cb: CircuitBreaker, n: int = 2) -> None:
-    """灌 n 次计入失败的调用把熔断器打 OPEN。"""
-    for _ in range(n):
+async def _open_breaker(cb: CircuitBreaker) -> None:
+    """灌 2 次计入失败的调用把熔断器打 OPEN（minimum_calls=2 口径）。"""
+    for _ in range(2):
         await cb.before_call()
         await cb.record_failure(RuntimeError("503 Service Unavailable"))
     assert cb.state is CircuitState.OPEN
 
 
 # ---------------------------------------------------------------------------
-# 1. classify_failure 错误分类表
+# 1. classify_failure 错误分类表（参数化：供应商侧计入 / 调用方错误不计 / 关键词兜底）
 # ---------------------------------------------------------------------------
 
-
-def test_classify_provider_side_failures_counted():
-    """供应商侧故障全部计入：连接/超时/限流/5xx。"""
-    assert classify_failure(openai.APIConnectionError(message="conn", request=_REQ))
-    assert classify_failure(openai.APITimeoutError(request=_REQ))
-    assert classify_failure(_status_exc(openai.RateLimitError, 429))
-    assert classify_failure(_status_exc(openai.InternalServerError, 500))
-    assert classify_failure(_status_exc(openai.InternalServerError, 503))
-    # openai 树之外：httpx 传输层 + 内建超时（3.11+ asyncio.TimeoutError 即它）
-    assert classify_failure(httpx.ConnectError("connection refused"))
-    assert classify_failure(httpx.ConnectTimeout("timed out"))
-    assert classify_failure(TimeoutError("async timeout"))
-
-
-def test_classify_client_side_errors_ignored():
-    """调用方错误不计入：400/401/404 换个请求照样成功，熔断只会误伤健康供应商。"""
-    assert not classify_failure(_status_exc(openai.BadRequestError, 400))
-    assert not classify_failure(_status_exc(openai.AuthenticationError, 401))
-    assert not classify_failure(_status_exc(openai.NotFoundError, 404))
-    # httpx.HTTPStatusError 按状态码同口径：400 不计 / 502 计
-    assert not classify_failure(
-        httpx.HTTPStatusError("bad request", request=_REQ, response=_resp(400))
-    )
-    assert classify_failure(
-        httpx.HTTPStatusError("bad gateway", request=_REQ, response=_resp(502))
-    )
-
-
-def test_classify_unknown_exception_keyword_fallback():
-    """未知异常兜底：文案命中可重试关键词 → 计入；其余不计（宁漏勿误）。"""
-    assert classify_failure(RuntimeError("429 Too Many Requests"))
-    assert classify_failure(RuntimeError("Connection reset by peer"))
-    assert not classify_failure(RuntimeError("401 unauthorized"))
-    assert not classify_failure(RuntimeError("invalid image format"))
-
-
-def test_classify_408_counts_as_provider_side():
-    """408 请求超时按供应商侧计入（litellm 同口径）。"""
-    assert classify_failure(
-        httpx.HTTPStatusError("timeout", request=_REQ, response=_resp(408))
-    )
+@pytest.mark.parametrize(
+    ("exc_factory", "expected"),
+    [
+        # 异常类型：连接失败/超时/限流——openai 树 + httpx 树 + 内建超时
+        pytest.param(lambda: openai.APIConnectionError(message="conn", request=_REQ), True, id="openai.APIConnectionError"),
+        pytest.param(lambda: openai.APITimeoutError(request=_REQ), True, id="openai.APITimeoutError"),
+        pytest.param(lambda: _status_exc(openai.RateLimitError, 429), True, id="openai.RateLimitError(429)"),
+        pytest.param(lambda: _status_exc(openai.InternalServerError, 500), True, id="openai.InternalServerError(500)"),
+        pytest.param(lambda: _status_exc(openai.InternalServerError, 503), True, id="openai.InternalServerError(503)"),
+        pytest.param(lambda: httpx.ConnectError("connection refused"), True, id="httpx.ConnectError"),
+        pytest.param(lambda: httpx.ConnectTimeout("timed out"), True, id="httpx.ConnectTimeout"),
+        pytest.param(lambda: TimeoutError("async timeout"), True, id="TimeoutError"),
+        # 状态码：APIStatusError / HTTPStatusError 同口径——408/429/≥500 计，其余 4xx 不计
+        pytest.param(lambda: _status_exc(openai.BadRequestError, 400), False, id="openai.BadRequestError(400)"),
+        pytest.param(lambda: _status_exc(openai.AuthenticationError, 401), False, id="openai.AuthenticationError(401)"),
+        pytest.param(lambda: _status_exc(openai.NotFoundError, 404), False, id="openai.NotFoundError(404)"),
+        pytest.param(lambda: httpx.HTTPStatusError("bad request", request=_REQ, response=_resp(400)), False, id="httpx.HTTPStatusError(400)"),
+        pytest.param(lambda: httpx.HTTPStatusError("timeout", request=_REQ, response=_resp(408)), True, id="httpx.HTTPStatusError(408)"),
+        pytest.param(lambda: httpx.HTTPStatusError("bad gateway", request=_REQ, response=_resp(502)), True, id="httpx.HTTPStatusError(502)"),
+        # 未知异常兜底：文案命中可重试关键词 → 计入；其余不计（宁漏勿误）
+        pytest.param(lambda: RuntimeError("429 Too Many Requests"), True, id="keyword:429"),
+        pytest.param(lambda: RuntimeError("Connection reset by peer"), True, id="keyword:connection"),
+        pytest.param(lambda: RuntimeError("401 unauthorized"), False, id="keyword:none(401)"),
+        pytest.param(lambda: RuntimeError("invalid image format"), False, id="keyword:none(biz)"),
+    ],
+)
+def test_classify_failure_table(exc_factory, expected):
+    """分类表：供应商侧故障计入；调用方错误（400/401/404——换个请求照样成功）
+    不计，熔断它们只会误伤健康供应商。"""
+    assert classify_failure(exc_factory()) is expected
 
 
 # ---------------------------------------------------------------------------

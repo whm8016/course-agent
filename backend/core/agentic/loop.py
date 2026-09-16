@@ -33,7 +33,7 @@ from core.agentic.tool_dispatch import dispatch_tool_calls
 from core.agentic.types import DispatchOutcome, LoopOutcome, RoundResult, ToolCall
 from core.context import UnifiedContext
 from core.llm.llm import _create_with_image_fallback, client as _default_client
-from core.llm.reliability import get_llm_circuit_breaker
+from core.llm.reliability import _status_of, get_llm_circuit_breaker
 from core.llm.multimodal import prepare_multimodal_messages
 from core.observability import log_flow
 from core.observability.cost import (
@@ -390,10 +390,7 @@ def _is_context_length_error(exc: Exception) -> bool:
         msg = str(cur).lower()
         if any(kw in msg for kw in _CTX_LEN_KEYWORDS):
             return True
-        _status = (
-            getattr(cur, "status_code", None)
-            or getattr(getattr(cur, "response", None), "status_code", None)
-        )
+        _status = _status_of(cur)  # 状态码提取收编 reliability._status_of（单一真相源）
         if _status == 413:  # Request Entity Too Large
             return True
         seen.add(id(cur))

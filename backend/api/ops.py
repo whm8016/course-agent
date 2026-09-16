@@ -103,12 +103,10 @@ async def health_detailed():
             checks["llm"] = "ok (api_key configured)"
             # 熔断器按 binding 拆分：展示全部供应商状态；旧单数 key 读主 binding 状态
             #（主流量已不再注册 "default"，读它会永远 closed 造成假绿）
-            from settings import get_settings as _gs
-
             _cb_states = get_all_llm_circuit_states()
             details["llm_circuit_breakers"] = _cb_states
             details["llm_circuit_breaker"] = _cb_states.get(
-                _gs().llm.binding, "closed"
+                get_settings().llm.binding, "closed"
             )
         else:
             checks["llm"] = "error: DASHSCOPE_API_KEY not set"

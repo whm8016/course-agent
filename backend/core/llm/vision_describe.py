@@ -21,18 +21,6 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
-def _get_vision_circuit_breaker(vision_model: str) -> Any:
-    """取 vision 专属熔断器（按 vision_model 注册，与对话主链路各 binding 隔离）。
-
-    M-21：视觉描述是辅助链路（失败可降级剥图），用独立熔断器，避免视觉供应商波动把
-    对话熔断器打 OPEN。并入全局注册表（get_llm_circuit_breaker）：阈值统一吃
-    settings、进 /health/detailed、运维 reset 端点自动覆盖。
-    """
-    from core.llm.reliability import get_llm_circuit_breaker
-
-    return get_llm_circuit_breaker(f"vision:{vision_model}")
-
-
 # 让 vision 模型把图片转成可被纯文本回答模型利用的结构化描述。
 _VISION_DESC_PROMPT = (
     "请详细、准确地描述这张图片的内容。要求：\n"
@@ -96,12 +84,15 @@ async def describe_image_attachments(
         CircuitOpenError,
         LLMRetryError,
         RetryConfig,
+        get_llm_circuit_breaker,
         with_retry_and_circuit,
     )
 
     cfg = retry_config if retry_config is not None else RetryConfig()
-    # vision 专属熔断器：独立于对话主链路的全局 default 熔断器，避免视觉描述失败连累对话。
-    breaker = _get_vision_circuit_breaker(vision_model)
+    # vision 专属熔断器（按 vision_model 注册，独立于对话主链路各 binding——M-21：
+    # 视觉描述是可降级剥图的辅助链路，失败不该打开对话熔断器；并入全局注册表 →
+    # 统一吃 settings、/health/detailed 可见、运维 reset 覆盖）
+    breaker = get_llm_circuit_breaker(f"vision:{vision_model}")
 
     descriptions: list[str] = []
     for idx, att in enumerate(images):

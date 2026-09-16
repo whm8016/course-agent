@@ -260,9 +260,9 @@ class CircuitBreaker:
             self._half_open_inflight = 0
             self._half_open_successes = 0
         else:  # CLOSED：全新窗口，历史失败不拖累恢复后的判定
+            # （半开计数不在进 CLOSED 时清：唯一入口是 HALF_OPEN 的 record_success，
+            #  而下次进 HALF_OPEN 时 _transition 会先清零——在这清是死存储）
             self._window.clear()
-            self._half_open_inflight = 0
-            self._half_open_successes = 0
         logger.info("CircuitBreaker [%s]: %s -> %s", self.name, old.value, new_state.value)
         CIRCUIT_TRANSITIONS.labels(breaker=self.name, to=new_state.value).inc()
         self._emit_state()
@@ -302,6 +302,17 @@ class LLMRetryError(Exception):
         self.last_error = last_error
 
 
+def llm_user_message(exc: Exception) -> str | None:
+    """LLM 可靠性异常 → 统一用户文案；其它异常返回 None（调用方回退 str(exc)）。
+
+    异常类型→用户文案的映射住在异常定义旁边（知识内聚），各 SSE/错误发射边界
+    调这一个函数，不再各写一份 isinstance 列表（turn_runtime / chat_complete）。
+    """
+    if isinstance(exc, (CircuitOpenError, LLMRetryError)):
+        return LLM_SERVICE_UNAVAILABLE
+    return None
+
+
 async def with_retry_and_circuit(
     func,
     *args,
@@ -333,8 +344,7 @@ async def with_retry_and_circuit(
     last_error: Exception | None = None
 
     for attempt in range(config.max_retries + 1):
-        # 熔断检查在每次 attempt 前（而非整轮重试外）——旧实现整波耗尽才算一次失败，
-        # 阈值 5 要 ~60 次 HTTP 尝试才 OPEN，熔断被重试稀释成摆设
+        # per-attempt 熔断检查（语义与设计依据见模块 docstring「与旧实现的关键差异」）
         if circuit_breaker is not None:
             await circuit_breaker.before_call()
 
@@ -343,9 +353,6 @@ async def with_retry_and_circuit(
             if circuit_breaker is not None:
                 await circuit_breaker.record_success()
             return result
-        except CircuitOpenError:
-            # func 自身嵌套抛出的熔断拒绝：原样上抛，不再记失败（避免双重计数）
-            raise
         except Exception as e:
             last_error = e
             if circuit_breaker is not None:

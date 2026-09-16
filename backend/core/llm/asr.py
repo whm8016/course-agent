@@ -24,16 +24,6 @@ class TranscribeError(Exception):
     """转写失败（provider 异常 / 熔断 / 空文本）。端点转 502。"""
 
 
-def _get_asr_circuit_breaker(model: str) -> Any:
-    """ASR 专属熔断器（按 model 注册，与对话主链路各 binding 隔离——M-21 同款：
-    辅助链路失败不该打 OPEN 对话熔断器）。并入全局注册表：阈值统一吃 settings、
-    进 /health/detailed、运维 reset 端点自动覆盖。
-    """
-    from core.llm.reliability import get_llm_circuit_breaker
-
-    return get_llm_circuit_breaker(f"asr:{model}")
-
-
 async def resolve_asr_runtime(user_id: str = "") -> tuple[Any, str | None]:
     """解析 (asr_client, model)。model 空 = 功能关闭 → (None, None)（端点 503）。
 
@@ -95,17 +85,21 @@ async def transcribe_audio(
         CircuitOpenError,
         LLMRetryError,
         RetryConfig,
+        get_llm_circuit_breaker,
         with_retry_and_circuit,
     )
 
     try:
+        # ASR 专属熔断器（按 model 注册，与对话主链路各 binding 隔离——M-21 同款：
+        # 辅助链路失败不打开对话熔断器；并入全局注册表 → 统一吃 settings、
+        # /health/detailed 可见、运维 reset 覆盖）
         resp = await with_retry_and_circuit(
             client.audio.transcriptions.create,
             model=model,
             file=(filename, BytesIO(file_bytes), mime_type),
             language=language or None,
             retry_config=RetryConfig(),
-            circuit_breaker=_get_asr_circuit_breaker(model),
+            circuit_breaker=get_llm_circuit_breaker(f"asr:{model}"),
         )
     except (CircuitOpenError, LLMRetryError) as exc:
         raise TranscribeError(f"ASR provider 失败（熔断/重试耗尽）：{exc}") from exc
