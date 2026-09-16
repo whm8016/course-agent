@@ -280,6 +280,8 @@ def record_context_trim(
     summary_added: bool = False,
     dropped_preview: str | None = None,
     summary_text: str | None = None,
+    compacted_tokens: int = 0,
+    checkpoint_idx: int | None = None,
 ) -> None:
     """记录一次上下文裁剪（轮内 enforce / 回合前 plan_turn 裁剪）。
 
@@ -287,7 +289,9 @@ def record_context_trim(
     *之后* 发给模型的 messages，看不到这一步删了什么。挂在当前 turn run 下为子 run。
 
     dropped_preview/summary_text 补正文截断（此前只留计数/布尔，"压缩成了什么"在
-    LangSmith 上无从查证）；统一在此截断，调用方无需各自把关。
+    LangSmith 上无从查证）；统一在此截断，调用方无需各自把关。compacted_tokens/
+    checkpoint_idx 是单 pass 压缩 ②折叠的回收量与 <compacted> 位置（回合前裁剪不产
+    生，走默认值）。
     """
     if not _TRACING_ON:
         return  # 关态早退：调用方拼 preview/join 的开销在 _emit_trim_report 侧已省，这里再省 outputs 构建
@@ -302,6 +306,8 @@ def record_context_trim(
             "summary_added": summary_added,
             "dropped_preview": (dropped_preview or "")[:800],
             "summary_text": (summary_text or "")[:800],
+            "compacted_tokens": compacted_tokens,
+            "checkpoint_idx": checkpoint_idx,
         },
     )
 

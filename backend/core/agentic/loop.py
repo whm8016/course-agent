@@ -189,8 +189,9 @@ async def _one_round(
     # default 熔断器打 OPEN 误伤其他用户）。
     _circuit = None if llm_client is not None else _llm_circuit_breaker
     # 反应式兜底：估算失误（tokenizer 差异/多模态/工具结果突增）导致 provider 拒 context-length 时，
-    # 紧急 L3 丢最旧 20% 消息组后重试；连续失败达 max_consecutive_failures 熔断（不再无限重试烧钱）。
+    # 紧急丢最旧 20% 消息组后重试；连续失败达 max_consecutive_failures 熔断（不再无限重试烧钱）。
     # 对标 Claude Code Reactive Compact + MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES=3。
+    # 删消息后无需重置压缩状态：checkpoint（<compacted>）自居历史、enforce 每次重扫定位。
     _max_cf = get_settings().context_budget.max_consecutive_failures
     _ctx_len_failures = 0
     while True:
@@ -441,6 +442,8 @@ def _emit_trim_report(report: "EnforceReport", iteration: int) -> None:
             report.cleared_originals + report.dropped_originals
         ),
         summary_text=report.summary_text,
+        compacted_tokens=report.compacted_tokens,
+        checkpoint_idx=report.checkpoint_idx,
     )
 
 
@@ -570,7 +573,8 @@ async def run_agent_loop(
                     }]
                     # 2.2：answer_now 也要跑上下文裁剪——多轮工具跑完、上下文最胖时点"立即回答"，
                     # 原是唯一不裁剪的路径 -> 大概率直接 context length 400。先 enforce ans_messages
-                    # （与下方正常轮同口径：评测臂走 apply_arm，否则走级联 enforce）。
+                    # （与下方正常轮同口径：评测臂走 apply_arm，否则走单 pass 压缩 enforce）。
+                    # 浅拷贝语义：清墓碑经共享 dict 同步可见；折叠删消息只影响副本（终答即无后续消费者）。
                     _ans_arm = context_policy.current_arm()
                     if _ans_arm is not None:
                         await context_policy.apply_arm(ans_messages, model, _ans_arm)
@@ -609,8 +613,9 @@ async def run_agent_loop(
         is_final_round = iteration == max_iterations - 1
         schemas = None if is_final_round else tool_schemas
         # 防止多轮工具调用后 messages 总量超模型 context window。
-        # 两路收敛：contextvar 评测臂覆盖（raw/masking/summary_only/hybrid）-> 级联执行器。
-        # 级联 L1 清旧 tool 结果(免费)->L2 LLM 摘要->L3 丢最旧 20%；未超软阈值时 L1 noop（等价 raw）。
+        # 两路收敛：contextvar 评测臂覆盖（raw/masking/summary_only/hybrid）-> 单 pass 压缩执行器。
+        # ①清旧 tool 结果(免费)->②折叠进唯一 checkpoint(一次 LLM，替换非叠加)->③收缩循环(hard 兜底)；
+        # 未超软阈值时零干预（等价 raw）。
         arm = context_policy.current_arm()
         _round_cleared = 0
         _round_masked = 0
@@ -624,8 +629,9 @@ async def run_agent_loop(
                     context.metadata.get("_cp_extra_llm_calls", 0) + _extra
                 )
         else:
-            # 级联执行器（取代旧 coordinator/policy/snip 三路互斥）。tools=schemas：
-            # schema 是本轮请求的真实组成部分（最后一轮 schemas=None 对齐请求不带 tools）
+            # 单 pass 压缩执行器（取代旧 coordinator/policy/snip 三路互斥）。tools=schemas：
+            # schema 是本轮请求的真实组成部分（最后一轮 schemas=None 对齐请求不带 tools）。
+            # checkpoint 状态由 messages 自携带（<compacted> 自定位），无需在此穿 state
             from core.agentic.context_budget import enforce as _cb_enforce
             _trim_report = await _cb_enforce(
                 messages, model, context.metadata.get("_budget_plan"), tools=schemas

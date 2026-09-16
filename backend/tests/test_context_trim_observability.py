@@ -67,10 +67,17 @@ def test_record_context_trim_outputs_body_and_truncation(monkeypatch):
     assert outputs["dropped_tool_results"] == 2
     assert len(outputs["dropped_preview"]) == 800   # 统一截断，调用方无需把关
     assert len(outputs["summary_text"]) == 800
-    # 未传正文 -> 空串（老调用点行为兼容，不 KeyError）
+    # 单 pass 压缩 ②折叠字段：回收量与 checkpoint 位置透传
+    lt.record_context_trim(stage="in_turn", coordinator_enabled=True, iteration=1,
+                           compacted_tokens=123, checkpoint_idx=2)
+    assert recorded[1]["outputs"]["compacted_tokens"] == 123
+    assert recorded[1]["outputs"]["checkpoint_idx"] == 2
+    # 未传正文/折叠字段 -> 默认值（老调用点行为兼容，不 KeyError）
     lt.record_context_trim(stage="in_turn", coordinator_enabled=True, iteration=0)
-    assert recorded[1]["outputs"]["dropped_preview"] == ""
-    assert recorded[1]["outputs"]["summary_text"] == ""
+    assert recorded[2]["outputs"]["dropped_preview"] == ""
+    assert recorded[2]["outputs"]["summary_text"] == ""
+    assert recorded[2]["outputs"]["compacted_tokens"] == 0
+    assert recorded[2]["outputs"]["checkpoint_idx"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -1,11 +1,15 @@
-"""通用上下文管理：三级级联 enforce + 反应式 plan_turn 测试。
+"""通用上下文管理：轮内单 pass 压缩 enforce + 反应式 plan_turn 测试。
 
 覆盖：
-- evict_tool_results（L1）：超预算优先级清理、generic 先于 source、recent 轮不动、
-  ask_user/exclude_tools 白名单永不清理、墓碑格式、捕获被清原文、达标即停、不超预算 noop
-- enforce（级联）：L1 清 tool 结果、L2 LLM 摘要续接、L3 丢最旧 20% 消息组、未超软阈值 noop
+- clear_old_tool_results（①清理）：时间序最旧优先、recent 轮不动、ask_user/exclude_tools
+  白名单永不清理、RAG 来源段跳过、clear_at_least 门限（可清量不足整体跳过）、
+  captured 记 id->原文（供 ②折叠复用）、墓碑格式
+- enforce（单 pass）：①清理够则不折叠、②折叠进唯一 <compacted>（替换非叠加，二次
+  enforce 幂等续写）、assistant 中间结论进折叠输入（D3 优先级倒挂修复）、tools 计入
+  预算、③收缩循环收敛到 hard 以下、无可收缩时显式 raise、tool_use<->tool_result
+  配对不变式、answer_now 浅拷贝语义（折叠只影响副本、墓碑经共享 dict 可见）
 - plan_turn（反应式）：未超软阈值原样返回、超了才裁历史、有摘要前插 <session_summary>
-- drop_oldest_turn_group（L3）：丢最旧 20%、保留前导、轮少不动
+- drop_oldest_turn_group（413 兜底入口）：丢最旧 20%、保留前导、轮少不动
 """
 from __future__ import annotations
 
@@ -15,143 +19,117 @@ from core.agentic import context_budget
 from core.agentic.context_budget import (
     EnforceReport,
     TurnBudgetPlan,
+    clear_old_tool_results,
     drop_oldest_turn_group,
     enforce,
-    evict_tool_results,
     plan_turn,
 )
 from settings import get_settings
 
 
-def _assistant_with_tools(call_id: str, name: str = "rag") -> dict:
+def _assistant_with_tools(call_id: str, name: str = "rag", content: str = "") -> dict:
     return {
         "role": "assistant",
-        "content": "",
+        "content": content,
         "tool_calls": [{"id": call_id, "type": "function",
                         "function": {"name": name, "arguments": "{}"}}],
     }
 
 
+def _assert_tool_pairing(messages: list[dict]) -> None:
+    """结构不变式：每条 role=tool 前必是 assistant(tool_calls) 或同轮前一条 tool。"""
+    for i, m in enumerate(messages):
+        if m.get("role") == "tool":
+            assert i > 0, "tool 消息不能是首条"
+            prev = messages[i - 1]
+            ok = (prev.get("role") == "assistant" and prev.get("tool_calls")) or (
+                prev.get("role") == "tool"
+            )
+            assert ok, f"tool 消息 {i} 前出现孤儿配对: {prev.get('role')}"
+
+
 # ---------------------------------------------------------------------------
-# evict_tool_results（L1）
+# clear_old_tool_results（①清理）
 # ---------------------------------------------------------------------------
 
-def test_evict_noop_under_budget():
-    msgs = [
-        {"role": "system", "content": "sys"},
-        _assistant_with_tools("c1"),
-        {"role": "tool", "name": "rag", "content": "short"},
-    ]
-    assert evict_tool_results(msgs, keep_recent_turns=1, target_tokens=100000) == 0
-    assert msgs[2]["content"] == "short"  # 未动
-
-
-def test_evict_clears_generic_before_source():
-    generic = "普通结果" * 200   # ~800 token
-    source = "内容\n\n来源: doc1"  # 带来源引用段，score +2
-    msgs = [
-        {"role": "system", "content": "sys"},
-        _assistant_with_tools("c1"),
-        {"role": "tool", "name": "rag", "content": generic},   # older, generic
-        {"role": "tool", "name": "rag", "content": source},    # older, source-bearing
-        _assistant_with_tools("c2"),
-        {"role": "tool", "name": "rag", "content": "recent"},  # recent 轮，保留
-    ]
-    # target=100：远小于 generic(800) 逼出 generic；又 > 清完 generic 后的余量
-    #（~72 = sys+两 assistant tool_calls+tombstone+source+recent），保住 source。
-    # 2.6 起 _messages_tokens 计入 tool_calls，旧 target=20 连 tool_calls 都装不下。
-    target = 100
-    cleared = evict_tool_results(msgs, keep_recent_turns=1, target_tokens=target)
-    contents = [str(m.get("content")) for m in msgs if m["role"] == "tool"]
-    assert cleared == 1
-    assert any(c.startswith("[cleared: rag]") for c in contents)  # generic 清成墓碑
-    assert source in contents                                        # source 保留
-    assert "recent" in contents                                      # recent 保留
-
-
-def test_evict_keeps_recent_turns():
-    big = "x" * 4000  # ~1000 token
+def test_clear_gate_skips_small_gain():
+    """clear_at_least：可清量不足 2000 token 整体跳过（小步清理只打断缓存）。"""
     msgs = [
         {"role": "system", "content": "s"},
         _assistant_with_tools("c1"),
-        {"role": "tool", "name": "rag", "content": big},  # older，应清
+        {"role": "tool", "name": "rag", "content": "z" * 4000},  # ~1000 token < 2000 门限
         _assistant_with_tools("c2"),
-        {"role": "tool", "name": "rag", "content": big},  # recent，必留
+        {"role": "tool", "name": "rag", "content": "recent"},
     ]
-    cleared = evict_tool_results(msgs, keep_recent_turns=1, target_tokens=50)
-    tool_contents = [str(m.get("content")) for m in msgs if m["role"] == "tool"]
-    assert cleared == 1
-    assert sum(1 for c in tool_contents if c.startswith("[cleared:")) == 1
-    assert big in tool_contents  # recent 未动
+    assert clear_old_tool_results(msgs, keep_recent_turns=1) == 0
+    assert not any(
+        str(m.get("content")).startswith("[cleared:") for m in msgs if m["role"] == "tool"
+    )
 
 
-def test_evict_ask_user_never_cleared_by_default():
-    """exclude_tools 默认含 ask_user -> 用户答复永不清理。"""
-    big = "y" * 4000
+def test_clear_all_candidates_chronological():
+    """时间序最旧优先：保护窗外候选一次性全清（已清区收敛成单调前缀，护 cache）。"""
+    old_a, old_b = "a" * 12000, "b" * 12000  # 各 ~3000 token，过门限
+    msgs = [
+        {"role": "system", "content": "s"},
+        _assistant_with_tools("c1"),
+        {"role": "tool", "name": "rag", "content": old_a},   # 最旧
+        _assistant_with_tools("c2"),
+        {"role": "tool", "name": "rag", "content": old_b},
+        _assistant_with_tools("c3"),
+        {"role": "tool", "name": "rag", "content": "recent"},  # keep=1 保护
+    ]
+    captured: dict[int, str] = {}
+    cleared = clear_old_tool_results(msgs, keep_recent_turns=1, captured_originals=captured)
+    contents = [str(m.get("content")) for m in msgs if m["role"] == "tool"]
+    assert cleared == 2
+    assert contents[0] == "[cleared: rag]" and contents[1] == "[cleared: rag]"
+    assert contents[2] == "recent"  # 保护窗内原文保留
+    # captured 按时间序记 id -> 原文（②折叠用原文而非墓碑）
+    assert list(captured.values()) == [old_a, old_b]
+
+
+def test_clear_keeps_whitelist_and_source_para():
+    """exclude_tools 白名单与 RAG 来源引用段永不清理（保留原地）。"""
+    big = "x" * 12000
     msgs = [
         {"role": "system", "content": "s"},
         _assistant_with_tools("c1", name="ask_user"),
-        {"role": "tool", "name": "ask_user", "content": big},  # 用户答复，永不清理
+        {"role": "tool", "name": "ask_user", "content": big},     # 白名单
         _assistant_with_tools("c2"),
+        {"role": "tool", "name": "rag", "content": "正文\n\n来源: doc2"},  # 来源段跳过
+        _assistant_with_tools("c3"),
         {"role": "tool", "name": "rag", "content": "recent"},
     ]
-    cleared = evict_tool_results(msgs, keep_recent_turns=1, target_tokens=10)
+    cleared = clear_old_tool_results(msgs, keep_recent_turns=1)
     contents = [str(m.get("content")) for m in msgs if m["role"] == "tool"]
-    assert cleared == 0  # ask_user 是 older 唯一候选但被白名单排除 -> 无可清
-    assert not any(c.startswith("[cleared:") for c in contents)
-    assert big in contents  # ask_user 内容原样保留
+    assert cleared == 0  # 唯一大体量候选是 ask_user（白名单），来源段跳过 -> 无可清
+    assert big in contents
+    assert any("来源: doc2" in c for c in contents)
 
 
-def test_evict_exclude_tools_whitelist_param():
-    """显式 exclude_tools 参数保护指定 tool 不被清理。"""
-    big = "z" * 4000
+def test_clear_exclude_tools_param():
+    """显式 exclude_tools 参数保护指定 tool。"""
+    big = "z" * 12000
     msgs = [
         {"role": "system", "content": "s"},
         _assistant_with_tools("c1"),
-        {"role": "tool", "name": "search", "content": big},  # older，但被白名单保护
+        {"role": "tool", "name": "search", "content": big},  # 被白名单保护
         _assistant_with_tools("c2"),
         {"role": "tool", "name": "rag", "content": "recent"},
     ]
-    cleared = evict_tool_results(msgs, keep_recent_turns=1, target_tokens=10,
-                                 exclude_tools=["search"])
-    contents = [str(m.get("content")) for m in msgs if m["role"] == "tool"]
-    assert cleared == 0  # search 被白名单排除，older 无其他可清候选
-    assert big in contents  # search 原样保留
+    assert clear_old_tool_results(msgs, keep_recent_turns=1, exclude_tools=["search"]) == 0
+    assert big in [str(m.get("content")) for m in msgs if m["role"] == "tool"]
 
 
-def test_evict_captures_originals_for_l2():
-    """captured_originals 收集被清原文，供 L2 摘要复用。"""
-    big = "z" * 4000
-    msgs = [
-        {"role": "system", "content": "s"},
-        _assistant_with_tools("c1"),
-        {"role": "tool", "name": "rag", "content": big},
-        _assistant_with_tools("c2"),
-        {"role": "tool", "name": "rag", "content": "recent"},
-    ]
-    captured: list[str] = []
-    evict_tool_results(msgs, keep_recent_turns=1, target_tokens=50,
-                       captured_originals=captured)
-    assert len(captured) == 1
-    assert captured[0] == big  # 被清原文
-
-
-def test_evict_tombstone_format():
-    msgs = [
-        {"role": "system", "content": "s"},
-        _assistant_with_tools("c1"),
-        {"role": "tool", "name": "rag", "content": "z" * 4000},
-        _assistant_with_tools("c2"),
-        {"role": "tool", "name": "rag", "content": "r"},
-    ]
-    evict_tool_results(msgs, keep_recent_turns=1, target_tokens=10)
-    cleared = [str(m.get("content")) for m in msgs if m["role"] == "tool" and str(m.get("content", "")).startswith("[cleared:")]
-    assert cleared
-    assert cleared[0] == "[cleared: rag]"
+def test_clear_no_tool_turns_noop():
+    """无 tool 轮（纯前导）-> 无可清。"""
+    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}]
+    assert clear_old_tool_results(msgs, keep_recent_turns=3) == 0
 
 
 # ---------------------------------------------------------------------------
-# drop_oldest_turn_group（L3）
+# drop_oldest_turn_group（413 反应式兜底入口）
 # ---------------------------------------------------------------------------
 
 def test_drop_oldest_drops_20_percent():
@@ -166,13 +144,11 @@ def test_drop_oldest_drops_20_percent():
     dropped = drop_oldest_turn_group(msgs)
     assert dropped >= 2  # 至少丢一个 tool 轮（assistant+tool = 2 条）
     assert len(msgs) < before
-    # 最旧的 result-0 被丢
     contents = [str(m.get("content")) for m in msgs]
-    assert "result-0" not in contents
-    # 最近的 result-4 保留
-    assert "result-4" in contents
-    # 前导 system 保留
-    assert msgs[0]["role"] == "system"
+    assert "result-0" not in contents  # 最旧的被丢
+    assert "result-4" in contents      # 最近的保留
+    assert msgs[0]["role"] == "system"  # 前导保留
+    _assert_tool_pairing(msgs)
 
 
 def test_drop_oldest_noop_when_too_few_turns():
@@ -183,18 +159,17 @@ def test_drop_oldest_noop_when_too_few_turns():
         {"role": "tool", "tool_call_id": "c0", "name": "rag", "content": "r"},
     ]
     before = list(msgs)
-    dropped = drop_oldest_turn_group(msgs)
-    assert dropped == 0
+    assert drop_oldest_turn_group(msgs) == 0
     assert msgs == before
 
 
 # ---------------------------------------------------------------------------
-# enforce（三级级联）
+# enforce（轮内单 pass 压缩）
 # ---------------------------------------------------------------------------
 
 @pytest.mark.asyncio
 async def test_enforce_noop_under_soft(monkeypatch):
-    """未超软阈值 -> 三级都不动作，tokens 不变。"""
+    """未超软阈值 -> 零干预，tokens 不变。"""
     monkeypatch.setattr(context_budget, "compute_budgets",
                         lambda m: (100000, 200000))
     msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "hi"}]
@@ -209,13 +184,15 @@ async def test_enforce_noop_under_soft(monkeypatch):
 @pytest.mark.asyncio
 async def test_enforce_tools_counted_in_budget(monkeypatch):
     """tools 定义计入请求前预算（对标 LiteLLM _count_extra）：messages 未超但含 tools
-    超 soft -> L1 触发清理。修复前 schema 体积（教学 agent 十几个工具 ≈3-8k token）
+    超 soft -> ①清理触发。修复前 schema 体积（教学 agent 十几个工具 ≈3-8k token）
     完全不计，soft 判断偏乐观。"""
     from core.agentic import context_policy as cp
     from core.agentic.context_window import count_tokens_messages
 
     monkeypatch.setattr(get_settings().context_budget, "keep_recent_turns", 1)
-    # 防真 LLM 调用：即便 L1 清后仍超 soft，摘要 mock 返回空串 = 不插入（summary_added=False）
+    # 门限置 0 让清理确定性触发（本测关注预算口径，非 clear_at_least 行为）
+    monkeypatch.setattr(context_budget, "_CLEAR_AT_LEAST_TOKENS", 0)
+    # 防真 LLM 调用：即便清后仍超 soft，摘要 mock 返回空串 = 折叠降级不动作
     async def fake_summarize(text, model):
         return ""
     monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
@@ -244,12 +221,12 @@ async def test_enforce_tools_counted_in_budget(monkeypatch):
     soft = msgs_tokens + tools_extra // 2
     monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (soft, 200000))
 
-    # 对照：不带 tools 时 messages < soft，L1 不触发
+    # 对照：不带 tools 时 messages < soft，不触发
     msgs_plain = [dict(m) for m in msgs]
     report_plain = await enforce(msgs_plain, "qwen-plus", plan=None)
     assert report_plain.cleared_tool_results == 0
 
-    # 带 tools：总量超 soft -> L1 触发清 older tool 结果
+    # 带 tools：总量超 soft -> ①清 older tool 结果
     report = await enforce(msgs, "qwen-plus", plan=None, tools=tools)
     assert report.cleared_tool_results == 1
     assert report.tokens_before == joint_tokens  # 报告口径含 tools（请求真实体积）
@@ -257,75 +234,163 @@ async def test_enforce_tools_counted_in_budget(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_enforce_l1_clears(monkeypatch):
-    """超软阈值 -> L1 清旧 tool 结果，L1 够则不升级 L2/L3。"""
-    monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (100, 200))
+async def test_enforce_clear_suffices_no_fold(monkeypatch):
+    """①清理够（清后回到 soft 下）-> 不折叠、不收缩。"""
+    from core.agentic import context_policy as cp
+
+    monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (100, 200000))
     monkeypatch.setattr(get_settings().context_budget, "keep_recent_turns", 1)
-    big = "z" * 4000  # ~1000 token
+    monkeypatch.setattr(context_budget, "_CLEAR_AT_LEAST_TOKENS", 0)
+    async def fake_summarize(text, model):
+        raise AssertionError("①够则不应调 LLM 折叠")
+    monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
+
     msgs = [
         {"role": "system", "content": "s"},
         _assistant_with_tools("c1"),
-        {"role": "tool", "name": "rag", "content": big},  # older，应清
+        {"role": "tool", "name": "rag", "content": "z" * 4000},  # ~1000 token，清后回到 soft 下
         _assistant_with_tools("c2"),
         {"role": "tool", "name": "rag", "content": "recent"},
     ]
     report = await enforce(msgs, "qwen-plus", plan=None)
     assert report.cleared_tool_results == 1
     assert report.tokens_after < report.tokens_before
-    assert report.summary_added is False  # L1 够，不升级
+    assert report.summary_added is False
     assert report.dropped_messages == 0
-    # 观测正文：被清 tool 原文前 200 字 preview 入报告（供 LangSmith dropped_preview），未做摘要则空
-    assert report.cleared_originals == [big[:200]]
+    assert report.cleared_originals == [("z" * 4000)[:200]]
     assert report.summary_text == ""
+    _assert_tool_pairing(msgs)
 
 
 @pytest.mark.asyncio
-async def test_enforce_l2_summary_when_l1_insufficient(monkeypatch):
-    """L1 清完仍超软阈值 -> L2 LLM 摘要续接（mock 摘要）。"""
+async def test_enforce_fold_replaces_segment_with_single_checkpoint(monkeypatch):
+    """①清后仍超 soft -> ②折叠：区段整段删除、唯一 <compacted> 顶替（替换非叠加），
+    checkpoint_idx 指向其位置。"""
     from core.agentic import context_policy as cp
 
-    monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (100, 100000))
+    monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (100, 1_000_000))
     monkeypatch.setattr(get_settings().context_budget, "keep_recent_turns", 1)
+    monkeypatch.setattr(context_budget, "_CLEAR_AT_LEAST_TOKENS", 0)
+    monkeypatch.setattr(context_budget, "_MIN_FOLD_GAIN_TOKENS", 0)
 
     async def fake_summarize(text, model):
         return "压缩摘要"
     monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
 
-    big_tool = "z" * 4000       # ~1000 token，L1 会清
-    big_user = "u" * 4000       # ~1000 token，L1 清不动（非 tool），保 total > soft
+    big_tool = "z" * 4000       # ①会清
+    big_user = "u" * 4000       # 非 tool，①清不动 -> 保 total > soft 逼出 ②
     msgs = [
         {"role": "system", "content": "s"},
-        {"role": "user", "content": big_user},  # 非 tool，L1 不动 -> 保 total > 100
+        {"role": "user", "content": big_user},
         _assistant_with_tools("c1"),
-        {"role": "tool", "name": "rag", "content": big_tool},  # older，L1 清
+        {"role": "tool", "name": "rag", "content": big_tool},
         _assistant_with_tools("c2"),
         {"role": "tool", "name": "rag", "content": "recent"},
     ]
     report = await enforce(msgs, "qwen-plus", plan=None)
-    assert report.cleared_tool_results == 1  # L1 清了 big_tool
-    assert report.summary_added is True       # 仍超 soft -> L2 摘要
-    # 摘要以 <context_summary> system 消息插入
-    assert any(m.get("role") == "system" and "<context_summary>" in str(m.get("content"))
-               for m in msgs)
-    # 观测正文：L1 被清原文前 200 字 preview + L2 摘要产物都入报告（供 LangSmith 上报）
-    assert report.cleared_originals == [big_tool[:200]]
+    assert report.cleared_tool_results == 1
+    assert report.summary_added is True
     assert report.summary_text == "压缩摘要"
+    assert report.compacted_tokens > 0
+    # 前导(system,user) + 唯一 checkpoint + 保护轮(A2,T2) = 5 条
+    ck_count = sum(
+        1 for m in msgs
+        if m.get("role") == "system" and str(m.get("content")).startswith("<compacted>")
+    )
+    assert ck_count == 1
+    assert len(msgs) == 5
+    contents = [str(m.get("content")) for m in msgs]
+    assert "压缩摘要" in contents[2]                      # checkpoint 在前导之后、保护轮之前
+    assert report.checkpoint_idx == 2
+    assert big_tool[:100] not in "".join(contents)        # 被折叠区段原文已删除
+    assert "recent" in contents                            # 保护轮原样
+    assert report.cleared_originals == [big_tool[:200]]   # 观测 preview
+    _assert_tool_pairing(msgs)
 
 
 @pytest.mark.asyncio
-async def test_enforce_l3_drop_when_over_hard_ceiling(monkeypatch):
-    """仍超硬天花板 -> L3 丢最旧 20% 消息组。"""
+async def test_enforce_fold_idempotent_and_rolling(monkeypatch):
+    """二次 enforce 幂等：<compacted> 仍唯一（不累积），折叠输入含旧 checkpoint 正文
+    （rolling 续写，非另起一条）。"""
     from core.agentic import context_policy as cp
 
-    # soft 极小（L1/L2 都触发后仍超 hard），hard 也小 -> L3 必触发
-    monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (50, 100))
+    monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (100, 1_000_000))
     monkeypatch.setattr(get_settings().context_budget, "keep_recent_turns", 1)
+    monkeypatch.setattr(context_budget, "_CLEAR_AT_LEAST_TOKENS", 0)
+    monkeypatch.setattr(context_budget, "_MIN_FOLD_GAIN_TOKENS", 0)
+
+    fold_inputs: list[str] = []
 
     async def fake_summarize(text, model):
-        return ""  # L2 摘要返回空 -> 不续接，逼 L3
+        fold_inputs.append(text)
+        return f"第{len(fold_inputs)}轮摘要"
     monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
 
-    # 构造 5 个 tool 轮，每轮 tool 结果大（total >> hard=100）
+    msgs = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "u" * 4000},
+        _assistant_with_tools("c1"),
+        {"role": "tool", "name": "rag", "content": "z" * 4000},
+        _assistant_with_tools("c2"),
+        {"role": "tool", "name": "rag", "content": "r2"},
+    ]
+    await enforce(msgs, "qwen-plus", plan=None)
+    # 新一轮工具追加后再 enforce：旧 checkpoint 应被续写而非新增
+    msgs.append(_assistant_with_tools("c3"))
+    msgs.append({"role": "tool", "name": "rag", "content": "z" * 4000})
+    report2 = await enforce(msgs, "qwen-plus", plan=None)
+    ck_msgs = [m for m in msgs
+               if m.get("role") == "system" and str(m.get("content")).startswith("<compacted>")]
+    assert len(ck_msgs) == 1                      # 不累积（旧 L2 插入语义的病灶）
+    assert "第1轮摘要" in fold_inputs[1]           # 二次折叠输入含旧 checkpoint 正文（续写）
+    assert report2.checkpoint_idx >= 0
+    _assert_tool_pairing(msgs)
+
+
+@pytest.mark.asyncio
+async def test_enforce_fold_input_covers_assistant_text(monkeypatch):
+    """D3 优先级倒挂修复：assistant 中间结论进折叠摘要输入（旧 L3 裸丢的恰是它）。"""
+    from core.agentic import context_policy as cp
+
+    monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (100, 1_000_000))
+    monkeypatch.setattr(get_settings().context_budget, "keep_recent_turns", 1)
+    monkeypatch.setattr(context_budget, "_CLEAR_AT_LEAST_TOKENS", 0)
+    monkeypatch.setattr(context_budget, "_MIN_FOLD_GAIN_TOKENS", 0)
+
+    fold_inputs: list[str] = []
+
+    async def fake_summarize(text, model):
+        fold_inputs.append(text)
+        return "摘要"
+    monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
+
+    msgs = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "u" * 4000},
+        _assistant_with_tools("c1", content="我先查导数定义，再对比两种定义的适用范围。"),
+        {"role": "tool", "name": "rag", "content": "z" * 4000},
+        _assistant_with_tools("c2"),
+        {"role": "tool", "name": "rag", "content": "r2"},
+    ]
+    await enforce(msgs, "qwen-plus", plan=None)
+    assert "我先查导数定义" in fold_inputs[0]   # assistant 中间结论进摘要输入
+
+
+@pytest.mark.asyncio
+async def test_enforce_shrink_loop_converges_under_hard(monkeypatch):
+    """③收缩循环：超 hard_ceiling 时逐级降级（截长 tool 结果 -> 丢最旧轮），构造性
+    收敛到 hard 以下，且配对不变式保持。"""
+    from core.agentic import context_policy as cp
+
+    monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (50, 2000))
+    monkeypatch.setattr(get_settings().context_budget, "keep_recent_turns", 1)
+    monkeypatch.setattr(context_budget, "_CLEAR_AT_LEAST_TOKENS", 0)
+    monkeypatch.setattr(context_budget, "_MIN_FOLD_GAIN_TOKENS", 0)
+
+    async def fake_summarize(text, model):
+        return ""  # 折叠降级（模拟 LLM 失败）-> 逼 ③ 收缩路径
+    monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
+
     msgs: list[dict] = [{"role": "system", "content": "s"}]
     for i in range(5):
         msgs.append({"role": "user", "content": f"u{i} " + "x" * 3000})
@@ -333,11 +398,55 @@ async def test_enforce_l3_drop_when_over_hard_ceiling(monkeypatch):
         msgs.append({"role": "tool", "tool_call_id": f"c{i}", "name": "rag",
                      "content": "z" * 3000})
     report = await enforce(msgs, "qwen-plus", plan=None)
-    assert report.dropped_messages > 0  # L3 丢了消息
-    assert len(msgs) < 5 * 4 + 1  # 消息变少
-    # 观测正文：被丢消息 preview 入报告（[role] 前 200 字，供 LangSmith dropped_preview）
-    assert len(report.dropped_originals) == report.dropped_messages
+    assert report.tokens_after <= 2000          # 构造性收敛
+    assert report.dropped_messages > 0          # 丢轮发生
+    assert len(report.dropped_originals) >= report.dropped_messages
     assert report.dropped_originals[0].startswith("[")
+    _assert_tool_pairing(msgs)
+
+
+@pytest.mark.asyncio
+async def test_enforce_shrink_exhausted_raises(monkeypatch):
+    """收缩耗尽仍超 hard -> 显式 raise（fail-fast，不静默发注定 413 的请求）。"""
+    monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (50, 100))
+    monkeypatch.setattr(context_budget, "_CLEAR_AT_LEAST_TOKENS", 0)
+    # 前导只有巨型 system：①②③皆无动作（无 tool 轮可清/折/丢，system 不在 ③c 范围）
+    msgs = [{"role": "system", "content": "s" * 100000}]
+    with pytest.raises(RuntimeError, match="context shrink exhausted"):
+        await enforce(msgs, "qwen-plus", plan=None)
+
+
+@pytest.mark.asyncio
+async def test_enforce_answer_now_shallow_copy_semantics(monkeypatch):
+    """answer_now 副本语义：折叠删消息只影响副本列表（主列表长度不变），清墓碑经
+    共享 dict 同步可见（无害且幂等）。"""
+    from core.agentic import context_policy as cp
+
+    monkeypatch.setattr(context_budget, "compute_budgets", lambda m: (100, 1_000_000))
+    monkeypatch.setattr(get_settings().context_budget, "keep_recent_turns", 1)
+    monkeypatch.setattr(context_budget, "_CLEAR_AT_LEAST_TOKENS", 0)
+    monkeypatch.setattr(context_budget, "_MIN_FOLD_GAIN_TOKENS", 0)
+
+    async def fake_summarize(text, model):
+        return "摘要"
+    monkeypatch.setattr(cp, "_summarize_masked_text", fake_summarize)
+
+    big_tool_msg = {"role": "tool", "name": "rag", "content": "z" * 4000}
+    msgs = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "u" * 4000},
+        _assistant_with_tools("c1"),
+        dict(big_tool_msg),  # 独立 dict：主列表墓碑断言不受副本混淆
+        _assistant_with_tools("c2"),
+        {"role": "tool", "name": "rag", "content": "recent"},
+    ]
+    tool_msg = msgs[3]
+    ans_messages = list(msgs) + [{"role": "system", "content": "用户请求立即回答…"}]
+    report = await enforce(ans_messages, "qwen-plus", plan=None)
+    assert report.summary_added is True
+    assert len(msgs) == 6  # 折叠只删副本，主列表长度不变
+    assert str(tool_msg["content"]).startswith("[cleared:")  # 墓碑经共享 dict 同步可见
+    _assert_tool_pairing(ans_messages)
 
 
 # ---------------------------------------------------------------------------
