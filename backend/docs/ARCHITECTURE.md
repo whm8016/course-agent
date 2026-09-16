@@ -225,11 +225,11 @@ The IM Bot (`core/bot/`) **already shares the same Agent engine as the Web API**
 
 ## Schema 设计原则
 
-数据库 schema 的完整设计规范（"宪法"）见 **[`SCHEMA_DESIGN_PRINCIPLES.md`](./SCHEMA_DESIGN_PRINCIPLES.md)**——7 条原则 + 27 表体检打分 + P0–P4 收尾路线图。新表/迁移/重构以其为准绳。三条最常踩的核心原则固化如下：
+数据库 schema 的完整设计规范（"宪法"）见 **[`SCHEMA_DESIGN_PRINCIPLES.md`](./SCHEMA_DESIGN_PRINCIPLES.md)**——7 条原则 + 31 表体检打分（P0–P4 收尾路线图已全部核销，2026-09-16 复核）。新表/迁移/重构以其为准绳。三条最常踩的核心原则固化如下：
 
 1. **分层归属（一概念一真相源）**：每表归属原始事件 / 派生读模型 / 可变状态 / 引用配置 之一；一个概念只能有一个权威存储（如 KB 构建状态只在 `kb_builds`，不在 KB 行死列）。
 2. **读写分离（CQRS）**：原始层只 INSERT、内容永不 UPDATE；rollup 层 cron 重算（delete-then-reinsert），读路径只读 rollup 不现算。
-3. **多租户就地隔离**：凡课程级可查的行，**写时落盘 `course_id`**，使查询无需 JOIN Session 即可确定租主（`messages`/`notebook_entries`/`bot_notifications` 当前缺此列，见路线图 P1）。
+3. **多租户就地隔离**：凡课程级可查的行，**写时落盘 `course_id`**，使查询无需 JOIN Session 即可确定租主（`messages`/`notebook_entries` 已补列——迁移 026；`bot_notifications` 拍板不加：仅按 `user_id` 查询，YAGNI）。
 
 其余四条（FK 故意分裂 / 可变列 OCC 或 append / Expand/Contract 演进 / ID-时间戳约定一致）详见宪法文档。
 

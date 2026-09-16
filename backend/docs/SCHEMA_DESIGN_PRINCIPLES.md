@@ -1,20 +1,18 @@
-# 数据库表设计宪法 + 27 表体检 + 收尾路线图
+# 数据库表设计宪法 + 31 表体检 + 收尾路线图（已核销）
 
 > 本文是 `course-agent` 后端数据库 schema 的**设计规范（"宪法"）**与**现状体检**。
-> 所有新表、迁移、重构都应以本文 7 条原则为准绳；已有的违规项见 [Part 3 收尾路线图](#part-3--收尾路线图expandcontract分阶段可中断)，按 P0→P4 排期治理。
-> 模型定义单文件：`backend/core/db/database.py`；迁移：`backend/alembic/versions/`（001→025）。
+> 所有新表、迁移、重构都应以本文 7 条原则为准绳。2026-08-08 审计产出的 P0–P4 收尾路线图**已全部治理完成**（2026-09-16 复核核销，状态见 Part 3）。
+> 模型定义单文件：`backend/core/db/database.py`；迁移：`backend/alembic/versions/`（001→037，缺 007）。
 
 ---
 
 ## 0. TL;DR
 
-- 27 张表 / 10 个域，对标 Moodle（468 表）属**健康范围**——表多本身不是病。
+- 31 张表 / 10 个域，对标 Moodle（468 表）属**健康范围**——表多本身不是病。
 - 分层方向（事件→rollup→展示、FK/no-FK 故意分裂）已是**业界中上水准**。
-- 体检：**18 ✅ / 4 ⚠️ / 9 处 🔴**，问题高度集中在 3 个同类病：
-  1. **缺 `course_id`**（Message / NotebookEntry / BotNotification）→ 课程级查询必 JOIN Session，已致一次跨租户 bug。
-  2. **双真相源**（KB 状态在 knowledge_bases 死列 + kb_builds；图谱在 users.knowledge_graph + knowledge_mastery）。
-  3. **死 rollup**（course_daily_rollup / student_course_rollup 每小时在算却没人读）。
-- 不是结构错误，是**少数残留没收尾**。路线图用 Expand/Contract 分 5 阶段、可中断地治。
+- 2026-08-08 体检发现的 3 类病（缺 `course_id` / 双真相源 / 死 rollup）经 P0–P4 整改**已全部治理**；当前体检 **27 ✅ / 4 ⚠️ / 0 🔴**，无结构级违规。
+- 2026-08 后新增 4 表（`course_faq` / `course_topic` / `course_topic_edge` / `mastery_observation`）已入册体检，全部合规。
+- 剩余 4 个 ⚠️ 均为"可改进/有理由保留"（见 Part 2 要点列），不是欠账；新表仍必须 7 原则全合规。
 
 ---
 
@@ -35,7 +33,7 @@
 
 ## Part 1 — 表设计宪法（7 条原则）
 
-每条 = **规则 · 为什么 · 正例 · 反例（现状违规）**。新表必须全部合规。
+每条 = **规则 · 为什么 · 正例 · 反例（历史违规，均标注治理落点）**。新表必须全部合规。
 
 ### 原则 1：分层归属（一概念一真相源）
 
@@ -43,35 +41,35 @@
 
 | 层 | 特征 | 本项目表 |
 |---|---|---|
-| ① 原始事件 | 只追加，内容永不 UPDATE | `messages` `learning_events` `memory_episodes` `llm_usage_records` |
-| ② 派生读模型 | cron 重算（delete-then-reinsert），从不 read-modify-write | `course_daily_rollup` `student_course_rollup` `llm_usage_daily` |
+| ① 原始事件 | 只追加，内容永不 UPDATE | `messages` `learning_events` `memory_episodes` `llm_usage_records` `mastery_observation` |
+| ② 派生读模型 | cron 重算（delete-then-reinsert），从不 read-modify-write | `course_daily_rollup` `student_course_rollup` `llm_usage_daily` `course_faq` |
 | ③ 可变状态 | 频繁 UPDATE 的当前事实 | `sessions` `kb_builds` `knowledge_mastery` `research_checkpoints` |
-| ④ 引用/配置 | 读多写少 | `knowledge_bases` `enrollments` `user_*` 配置表 |
+| ④ 引用/配置 | 读多写少 | `knowledge_bases` `enrollments` `course_topic` `course_topic_edge` `user_*` 配置表 |
 
 **规则**：一个业务概念只能有**一个权威存储**，其余只能是它的投影/缓存（且必须能从权威源重算）。
 
 **为什么**：双真相源必然漂移；查"KB 状态"不知信谁、查"用户图谱"两个地方不一致。
 
 **正例**：`kb_builds` 是 KB 构建状态的唯一真相源（`UNIQUE(kb_id, backend)`），KB 行的展示状态由 `aggregate_build_status(kb.builds)` 现算投影。
-**反例（违 P1）**：`knowledge_bases` 行上残留的死状态列（`status/progress*/chunks_*/token_estimate`）与 `kb_builds` 重复 → 见 [P2](#p2--kb-状态单一真相源中高风险纯收尾)。`users.knowledge_graph` 与 `knowledge_mastery` 双写 → 见 [P3](#p3--记忆单一真相源--users-瘦身--并发高风险最大块)。
+**历史反例（已治理）**：`knowledge_bases` 行上曾残留死状态列与 `kb_builds` 重复 → 迁移 028 删列收口；`users.knowledge_graph` 曾与 `knowledge_mastery` 双写 → 改判保留为展示层 + OCC（迁移 031，见附录决策 2）。
 
 ### 原则 2：读写分离（CQRS：事件 → rollup 读模型）
 
 **规则**：原始层只 INSERT、内容永不 UPDATE；rollup 层全派生（delete-then-reinsert），从不 read-modify-write。**读路径只读 rollup，不现算**。
 
-**为什么**：现算=每请求 JOIN 风暴；rollup=O(1) 读 + 后台批量算。`analytics_student_stats` 现状一次 6 条串行查询 + 重 Python 处理。
+**为什么**：现算=每请求 JOIN 风暴；rollup=O(1) 读 + 后台批量算。
 
-**正例**：`llm_usage_records`(原始) → `llm_usage_daily`(派生)，且 `llm_usage_daily` **已被** teacher/admin 端点消费。
-**反例（违 P2）**：`course_daily_rollup` / `student_course_rollup` cron 每小时算，却**无读路径**消费——纯浪费 → 见 [P0](#p0--接通死-rollup--补全事件层高-roi低风险)。`learning_events` 只写 `verb=answered` 缺失，导致 rollup 答题口径退回去 JOIN `NotebookEntry ⋈ Session`。
+**正例**：`llm_usage_records`(原始) → `llm_usage_daily`(派生)，已被 teacher/admin 端点消费；`learning_events`(原始) → `course_daily_rollup` / `student_course_rollup`(派生) → analytics 端点消费，行缺失/过期降级现算兜底。
+**历史反例（已治理）**：两张 rollup 曾 cron 在算却无读路径（P0 已接通）；`learning_events` 曾缺 `verb=answered`，答题口径退回 JOIN `NotebookEntry ⋈ Session`（已由 `api/question_notebook.py` 提交作答即写接通）。
 
 ### 原则 3：多租户就地隔离（行级 `course_id`，写时落盘）
 
 **规则**：共享表 + 行级隔离档下，**凡是课程级可查的行，必须在写入时就把 `course_id` 落盘**，使查询无需 JOIN 即可确定租主。
 
-**为什么**：靠 JOIN Session 反查 `course_id` 已致一次跨租户 bug（`teacher.py:779` 注释："旧实现仅按 user_id 全局聚合，会把他课程的答题也算进本课程"）；rollup 也因此 JOIN 沉重。
+**为什么**：靠 JOIN Session 反查 `course_id` 已致一次跨租户 bug（`teacher.py` 旧实现仅按 user_id 全局聚合，把他课程的答题也算进本课程）。
 
-**正例**：`knowledge_mastery` 带 `course_id`（`UNIQUE(user_id, course_id, kp_id)`），当初正是为修 `users.knowledge_graph` 跨课污染而加。
-**反例（违 P3）**：`messages` / `notebook_entries` / `bot_notifications` 缺 `course_id` → 见 [P1](#p1--租主硬化给-3-表补-course_id中风险)。
+**正例**：`knowledge_mastery`（`UNIQUE(user_id, course_id, kp_id)`）、`messages`、`notebook_entries` 均带写时落盘的 `course_id` + 复合索引。
+**历史反例（已治理/已拍板）**：`messages` / `notebook_entries` 缺 `course_id` → 迁移 026 补列+回填+索引；`bot_notifications` 拍板不加（仅按 `user_id` 查询，YAGNI，附录决策 3）。
 
 > **注**：不新建 `courses` 表（course 与 `knowledge_bases` 1:1 已工作；给 13 张表的 `course_id` 改真 FK 是巨大 Expand/Contract 却只换边际收益）。治跨租户病的正确姿势是补 `course_id` 列，而非建父表。
 
@@ -89,19 +87,19 @@
 
 **为什么**：两个 `consolidate_memory` job 同用户并发，会各自 read→rewrite→互相覆盖。
 
-**正例**：`sessions.summary_version`（OCC：`UPDATE ... WHERE summary_version = old`）防多 worker 摘要丢更新；`knowledge_mastery` 逐行 append + 读时衰减。
-**反例（违 P5）**：`users.knowledge_graph` / `error_graph` 无版本号，由 `graph_memory.save_graphs` 整列 rewrite。→ 见 [P3](#p3--记忆单一真相源--users-瘦身--并发高风险最大块)（治理方式是删列迁到 `knowledge_mastery`，而非给将删的列加版本号）。
+**正例**：`sessions.summary_version`（OCC：`UPDATE ... WHERE summary_version = old`）防多 worker 摘要丢更新；`users.graph_version`（迁移 031，条件 UPDATE + 冲突重试）防图谱整列 rewrite 丢更新；`knowledge_mastery` 逐行 append + 读时衰减。
+**历史反例（已治理）**：`users.knowledge_graph` / `error_graph` 无版本号、由 `graph_memory.save_graphs` 整列 rewrite → 迁移 031 加 OCC（治理方式从原案"删列"改判为"OCC 保留"，附录决策 2）。
 
 ### 原则 6：演进纪律（Expand/Contract，不留孤儿，迁移唯一权威）
 
 **规则**：
 1. schema 变更走 **Expand → Migrate → Contract**，"保留不删"必须挂一个 Contract 工单。
-2. **所有建表只经 Alembic**，禁止 `create_all` + `_ensure_column` 双轨。
+2. 生产建表只经 Alembic；create_all 仅作 dev/test 基座（拍板保留，附录决策 4）。
 3. 每个迁移有 `revision`/`down_revision` 链，文件名与 revision 一一对应。
 
-**为什么**：双轨导致 rev 014 补建 7 张早已"活在 create_all 里"的表、每个迁移裹 `_table_exists/_column_exists` 幂等守卫；6 个孤儿记忆列是"保留不删"欠的债；缺 revision `007` + `005_` 文件重名是卫生信号。
+**为什么**：双轨曾致 rev 014 补建 7 张早已"活在 create_all 里"的表、每个迁移裹 `_table_exists/_column_exists` 幂等守卫；"保留不删"欠下 6 个孤儿记忆列的债。
 
-**反例（违 P6）**：`init_db()` 的 `create_all`+`_ensure_column`（dev/test 路径）与生产 Alembic 双轨；`users` 6 个孤儿列。→ 见 [P3](#p3--记忆单一真相源--users-瘦身--并发高风险最大块) / [P4](#p4--建表纪律--配额回填基础设施卫生)。
+**历史反例（已治理/已拍板）**：`users` 6 个孤儿记忆列 → 4 个已删（迁移 029），余 2 个图谱列改判保留+OCC（031）；`create_all` 双轨 → **拍板保留**（生产路径跳过 create_all，漂移由 greenfield/head 链迁移守卫测试兜底，附录决策 4）。
 
 ### 原则 7：约定一致（ID / 时间戳 / 命名）
 
@@ -121,13 +119,13 @@
 
 ---
 
-## Part 2 — 27 表体检打分
+## Part 2 — 31 表体检打分
 
-图例：`✅合规` / `⚠️可改进` / `🔴违反原则`
+图例：`✅合规` / `⚠️可改进（或有理由保留）` / `🔴违反原则`
 
-| 域 | 表 | 判定 | 要点（违反哪条） |
+| 域 | 表 | 判定 | 要点 |
 |---|---|---|---|
-| Auth | `users` | 🔴 | 超载（身份 + 6 记忆列）；`knowledge_graph` 无 OCC 整列 rewrite（违 P1/P5） |
+| Auth | `users` | ⚠️ | 4 死记忆列已删（迁移 029）、图谱列 OCC 已修（031）；余 `knowledge_graph`/`error_graph` 保留为**仪表盘展示层**（每生对话现编图），与 `knowledge_mastery`（掌握状态）、`course_topic_edge`（全班课程结构）三方分工已澄清 |
 | | `user_social_bindings` | ✅ | 标准 OAuth 绑定 |
 | | `user_mcp_enrollments` | ✅ | 1:1 配置 |
 | | `user_search_configs` | ✅ | 1:1 配置 |
@@ -135,11 +133,11 @@
 | | `teacher_invites` | ✅ | 一次性码流程 |
 | | `teacher_applications` | ✅ | 审批流程，索引合理 |
 | Chat | `sessions` | ⚠️ | OCC 摘要做对；`updated_at` 每条消息 UPDATE（有界，留意索引 churn） |
-| | `messages` | 🔴 | 缺 `course_id`，课程级查询必 JOIN Session（违 P3） |
-| RAG | `knowledge_bases` | 🔴 | 残留死状态列 `status/progress*/chunks_*/token_estimate`（违 P1） |
+| | `messages` | ✅ | `course_id` 已补（迁移 026，写时落盘+复合索引）；037 加 `turn_id` 唯一索引（服务端权威回合日志幂等） |
+| RAG | `knowledge_bases` | ✅ | 7 个死状态列已删（迁移 028）；构建状态唯一真相源=`kb_builds`，展示态由 `aggregate_build_status` 现算投影 |
 | | `kb_builds` | ✅ | 真相源，`UNIQUE(kb_id,backend)` 合理 |
 | | `kb_files` | ✅ | |
-| Quiz | `notebook_entries` | 🔴 | 缺 `course_id`（违 P3，已致跨课 bug） |
+| Quiz | `notebook_entries` | ✅ | `course_id` 已补（迁移 026）；036 加判分列（grade/grade_source/feedback/score） |
 | | `notebook_categories` | ✅ | |
 | | `notebook_entry_categories` | ✅ | M2M join |
 | Academic | `enrollments` | ✅ | 租户 JOIN 枢纽（符合预期） |
@@ -147,80 +145,66 @@
 | | `grades` | ✅ | upsert 键合理 |
 | Memory | `memory_episodes` | ✅ | 原始+outbox 双职，append-only |
 | | `knowledge_mastery` | ✅ | 逐行 append + 读时衰减，P3/P5 范例 |
-| Analytics | `learning_events` | ⚠️ | 只写 `asked`，`answered`/`feedback` 未产（违 P2 完整性） |
-| | `course_daily_rollup` | 🔴 | cron 在算却无读路径（违 P2，纯浪费） |
-| | `student_course_rollup` | 🔴 | 同上 |
+| | `mastery_observation` | ✅ | 新增（033）：append-only 观测日志，字段契约对齐 pyBKT tutor log；状态由 `fold_observations` 确定性折叠进 `knowledge_mastery`——换估计器只重跑折叠不重跑 LLM；`evidence_quote` 判定依据可审计 |
+| | `course_topic` | ✅ | 新增（032）：课程结构层，读多写少，建库时一次性离线抽取；`uq(course_id, topic_id)`；`topic_id` 对齐 `knowledge_mastery.kp_id`；难度侧 `difficulty_b`/`n_item` 日频全班重折、写路径不在线更新 |
+| | `course_topic_edge` | ✅ | 新增（032）：先修边唯一事实源，`uq(course_id, src, dst, relation)`；`evidence` 讲义原句（子串校验过）可审计，闭包推断边无 evidence；回溯按 dst 查有索引 |
+| Analytics | `learning_events` | ⚠️ | `asked`/`answered` 已接通（answered 由 question_notebook 提交作答即写，rollup 在吃）；`feedback` 待 Phase 4 |
+| | `course_daily_rollup` | ✅ | 读路径已接（teacher 概览 7 天趋势），行缺失/过期 >6h 降级现算（P0 收口） |
+| | `student_course_rollup` | ✅ | 读路径已接（学生统计 2-5 项），stale 降级（P0 收口） |
+| | `course_faq` | ✅ | 新增（027）：L1 读模型，ARQ cron 语义聚类删后重算（幂等）；embedding 存 JSON 非 pgvector——SQLite 测试可跑、Python 算 cosine（避开 `func.left` 同款 PG 专有坑） |
 | Billing | `llm_usage_records` | ✅ | append-only + 无 FK，P4 范例 |
-| | `llm_usage_daily` | ⚠️ | 被 teacher/admin 消费，合规；配额真相只在 Redis（见 P4） |
+| | `llm_usage_daily` | ✅ | 被 teacher/admin 消费；Redis 配额失联由 `reconcile_quota_from_db` 从本表聚合回填兜底（P4.2） |
 | Research | `research_checkpoints` | ✅ | 无 FK 故意，合理 |
-| Bot | `bot_notifications` | 🔴 | 缺 `course_id` + 无留存清理 cron（违 P3） |
+| Bot | `bot_notifications` | ✅ | 每日 04:53 清理 N 天前**已读**通知（`purge_old_notifications`）；`course_id` 拍板不加（仅按 `user_id` 查询，YAGNI，附录决策 3） |
 
-**统计**：18 ✅ / 4 ⚠️ / 9 处 🔴（3 处 = 缺 `course_id` 同病；2 处 = 双真相源同病；2 处 = 死 rollup 同病）。**问题高度集中，非系统性。**
+**统计**：**27 ✅ / 4 ⚠️ / 0 🔴**（⚠️=users 展示层保留 / user_llm_providers 死字段 / sessions updated_at churn / learning_events feedback 未落）。2026-08-08 首检逐表实为 16✅/4⚠️/7🔴（当时统计行误作 18/4/9，本次修正为逐表可加总口径）。
 
 ---
 
-## Part 3 — 收尾路线图（Expand/Contract，分阶段可中断）
+## Part 3 — 收尾路线图（P0–P4 全部核销，2026-09-16 复核）
 
-按 **ROI / 风险** 排序，每阶段独立可交付、可中断。每阶段格式：**病 → 修 → 文件 → 验证**。
+原路线图按 ROI/风险排序分 5 阶段，各阶段独立交付。以下为各阶段的**病 → 实际落地（含改判）→ 验证**存档。
 
-### P0 ｜ 接通死 rollup + 补全事件层（高 ROI，低风险）
+### P0 ｜ 接通死 rollup + 补全事件层 —— ✅ 已完成
 
-- **病**：`course_daily_rollup` / `student_course_rollup` 每小时 DELETE+重算却无人读；仪表盘 `analytics_overview` / `analytics_student_stats`（6 条串行查询）/ `analytics_student_detail` 每请求现算。
-- **修**：
-  1. 把三个 analytics 端点改为读 rollup 表；rollup 行缺失/过期时**降级现算**（兜底，保证正确性）。
-  2. quiz 答题路径开始写 `learning_events(verb=answered)`，让 rollup 的答题口径不再依赖 `NotebookEntry ⋈ Session`。
-- **文件**：`backend/api/teacher.py`（analytics_*）、`backend/core/analytics/learning_rollup.py`、`backend/main.py`（写 answered 事件）。
-- **迁移**：无需。
-- **验证**：仪表盘请求数 6→1（读 rollup）；rollup stale 降级路径有测试；学情测试绿。
+- **病**：`course_daily_rollup` / `student_course_rollup` 每小时 DELETE+重算却无人读；analytics 端点每请求现算（6 条串行查询）；`learning_events` 缺 `verb=answered`。
+- **落地**：analytics 概览/学生统计读 rollup（`api/teacher.py`），行缺失/过期 >6h **降级现算**兜底；`verb=answered` 由 `api/question_notebook.py` 提交作答即写，rollup 答题口径不再依赖 `NotebookEntry ⋈ Session`。
+- **验证**：`tests/test_teacher_analytics.py`（含"rollup 读路径接通（P0 收口）"回归）。
 
-### P1 ｜ 租主硬化：给 3 表补 `course_id`（中风险）
+### P1 ｜ 租主硬化：补 `course_id` —— ✅ 已完成（2/3 表，第 3 表拍板不做）
 
 - **病**：`messages` / `notebook_entries` / `bot_notifications` 缺 `course_id`，课程级查询必 JOIN Session，已致跨租户 bug。
-- **修（Expand/Contract）**：
-  1. **Expand**：加可空 `course_id String(64)`（迁移 026）+ 复合索引 `(course_id, ...)`。
-  2. **Migrate**：回填 `UPDATE t SET course_id = s.course_id FROM sessions s WHERE t.session_id = s.id`（`bot_notifications` 按 user 维度回填）。
-  3. **Contract**：验证覆盖率 100% 后改 `NOT NULL`。
-  4. 新写入在创建行时落 `course_id`（`add_message` / `notebook_store` / notification cron）。
-  5. collapse analytics / rollup 里的 Session JOIN。
-- **文件**：`database.py`（3 模型）、迁移 026、`core/memory/memory.py`(`add_message`)、`core/db/notebook_store.py`、`services/cron/executor.py`、`api/teacher.py` + `core/analytics/learning_rollup.py`。
-- **验证**：`SELECT count(*) WHERE course_id IS NULL` = 0；跨租户回归测试保绿；EXPLAIN 显示去 JOIN。
+- **落地**：前两表迁移 026 补列（NOT NULL default ""）+ 复合索引 + 关联子查询回填（PG/SQLite 通用）；写时落盘（`memory.py add_message` / `notebook_store.upsert` 反查 Session.course_id）；5 处查询去 JOIN。`bot_notifications` 拍板不加（附录决策 3）。
+- **验证**：41 项相关测试绿。⚠️ 测试 fixture 直造 NotebookEntry 须补 `course_id` 否则查不到（已沉淀为测试约定）。
 
-### P2 ｜ KB 状态单一真相源（中高风险，纯收尾）
+### P2 ｜ KB 状态单一真相源 —— ✅ 已完成
 
-- **病**：`knowledge_bases` 残留死列 `status / progress / progress_msg / chunks_done / chunks_total / token_estimate / error_msg`，与 `kb_builds` 重复。
-- **修（Contract）**：
-  1. grep 全仓确认**无读者**依赖 KB 行这些列（`aggregate_build_status` 读的是 `kb.builds`，非 `kb.status`；前端 `_kb_to_dict`/`_kb_to_course` 同口径）。
-  2. 迁移 027 DROP 这些列。
-- **文件**：`database.py`(`KnowledgeBase`)、迁移 027、`api/admin.py` / 前端 `KbDetailPanel` 若有引用。
-- **验证**：`test_kb_builds` / `test_migration_greenfield` 绿；建库/检索全流程冒烟。
+- **病**：`knowledge_bases` 残留 7 死状态列（status/progress*/chunks_*/token_estimate/error_msg）与 `kb_builds` 重复。
+- **落地**：迁移 028 DROP 7 列；KB 真相源收口 `kb_builds`；`_ensure_column` 死条目与 seed 传参同步清理（漏删=dev/prod schema 分叉，真实漂移 bug 已修）。
+- **验证**：`test_kb_builds` / `test_migration_greenfield` 绿（greenfield 有"无死列"守卫断言）。
 
-### P3 ｜ 记忆单一真相源 + users 瘦身 + 并发（高风险，最大块）
+### P3 ｜ 记忆单一真相源 + users 瘦身 + 并发 —— ✅ 已完成（含一次改判）
 
-- **病**：①图谱双写 `users.knowledge_graph`(无 OCC 整列 rewrite) ↔ `knowledge_mastery`(做对)；②`users` 6 个记忆列（`summary_memory/profile_memory/scope_memory/preferences_memory/knowledge_graph/error_graph`）多为孤儿（语义记忆已交 mem0 `memories` 表）。
-- **修（Expand/Contract，建议拆 2 个子 PR）**：
-  - **图谱（子 PR-a）**：教师仪表盘读路径（`teacher.py:734`）从 `users.knowledge_graph` 切到 `knowledge_mastery`（或其投影）→ 停止双写 → Contract 删 `knowledge_graph`/`error_graph`。**删列即消除 OCC bug**（比给将删的列加版本号更优）。
-  - **L2 文本列（子 PR-b）**：逐列 grep 读者——`summary_memory`/`profile_memory` 若已被 mem0 取代则 Contract 删；仍在用的保留或迁独立表。`scope_memory`/`preferences_memory` 同理判定。
-- **文件**：`database.py`(`User`)、`core/memory/graph_memory.py`、`api/teacher.py`、`core/memory/mem0_client.py`、迁移 028。
-- **验证**：仪表盘图谱渲染正常（数据源切换）；mem0 检索冒烟；`test_rag_*` / 记忆测试绿。
-- **⚠️ 风险**：最高的一块，必须逐列确认读者后再删。
+- **病**：①图谱双写 `users.knowledge_graph`（无 OCC 整列 rewrite）↔ `knowledge_mastery`；②`users` 6 个记忆列多为孤儿（语义记忆已交 mem0）。
+- **落地**：迁移 029 删 4 死列（summary/profile/scope/preferences_memory）。图谱列**原案"删列"被推翻**：前端 GraphPage/仪表盘/学生统计直接渲染该列，删列=拆功能，用户拍板"修 bug 别删"→ 迁移 031 加 `graph_version` OCC（条件 UPDATE+冲突重试 3 次，modify 幂等）+ 新节点打 `course_id` 标签 + 教师视图按课程过滤。随后 `course_topic_edge`（032）落地，"全班课程结构（可审计唯一事实源）"与"每生展示图"分工正式澄清。
+- **验证**：仪表盘图谱渲染正常；OCC 冲突重试有测试。
+- **教训**：①删列前 grep 零读者零写者（含 seed 构造传参）②"前端渲染原始 JSON 列"是删列硬阻塞③并行加迁移会撞号，加迁移先 `ls versions/`。
 
-### P4 ｜ 建表纪律 + 配额回填（基础设施卫生）
+### P4 ｜ 建表纪律 + 配额回填 —— ✅ 已完成（create_all 双轨拍板保留）
 
 - **病**：①双轨建表（`init_db()` create_all + Alembic）；②配额真相只在 Redis，Redis 丢=静默重置；③迁移文件卫生（缺 revision 007、`005_` 文件重名）。
-- **修**：
-  1. `init_db()` 只做 seed，schema 全交 Alembic；测试用经 Alembic 迁移的 DB（或受控 create_all fixture）。
-  2. 启动时 + 定期从 `llm_usage_daily` 回填 Redis `ca:costquota:*`，Redis 失联不静默重置。
-  3. `005_` 重命名补注释说明 007 缺口（不可改 history）。
-- **文件**：`core/db/database.py`(`init_db`)、`tests/conftest.py`、`core/observability/cost_quota.py`、迁移目录。
-- **验证**：空库 `alembic upgrade head` → 27 表齐（greenfield 测试）；Redis 清空后配额从 DB 回填有测试。
+- **落地**：配额回填 `reconcile_quota_from_db`（`core/quota/cost_quota.py`，`main.py` 启动调用）从 `llm_usage_daily` 聚合 SETNX 回填 Redis 配额键；迁移文件改名补注释。kill create_all **实证不可行**（002 create_unique_constraint SQLite 不支持；create_all 是 900+ 测试基座）→ **拍板保留双轨**：生产路径跳过 create_all（`init_db` 守卫），漂移由 greenfield/head 链迁移守卫测试兜底（附录决策 4）。
+- **验证**：`test_cost_quota.py`（Redis 失联回填）；`test_migration_greenfield.py`（空库 `alembic upgrade head` 全表齐）。
 
 ---
 
-## 附录：两个已拍板决策
+## 附录：四个已拍板决策
 
 1. **不新建 `courses` 表**——course 与 `knowledge_bases` 1:1 已工作，建父表要改 13 张表的 `course_id` 为 FK，ROI 不划算；治跨租户病用"补 `course_id` 列"（`knowledge_mastery` 范式）。
-2. **P3 删列而非加 OCC**——`users.knowledge_graph` 是过渡双写死列，加版本号是给将删之物打补丁；删列即根治。
+2. **图谱列保留 + OCC（改判）**——原案"P3 删列而非加 OCC"于 2026-08 下旬推翻：前端 GraphPage/仪表盘/学生统计直接渲染 `users.knowledge_graph`，删列=拆功能；用户拍板"修 bug 别删"，走迁移 031 `graph_version` OCC。随后 `course_topic_edge` 落地，全班课程结构与每生展示图分工澄清，"双真相源"降级为"展示层 + 状态层"。
+3. **`bot_notifications` 不加 `course_id`**——首检体检表 over-flag：该表只按 `user_id` 查询，加列是 YAGNI。留存清理已另行落地（每日 04:53 `purge_old_notifications`，只清已读）。
+4. **`create_all` 双轨保留**——kill 实证不可行（SQLite 不支持 002 的 create_unique_constraint；create_all 是 900+ 测试基座）。收口方式：生产路径跳过 create_all + greenfield/head 链迁移守卫测试兜漂移，而非强行单轨。
 
 ---
 
-*本文由 2026-08-08 的 schema 审计产出（3 个并行 Explore：表清单 / 迁移 churn / 访问模式 + 三维调研）。体检判定已逐行核对 `database.py` line 78–247 + 529–733。*
+*2026-08-08 审计产出（三维调研 + 27 表体检 + P0–P4 路线图）；2026-09-16 复核刷新：P0–P4 全部核销（Part 3 存档状态）、4 张新表入册（`course_faq`/`course_topic`/`course_topic_edge`/`mastery_observation`）、体检重打分 27✅/4⚠️/0🔴、迁移对齐 001→037。*
