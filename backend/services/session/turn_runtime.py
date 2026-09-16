@@ -656,9 +656,22 @@ class TurnRuntimeManager:
                 )
                 log_flow("turn.error", turn_id=execution.turn_id,
                          elapsed_ms=int((time.monotonic() - t0) * 1000), error=str(exc))
+                # LLM 可靠性层异常（熔断 OPEN / 重试耗尽）给用户统一中文文案，
+                # 不把 CircuitOpenError 内部英文信息漏进 SSE 错误气泡（llm.chat_complete 同款）
+                from core.llm.reliability import (
+                    LLM_SERVICE_UNAVAILABLE,
+                    CircuitOpenError,
+                    LLMRetryError,
+                )
+
+                _user_msg = (
+                    LLM_SERVICE_UNAVAILABLE
+                    if isinstance(exc, (CircuitOpenError, LLMRetryError))
+                    else str(exc)
+                )
                 await execution.bus.emit({
                     "type": "error",
-                    "message": str(exc),
+                    "message": _user_msg,
                     "source": "turn_runtime",
                 })
             finally:

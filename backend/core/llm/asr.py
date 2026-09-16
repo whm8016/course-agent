@@ -19,24 +19,19 @@ from settings import get_settings
 
 logger = logging.getLogger(__name__)
 
-# ASR 专属熔断器池（按 model 注册，与对话主链路全局 default 隔离——M-21 同款：
-# 辅助链路失败不该打 OPEN 主链路熔断器）
-_ASR_BREAKERS: dict[str, Any] = {}
-
 
 class TranscribeError(Exception):
     """转写失败（provider 异常 / 熔断 / 空文本）。端点转 502。"""
 
 
 def _get_asr_circuit_breaker(model: str) -> Any:
-    from core.llm.reliability import CircuitBreaker
+    """ASR 专属熔断器（按 model 注册，与对话主链路各 binding 隔离——M-21 同款：
+    辅助链路失败不该打 OPEN 对话熔断器）。并入全局注册表：阈值统一吃 settings、
+    进 /health/detailed、运维 reset 端点自动覆盖。
+    """
+    from core.llm.reliability import get_llm_circuit_breaker
 
-    key = f"asr:{model}"
-    cb = _ASR_BREAKERS.get(key)
-    if cb is None:
-        cb = CircuitBreaker(name=key)
-        _ASR_BREAKERS[key] = cb
-    return cb
+    return get_llm_circuit_breaker(f"asr:{model}")
 
 
 async def resolve_asr_runtime(user_id: str = "") -> tuple[Any, str | None]:
@@ -66,7 +61,14 @@ async def resolve_asr_runtime(user_id: str = "") -> tuple[Any, str | None]:
         from openai import AsyncOpenAI
 
         return (
-            AsyncOpenAI(api_key=key, base_url=base_url, timeout=settings.asr.timeout_sec),
+            # max_retries=0：重试收归 reliability.with_retry_and_circuit 单层，
+            # 避免 SDK 内置重试与外层重试相乘（最坏 4 波×3 次三层叠加）
+            AsyncOpenAI(
+                api_key=key,
+                base_url=base_url,
+                timeout=settings.asr.timeout_sec,
+                max_retries=0,
+            ),
             model,
         )
     except Exception:

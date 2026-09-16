@@ -450,6 +450,16 @@ Key points:
 
 Management API (`api/llm.py`, admin): CRUD profiles + `/probe` test connection + `/active` default; `/profiles/selectable` feeds the dropdown (**api_key stripped**). Catalog read/write layer: `core/llm/catalog.py` —— 同步 `load_catalog/get_profile`（启动期 / 单测用）+ async `*_cached`（运行期热路径：Redis cache-aside + `asyncio.to_thread` 读文件，避免同步 I/O 阻塞 worker 事件循环；写后 `invalidate_catalog_cache` 显式失效）。写端点用 `asyncio.to_thread` 包文件写。Frontend: `LlmProviderPage`（admin CRUD+test；学生视图可自配个人 Key 覆盖平台默认、走自己额度，支持「复原为默认」回退平台共享模型）+ `ChatWindow` model dropdown (all users).
 
+### LLM 调用可靠性（重试 + 熔断 + fallback，2026-09 滑动窗口重写）
+
+`core/llm/reliability.py` 是全部 LLM 出站调用的可靠性咽喉（主链路 `_create_with_image_fallback`、ASR、vision、topic_build 均经 `with_retry_and_circuit`）。2026-09 重写对齐三个对标的主循环：litellm `router_utils/cooldown_handlers.py`（失败率判定 + 最小样本量 + 错误分类 + per-attempt 记账）、resilience4j `CircuitBreakerConfig`（COUNT_BASED 滑动窗口 + minimumNumberOfCalls + HALF_OPEN 探测名额、OPEN→HALF_OPEN 请求被动触发无定时器）、pybreaker（HALF_OPEN 少量成功即合闸）。
+
+**判定语义**：滑动窗口（默认 20 次）失败率 ≥50% 且样本 ≥8（`LLM__CIRCUIT_*` 可调）才 OPEN——看比率不看连续，抖动型故障（好一次坏一次）能触发、成功不清零窗口、低流量不误跳。**per-attempt 记账**：`with_retry_and_circuit` 每次 attempt 先 `before_call()`（OPEN 毫秒级抛 `CircuitOpenError`，fail-fast）、失败即 `record_failure()`——旧实现整轮重试耗尽才算一次失败，阈值 5 实际要 ~60 次 HTTP 尝试/35s 才熔断，被重试稀释成摆设。**错误分类**（`classify_failure`）：只有供应商侧故障（连接错误/超时/429/408/5xx）计入；400/401/404 调用方错误不计（换个请求照样成功，熔断只会误伤健康供应商）；未知异常按文案关键词兜底（宁漏勿误）。
+
+**粒度与隔离**：熔断器按注册名隔离——主链路按 binding（`dashscope`/`deepseek`/…，`loop._one_round` 按本轮 binding 解析）、fallback 供应商接自己的实例（对称保护，主路径 OPEN 时毫秒级切 fallback）、ASR `asr:{model}`、vision `vision:{model}`、topic_build。全部并入 `get_llm_circuit_breaker` 注册表：阈值统一吃 settings、`/health/detailed` 全量可见、`POST /admin/circuit-breaker/reset` 一键覆盖。**H-16 不变**：自配/profile client 传 `circuit_breaker=None`（只重试不熔断，用户私有资源不连累平台）。**半开结构化无死锁**：探测名额(3) ≥ 合闸所需成功数(2) 由构造器钳制保证（旧 H-11 死锁守卫随重写删除）。
+
+**单层重试**：全部 client 构造点（`provider_factory`/`asr`/`vision`/`anthropic_adapter`）显式 `max_retries=0`——SDK 内置重试（默认 2）与外层 4 波相乘曾是三层叠加（最坏 24 次 HTTP），重试收归 reliability 单层。**多 worker**：各进程独立记账（阈值单进程语义，不做 //workers 缩放），`ca_llm_circuit_state` gauge（liveall，取 max 即"是否有进程 OPEN"）+ `ca_llm_circuit_transitions_total`/`ca_llm_retries_total`/`ca_llm_fallback_triggers_total` counter 聚合观测；运维 reset 仅当前进程，其余靠 open_timeout(30s) 后 HALF_OPEN 自动恢复兜底。**用户文案**：`CircuitOpenError`/`LLMRetryError` 到达 SSE error 事件时映射为统一中文提示（`reliability.LLM_SERVICE_UNAVAILABLE`），不再把英文内部信息漏给学生。已知缺口：`session_summary` 裸调未接入（L2 压缩有自己的双温重试）。
+
 ## RAG 检索架构（`core/rag/`）
 
 四阶段递进检索，每层独立开关，**默认配置下行为与改造前完全一致**（ES / 上下文分块均默认关），逐层启用可量化增益：

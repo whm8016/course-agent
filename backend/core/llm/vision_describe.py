@@ -20,25 +20,17 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-# vision 专属熔断器池（按 vision_model 注册，与对话主链路全局 default 隔离）
-_VISION_BREAKERS: dict[str, Any] = {}
-
 
 def _get_vision_circuit_breaker(vision_model: str) -> Any:
-    """取 vision 专属熔断器（按 vision_model 注册，与对话主链路全局 default 隔离）。
+    """取 vision 专属熔断器（按 vision_model 注册，与对话主链路各 binding 隔离）。
 
     M-21：视觉描述是辅助链路（失败可降级剥图），用独立熔断器，避免视觉供应商波动把
-    对话主链路的全局 default 熔断器打 OPEN。复用 reliability 的 CircuitBreaker，阈值
-    走默认（5 次失败 OPEN）。
+    对话熔断器打 OPEN。并入全局注册表（get_llm_circuit_breaker）：阈值统一吃
+    settings、进 /health/detailed、运维 reset 端点自动覆盖。
     """
-    from core.llm.reliability import CircuitBreaker
+    from core.llm.reliability import get_llm_circuit_breaker
 
-    key = f"vision:{vision_model}"
-    cb = _VISION_BREAKERS.get(key)
-    if cb is None:
-        cb = CircuitBreaker(name=key)
-        _VISION_BREAKERS[key] = cb
-    return cb
+    return get_llm_circuit_breaker(f"vision:{vision_model}")
 
 
 # 让 vision 模型把图片转成可被纯文本回答模型利用的结构化描述。
@@ -94,7 +86,7 @@ async def describe_image_attachments(
 
     M-21：单张描述接入 reliability 层（with_retry_and_circuit）。瞬时错误（429/超时/网关）
     自动指数退避重试，不再裸 await 一次失败就丢图。熔断器走 vision 专属实例（按 vision_model
-    注册），不污染对话主链路的全局 default 熔断器；熔断 OPEN / 重试耗尽时降级为空串，
+    注册），不污染对话主链路的熔断判定；熔断 OPEN / 重试耗尽时降级为空串，
     由调用方回退剥图降级，绝不抛 CircuitOpenError 打断主链路。
     """
     if not vision_client or not vision_model or not images:
@@ -208,7 +200,17 @@ async def resolve_vision_runtime(user_id: str = "") -> tuple[Any, str | None]:
         try:
             from openai import AsyncOpenAI
 
-            return AsyncOpenAI(api_key=v_key, base_url=v_url), v_model
+            # max_retries=0：重试收归 reliability 单层；timeout 此前缺省 600s
+            # （SDK 默认），压到与主链路一致的 llm.timeout_sec
+            return (
+                AsyncOpenAI(
+                    api_key=v_key,
+                    base_url=v_url,
+                    timeout=settings.llm.timeout_sec,
+                    max_retries=0,
+                ),
+                v_model,
+            )
         except Exception:
             logger.exception("resolve vision runtime: 构造全局 vision client 失败")
 

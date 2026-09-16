@@ -1,15 +1,16 @@
-"""LLM 可靠性隔离回归测试（H-16 + M-14/16/19/20/21）。
+"""LLM 可靠性隔离回归测试（H-16 + M-19/20/21）。
 
-H-16：自配/profile client 失败不接入全局 default 熔断器——用户选了个坏 profile 不应
-连累所有走全局 client 的用户。判定信号 = _one_round 的 llm_client 参数（None=全局
-默认 client 才熔断）。
+H-16：自配/profile client 失败不接入平台熔断器——用户选了个坏 profile 不应连累所有
+走全局 client 的用户。判定信号 = _one_round 的 llm_client 参数（None=全局默认 client
+才熔断，2026-09 起按本轮 binding 注册实例）。
 
-M-14：worker scaling 应用到「显式传入的 configured」熔断器（此前仅 None 默认路径缩放）。
-M-16：BACKEND_WORKERS env 与 settings.backend_workers 统一同一来源。
 M-19：profile base_url 空值回退 .env（DASHSCOPE_BASE_URL），与 api_key 对称。
 M-20：catalog 读-改-写原子（_atomic_update），杜绝 TOCTOU 丢更新 + 原子文件替换。
 M-21：vision 模型描述图片的调用接入 reliability 层（retry + 熔断），失败退化为空描述、
 不阻断主链路；此前是裸 await vision_client...create，瞬时错误（429/超时）直接丢图。
+
+M-14/M-16（//BACKEND_WORKERS 阈值缩放及 worker 数来源统一）已随 2026-09 滑动窗口
+重写删除：多 worker 各进程独立记账，阈值按单进程语义配置，不再缩放。
 """
 from __future__ import annotations
 
@@ -206,69 +207,6 @@ async def test_m21_vision_describe_circuit_open_degrades_to_empty():
         retry_config=RetryConfig(max_retries=0),
     )
     assert descs == [""]
-
-
-# ---------------------------------------------------------------------------
-# M-14：worker scaling 应用到 configured circuit breaker
-# ---------------------------------------------------------------------------
-
-
-def test_m14_configured_circuit_breaker_scales_failure_threshold(monkeypatch):
-    """显式传入 config（get_llm_circuit_breaker 路径）的 failure_threshold 也按 worker 缩放。
-
-    此前只有 config=None 走 worker 缩放；get_llm_circuit_breaker 显式传 CircuitBreakerConfig，
-    failure_threshold 保持原值，多 worker 下阈值偏大、熔断迟钝。修复后统一缩放。
-    """
-    from core.llm.reliability import CircuitBreaker, CircuitBreakerConfig
-
-    monkeypatch.setenv("BACKEND_WORKERS", "4")
-    cb = CircuitBreaker(
-        "m14_cfg",
-        config=CircuitBreakerConfig(
-            failure_threshold=8, success_threshold=2, open_timeout=30.0,
-        ),
-    )
-    # failure_threshold(8) // workers(4) = 2（>= 下限 2）。success_threshold 不缩放。
-    assert cb.config.failure_threshold == 2
-    assert cb.config.success_threshold == 2
-
-
-def test_m14_failure_threshold_floor_is_two(monkeypatch):
-    """workers 过大导致 //workers < 2 时，下限抬到 2，避免单次抖动即熔断。"""
-    from core.llm.reliability import CircuitBreaker, CircuitBreakerConfig
-
-    monkeypatch.setenv("BACKEND_WORKERS", "16")
-    cb = CircuitBreaker(
-        "m14_floor",
-        config=CircuitBreakerConfig(
-            failure_threshold=5, success_threshold=2, open_timeout=30.0,
-        ),
-    )
-    # 5 // 16 = 0 → 抬到下限 2
-    assert cb.config.failure_threshold == 2
-
-
-# ---------------------------------------------------------------------------
-# M-16：BACKEND_WORKERS env 与 settings.backend_workers 统一
-# ---------------------------------------------------------------------------
-
-
-def test_m16_resolve_backend_workers_env_priority(monkeypatch):
-    """env BACKEND_WORKERS 优先于 settings.backend_workers。"""
-    from core.llm.reliability import _resolve_backend_workers
-
-    monkeypatch.setenv("BACKEND_WORKERS", "8")
-    assert _resolve_backend_workers() == 8
-
-
-def test_m16_resolve_backend_workers_falls_back_to_settings(monkeypatch):
-    """env 缺失时回退 settings.backend_workers（不再硬编码只读 env）。"""
-    from core.llm.reliability import _resolve_backend_workers
-    from settings.base import get_settings
-
-    monkeypatch.delenv("BACKEND_WORKERS", raising=False)
-    expected = get_settings().backend_workers
-    assert _resolve_backend_workers() == max(1, expected)
 
 
 # ---------------------------------------------------------------------------

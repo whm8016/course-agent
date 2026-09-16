@@ -42,7 +42,7 @@ async def test_image_fallback_does_not_pollute_circuit_breaker():
     mock_client = MagicMock()
     mock_client.chat.completions.create = _fake_create
 
-    # 不传 circuit_breaker → 走默认全局熔断器（"default"）。校验它零污染。
+    # 不传 circuit_breaker → 走默认平台熔断器（按主 binding 注册）。校验它零污染。
     _llm_circuit_breaker.reset()
     try:
         result = await _create_with_image_fallback(
@@ -97,7 +97,7 @@ async def test_user_supplied_client_not_circuit_broken():
     """自配 client（circuit_breaker=None）失败不计入任何熔断器。
 
     自配供应商是用户私有资源，平台不替它兜底——失败仍会重试，但不熔断，让真实错误
-    （这里是 401 key 失效）冒给用户；也保证自配失败不会把全局 default 熔断器打 OPEN
+    （这里是 401 key 失效）冒给用户；也保证自配失败不会把平台熔断器打 OPEN
     误伤其他用户。
     """
     create_kwargs = {
@@ -120,7 +120,7 @@ async def test_user_supplied_client_not_circuit_broken():
                 mock_client, create_kwargs, "openai", "some-model",
                 circuit_breaker=None,  # 自配：不熔断
             )
-        # 核心保证：全局 default 熔断器零污染——自配失败不误伤他人
+        # 核心保证：平台熔断器零污染——自配失败不误伤他人
         assert _llm_circuit_breaker.failure_count == 0
         assert _llm_circuit_breaker.get_state().value == "closed"
     finally:

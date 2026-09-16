@@ -22,6 +22,7 @@ from core.llm.reliability import (
     CircuitBreaker,
     CircuitOpenError,
     LLMRetryError,
+    LLM_SERVICE_UNAVAILABLE,
     RetryConfig,
     get_llm_circuit_breaker,
     with_retry_and_circuit,
@@ -101,10 +102,12 @@ if FALLBACK_API_KEY:
 # 熔断器配置
 # ============================================================
 
-# "default" 熔断器：仅 binding 解析失败 / 未走 profile 的兜底调用使用。主链路按 binding
-# （dashscope/openai/...）各自注册独立实例（见 _create_with_image_fallback）。保留此全局
-# 引用供 get_llm_circuit_state/reset_llm_circuit_breaker 默认行为向后兼容。
-_llm_circuit_breaker = get_llm_circuit_breaker("default")
+# 主链路熔断器按供应商（binding）注册：dashscope 挂了只熔 dashscope，请求毫秒级切
+# fallback，不再一个全局总闸连累全站。主聊天路径经 _make_chat_completion 用此默认实例
+# （binding=LLM_BINDING）；loop 侧对非主 binding 的默认流量按各自 binding 解析实例。
+# 保留 _llm_circuit_breaker 全局引用供 get_llm_circuit_state/reset_llm_circuit_breaker
+# 及测试向后兼容。
+_llm_circuit_breaker = get_llm_circuit_breaker(LLM_BINDING)
 
 # 重试配置（从 settings.llm 读取；settings 模块缺失时回退默认值，避免循环导入阻断启动）。
 # ⚠️ 路径必须是 _s.llm.retry_max（嵌套），不是旧扁平 _s.llm_retry_max —— config 嵌套重构后
@@ -250,10 +253,10 @@ async def _create_with_image_fallback(
         return _call_with_image_fallback
 
     # 熔断器策略：circuit_breaker=None 时不熔断（with_retry_and_circuit 仍重试，只是不计
-    # failure）。默认 _llm_circuit_breaker（全局 "default"）保护平台共享的 DashScope——它
-    # 是所有未自配用户共用的下游，挂了要快速失败防雪崩；自配 client 路径由调用方传 None
-    # 关闭：自配供应商是用户私有资源，平台不替它兜底，让真实错误冒给用户，也避免自配失败
-    # 把全局熔断器打 OPEN 误伤他人（含同 binding 不同 key 的自配用户）。
+    # failure）。默认 _llm_circuit_breaker（按主 binding 注册，如 dashscope）保护平台共享
+    # 供应商——它是所有未自配用户共用的下游，挂了要快速失败防雪崩；自配 client 路径由
+    # 调用方传 None 关闭：自配供应商是用户私有资源，平台不替它兜底，让真实错误冒给用户，
+    # 也避免自配失败把平台熔断器打 OPEN 误伤他人（含同 binding 不同 key 的自配用户）。
     try:
         return await with_retry_and_circuit(
             _make_call(llm_client, create_kwargs, binding, model),
@@ -261,7 +264,7 @@ async def _create_with_image_fallback(
             circuit_breaker=circuit_breaker,
         )
     except (CircuitOpenError, LLMRetryError) as exc:
-        # M-17/M-18：主路径彻底失败 → fallback 端点兜底（仅全局默认路径）。
+        # M-17/M-18：主路径熔断 OPEN / 重试耗尽 → fallback 端点兜底（仅平台默认路径）。
         # fallback 经 with_retry_and_circuit 重跑，瞬时抖动能自愈，不再裸 create。
         if _fallback_client is None or circuit_breaker is None:
             raise  # 无 fallback / 自配路径：原样抛给上层
@@ -269,21 +272,27 @@ async def _create_with_image_fallback(
             "Primary LLM path failed (%s: %s); falling back to %s",
             type(exc).__name__, exc, FALLBACK_MODEL,
         )
+        from core.observability.metrics import LLM_FALLBACK
+
         fb_kwargs = dict(create_kwargs)
         fb_kwargs["model"] = FALLBACK_MODEL
         # 换了供应商/型号：剥掉主模型的思考参数（如 deepseek 的 thinking disabled），
         # 按 fallback 端点重算（如 qwen-plus → enable_thinking），避免跨供应商串参数。
         apply_reasoning_kwargs(fb_kwargs, _fallback_binding, FALLBACK_MODEL, _fallback_client)
         try:
-            return await with_retry_and_circuit(
+            result = await with_retry_and_circuit(
                 _make_call(_fallback_client, fb_kwargs, _fallback_binding, FALLBACK_MODEL),
                 retry_config=_retry_config,
-                # fallback 是独立端点，不接入主链路熔断器（避免 fallback 故障连累主路径判定）
-                circuit_breaker=None,
+                # fallback 供应商接自己的熔断器（对称保护）：熔断打开毫秒级失败，
+                # 且 fallback 故障不连累主 binding 的判定
+                circuit_breaker=get_llm_circuit_breaker(_fallback_binding),
             )
         except (CircuitOpenError, LLMRetryError) as fb_exc:
             logger.error("Fallback LLM also failed: %s", fb_exc)
+            LLM_FALLBACK.labels(outcome="failure").inc()
             raise
+        LLM_FALLBACK.labels(outcome="success").inc()
+        return result
 
 
 async def _make_chat_completion(
@@ -371,7 +380,7 @@ async def chat_complete(
 
     except (CircuitOpenError, LLMRetryError) as e:
         logger.warning("chat_complete: primary+fallback 均失败: %s", e)
-        raise RuntimeError("AI 服务暂时不可用，请稍后重试。") from e
+        raise RuntimeError(LLM_SERVICE_UNAVAILABLE) from e
 
 
 # ============================================================

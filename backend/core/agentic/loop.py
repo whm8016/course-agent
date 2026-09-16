@@ -32,7 +32,8 @@ from core.agentic import context_policy
 from core.agentic.tool_dispatch import dispatch_tool_calls
 from core.agentic.types import DispatchOutcome, LoopOutcome, RoundResult, ToolCall
 from core.context import UnifiedContext
-from core.llm.llm import _create_with_image_fallback, _llm_circuit_breaker, client as _default_client
+from core.llm.llm import _create_with_image_fallback, client as _default_client
+from core.llm.reliability import get_llm_circuit_breaker
 from core.llm.multimodal import prepare_multimodal_messages
 from core.observability import log_flow
 from core.observability.cost import (
@@ -182,12 +183,13 @@ async def _one_round(
     round_usage: TokenUsage | None = None  # 本轮 usage（从末块捕获），provider 不支持时保持 None
     truncated = False                     # 本轮是否撞输出上限被截断（末块 finish_reason=="length"）
 
-    # H-16：自配/profile client（llm_client 非 None）不接入全局熔断器。
+    # H-16：自配/profile client（llm_client 非 None）不接入熔断器。
     # 判定信号 = _one_round 的 llm_client 参数：None → 全局默认 client（平台所有未自配
-    # 用户共用，挂了要快速失败防雪崩，熔断）；非 None → 用户自配/profile 解析出的独立
-    # client（用户私有资源，平台不替它兜底，让真实错误冒给用户；也避免自配失败把全局
-    # default 熔断器打 OPEN 误伤其他用户）。
-    _circuit = None if llm_client is not None else _llm_circuit_breaker
+    # 用户共用，挂了要快速失败防雪崩，熔断，按本轮 binding 注册——dashscope 抖只熔
+    # dashscope，不连累其他供应商流量）；非 None → 用户自配/profile 解析出的独立
+    # client（用户私有资源，平台不替它兜底，让真实错误冒给用户；也避免自配失败把平台
+    # 熔断器打 OPEN 误伤其他用户，含同 binding 不同 key 的自配用户）。
+    _circuit = None if llm_client is not None else get_llm_circuit_breaker(binding)
     # 反应式兜底：估算失误（tokenizer 差异/多模态/工具结果突增）导致 provider 拒 context-length 时，
     # 紧急丢最旧 20% 消息组后重试；连续失败达 max_consecutive_failures 熔断（不再无限重试烧钱）。
     # 对标 Claude Code Reactive Compact + MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES=3。

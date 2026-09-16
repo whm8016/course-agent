@@ -81,6 +81,7 @@ def get_llm_client(
             api_key=api_key or "sk-no-key-required",
             azure_endpoint=base_url,
             api_version=api_version or "2024-02-01",
+            max_retries=0,
         )
 
     # ---- OpenAI 兼容（默认）-----------------------------------------------
@@ -94,6 +95,9 @@ def get_llm_client(
         api_key=api_key or "sk-no-key-required",
         base_url=effective_base,
         timeout=timeout,
+        # max_retries=0：重试收归 reliability.with_retry_and_circuit 单层管理，
+        # 避免 SDK 内置重试（默认 2）与外层重试相乘（最坏 4 波×3 次三层叠加）
+        max_retries=0,
     )
 
 

@@ -7,17 +7,18 @@
    dataclass 朴素模拟即可，不依赖 openai SDK 的真实类型。
 
 2. maybe_loadtest_mock_stream 必须是 async def（内部 return _gen()），不能本身是 async
-   generator。调用链：reliability.with_retry_and_circuit → circuit_breaker.call(_call) →
-   `_call` retry 循环里 `await _call_with_image_fallback()` → 它再 `await
-   maybe_loadtest_mock_stream()` 拿到 _gen() 这个 async gen 对象。若本函数本身是 async
-   gen，`await mock()` 会 TypeError（async generator 不能被 await）。
+   generator。调用链：reliability.with_retry_and_circuit 的 attempt 循环里 `await
+   _call_with_image_fallback()` → 它再 `await maybe_loadtest_mock_stream()` 拿到 _gen()
+   这个 async gen 对象。若本函数本身是 async gen，`await mock()` 会 TypeError
+   （async generator 不能被 await）。
 
-3. 正常 mock 不抛异常 → reliability 计 success，不污染熔断器、不计 retry（reliability.py:172
-   _on_success 在 result 拿到 gen 对象后调用，gen 对象非 Exception 即成功）。
+3. 正常 mock 不抛异常 → reliability 记 success，不污染熔断窗口、不计 retry（record_success
+   在 result 拿到 gen 对象后调用，gen 对象非 Exception 即成功）。
 
-4. H-11 熔断复验：LOAD_TEST_FORCE_FAIL_RATIO 按概率抛 _FakeAPIError(status_code=503)，
-   命中 reliability.retryable_status_codes（reliability.py:67-74）→ 触发 retry + 累计
-   failure_count → 熔断 OPEN。force_fail 抛在 await 建流阶段，与真实上游建连失败语义一致。
+4. 熔断复验：LOAD_TEST_FORCE_FAIL_RATIO 按概率抛 _FakeAPIError(status_code=503)，
+   命中 retryable_status_codes 且 classify_failure 计入（503 供应商侧）→ 触发 retry +
+   窗口累计失败 → 失败率达阈值熔断 OPEN。force_fail 抛在 await 建流阶段，与真实上游
+   建连失败语义一致。
 
 生产零影响：本模块仅被 import（只定义函数，零副作用）；env 不设时 llm.py 的分流 if 永不进入。
 """

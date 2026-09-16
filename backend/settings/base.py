@@ -187,10 +187,15 @@ class LLMConfig(BaseModel):
     retry_base_delay: float = 1.0
     retry_max_delay: float = 30.0
     retry_exponential_base: float = 2.0
-    # circuit breaker
-    circuit_failure_threshold: int = 5
-    circuit_success_threshold: int = 2
-    circuit_open_timeout: float = 30.0
+    # circuit breaker（滑动窗口失败率判定，resilience4j 语义：窗口样本 ≥ minimum_calls
+    # 且失败率 ≥ 阈值才 OPEN。计入的失败只含供应商侧故障——见 reliability.classify_failure。
+    # 多 worker 各进程独立记账，阈值按单进程口径配置，不做 //BACKEND_WORKERS 缩放）
+    circuit_window_size: int = 20        # 滑动窗口容量（按调用次数）
+    circuit_minimum_calls: int = 8       # 判定前最小样本量
+    circuit_failure_rate: float = 0.5    # 窗口失败率阈值
+    circuit_open_timeout: float = 30.0   # OPEN 持续秒数（超时后被动转 HALF_OPEN）
+    circuit_half_open_probes: int = 3    # 半开探测名额
+    circuit_half_open_success: int = 2   # 合闸（HALF_OPEN→CLOSED）所需成功次数
     # agent
     agent_max_iterations: int = 10
     agent_token_chunk_size: int = 8

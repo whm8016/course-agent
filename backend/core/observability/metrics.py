@@ -175,6 +175,41 @@ LIGHTRAG_IN_USE = _metric(
 
 
 # --------------------------------------------------------------------------
+# LLM 可靠性（熔断 / 重试 / fallback）。reliability.py 在状态转换处写 gauge/counter，
+# llm.py 在 fallback 分支写 fallback 计数。多 worker 各进程独立熔断器 → state 用
+# liveall（每存活 worker 一条序列，Prometheus 取 max 即"是否有进程处于 OPEN"）。
+# --------------------------------------------------------------------------
+# 熔断器状态：0=closed 1=half_open 2=open（label breaker = 注册名，如 binding 名
+# dashscope / asr:paraformer / vision:qwen-vl-plus / topic_build）。
+CIRCUIT_STATE = _metric(
+    Gauge,
+    "ca_llm_circuit_state",
+    "LLM circuit breaker state (0=closed 1=half_open 2=open)",
+    labelnames=["breaker"],
+    multiprocess_mode="liveall",
+)
+CIRCUIT_TRANSITIONS = _metric(
+    Counter,
+    "ca_llm_circuit_transitions_total",
+    "LLM circuit breaker state transitions",
+    labelnames=["breaker", "to"],
+)
+# 重试计数：with_retry_and_circuit 每调度一次重试 inc 1（不含首发）。
+LLM_RETRIES = _metric(
+    Counter,
+    "ca_llm_retries_total",
+    "LLM call retries scheduled by with_retry_and_circuit",
+)
+# fallback 触发计数：主路径熔断/重试耗尽后切 fallback 端点，outcome=success/failure。
+LLM_FALLBACK = _metric(
+    Counter,
+    "ca_llm_fallback_triggers_total",
+    "LLM fallback endpoint triggers (outcome: success/failure)",
+    labelnames=["outcome"],
+)
+
+
+# --------------------------------------------------------------------------
 # 磁盘水位 + 存储 GC（运维观测：派生数据体积、整卷水位、GC 回收量）
 # DISK_USED_BYTES：整卷水位（main.py _sample_resource_gauges 每 5s 写一次 shutil.disk_usage）。
 #   multiprocess_mode='liveall'：多 worker 各采一次，Prometheus 取 max（同一卷，值应一致）。

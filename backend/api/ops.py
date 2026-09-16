@@ -101,10 +101,15 @@ async def health_detailed():
         DASHSCOPE_API_KEY = get_settings().llm.api_key.get_secret_value()
         if DASHSCOPE_API_KEY:
             checks["llm"] = "ok (api_key configured)"
-            # 熔断器按 binding 拆分：展示全部供应商状态；保留旧单数 key（default）向后兼容
+            # 熔断器按 binding 拆分：展示全部供应商状态；旧单数 key 读主 binding 状态
+            #（主流量已不再注册 "default"，读它会永远 closed 造成假绿）
+            from settings import get_settings as _gs
+
             _cb_states = get_all_llm_circuit_states()
             details["llm_circuit_breakers"] = _cb_states
-            details["llm_circuit_breaker"] = _cb_states.get("default", "closed")
+            details["llm_circuit_breaker"] = _cb_states.get(
+                _gs().llm.binding, "closed"
+            )
         else:
             checks["llm"] = "error: DASHSCOPE_API_KEY not set"
     except Exception as exc:
@@ -130,6 +135,9 @@ async def reset_circuit_breaker(_: dict = Depends(get_current_admin)):
     """
     n = reset_all_llm_circuit_breakers()
     return {
-        "message": f"所有 LLM 熔断器已重置（共 {n} 个）",
+        "message": (
+            f"所有 LLM 熔断器已重置（共 {n} 个；多 worker 下仅当前进程，"
+            f"其余进程靠 HALF_OPEN 自动恢复兜底）"
+        ),
         "states": get_all_llm_circuit_states(),
     }

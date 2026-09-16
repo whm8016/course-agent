@@ -1,6 +1,10 @@
-"""H-7~H-11 并发/数据完整性回归测试。
+"""H-7~H-10 并发/数据完整性回归测试。
 
 每个测试模拟竞态场景，验证修复后的防护逻辑。
+
+H-11（CircuitBreaker HALF_OPEN 死锁）已随 2026-09 滑动窗口重写删除：新实现结构性
+保证"合闸所需成功数 ≤ 探测名额"，死锁组合不可能出现；对应行为测试见
+test_llm_circuit_breaker.py。
 """
 from __future__ import annotations
 
@@ -8,12 +12,6 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-
-from core.llm.reliability import (
-    CircuitBreaker,
-    CircuitBreakerConfig,
-    CircuitState,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -101,102 +99,3 @@ async def test_h10_release_instance_after_acquire():
     # 再释放 → 归 0（key 被 pop）
     await _release_instance("c1")
     assert _in_use.get("c1") is None or _in_use["c1"] == 0
-
-
-# ---------------------------------------------------------------------------
-# H-11 CircuitBreaker HALF_OPEN 死锁：half_open_calls 释放语义 + 配置守卫
-# ---------------------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_h11_half_open_two_probes_close():
-    """success_threshold=2，half_open_max_calls=1：串行两次探测成功，熔断器应关闭。
-
-    旧实现：half_open_calls 只增不减，第一次探测成功后名额耗尽，第二次探测
-    永远被拒 → success_count 卡在 1，熔断器永久卡在 HALF_OPEN。
-    """
-    cb = CircuitBreaker(
-        "h11_test",
-        config=CircuitBreakerConfig(
-            failure_threshold=1,
-            success_threshold=2,
-            open_timeout=0,  # 立即转 HALF_OPEN
-            half_open_max_calls=1,
-        ),
-    )
-
-    async def always_fail():
-        raise ValueError("模拟后端不可用")
-
-    async def always_ok():
-        return "ok"
-
-    # Step 1: 触发 OPEN（需 2 次失败：failure_threshold 被 worker 缩放至 2）
-    with pytest.raises(ValueError, match="模拟后端不可用"):
-        await cb.call(always_fail)
-    with pytest.raises(ValueError, match="模拟后端不可用"):
-        await cb.call(always_fail)
-    assert cb.state == CircuitState.OPEN
-
-    # Step 2: 第一次探测（OPEN → HALF_OPEN，放行）
-    r1 = await cb.call(always_ok)
-    assert r1 == "ok"
-    # 新实现：success_count=1 < 2，仍 HALF_OPEN
-    # 旧实现：此处会永久卡死（half_open_calls 不释放）
-    assert cb.state == CircuitState.HALF_OPEN
-
-    # Step 3: 第二次探测（新实现：half_open_calls 已释放，应能放行）
-    r2 = await cb.call(always_ok)
-    assert r2 == "ok"
-    assert cb.state == CircuitState.CLOSED, "两次成功后应关闭熔断器"
-
-
-@pytest.mark.asyncio
-async def test_h11_half_open_probe_failure_reopens():
-    """半开探测失败 → half_open_calls 释放 → 状态回到 OPEN（不残留死锁）。"""
-    cb = CircuitBreaker(
-        "h11_test_reopen",
-        config=CircuitBreakerConfig(
-            failure_threshold=1,
-            success_threshold=2,
-            open_timeout=0,  # 立即转 HALF_OPEN
-            half_open_max_calls=1,
-        ),
-    )
-
-    async def always_fail():
-        raise ValueError("模拟后端不可用")
-
-    async def sometimes_ok():
-        return "ok"
-
-    # Step 1: 触发 OPEN（需 2 次失败：failure_threshold 被 worker 缩放至 2）
-    with pytest.raises(ValueError, match="模拟后端不可用"):
-        await cb.call(always_fail)
-    with pytest.raises(ValueError, match="模拟后端不可用"):
-        await cb.call(always_fail)
-    assert cb.state == CircuitState.OPEN
-
-    # Step 2: 第一次探测成功（HALF_OPEN，success_count=1）
-    await cb.call(sometimes_ok)
-    assert cb.state == CircuitState.HALF_OPEN
-
-    # Step 3: 第二次探测失败 → OPEN
-    with pytest.raises(ValueError, match="模拟后端不可用"):
-        await cb.call(always_fail)
-    assert cb.state == CircuitState.OPEN, "探测失败应回到 OPEN"
-    assert cb.half_open_calls == 0, "失败后 half_open_calls 应释放"
-
-
-def test_h11_config_guard_against_deadlock():
-    """success_threshold > half_open_max_calls → __init__ 自动抬升 half_open_max_calls。"""
-    cb = CircuitBreaker(
-        "h11_guard",
-        config=CircuitBreakerConfig(
-            failure_threshold=3,
-            success_threshold=5,       # > half_open_max_calls(1)
-            open_timeout=10.0,
-            half_open_max_calls=1,
-        ),
-    )
-    assert cb.config.half_open_max_calls >= cb.config.success_threshold, \
-        "守卫应抬升 half_open_max_calls 至少等于 success_threshold"

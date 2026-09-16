@@ -92,6 +92,7 @@ async def test_resolve_asr_falls_back_to_embedding_creds(monkeypatch):
         api_key="sk-emb",
         base_url="https://dashscope.example/compatible-mode/v1",
         timeout=60,
+        max_retries=0,  # 重试收归 reliability 单层（2026-09 熔断重写）
     )
     assert model == "paraformer-v2"
 
