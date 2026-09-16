@@ -51,6 +51,7 @@ TEXT_MODEL = get_settings().llm.text_model
 logger = logging.getLogger(__name__)
 
 _EXECUTION_TTL = 300.0  # turn 结束后保留状态的时间（秒），供迟到订阅者回放
+_ANSWER_NOW_POLL_S = 1.0  # 跨 worker answer_now watcher 轮询间隔（信号最坏投递延迟）
 
 
 @dataclass
@@ -245,6 +246,7 @@ class TurnRuntimeManager:
         # 状态不再挂在 manager 上——见 services.session.reply_channel。
         # answer_now 信号：turn_id → asyncio.Event，前端"立即回答"按钮 set()，loop 每轮顶部
         # 轮询（与 reply_channel 同生命周期：start_turn 建，_run_turn finally 清）。
+        # 跨 worker 投递见 reply_channel.set_answer_now 与 _watch_answer_now_flag。
         self._answer_now_events: dict[str, asyncio.Event] = {}
 
     # ------------------------------------------------------------------
@@ -493,38 +495,78 @@ class TurnRuntimeManager:
     ) -> bool:
         """触发"立即回答"：让正在运行的 turn 的 agent loop 在下一轮顶部提前直接回答。
 
-        仿 submit_user_reply 的信号投递模式，但投递的是 asyncio.Event.set()（幂等，
-        连点安全）。run_agent_loop 每轮顶部轮询 is_answer_now_requested()——为 True 时
-        跳过后续工具循环，用已累积的 messages 发起一次无工具的直接回答（见 loop.py）。
+        信号投递两级（仿 submit_user_reply 的双级归属校验 + 回落；SSE 长连接与按钮
+        POST 在 gunicorn -w4 下常落不同 worker）：
+        1. 本进程持有 turn（_answer_now_events 命中）→ 直接 ev.set()（幂等，连点安全），
+           不碰 Redis——同 worker 快路径零新增延迟。
+        2. 本地 miss（turn 在其他 worker）→ Redis owner key（ca:turn:owner:{turn_id}）
+           做 IDOR 校验后 SET 标志位 ca:answer_now:{turn_id}；持有 turn 的 worker 上
+           _watch_answer_now_flag 轮询到标志 → 置同一把本地 ev（loop.py 零改动，
+           最坏延迟 ≈ _ANSWER_NOW_POLL_S）。无 Redis（memory://）跨 worker 投递不达，
+           返回 False（= 单 worker 语义，与修复前一致）。
+
+        边界：execution 在而 ev 不在（turn 已结束、execution 还在 _EXECUTION_TTL=300s
+        回放窗内）必须返回 False 且**严禁落入 Redis 路径**——owner key TTL 600s 未过期，
+        落进去会放行并谎报 200，让跨 worker 行为比修复前（同 worker 此时 False→404）更差，
+        还给死 turn 留 600s 垃圾 flag。此分支与 user_id 无关。
+        残窗（best-effort，与 push_reply 对已结束 turn 投递同语义）：turn 已结束但 owner key
+        （TTL 600s 自 turn 开始计）未过期、且请求落在非持有 worker（或 execution 已过 300s
+        被逐出）时，跨 worker 路径仍放行返回 True——投递成功 ≠ turn 仍存活。前端流结束即
+        隐藏按钮，实际不可达；彻底关闭须 turn 结束时 DEL owner key，牵动 submit_user_reply
+        契约与 run.py 订阅侧 IDOR，独立任务处理。
 
         Args:
             turn_id: 由 start_turn() 返回的 ID。
-            user_id: 可选，发起"立即回答"的当前登录用户 id。提供时做 turn 归属校验：
-                     turn 不属于该用户则当作不存在返回 False（防 IDOR——B 用户拿 A 的
-                     turn_id 触发 A 的对话提前作答）。
+            user_id: 可选，发起"立即回答"的当前登录用户 id。本地命中走 _turn_belongs_to；
+                     跨 worker（本地 miss）回落 Redis owner key 比对（防 B 用户拿 A 的
+                     turn_id 触发 A 的对话提前作答，Turn IDOR）。
 
         Returns:
-            True  — turn 存在、归属相符且已触发信号
-            False — turn 不存在/已结束，或归属校验未通过
+            True  — 归属校验通过且信号已投递（本进程 ev.set / Redis 标志已置；跨 worker
+                    为 best-effort，见上方残窗）
+            False — turn 不存在/已结束（含 300s 回放窗内的死 turn），归属不符，或无 Redis
         """
-        # 归属校验：仅当调用方提供 user_id（API 层）时才要求 _executions 命中且归属相符。
-        # 未提供 user_id（内部/旧调用方）走原始路径——仅以 _answer_now_events 是否存在为判，
-        # 保持对直接注入 event 的内部测试兼容。
+        execution = self._executions.get(turn_id)
+        # 归属校验（本进程持有 turn 时）：不符即 False，不得落入跨 worker 路径。
+        # 未提供 user_id（内部/旧调用方）时 _turn_belongs_to 一律放行，保持对直接注入
+        # event 的内部测试兼容。
+        if execution is not None and not self._turn_belongs_to(execution, user_id):
+            logger.warning(
+                "TurnRuntime: request_answer_now turn_id=%s 归属不符", turn_id
+            )
+            return False
+        ev = self._answer_now_events.get(turn_id)
+        if ev is not None:
+            # 同 worker 快路径：get 与 set 之间无 await，对 finally 的 pop 原子——
+            # 不写 Redis 标志（watcher 见 ev 已置自行退出，不留垃圾 key）
+            ev.set()
+            log_flow("turn.answer_now", turn_id=turn_id)
+            logger.info("TurnRuntime: answer_now requested for turn_id=%s", turn_id)
+            return True
+        if execution is not None:
+            # turn 已结束（ev 已随 _run_turn finally 清）但 execution 还在回放 TTL 窗内：
+            # 死 turn，必须 False（见 docstring 边界），不得落入下方 Redis 路径
+            logger.info(
+                "TurnRuntime: request_answer_now turn_id=%s turn 已结束（execution 回放窗内）",
+                turn_id,
+            )
+            return False
+        # 本地无 execution：跨 worker（或已彻底过期）。仿 submit_user_reply 的 owner key 校验。
         if user_id is not None:
-            execution = self._executions.get(turn_id)
-            if execution is None or not self._turn_belongs_to(execution, user_id):
-                logger.info(
-                    "TurnRuntime: request_answer_now turn_id=%s 不存在/已结束/归属不符", turn_id
+            owner = await reply_channel.get_turn_owner(turn_id)
+            if not owner or str(owner) != str(user_id):
+                logger.warning(
+                    "TurnRuntime: request_answer_now turn_id=%s 跨 worker 归属不符/不存在",
+                    turn_id,
                 )
                 return False
-        ev = self._answer_now_events.get(turn_id)
-        if ev is None:
-            logger.info("TurnRuntime: request_answer_now turn_id=%s 不存在或已结束", turn_id)
-            return False
-        ev.set()
-        log_flow("turn.answer_now", turn_id=turn_id)
-        logger.info("TurnRuntime: answer_now requested for turn_id=%s", turn_id)
-        return True
+        ok = await reply_channel.set_answer_now(turn_id)
+        if ok:
+            log_flow("turn.answer_now", turn_id=turn_id, cross_worker=True)
+            logger.info(
+                "TurnRuntime: answer_now flag (cross-worker) set for turn_id=%s", turn_id
+            )
+        return ok
 
     @staticmethod
     def _turn_belongs_to(execution: _TurnExecution, user_id: str | None) -> bool:
@@ -558,6 +600,7 @@ class TurnRuntimeManager:
         seq = 0
         first_event_logged = False
         t0 = time.monotonic()
+        answer_now_watcher: asyncio.Task | None = None
 
         # 顶层 turn trace：下游所有 @traceable 工具/RAG 与 wrap_openai 的 LLM run
         # 通过 langsmith contextvars run tree 自动成为本 turn 的子 run。
@@ -593,6 +636,18 @@ class TurnRuntimeManager:
                     summary_text=execution.context.metadata.get("_ctx_pretrim_summary_preview"),
                 )
             try:
+                # answer_now 跨 worker watcher：持有 turn 的 worker 轮询 Redis 标志位，
+                # 命中置本地 ev（loop.py 的 is_answer_now_requested 回调零改动）。
+                # 必须放 try 首句：任务在首步前被取消时协程体不执行、finally 不运行——
+                # 在 start_turn 里 spawn 的话该场景下 watcher 将永久泄漏；放这里则
+                # 「协程体执行过 ⇔ finally 必达 ⇔ watcher 必被 cancel」。无 Redis 不
+                # 创建（memory:// 下跨 worker 投递本就不达，白轮询）。
+                _answer_now_ev = self._answer_now_events.get(execution.turn_id)
+                if _answer_now_ev is not None and reply_channel.redis_available():
+                    answer_now_watcher = asyncio.create_task(
+                        self._watch_answer_now_flag(execution.turn_id, _answer_now_ev),
+                        name=f"ansnow-{execution.turn_id[:8]}",
+                    )
                 async for event in orchestrator.handle(execution.context):
                     # 记录 seq（供断线重连回放）
                     execution.events.append((seq, event))
@@ -692,6 +747,14 @@ class TurnRuntimeManager:
                 reply_channel.cleanup(execution.turn_id)
                 # 清理 answer_now 信号（turn 已结束，后续 request_answer_now 返回 False）
                 self._answer_now_events.pop(execution.turn_id, None)
+                # 取消 answer_now 跨 worker watcher。cancel 是同步调用且位于 finally 的
+                # 无 await 前缀段——即使 finally 本身随后被二次取消（见下方 persist 的
+                # shield 说明），cancel 也已发出；watcher 在下一个 await 点
+                # （≤_ANSWER_NOW_POLL_S）退出并自行吞 CancelledError。cleanup → pop →
+                # cancel 三条同步语句间无 await，不存在「pop 后、cancel 前插入 request」
+                # 的窗口。
+                if answer_now_watcher is not None and not answer_now_watcher.done():
+                    answer_now_watcher.cancel()
 
                 # 服务端权威回合日志：落 user/assistant 两行（幂等 by turn_id，含取消/错误轮）。
                 # 必须先于 bus.close()——API 层（chat.py SSE finally / run.py 尾部）在订阅流
@@ -768,6 +831,28 @@ class TurnRuntimeManager:
         async with self._lock:
             self._executions.pop(turn_id, None)
         logger.debug("TurnRuntime: cleaned up turn_id=%s", turn_id)
+
+    async def _watch_answer_now_flag(self, turn_id: str, ev: asyncio.Event) -> None:
+        """跨 worker answer_now 信号 watcher：轮询 Redis 标志位，命中即置本地 ev。
+
+        退出三途：① 标志命中（置 ev 后 return）② ev 已被本进程直连路径置位（while
+        条件不成立）③ _run_turn finally 的 cancel——turn 正常结束但信号从未命中时
+        watcher 不会自己退出，cancel 是唯一退路，故吞 CancelledError（cancel 即正常
+        退出，不是异常）。check 异常按未触发处理，下一轮再读（Redis 抖动不杀 watcher）。
+        """
+        try:
+            while not ev.is_set():
+                if await reply_channel.check_answer_now(turn_id):
+                    ev.set()
+                    log_flow("turn.answer_now_cross_worker", turn_id=turn_id)
+                    logger.info(
+                        "TurnRuntime: answer_now flag consumed (cross-worker) turn_id=%s",
+                        turn_id,
+                    )
+                    return
+                await asyncio.sleep(_ANSWER_NOW_POLL_S)
+        except asyncio.CancelledError:
+            return
 
 
 # ---- 全局单例 ----

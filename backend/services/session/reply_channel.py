@@ -11,6 +11,12 @@
 ``submit_user_reply`` 本地 ``_executions`` 不命中，回落该 key 做 IDOR 校验，防 B 用户拿 A 的
 turn_id 向 A 的 ask_user 投递回复、操纵 A 的对话。
 
+answer_now（立即回答）信号也经本模块跨 worker：``set_answer_now`` 置标志位
+``ca:answer_now:{turn_id}``（SET+EX），持有 turn 的 worker 由 TurnRuntimeManager 的
+``_watch_answer_now_flag`` 轮询 ``check_answer_now`` 后置本地 asyncio.Event。标志位**不做
+进程内回退**：同进程路径已由本地 Event.set() 覆盖，能走到 Redis 的必是跨 worker miss，无
+Redis 即投递不达、如实返回 False（= 单 worker 语义，与修复前一致）。
+
 降级写法参照 ``core/arq_pool.py``：``memory://`` 直接回退，连接异常 best-effort 不阻塞业务。
 """
 from __future__ import annotations
@@ -24,7 +30,8 @@ logger = logging.getLogger(__name__)
 
 _REPLY_PREFIX = "ca:askuser:reply:"
 _OWNER_PREFIX = "ca:turn:owner:"
-_TTL = 600  # 回复 / 归属 key 保留 10 分钟（覆盖一次澄清往返 + 余量），过期自清理
+_ANSWER_NOW_PREFIX = "ca:answer_now:"
+_TTL = 600  # 回复 / 归属 / answer_now 标志 key 保留 10 分钟（覆盖一次往返 + 余量），过期自清理
 
 # 懒加载的共享 redis 客户端（仅判定一次：memory:// 或连不上 → None，走进程内回退）
 _redis: Any = None
@@ -120,6 +127,47 @@ async def get_turn_owner(turn_id: str) -> str | None:
         except Exception:
             logger.warning("reply_channel.get_turn_owner Redis 异常，回退进程内", exc_info=True)
     return _fallback_owners.get(turn_id)
+
+
+def redis_available() -> bool:
+    """共享 Redis 客户端是否可用（memory:// 或未配置 → False）。
+
+    供 turn 侧决定是否起 answer_now watcher。注意 from_url 不即时建连，
+    本谓词只保证「配置了真实 Redis」，运行期可达性由各命令自行降级。
+    """
+    return _redis_client() is not None
+
+
+def _answer_now_key(turn_id: str) -> str:
+    return f"{_ANSWER_NOW_PREFIX}{turn_id}"
+
+
+async def set_answer_now(turn_id: str) -> bool:
+    """置「立即回答」跨 worker 信号（SET "1" EX _TTL）。幂等：连点重复 SET 无副作用。
+
+    不做进程内回退（见模块 docstring）；无 Redis / 异常返回 False。
+    """
+    r = _redis_client()
+    if r is None:
+        return False
+    try:
+        await r.set(_answer_now_key(turn_id), "1", ex=_TTL)
+        return True
+    except Exception:
+        logger.warning("reply_channel.set_answer_now Redis 异常，信号未投递", exc_info=True)
+        return False
+
+
+async def check_answer_now(turn_id: str) -> bool:
+    """读「立即回答」信号；不存在 / 无 Redis / 异常一律 False。"""
+    r = _redis_client()
+    if r is None:
+        return False
+    try:
+        return await r.get(_answer_now_key(turn_id)) is not None
+    except Exception:
+        logger.warning("reply_channel.check_answer_now Redis 异常，视为未触发", exc_info=True)
+        return False
 
 
 def cleanup(turn_id: str) -> None:

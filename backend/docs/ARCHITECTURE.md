@@ -122,7 +122,7 @@ Each capability externalizes its prompts to `core/<cap>/prompts/zh/*.yaml`, load
 ### 深度研究：前置澄清 + 可恢复暂停（plan: research_clarification_pause_resume）
 
 - **前置澄清**：rephrase 阶段挂 `ask_user`（双重 gate：`settings.research.clarify_enabled` 且 WS 入口注入了 `wait_for_user_reply`），主题模糊时在同 turn 内暂停问学生、回复后续跑；HTTP/IM 无 waiter 不挂（否则 loop 无 waiter 直接结束）。`_REPHRASE_TOOLS` 与 `_RESEARCH_TOOLS` 分开——研究块/报告不问用户（中后期提问收益为负）。waiter 硬超时 `clarify_wait_timeout_s`（默认 120），超时返回 skip payload（`_format_reply`→"User skipped."续跑），不返回 None（None 被 loop 当取消）。
-- **跨 worker 回复**（`services/session/reply_channel.py`）：ask_user 回复走 Redis `BLPOP`/`RPUSH`（`ca:askuser:reply:{turn_id}`），任意 worker 的 `submit_user_reply` 都能投到正在等待的 worker，不再依赖 Nginx `ip_hash`；`memory://`/连不上回退进程内 `asyncio.Queue`（降级范式照 `core/arq_pool.py`）。turn 归属 key `ca:turn:owner:{turn_id}` 供跨 worker IDOR 校验（本地 `_executions` miss 时回落）。
+- **跨 worker 回复**（`services/session/reply_channel.py`）：ask_user 回复走 Redis `BLPOP`/`RPUSH`（`ca:askuser:reply:{turn_id}`），任意 worker 的 `submit_user_reply` 都能投到正在等待的 worker，不再依赖 Nginx `ip_hash`；`memory://`/连不上回退进程内 `asyncio.Queue`（降级范式照 `core/arq_pool.py`）。turn 归属 key `ca:turn:owner:{turn_id}` 供跨 worker IDOR 校验（本地 `_executions` miss 时回落）。answer_now（立即回答）信号同走本模块跨 worker：`SET ca:answer_now:{turn_id}` 标志位 + 持有方 `_watch_answer_now_flag` 秒级轮询置本地 `asyncio.Event`（`request_answer_now` 本地 miss 时先 owner key 校验再置 flag；`loop.py` 零改动；最终一致，遵本项目不建 pub/sub 的约定；死 turn——execution 在 300s 回放窗内而 ev 已清——短路返回 404 不落 Redis）。
 - **阶段级 checkpoint**（`core/research/checkpoint.py` + 迁移 `022` + `ResearchCheckpoint` 模型）：`pipeline.run()` 每阶段末存 checkpoint（phase + state_json，含 `DynamicTopicQueue.to_dict`）；`resume_research_id` 命中→`_phases_done(phase)` 跳过已完成阶段、被中断阶段整段重放（接受该阶段内部 LLM/检索成本重付一次，与 LangGraph「node 从头重跑」同语义）。`research_id` 随 `stage_start "init"` 提前下发，前端保存供断线重连。
 - **awaiting_user 恢复**：loop 暂停前调 `context.metadata["on_ask_user_pause"]` 回调（pipeline 注入）落 `status=awaiting_user`+卡片；重连时 pipeline 重发同一份卡片、等回复、把回复当 refined_topic。**注意：awaiting_user 判断必须在「phase∈done_phases」之前**——awaiting_user 行的 phase 常已是 rephrase，否则跳过分支先命中、永远不恢复卡片。
 
@@ -263,7 +263,7 @@ Frontend (`frontend/`, React 19 + TypeScript + Vite + Tailwind) talks to the bac
 | CronService ×4 | 定时任务执行 4 次 | Leader 选举，仅 leader 启动 Cron |
 | TutorBotManager ×4 | IM 消息重复处理 | Leader 选举，仅 leader 启动 Bot |
 | MCP 工具对非 leader worker 不可见 | 落在非 leader worker 的对话请求看不到任何 MCP 工具（曾错误套用 leader-only 模式，见下方说明） | **不**用 leader 选举：每个 worker 独立 `ensure_started()` + 周期 `reload()`（间隔 `settings.mcp.reload_interval_s`，`main.py` `_mcp_reload_loop`） |
-| TurnRuntime KeyError | SSE 断线重连路由到不同 worker → `_executions` 找不到 | Nginx `ip_hash` 粘性会话 |
+| TurnRuntime KeyError | SSE 断线重连路由到不同 worker → `_executions` 找不到 | Nginx `ip_hash` 粘性会话；ask_user 回复与 answer_now 信号已不依赖 ip_hash——`reply_channel` 经 Redis 队列/标志位跨 worker 投递 |
 | Circuit Breaker 语义减弱 | 每个进程独立 failure_threshold → 总阈值放大 N 倍 | 参数缩放：`failure_threshold // workers`（最小 2） |
 | LightRAG LRU 缓存 | 4 份缓存，内存占用 ×4 | 容量缩放：`capacity // workers` |
 
