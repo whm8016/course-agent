@@ -21,7 +21,9 @@ class FakeWebSocket {
   readyState = 1 // OPEN
   close = vi.fn()
   send = vi.fn()
-  constructor(public url: string) {
+  url: string
+  constructor(url: string) {
+    this.url = url
     FakeWebSocket.instances.push(this)
   }
 }

@@ -36,7 +36,7 @@ vi.mock('../services/api', () => ({
 vi.mock('../services/questionWs', () => ({
   connectQuestionGenerate: vi.fn(() => ({ close: vi.fn(), send: vi.fn() })),
   connectDeepResearch: vi.fn(
-    (payload: unknown, handlers: wsState['research'][number]['handlers']) => {
+    (_payload: unknown, handlers: (typeof wsState)['research'][number]['handlers']) => {
       const conn = { handlers, close: vi.fn() }
       wsState.research.push(conn)
       return { close: conn.close, send: vi.fn() }
