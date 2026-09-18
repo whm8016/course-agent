@@ -4,7 +4,6 @@ spec 先行：断言表列契约（ref 精确查）、过滤参数、admin 鉴�
 """
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import patch
 
 import pytest
