@@ -722,6 +722,19 @@ def _section_rank(section: str | None) -> int:
     return 1
 
 
+def _pair_claim_score(a: dict, b: dict) -> float:
+    """候选对认领强度，与 ``_candidate_pairs`` 的 blocking 打分同口径：归一互相包含
+    （过最短词长）= 1.0 强信号，否则余弦。跨组争夺同一枢纽时按此排序裁决——单用
+    余弦会把包含对（常无向量证据）当最弱认领，与 blocking 层「包含排最前」相反。
+    纯函数。"""
+    from core.memory.course_topic_store import _norm_label, cosine
+
+    na, nb = _norm_label(a["label"]), _norm_label(b["label"])
+    if min(len(na), len(nb)) >= _CONTAIN_MIN_CHARS and (na in nb or nb in na):
+        return 1.0
+    return cosine(a["embedding"] or [], b["embedding"] or [])
+
+
 def _candidate_pairs(
     topics: list[dict], sim_floor: float, sim_ceiling: float,
 ) -> list[tuple[int, int]]:
@@ -744,8 +757,8 @@ def _candidate_pairs(
             )
             sim = cosine(a["embedding"] or [], b["embedding"] or [])
             if contained or sim_floor <= sim < sim_ceiling:
-                # 包含是强信号（「叠加定理」⊂「叠加定理的验证」），排最前
-                scored.append((1.0 if contained else sim, i, j))
+                # 打分单一真相源在 _pair_claim_score（裁决层与 blocking 同口径）
+                scored.append((_pair_claim_score(a, b), i, j))
     scored.sort(key=lambda x: (-x[0], x[1], x[2]))
     if len(scored) > _RESOLVE_PAIRS_CAP:
         logger.warning(
@@ -770,14 +783,14 @@ async def resolve_synonyms_llm(
     canonical 选择在代码侧不在 LLM 侧：组内按 ``_section_rank``（实验章节优先）+
     order_idx 取保留点，只把与 canonical **有直接候选对**的点并进去（星形，不走
     组内连通闭包——否则 [大纲,细点1,细点2] 会经枢纽把两个细点焊死）。
-    每个 groups 条目独立成并、不跨组传递：被多组认领的枢纽点只并进与 canonical 余弦
-    最高的那组。
+    每个 groups 条目独立成并、不跨组传递：被多组认领的枢纽点只并进认领分
+    （``_pair_claim_score``：包含 1.0 / 余弦）最高的那组。
     字段口径同 merge_synonymous：definition 取较长者、embedding 取首个非空。
 
     LLM 失败/无候选对：原样返回（降级为仅向量去重），不废整图——归并是增益不是依赖。
     返回 (topics, alias, merged_count)。
     """
-    from core.memory.course_topic_store import _norm_label, cosine
+    from core.memory.course_topic_store import _norm_label
 
     pairs = _candidate_pairs(topics, sim_floor, sim_ceiling) if len(topics) > 1 else []
     if not pairs:
@@ -798,10 +811,10 @@ async def resolve_synonyms_llm(
         return topics, alias, 0
 
     # 组内星形并到 canonical：只收与它有直接候选对的点。组内连通闭包会把
-    # [大纲,触发,探头] 经枢纽焊成一点；跨组也不传递（两组共享枢纽时只留余弦更高的）。
+    # [大纲,触发,探头] 经枢纽焊成一点；跨组也不传递（两组共享枢纽时只留认领分更高的）。
     cand_pairs = {frozenset(p) for p in pairs}
 
-    group_comps: list[tuple[float, int, list[int], int]] = []  # (最强余弦, 组序, 成员, canonical)
+    group_comps: list[tuple[float, int, list[int], int]] = []  # (最强认领分, 组序, 成员, canonical)
     for gi, group in enumerate(data.get("groups") or []):
         if not isinstance(group, list):
             continue
@@ -815,12 +828,12 @@ async def resolve_synonyms_llm(
         if not attached:
             continue
         members = attached + [canon]
-        best = max(cosine(topics[i]["embedding"] or [], topics[canon]["embedding"] or [])
-                   for i in attached)
+        best = max(_pair_claim_score(topics[i], topics[canon]) for i in attached)
         group_comps.append((best, gi, members, canon))
 
     # 跨组独占：成员已被更强组占用的整组放弃（宁可不并，不跨组传递）；被多组认领的
-    # 枢纽点只并进与 canonical 余弦最高的那组，平局按组序（LLM JSON 顺序，稳定）。
+    # 枢纽点只并进认领分最高的那组（包含 1.0 > 带内余弦，与 blocking 同口径），
+    # 平局按组序（LLM JSON 顺序，稳定）。
     group_comps.sort(key=lambda x: (-x[0], x[1]))
     used: set[int] = set()
     canon_of: dict[int, int] = {}  # 被并点 idx → canonical idx
