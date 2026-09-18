@@ -242,6 +242,46 @@ async def _persist_turn_rows(
         )
 
 
+async def _persist_turn_error(
+    execution: _TurnExecution,
+    *,
+    error_code: str,
+    error_ref: str,
+    message: str,
+    exc_type: str,
+    exc_head: str,
+) -> None:
+    """失败 turn 落 turn_errors 流水行（append-only 运维读模型，best-effort 不阻塞 turn）。
+
+    与 messages 落盘解耦：错误流水是 admin 排障数据（GET /admin/errors/recent 按学生
+    报障 ref 精确查），失败也不影响叙事流落盘。无 FK 裸字符串——用户/课程删除后行须
+    存活（对齐 llm_usage_records）。
+    """
+    ctx = execution.context
+    try:
+        from core.db.database import AsyncSessionLocal, TurnErrorRecord
+
+        async with AsyncSessionLocal() as db:
+            db.add(TurnErrorRecord(
+                turn_id=execution.turn_id,
+                ref=(error_ref or execution.turn_id[:8])[:16],
+                session_id=ctx.session_id or "",
+                user_id=str(ctx.user_id or ""),
+                course_id=str(ctx.course_id or ""),
+                mode=ctx.mode or "chat",
+                code=error_code or "internal",
+                message=message[:512],
+                exc_type=exc_type[:128],
+                exc_head=exc_head[:256],
+            ))
+            await db.commit()
+    except Exception:
+        logger.warning(
+            "TurnRuntime: persist turn error row failed turn_id=%s",
+            execution.turn_id, exc_info=True,
+        )
+
+
 class TurnRuntimeManager:
     """管理 turn 生命周期：创建 → ContextBuilder → orchestrator → fan-out → EventBus。"""
 
@@ -826,6 +866,19 @@ class TurnRuntimeManager:
                     ))
                 except asyncio.CancelledError:
                     pass  # 落盘在后台继续；继续收尾（close bus 释放订阅者）
+                # 失败 turn 的运维流水（turn_errors）：与叙事行独立 best-effort，互不拖累
+                if turn_error is not None:
+                    try:
+                        await asyncio.shield(_persist_turn_error(
+                            execution,
+                            error_code=turn_error_code,
+                            error_ref=turn_error_ref,
+                            message=turn_error,
+                            exc_type=turn_error_exc_type,
+                            exc_head=turn_error_exc_head,
+                        ))
+                    except asyncio.CancelledError:
+                        pass
                 if not execution.bus._closed:
                     await execution.bus.close()
 
