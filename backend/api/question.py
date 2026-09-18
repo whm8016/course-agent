@@ -61,8 +61,13 @@ async def websocket_question_followup(websocket: WebSocket):
         logger.debug("followup client disconnected")
     except Exception as e:
         logger.exception("question followup failed")
+        from core.observability.errors import normalize_error
+
+        _env = normalize_error(e)
         try:
-            await websocket.send_json({"type": "error", "content": str(e)[:800]})
+            # content 字段名保留（前端 msg.message ?? msg.content 双读）；信封加 code/ref
+            await websocket.send_json({"type": "error", "content": _env["message"],
+                                       "code": _env["code"], "ref": _env["ref"]})
         except Exception:
             pass
     finally:

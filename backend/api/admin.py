@@ -144,8 +144,9 @@ async def create_kb(
     # 与教师建课一致：建库即自动生成课程码（管理员库历史漏生成，前端凭此渲染二维码）
     try:
         kb.join_code = await ensure_unique_join_code(db)
-    except JoinCodeExhaustedError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except JoinCodeExhaustedError:
+        logger.exception("join code exhausted")
+        raise HTTPException(status_code=500, detail="课程码生成失败，请稍后重试")
     await db.flush()
 
     _kb_raw_dir(body.course_id).mkdir(parents=True, exist_ok=True)

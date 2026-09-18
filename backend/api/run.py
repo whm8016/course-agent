@@ -222,7 +222,14 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
     # ---- 8. 通过 TurnRuntimeManager 启动 turn ----
     trm = get_turn_runtime_manager()
     # bind_context 在 start_turn 内部执行（含 turn_id 注入）；此处先绑定 WS 特有字段
-    bind_context(user_id=str(user["id"]), course_id=course_id, mode=capability_name)
+    # request_id：WS 不走 BaseHTTPMiddleware，手动读 X-Trace-Id 或生成——错误信封的
+    # ref 由此而来（有 turn_id 后 ref 用 turn_id），学生报障可 grep
+    import uuid as _uuid
+
+    bind_context(
+        user_id=str(user["id"]), course_id=course_id, mode=capability_name,
+        request_id=websocket.headers.get("x-trace-id") or _uuid.uuid4().hex[:12],
+    )
     turn_id = await trm.start_turn(context)
     log_flow("ws.run.start_turn", turn_id=turn_id, capability=capability_name,
              course_id=course_id, user_id=str(user["id"]))
