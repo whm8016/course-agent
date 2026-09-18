@@ -22,6 +22,20 @@ logger = logging.getLogger(__name__)
 # Anthropic tool_call delta 的 index 计数器（流式时每个 tool_use block 对应一个 index）
 _SENTINEL = object()  # 队列结束哨兵
 
+# Anthropic stop_reason → OpenAI finish_reason 词表归一。适配器是词表边界：下游
+# （agent loop 截断检测等）只认 OpenAI 方言（"length"=撞输出上限），各家 provider
+# 的方言在此翻译，不渗进共享内核。未知值原样透传。
+_STOP_REASON_TO_FINISH = {
+    "end_turn": "stop",
+    "stop_sequence": "stop",
+    "max_tokens": "length",
+}
+
+
+def _map_stop_reason(stop_reason: str) -> str:
+    """把 Anthropic stop_reason 翻成 OpenAI finish_reason（未知值原样返回）。"""
+    return _STOP_REASON_TO_FINISH.get(stop_reason, stop_reason)
+
 
 def _openai_chunk(
     *,
@@ -257,6 +271,9 @@ class AnthropicAdapter:
             self._client = anthropic.AsyncAnthropic(
                 api_key=api_key,
                 base_url=base_url or None,
+                # max_retries=0：重试收归 reliability.with_retry_and_circuit 单层管理
+                # （与其余 provider_factory 构造的 client 同口径）
+                max_retries=0,
             )
         except ImportError as exc:
             raise ImportError(
@@ -334,7 +351,11 @@ def _response_to_openai(resp: Any) -> Any:
         content="".join(text_parts) or None,
         tool_calls=tool_calls or None,
     )
-    finish = "tool_calls" if tool_calls else "stop"
+    # 非流式响应 stop_reason 在顶层；与流式 message_stop 同走词表归一（如 max_tokens→length，
+    # course_topic_builder 等消费方按 OpenAI 方言判 length 做快速放弃）
+    finish = "tool_calls" if tool_calls else _map_stop_reason(
+        getattr(resp, "stop_reason", "stop") or "stop"
+    )
     # usage 归一（成本采集）：折算口径见 _fold_anthropic_usage（流式/非流式共用）。
     # 不带 usage 的话，辅助调用点的 usage_from_response 会读到 None 静默无账。
     _total_in, _out, _cr = _fold_anthropic_usage(getattr(resp, "usage", None))
@@ -386,6 +407,9 @@ class _AnthropicStream:
                 usage_in = 0
                 usage_cache = 0
                 usage_out = 0
+                # 最终 stop_reason 由最后一个 message_delta 携带（delta.stop_reason）；
+                # message_stop 事件本身只有 type 字段（SDK 事实），在此暂存、彼处消费
+                stop_reason_seen = ""
 
                 async for event in stream:
                     etype = getattr(event, "type", "")
@@ -433,10 +457,8 @@ class _AnthropicStream:
                             current_tool_args = ""
 
                     elif etype == "message_stop":
-                        stop_reason = getattr(
-                            getattr(event, "message", None), "stop_reason", "stop"
-                        ) or "stop"
-                        finish = "tool_calls" if tool_index > 0 else stop_reason
+                        stop_reason = stop_reason_seen or "stop"
+                        finish = "tool_calls" if tool_index > 0 else _map_stop_reason(stop_reason)
                         await self._queue.put(_openai_chunk(finish_reason=finish))
                         # 合成 OpenAI 形态 usage 块（成本采集）——消息正常结束时才攒齐完整 usage
                         await self._queue.put(_openai_usage_chunk(
@@ -453,10 +475,15 @@ class _AnthropicStream:
                             usage_in, _, usage_cache = _fold_anthropic_usage(_u)
 
                     elif etype == "message_delta":
-                        # output_tokens 在消息增量结束时给出（累计值）
+                        # output_tokens / 最终 stop_reason 在消息增量结束时给出（累计值）
                         _u = getattr(event, "usage", None)
                         if _u is not None:
                             usage_out = int(getattr(_u, "output_tokens", 0) or 0)
+                        _d = getattr(event, "delta", None)
+                        if _d is not None:
+                            _sr = getattr(_d, "stop_reason", None)
+                            if _sr:
+                                stop_reason_seen = str(_sr)
 
         except Exception as exc:
             logger.exception("AnthropicStream error")
