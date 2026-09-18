@@ -14,9 +14,12 @@ StreamEvent      — 单个事件的结构化载体
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 class StreamEventType(str, Enum):
@@ -93,6 +96,9 @@ class StreamEvent:
         try:
             event_type = StreamEventType(type_str)
         except ValueError:
+            # 历史三次事故根因：新增事件 type 忘补枚举 → 静默降级 TOKEN 前端收不到。
+            # 降级语义保留（不改协议），但必须留痕——错误处理链路的新类型丢失至少可归因。
+            logger.warning("StreamEvent.from_dict: 未知事件类型 %r 降级为 token", type_str)
             event_type = StreamEventType.TOKEN
         source = str(d.get("source", ""))
         payload = {k: v for k, v in d.items() if k not in ("type", "source")}

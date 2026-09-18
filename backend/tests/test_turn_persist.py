@@ -191,11 +191,76 @@ async def test_quiz_turn_persists_empty_content_with_quiz_meta(seeded_session):
 
 @pytest.mark.asyncio
 async def test_error_turn_persists_error_text(seeded_session):
-    """错误轮：assistant 行落错误文本（此前前端见「出错了」即整轮不落库）。"""
+    """错误轮：assistant 行落错误信封文案（可观测性重整后，裸 str(exc) 不再进
+    用户可见文本/落库——"boom" 只留在服务端日志）。"""
     await _run_turn([], _ctx(), error="boom")
     rows = await _rows()
     assert len(rows) == 2
-    assert rows[1][2] == "出错了: boom"
+    assert rows[1][2].startswith("出错了: 服务出了点问题")  # 信封文案
+    assert "boom" not in rows[1][2]  # 内部异常文本不落库
+
+
+# ---------------------------------------------------------------------------
+# 错误信封回写（可观测性重整 Step 3）：能力级 ERROR 事件 → status/落盘/计数。
+# 旧实现断点：能力异常在 orchestrator 内已转 ERROR 事件（generator 不抛），
+# turn_error 不回写 → status 计成 empty、DB 落空行、Prometheus 零计数。
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_capability_error_event_sets_error_state(seeded_session, monkeypatch):
+    """能力级 ERROR 事件（主链路真实错误形态，带信封字段）→ 四路可见：
+    status=error、行 content「出错了: 」、metadata.error={code,ref}、counter+1。"""
+    captured: dict = {}
+
+    def _fake_observe_turn(*, mode, status, elapsed_ms):
+        captured["status"] = status
+
+    monkeypatch.setattr(tr, "observe_turn", _fake_observe_turn)
+
+    from prometheus_client import REGISTRY
+
+    _labels = {"mode": "chat", "code": "llm_unavailable"}
+    _before = REGISTRY.get_sample_value("ca_turn_errors_total", _labels) or 0
+
+    await _run_turn([
+        _ev(StreamEventType.ERROR,
+            message="AI 服务暂时不可用，请稍后重试。",
+            source="chat", code="llm_unavailable", ref="turn0001",
+            exc_type="LLMRetryError", exc_head="LLM call failed after 4 attempts"),
+    ], _ctx())
+
+    assert captured["status"] == "error"
+    rows = await _rows()
+    assert len(rows) == 2
+    _, _, acontent, ameta = rows[1]
+    assert acontent.startswith("出错了: AI 服务暂时不可用")
+    assert ameta.get("error") == {"code": "llm_unavailable", "ref": "turn0001"}
+    assert (REGISTRY.get_sample_value("ca_turn_errors_total", _labels) or 0) == _before + 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_turn_status_is_cancelled(seeded_session, monkeypatch):
+    """取消轮 status=cancelled（旧实现计成 empty——错误/取消对指标不可见）。"""
+    captured: dict = {}
+
+    def _fake_observe_turn(*, mode, status, elapsed_ms):
+        captured["status"] = status
+
+    monkeypatch.setattr(tr, "observe_turn", _fake_observe_turn)
+    await _run_turn([_ev(StreamEventType.TOKEN, content="部")], _ctx(), cancel=True)
+    assert captured["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_generator_error_turn_counts_by_code(seeded_session):
+    """generator 级异常（RuntimeError→internal）：计数走 internal 而非缺省。"""
+    from prometheus_client import REGISTRY
+
+    _labels = {"mode": "chat", "code": "internal"}
+    _before = REGISTRY.get_sample_value("ca_turn_errors_total", _labels) or 0
+    await _run_turn([], _ctx(), error="boom")
+    assert (REGISTRY.get_sample_value("ca_turn_errors_total", _labels) or 0) == _before + 1
 
 
 @pytest.mark.asyncio

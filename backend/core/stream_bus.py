@@ -109,8 +109,29 @@ class StreamBus:
     async def progress(self, stage: str, status: str, **extra: Any) -> None:
         await self.emit({"type": "progress", "stage": stage, "status": status, **extra})
 
-    async def error(self, message: str, source: str = "") -> None:
-        await self.emit({"type": "error", "message": message, "source": source})
+    async def error(
+        self,
+        message: str,
+        source: str = "",
+        *,
+        code: str = "internal",
+        ref: str | None = None,
+        exc_type: str | None = None,
+        exc_head: str | None = None,
+    ) -> None:
+        """发错误事件。code/ref/exc_* 是错误信封字段（见 observability/errors.py）——
+        存量调用不传时按 internal 兜底，turn_runtime 记账点对缺字段容忍（渐进迁移）。
+        """
+        payload: dict[str, Any] = {"type": "error", "message": message, "source": source}
+        if code:
+            payload["code"] = code
+        if ref:
+            payload["ref"] = ref
+        if exc_type:
+            payload["exc_type"] = exc_type
+        if exc_head:
+            payload["exc_head"] = exc_head
+        await self.emit(payload)
 
     # ---- consumer adapter ----
 
