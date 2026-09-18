@@ -63,3 +63,7 @@ class LoopOutcome:
     # ttft 可能 None（provider 未吐任何 delta），elapsed 恒有值。
     first_ttft_ms: int | None = None
     first_round_ms: int = 0
+    # 最终答案轮是否被 max_tokens 掐断（finish_reason=length）。与 done.metadata.truncated
+    # 同源——emit_terminal_events=False 的管道内子 loop（quiz/research）无 done 事件，靠这个
+    # 字段区分「输出被截断」vs「答错」，不必反推 metadata。
+    truncated: bool = False
