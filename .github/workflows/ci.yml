@@ -66,3 +66,6 @@ jobs:
       - run: npm ci
       - run: npm test        # vitest run（单次，非 watch）
       - run: npm run lint    # eslint .
+      # vitest 走 esbuild 转译不做类型检查；tsc -b 只在 docker build 里跑，
+      # 不加这步类型错误可带绿 CI 入库、发布构建才炸（曾实际发生）
+      - run: npm run build  # tsc -b && vite build
