@@ -123,7 +123,7 @@ async def test_orchestrator_capability_raise_uses_envelope(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def _tool_round() -> "RoundResult":
+def _tool_round():
     from core.agentic.types import RoundResult, ToolCall
 
     return RoundResult(
