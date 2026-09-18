@@ -533,6 +533,9 @@ async def run_agent_loop(
     turn_usage = TokenUsage()  # 本 loop 累积 usage（成本采集汇总），done 时埋 cost Counter。
     # 是否采到过真实 usage 看 turn_usage.samples（缺失≠真实 0，前端据此显示"未采集"而非 0）
     final_text = ""
+    # 中途失败的真错误事件载体（可观测性重整）：非首轮 LLM/answer_now 失败不再伪装
+    # 成固定文案的 answer，收尾统一 emit_error_event + done(error_code)
+    loop_error: BaseException | None = None
     first_ttft_ms: int | None = None   # 首轮（第一次模型调用）ttft，chat.turn_breakdown 数据源
     first_round_ms = 0                 # 首轮整段耗时
     # M-4：兜底用——最后一轮若没产出最终文字（见下方「空回复兜底」），回退到本轮模型已生成的
@@ -601,9 +604,9 @@ async def run_agent_loop(
                     # 不覆盖真正的首轮值。失败路径（下方 except）不记，保持 0=未记录。
                     if first_round_ms == 0:
                         first_ttft_ms, first_round_ms = result.ttft_ms, result.elapsed_ms
-                except Exception:
+                except Exception as _ans_exc:
                     logger.exception("AgentLoop: answer_now 直接回答失败")
-                    final_text = "（立即回答失败，请稍后重试。）"
+                    loop_error = _ans_exc
                 await stream.emit({"type": "thinking", "stage": "answer_now",
                                    "call_state": "complete", "content": ""})
                 break
@@ -695,7 +698,7 @@ async def run_agent_loop(
             # 首轮计时（chat.turn_breakdown 数据源）：iteration==0 才记，后续轮不覆盖
             if iteration == 0:
                 first_ttft_ms, first_round_ms = result.ttft_ms, result.elapsed_ms
-        except Exception:
+        except Exception as exc:
             # 兜底：本轮若已发出 reasoning start（running），补发 complete 避免前端思考块卡转圈
             try:
                 await stream.emit({
@@ -706,10 +709,10 @@ async def run_agent_loop(
                 pass
             logger.exception("AgentLoop: 第 %d 轮 LLM 调用失败", iteration)
             log_flow("agent_loop.llm_error", level=logging.ERROR,
-                     iteration=iteration, model=model)
+                     iteration=iteration, model=model, error=str(exc))
             if iteration == 0:
                 raise  # 首轮失败直接向上抛，让 capability 处理错误响应
-            final_text = "（抱歉，AI 服务临时异常，请稍后重试。）"
+            loop_error = exc
             break
 
         if result.has_tool_calls and not is_final_round:
@@ -847,13 +850,27 @@ async def run_agent_loop(
     # M-4 空回复兜底：循环走完仍无最终文字（轮次预算耗尽且最后一轮模型既没吐文字也没正常 break，
     # 或最后一轮 content 为空），回退到本轮模型已生成的旁白；旁白也空则用明确提示语。
     # 不让用户得到空 answer——宁可给一句可读的兜底，也不留空白。
-    if not final_text.strip():
+    #（loop_error 路径优先于 M-4：中途失败用信封文案，不落旁白兜底）
+    from core.observability.errors import classify, emit_error_event
+
+    _err_code: str | None = None
+    if loop_error is not None:
+        _spec = classify(loop_error)
+        _err_code = _spec.code
+        # outcome 文本优雅降级（quiz/research 等读 final_text 的调用方拿到可读中文）
+        final_text = _spec.user_message
+    elif not final_text.strip():
         final_text = last_nonempty_content.strip() or "（抱歉，本轮未能生成有效回复，请重试或换个问法。）"
         log_flow("agent_loop.empty_final_fallback",
                  fallback_chars=len(final_text), iterations=iteration + 1)
 
     if emit_terminal_events:
-        await stream.emit({"type": "answer", "content": final_text})
+        if loop_error is not None:
+            # 可观测性重整：中途失败发真错误事件（分类信封+ref），不再伪装成固定文案的
+            # answer；done 仍发（metadata 带 error_code），防前端 loading 悬挂
+            await emit_error_event(stream, loop_error, source="agent_loop")
+        else:
+            await stream.emit({"type": "answer", "content": final_text})
         await stream.emit({
             "type": "done",
             "metadata": {
@@ -862,6 +879,7 @@ async def run_agent_loop(
                 "iterations": iteration + 1,
                 "answer_now": answer_now_triggered,  # 是否因"立即回答"提前收尾（前端区分/埋点）
                 "truncated": final_truncated,  # 最终答案是否被 max_tokens 掐断（前端提示"回答不完整"）
+                **({"error_code": _err_code} if _err_code else {}),
                 # 本轮 token 用量（学生端气泡底部小字）。美元成本仅 expose_cost_to_student 开启时带。
                 # collected=False（端点不支持 usage 采集等）时 token 数为 0 是缺失而非免费，
                 # 前端据此显示「未采集」而非「输入 0 · 输出 0」。payload 构造统一走

@@ -96,7 +96,14 @@ class TrackedCapability(BaseCapability):
                 error=str(exc),
             )
             logger.exception("%s: pipeline failed", type(self).__name__)
-            await stream.error(f"{self.error_label()}：{exc}", source=self.name)
+            # 错误信封：能力名前缀保留，异常原文换分类后的固定中文（内部信息不漏学生，
+            # exc_head/堆栈留在事件信封与服务端日志供排障）
+            from core.observability.errors import classify, emit_error_event
+
+            await emit_error_event(
+                stream, exc, source=self.name,
+                message_override=f"{self.error_label()}：{classify(exc).user_message}",
+            )
 
     @abstractmethod
     async def run_with_tracking(
