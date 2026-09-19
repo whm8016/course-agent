@@ -19,7 +19,7 @@ import {
   connectDeepResearch,
   type DeepResearchSource,
 } from '../../services/questionWs'
-import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode, HallucinationInfo, KBStatus, QuizQuestion, AttachmentInfo, MessageUsage } from '../../types'
+import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode, HallucinationInfo, KBStatus, QuizQuestion, AttachmentInfo, MessageUsage, ErrorEnvelope } from '../../types'
 
 interface Props {
   courseId: string
@@ -997,7 +997,7 @@ export default function ChatWindow({
     let answerContent = ''
     // 错误信封（可观测性重整）：error 事件携带的 code/ref，随消息挂 metadata.error
     //（MessageBubble 红框变体 + ErrorRefLine 编号复制）
-    let errorInfo: { code: string; ref: string } | undefined
+    let errorInfo: ErrorEnvelope | undefined
     let ragChunks: RagChunk[] = []
     let quizData: QuizData | undefined
     let intent = ''
