@@ -15,7 +15,17 @@ from core.stream import StreamEvent, StreamEventType
 from services.session import turn_runtime as tr
 
 _SID = "sess-err-1"
+
 _TID = "turnerr1persist00000000xy"  # 前 8 位 = "turnerr1"
+
+
+@pytest.fixture(autouse=True)
+def _no_langsmith(monkeypatch):
+    """钉死 tracing：本机 .env 开着 LANGSMITH_TRACING=true 时 turn 根 run 真打
+    LangSmith——测试不打外网（test_turn_persist 同款钉法）。"""
+    from core.observability import langsmith_trace as lt
+
+    monkeypatch.setattr(lt, "_TRACING_ON", False)
 
 
 class _SilentBus:

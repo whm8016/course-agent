@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 
+from core.llm.reliability import CircuitOpenError, LLMRetryError
 from core.observability.context import bind_context
 from core.observability.errors import (
     ERROR_CODES,
@@ -52,14 +53,8 @@ _REQ = httpx.Request("POST", "http://test.local/v1/chat/completions")
     ("exc_factory", "expected_code"),
     [
         pytest.param(lambda: asyncio.CancelledError(), "cancelled", id="CancelledError"),
-        pytest.param(
-            lambda: __import__("core.llm.reliability", fromlist=["CircuitOpenError"]).CircuitOpenError("OPEN"),
-            "llm_unavailable", id="CircuitOpenError",
-        ),
-        pytest.param(
-            lambda: __import__("core.llm.reliability", fromlist=["LLMRetryError"]).LLMRetryError("exhausted"),
-            "llm_unavailable", id="LLMRetryError",
-        ),
+        pytest.param(lambda: CircuitOpenError("OPEN"), "llm_unavailable", id="CircuitOpenError"),
+        pytest.param(lambda: LLMRetryError("exhausted"), "llm_unavailable", id="LLMRetryError"),
         pytest.param(lambda: RuntimeError("This model's maximum context length is 4096 tokens"),
                      "context_overflow", id="keyword:maximum-context"),
         pytest.param(

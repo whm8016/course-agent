@@ -371,10 +371,8 @@ def _strip_dsml_tags(text: str) -> str:
 
 
 # context-length 错误消息关键词（provider 400/413 文案各异，按小写子串匹配）
-_CTX_LEN_KEYWORDS = (
-    "context length", "maximum context", "too long", "reduce the length",
-    "too many tokens", "input length", "exceeds the", "messages too",
-)
+from core.observability.errors import CTX_OVERFLOW_KEYWORDS as _CTX_LEN_KEYWORDS
+# 上下文超长关键词单一真相源在 observability/errors.py（信封分类同表）
 
 
 def _is_context_length_error(exc: Exception) -> bool:

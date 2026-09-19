@@ -43,9 +43,11 @@ logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# LLM 服务不可用的统一用户文案（llm.chat_complete 与 turn_runtime SSE error 共用，
-# 避免把 CircuitOpenError 英文内部信息直接漏给学生）
-LLM_SERVICE_UNAVAILABLE = "AI 服务暂时不可用，请稍后重试。"
+# LLM 服务不可用的统一用户文案：真值在 observability/errors.py 的错误信封注册表
+#（llm_unavailable 码），此处 re-export 供 chat_complete 等直接使用，勿双写字面量。
+from core.observability.errors import LLM_UNAVAILABLE_MESSAGE
+
+LLM_SERVICE_UNAVAILABLE = LLM_UNAVAILABLE_MESSAGE
 
 # 可重试错误关键词（_is_retryable 与 classify_failure 的未知异常兜底共用；
 # 覆盖 openai/httpx 及自配 client 的常见错误文案）
@@ -304,17 +306,6 @@ class LLMRetryError(Exception):
     def __init__(self, message: str, last_error: Exception | None = None):
         super().__init__(message)
         self.last_error = last_error
-
-
-def llm_user_message(exc: Exception) -> str | None:
-    """LLM 可靠性异常 → 统一用户文案；其它异常返回 None（调用方回退 str(exc)）。
-
-    异常类型→用户文案的映射住在异常定义旁边（知识内聚），各 SSE/错误发射边界
-    调这一个函数，不再各写一份 isinstance 列表（turn_runtime / chat_complete）。
-    """
-    if isinstance(exc, (CircuitOpenError, LLMRetryError)):
-        return LLM_SERVICE_UNAVAILABLE
-    return None
 
 
 async def with_retry_and_circuit(

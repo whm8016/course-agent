@@ -48,6 +48,14 @@ export interface HallucinationInfo {
   tip: string
 }
 
+/** 错误信封（可观测性重整）：机器可读错误码 + 学生可报障的 8 位引用号。
+ *  SSE/WS error 事件与 messages 落盘行同字段——事件态（SSEEvent 平铺 code/ref）
+ *  与持久化态（metadata.error）共用此形状。 */
+export interface ErrorEnvelope {
+  code: string
+  ref: string
+}
+
 export interface AgentMetadata {
   intent?: string
   intent_confidence?: number
@@ -60,7 +68,7 @@ export interface AgentMetadata {
   /** done 事件携带：最终答案是否因输出长度上限（finish_reason=length）被截断 */
   truncated?: boolean
   /** 错误信封（可观测性重整）：失败 turn 的错误码与报障编号（服务端落盘同字段，重载恢复样式） */
-  error?: { code: string; ref: string }
+  error?: ErrorEnvelope
 }
 
 export interface SSEEvent {
@@ -115,7 +123,7 @@ export interface Message {
     usage?: MessageUsage
     timestamp?: number
     /** 错误信封（可观测性重整）：失败 turn 的错误码与报障编号（服务端落盘行同字段，重载恢复红框样式） */
-    error?: { code: string; ref: string }
+    error?: ErrorEnvelope
   }
 }
 

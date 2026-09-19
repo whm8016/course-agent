@@ -24,11 +24,6 @@ def _ctx(mode: str = "chat") -> UnifiedContext:
     )
 
 
-async def _collect(bus_events):
-    """从伪 bus 事件列表收敛为 dict 列表。"""
-    return bus_events
-
-
 # ---------------------------------------------------------------------------
 # Step 4a：TrackedCapability 兜底 → 信封（非裸 str(exc)）
 # ---------------------------------------------------------------------------

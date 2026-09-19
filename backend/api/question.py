@@ -21,6 +21,10 @@ router = APIRouter(prefix="/question", tags=["question"])
 
 @router.websocket("/followup")
 async def websocket_question_followup(websocket: WebSocket):
+    # WS 不走 BaseHTTPMiddleware：手动绑 request_id（错误信封 ref 的来源，与 run.py 同款）
+    from core.observability.context import bind_ws_request_id
+
+    bind_ws_request_id(websocket)
     user = await ws_authenticate(websocket)
     if user is None:
         return

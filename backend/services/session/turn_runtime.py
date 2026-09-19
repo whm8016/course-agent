@@ -769,17 +769,13 @@ class TurnRuntimeManager:
                 turn_cancelled = True
                 log_flow("turn.cancel", turn_id=execution.turn_id,
                          elapsed_ms=int((time.monotonic() - t0) * 1000), events=seq)
+                # 取消也走信封（code=cancelled；ref 空串时 bus.error 按协议省略键）
                 from core.observability.errors import error_ref
 
-                _cancel_payload: dict = {
-                    "type": "error",
-                    "message": "turn 被取消",
-                    "source": "turn_runtime",
-                    "code": "cancelled",
-                }
-                if error_ref():
-                    _cancel_payload["ref"] = error_ref()
-                await execution.bus.emit(_cancel_payload)
+                await execution.bus.error(
+                    "turn 被取消", source="turn_runtime",
+                    code="cancelled", ref=error_ref(),
+                )
             except Exception as exc:
                 # 统一错误信封：分类（code）+ 中文文案 + ref；堆栈由 emit_error_event
                 # 现场记录（turn_id 已在 contextvars，ContextFilter 注入每行日志）

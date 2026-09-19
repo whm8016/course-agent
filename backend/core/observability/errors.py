@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 from dataclasses import dataclass
 
@@ -46,9 +48,9 @@ ERROR_REGISTRY: dict[str, ErrorSpec] = {
 
 ERROR_CODES = frozenset(ERROR_REGISTRY)
 
-# 与 loop._CTX_LEN_KEYWORDS 同口径（上下文超长的 provider 文案变体），不 import loop
-# 防环——两侧关键词表变更时须同步。
-_CTX_OVERFLOW_KEYWORDS = (
+# 上下文超长的 provider 文案变体——单一真相源在本模块（分类是其职责）；loop 的
+# 反应式裁剪判定（_is_context_length_error）反向 import 本表，勿在 loop 再抄一份。
+CTX_OVERFLOW_KEYWORDS = (
     "context length", "maximum context", "too long", "reduce the length",
     "too many tokens", "input length", "exceeds the", "messages too",
 )
@@ -64,7 +66,7 @@ def classify(exc: BaseException) -> ErrorSpec:
     # 模块级互相 import 会成环；函数内导入在调用期解析，无环。
     from core.llm.reliability import CircuitOpenError, LLMRetryError, classify_failure, status_of
 
-    if isinstance(exc, asyncio_cancelled()):
+    if isinstance(exc, asyncio.CancelledError):
         return ERROR_REGISTRY["cancelled"]
     if isinstance(exc, (CircuitOpenError, LLMRetryError)):
         return ERROR_REGISTRY["llm_unavailable"]
@@ -72,9 +74,9 @@ def classify(exc: BaseException) -> ErrorSpec:
     if status_of(exc) == 413:
         return ERROR_REGISTRY["context_overflow"]
     msg = str(exc).lower()
-    if any(kw in msg for kw in _CTX_OVERFLOW_KEYWORDS):
+    if any(kw in msg for kw in CTX_OVERFLOW_KEYWORDS):
         return ERROR_REGISTRY["context_overflow"]
-    if isinstance(exc, json_decode_error()):
+    if isinstance(exc, json.JSONDecodeError):
         return ERROR_REGISTRY["schema_invalid"]
     # 供应商侧故障（超时/连接/429/5xx——复用熔断重写的分类判定）统一按 LLM 不可用
     if classify_failure(exc):
@@ -138,18 +140,3 @@ async def emit_error_event(
         logger.warning("emit_error_event: bus.error 发射失败", exc_info=True)
     return envelope
 
-
-# ---------------------------------------------------------------------------
-# 延迟取内建异常类型的薄封装（避免模块级 import 语法噪声，也便于测试 monkeypatch）
-# ---------------------------------------------------------------------------
-
-def asyncio_cancelled() -> tuple[type[BaseException], ...]:
-    import asyncio
-
-    return (asyncio.CancelledError,)
-
-
-def json_decode_error() -> tuple[type[Exception], ...]:
-    import json
-
-    return (json.JSONDecodeError,)

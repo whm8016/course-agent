@@ -34,6 +34,7 @@ from core.db.database import (
     KnowledgeBase,
     TeacherApplication,
     TeacherInvite,
+    TurnErrorRecord,
     User,
     get_db,
 )
@@ -713,8 +714,6 @@ async def errors_recent(
     学生报障主路径：错误气泡带的 8 位编号 → ?ref= 精确命中该行 → turn_id 拿去 grep
     后端日志（ContextFilter 注入每行）。cancelled 不入流水（非错误）。
     """
-    from core.db.database import TurnErrorRecord
-
     q = select(TurnErrorRecord).order_by(TurnErrorRecord.created_at.desc())
     if ref:
         q = q.where(TurnErrorRecord.ref == ref)
