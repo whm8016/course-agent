@@ -222,7 +222,7 @@ def _inject_images(
                     raw = safe_path.read_bytes()
                     b64 = _b64.b64encode(raw).decode("ascii")
                 except OSError as exc:
-                    logger.warning("failed to read image file %s: %s", safe_path, exc)
+                    logger.warning("failed to read image file %s: %s", safe_path, exc, exc_info=True)
 
         if not b64 and not url:
             continue

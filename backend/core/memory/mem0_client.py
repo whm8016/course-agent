@@ -191,7 +191,7 @@ async def persona_postfilter(user_id: str, course_id: str, add_resp) -> None:
                 except Exception:
                     logger.warning("[mem0] persona blacklist delete failed id=%s", it.get("id"))
     except Exception as exc:
-        logger.warning("[mem0] persona_postfilter failed (non-fatal): %s", exc)
+        logger.warning("[mem0] persona_postfilter failed (non-fatal): %s", exc, exc_info=True)
 
 
 def normalize_results(resp) -> list:
@@ -249,7 +249,7 @@ async def _rerank_slot_if_needed(query_text: str, slot: list, limit: int) -> lis
         )
         return ranked
     except Exception as exc:
-        logger.warning("[mem0] slot rerank failed, fallback to vector order: %s", exc)
+        logger.warning("[mem0] slot rerank failed, fallback to vector order: %s", exc, exc_info=True)
         return slot
 
 
@@ -295,7 +295,7 @@ async def build_memory_context(
         )
         results = persona + events
     except Exception as exc:
-        logger.warning("[mem0] build_memory_context SEARCH_FAILED user_id=%s error=%s", user_id, exc)
+        logger.warning("[mem0] build_memory_context SEARCH_FAILED user_id=%s error=%s", user_id, exc, exc_info=True)
         return ""
 
     # 矛盾检测清理（如果启用）：清理结果必须接回 persona/events——真正注入用的是这两份
@@ -525,7 +525,7 @@ async def _detect_and_clean_conflicts(user_id: str, results: list[dict], setting
                     old.get("memory", ""), old_dt, new.get("memory", ""), new_dt
                 )
             except Exception as exc:
-                logger.warning("[mem0] conflict LLM arbitration failed (keep both): %s", exc)
+                logger.warning("[mem0] conflict LLM arbitration failed (keep both): %s", exc, exc_info=True)
                 continue
             if label != "SUPPLEMENT":
                 exclude_ids.add(old.get("id"))

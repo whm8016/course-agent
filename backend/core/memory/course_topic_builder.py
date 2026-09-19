@@ -55,7 +55,7 @@ async def _aget_embed(embed_model, text: str) -> list[float] | None:
     try:
         return await embed_model._aget_text_embedding(text)
     except Exception as exc:
-        logger.warning("[course_topics] embedding 失败（置 NULL）：%s", exc)
+        logger.warning("[course_topics] embedding 失败（置 NULL）：%s", exc, exc_info=True)
         return None
 
 
@@ -330,7 +330,7 @@ async def _llm_json(
                 retry_config=retry_config, circuit_breaker=breaker,
             )
         except (CircuitOpenError, LLMRetryError) as exc:
-            logger.warning("[course_topics] LLM 传输失败（可靠性层整波耗尽，放弃本块）：%s", exc)
+            logger.warning("[course_topics] LLM 传输失败（可靠性层整波耗尽，放弃本块）：%s", exc, exc_info=True)
             return None
         try:
             if track is not None:
@@ -342,7 +342,7 @@ async def _llm_json(
             raw = (choice.message.content or "").strip()
             data = extract_json_from_llm(raw)
         except Exception as exc:  # 埋点/解析偶发崩不废整轮——按本次失败重试
-            logger.warning("[course_topics] 响应处理失败（第 %d 次）：%s", attempt, exc)
+            logger.warning("[course_topics] 响应处理失败（第 %d 次）：%s", attempt, exc, exc_info=True)
             continue
         if data:
             return data

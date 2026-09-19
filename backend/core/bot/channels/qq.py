@@ -100,7 +100,7 @@ class QQChannel(BaseChannel):
             try:
                 await self._client.start(appid=self.config.app_id, secret=self.config.secret)
             except Exception as e:
-                logger.warning("QQ bot error: %s", e)
+                logger.warning("QQ bot error: %s", e, exc_info=True)
             if self._running:
                 logger.info("Reconnecting QQ bot in 5 seconds...")
                 await asyncio.sleep(5)

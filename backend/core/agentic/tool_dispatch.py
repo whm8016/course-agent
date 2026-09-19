@@ -74,7 +74,7 @@ async def dispatch_tool_calls(
                 # gather 后统一检测，不在并发路径里修改共享状态
                 pause_payload = result.pause_for_user if result else None
             except Exception as exc:
-                logger.warning("工具 '%s' 执行失败: %s", tc.name, exc)
+                logger.warning("工具 '%s' 执行失败: %s", tc.name, exc, exc_info=True)
                 content = f"（工具执行失败：{exc}）"
                 pause_payload = None
                 status = "error"

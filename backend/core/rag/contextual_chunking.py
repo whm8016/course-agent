@@ -132,7 +132,7 @@ async def summarize_document(
     try:
         desc = (await llm_func(_DOC_SUMMARY_PROMPT.format(document_text=body))).strip()
     except Exception as exc:  # 摘要失败不阻断 enrichment，降级为空摘要
-        logger.warning("summarize_document 失败，降级为空摘要: %s", exc)
+        logger.warning("summarize_document 失败，降级为空摘要: %s", exc, exc_info=True)
         desc = ""
 
     if cache is not None and desc:
@@ -208,7 +208,7 @@ async def contextualize_chunks(
             try:
                 desc = (await llm_func(prompt)).strip()
             except Exception as exc:  # 单 chunk 失败不拖垮整批，降级原文
-                logger.warning("contextualize chunk %d 失败，降级为原文: %s", i, exc)
+                logger.warning("contextualize chunk %d 失败，降级为原文: %s", i, exc, exc_info=True)
                 desc = ""
         text = f"[背景] {desc}\n\n{chunk}" if desc else chunk
         enriched[i] = text

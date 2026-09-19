@@ -137,7 +137,7 @@ def _read_text_fallback(file_path: str) -> str:
     try:
         return Path(file_path).read_text(encoding="utf-8", errors="replace")
     except OSError as e:
-        logger.warning("无法读取文件 %s: %s", file_path, e)
+        logger.warning("无法读取文件 %s: %s", file_path, e, exc_info=True)
         return ""
 
 
@@ -429,7 +429,7 @@ def _save_contextual_cache(path: Path, cache: dict[str, str]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
     except OSError as e:
-        logger.warning("contextual cache 保存失败: %s", e)
+        logger.warning("contextual cache 保存失败: %s", e, exc_info=True)
 
 
 async def _apply_contextual_enrichment(
@@ -608,7 +608,7 @@ def persist_ingest_chunks(
         )
         return latest
     except OSError as e:
-        logger.warning("保存摄入切块失败 backend=%s course=%s: %s", backend, course_id, e)
+        logger.warning("保存摄入切块失败 backend=%s course=%s: %s", backend, course_id, e, exc_info=True)
         return None
 
 
@@ -742,7 +742,7 @@ def _append_image_desc_chunks(
 
         manifest = _load_blob_manifest(_blob_manifest_path(img_cache))
     except Exception as exc:
-        logger.warning("图片描述回填失败（降级跳过）: %s", exc)
+        logger.warning("图片描述回填失败（降级跳过）: %s", exc, exc_info=True)
         return 0
 
     skip = inlined or set()

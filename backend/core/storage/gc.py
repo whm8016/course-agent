@@ -169,7 +169,7 @@ def _delete(path: Path, size: int, stats: GcStats, *, dry_run: bool) -> None:
         stats.freed_bytes += max(0, size)
         stats.deleted_paths.append(str(path))
     except OSError as exc:
-        logger.warning("GC 删除失败 %s: %s", path, exc)
+        logger.warning("GC 删除失败 %s: %s", path, exc, exc_info=True)
         stats.skipped += 1
 
 
@@ -410,7 +410,7 @@ def storage_usage() -> dict:
         du = shutil.disk_usage(str(Path(s.paths.lightrag_workdir).resolve()))
         disk = {"total": du.total, "used": du.used, "free": du.free}
     except OSError as exc:
-        logger.warning("disk_usage 采样失败：%s", exc)
+        logger.warning("disk_usage 采样失败：%s", exc, exc_info=True)
         disk = {"total": 0, "used": 0, "free": 0}
     used_pct = round(100 * disk["used"] / disk["total"], 1) if disk["total"] else 0.0
     return {

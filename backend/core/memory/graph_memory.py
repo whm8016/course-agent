@@ -477,7 +477,7 @@ async def _get_entity_catalog(course_id: str, max_entities: int = 100) -> str:
             lines.append(f"{e['id']}: {e['label']} ({e['type']})")
         return "\n".join(lines)
     except Exception as e:
-        logger.warning("[graph] get_entity_catalog failed course_id=%s error=%s", course_id, e)
+        logger.warning("[graph] get_entity_catalog failed course_id=%s error=%s", course_id, e, exc_info=True)
         return ""
 
 
@@ -674,7 +674,7 @@ async def update_graphs_from_conversation(
         except Exception as e:
             # Redis 不可用属可恢复故障：跳过本轮提取（非致命——graph 是派生数据，
             # mem0 已在 _flush_turns 主路径落盘）。不外抛，避免阻塞 flush 主流程。
-            logger.warning("[graph] turn_count INCR failed user_id=%s error=%s", user_id, e)
+            logger.warning("[graph] turn_count INCR failed user_id=%s error=%s", user_id, e, exc_info=True)
             return False
         if count % _EXTRACT_EVERY_N_TURNS != 0:
             logger.info(

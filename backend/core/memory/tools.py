@@ -103,7 +103,7 @@ async def execute_read_memory(
         else:
             raw = await m.get_all(filters=filters, top_k=limit)
     except Exception as exc:
-        logger.warning("[mem0-tool] read_memory failed user_id=%s error=%s", user_id, exc)
+        logger.warning("[mem0-tool] read_memory failed user_id=%s error=%s", user_id, exc, exc_info=True)
         return ToolResult(content=f"（读取记忆失败：{exc}）", success=False)
 
     items = normalize_results(raw)

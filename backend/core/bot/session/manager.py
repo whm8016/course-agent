@@ -134,7 +134,7 @@ class SessionManager:
                 last_consolidated=last_consolidated,
             )
         except Exception as e:
-            logger.warning("Failed to load session %s: %s", key, e)
+            logger.warning("Failed to load session %s: %s", key, e, exc_info=True)
             return None
 
     def save(self, session: Session) -> None:

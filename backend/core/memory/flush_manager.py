@@ -146,7 +146,7 @@ async def _flush_turns(user_id: str, course_id: str, turns: list[dict]) -> bool:
         # Phase 1 止血：mem0 写失败不再静默吞——标记 False 让 _flush_one 保留 key 重试。
         # 原实现只 warning 不外抛，_flush_one 据此误判成功并删 key → 永久丢数据（架空 H-7）。
         mem0_ok = False
-        logger.warning("[flush_manager] mem0.add failed user=%s error=%s (key retained for retry)", user_id, e)
+        logger.warning("[flush_manager] mem0.add failed user=%s error=%s (key retained for retry)", user_id, e, exc_info=True)
 
     # 3. graph_memory 更新（已有 6 轮节流，这里批量调用）—— 仅在 mem0 成功时执行：
     # mem0 失败会整批重试，此时跑 graph 等于白烧一次 LLM 提取（重试时还会再跑一遍）。
@@ -179,11 +179,11 @@ async def _flush_turns(user_id: str, course_id: str, turns: list[dict]) -> bool:
                 except Exception as e:
                     # commit 失败属可恢复：数据仍在 Redis key 里，下次 cron 会重试。
                     # 这里 rollback 后退出 with（防止脏事务残留）。
-                    logger.warning("[flush_manager] graph_memory commit failed user=%s error=%s", user_id, e)
+                    logger.warning("[flush_manager] graph_memory commit failed user=%s error=%s", user_id, e, exc_info=True)
                     await db.rollback()
             logger.info("[flush_manager] graph_memory update complete user=%s", user_id)
         except Exception as e:
-            logger.warning("[flush_manager] graph_memory update failed user=%s error=%s", user_id, e)
+            logger.warning("[flush_manager] graph_memory update failed user=%s error=%s", user_id, e, exc_info=True)
 
     logger.info(
         "[flush_manager] FLUSH COMPLETE user=%s turns=%d mem0_ok=%s",
@@ -269,7 +269,7 @@ async def _flush_one(r: aioredis.Redis, key: str) -> int:
         try:
             await r.delete(lock_key)
         except Exception as e:
-            logger.warning("[flush_manager] flush_one unlock failed key=%s error=%s", key, e)
+            logger.warning("[flush_manager] flush_one unlock failed key=%s error=%s", key, e, exc_info=True)
 
 
 async def scan_and_flush(r: aioredis.Redis, max_turns: int, idle_timeout: float) -> int:
@@ -318,7 +318,7 @@ async def scan_and_flush(r: aioredis.Redis, max_turns: int, idle_timeout: float)
         except Exception as e:
             # 可恢复：保留 key 等下次 cron 重试（注意：这里若 _flush_one 已抢锁但
             # flush 抛异常，key 不会被删，数据安全；锁由 finally / TTL 释放）
-            logger.warning("[flush_manager] cron flush key=%s error=%s", key, e)
+            logger.warning("[flush_manager] cron flush key=%s error=%s", key, e, exc_info=True)
 
     return flushed_count
 
@@ -349,7 +349,7 @@ async def flush_all_pending(r: aioredis.Redis) -> int:
                 flushed_count += 1
 
         except Exception as e:
-            logger.warning("[flush_manager] flush_all key=%s error=%s", key, e)
+            logger.warning("[flush_manager] flush_all key=%s error=%s", key, e, exc_info=True)
 
     logger.info("[flush_manager] flush_all_pending complete flushed=%d", flushed_count)
     return flushed_count
@@ -423,7 +423,7 @@ class MemoryFlushManager:
                 # 复用安全 flush（锁内读 + flush + LTRIM）
                 await _flush_one(r, key)
             except Exception as e:
-                logger.warning("[flush_manager] flush_user key=%s error=%s", key, e)
+                logger.warning("[flush_manager] flush_user key=%s error=%s", key, e, exc_info=True)
 
     def stats(self) -> dict:
         """同步 wrapper（不推荐，改用 async stats()）。"""

@@ -665,7 +665,7 @@ class SessionSummaryManager:
                 try:
                     acquired = bool(await r.set(lock_key, "1", ex=get_settings().summary.lock_ttl, nx=True))
                 except Exception as e:
-                    logger.warning("[L2] redis lock acquire failed session=%s err=%s; degrade to OCC", session_id, e)
+                    logger.warning("[L2] redis lock acquire failed session=%s err=%s; degrade to OCC", session_id, e, exc_info=True)
                     acquired = None
                 if acquired is False:
                     logger.info("[L2] compress SKIP session=%s reason=locked-by-other-worker", session_id)
@@ -677,7 +677,7 @@ class SessionSummaryManager:
                     try:
                         await r.delete(lock_key)
                     except Exception as e:
-                        logger.warning("[L2] redis unlock failed session=%s err=%s", session_id, e)
+                        logger.warning("[L2] redis unlock failed session=%s err=%s", session_id, e, exc_info=True)
 
     async def _maybe_compress_locked(
         self,
@@ -894,7 +894,7 @@ class SessionSummaryManager:
                     await self._track_l2_usage(resp, model, track)
                 raw = (resp.choices[0].message.content or "").strip()
             except Exception as e:
-                logger.warning("[L2] structured compress temp=%s failed: %s", temperature, e)
+                logger.warning("[L2] structured compress temp=%s failed: %s", temperature, e, exc_info=True)
             parsed = _parse_json_loose(raw)
             if parsed is not None:
                 new_items, resolved = _parse_llm_output(parsed, boundary_ts)

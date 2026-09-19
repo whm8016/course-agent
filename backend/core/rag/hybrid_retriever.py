@@ -100,7 +100,7 @@ async def retrieve(
                         )
                     fused = kept
         except Exception as exc:
-            logger.warning("rerank 失败，返回融合结果（未精排）: %s", exc)
+            logger.warning("rerank 失败，返回融合结果（未精排）: %s", exc, exc_info=True)
 
     return fused
 

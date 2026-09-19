@@ -83,7 +83,7 @@ def _auto_register(name: str) -> None:
             register_retriever("lightrag", LightRAGRetriever)
             register_indexer("lightrag", LightRAGIndexer)
         except ImportError as e:
-            logger.warning("Failed to auto-register lightrag: %s", e)
+            logger.warning("Failed to auto-register lightrag: %s", e, exc_info=True)
     elif name == "llamaindex_pg":
         try:
             from core.rag.retriever.llamaindex_pg import LlamaIndexRetriever
@@ -91,7 +91,7 @@ def _auto_register(name: str) -> None:
             register_retriever("llamaindex_pg", LlamaIndexRetriever)
             register_indexer("llamaindex_pg", LlamaIndexIndexer)
         except ImportError as e:
-            logger.warning("Failed to auto-register llamaindex_pg: %s", e)
+            logger.warning("Failed to auto-register llamaindex_pg: %s", e, exc_info=True)
 
 
 # ── 后端可用性检查 ───────────────────────────────────────────────────────────

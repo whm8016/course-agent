@@ -1,17 +1,18 @@
-"""coding 题最小子进程执行器（尽力而为沙箱）。
+"""coding 题执行器：local 子进程（尽力而为，dev/CI）或 service 沙箱容器（上线口径）。
 
-⚠️ 风险披露（不是安全边界）：本模块做「独立临时目录 + 超时 + `-I` 隔离模式
-子进程 + 最小环境变量 + rlimit 资源上限（POSIX）」的尽力而为防护。自判分期起
-执行对象包含**不可信学生代码**（信任域低于 critic 轮的 LLM 生成代码），防线为：
-①RLIMIT_AS/CPU/NPROC 以 soft=hard 写死注入 preamble——子代码无法调高 hard 上限
-（调高需特权），爆内存/死循环/fork 炸弹在内核层被杀；②线程数环境变量封 1（防
-BLAS/OpenMP 线程池绕过 CPU 限制）；③`_EXEC_GATE` 并发闸防瞬时资源堆积。
-已知剩余风险（无相应基建，显式接受）：①无网络隔离（socket 可外传，课程场景
-接受）；②RLIMIT_NPROC 按 UID 计——容器以 root 跑时对 root 不生效，仅防非特权
-uid 下的 fork 炸弹（运维建议 worker 用独立低权用户）；③Windows 开发机无
-resource 模块、preamble 不注入（无内存/CPU 上限，仅超时+最小 env）。
-🚫 红线：开放公网高利害考试（成绩直接挂钩）前必须换容器级隔离
-（gVisor/Firecracker/独立容器+netns），不得继续复用本文件。
+两种模式（settings.sandbox.mode）：
+- **local**（默认）：本进程子进程——独立临时目录 + 超时 + `-I` 隔离模式 + 最小
+  环境变量 + rlimit 资源上限（POSIX）。⚠️ 不是安全边界：无网络隔离；RLIMIT_NPROC
+  按 UID 计，容器以 root 跑时对 root 不生效；Windows 开发机无 resource 模块、
+  preamble 不注入（仅超时+最小 env）。仅供开发与 CI（settings `_check_prod`
+  在 production 拒绝 local 模式）。
+- **service**：经 Unix domain socket 调独立沙箱容器（sandbox/，compose 服务）：
+  `network_mode: none`（无出网、无内网可达）+ 非 root + 零凭据零业务卷 + 容器级
+  mem/cpus/pids 限额。学生代码攻击面从「backend 容器 root + .env + 出网」坍缩为
+  「一个什么都没有的空容器」。服务内部沿用同一套子进程纪律（超时+`-I`+最小 env+
+  rlimit preamble），执行数据流对齐 Piston api/src/job.js 的 prime→execute→cleanup。
+  不可用时抛 SandboxUnavailableError → 判分降级 ungraded，**绝不回退本地执行**
+  （fail 降可用性，不降安全性）。攻击面回归见 tests/test_sandbox_service_attacks.py。
 
 用法：①quiz pipeline critic 轮：question_type=coding 时执行 correct_answer 里的
 围栏代码块（correct_answer 才是"要能跑的参考答案"；explanation 里的代码常是
@@ -32,7 +33,23 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import httpx
+
+from settings import get_settings
+
 logger = logging.getLogger(__name__)
+
+# service 模式：沙箱服务 /execute 的 code 上限（与服务端常量同值）；超限客户端
+# 直接拒（不打服务）——判分口径与「代码超长」本地编译失败一致，属无效输入。
+_SERVICE_CODE_MAX_BYTES = 64 * 1024
+
+
+class SandboxUnavailableError(RuntimeError):
+    """沙箱服务不可用（连接失败/超时/5xx/token 拒绝）。
+
+    判分侧捕获后降级 ungraded（TestRunResult.degraded），critic 侧落入既有
+    except Exception → issue 重试口径。绝不回退本地子进程执行。
+    """
 
 DEFAULT_TIMEOUT_S = 5
 
@@ -94,6 +111,7 @@ class TestRunResult:
     failed: list[tuple[int, str]] = field(default_factory=list)
     skipped: list[int] = field(default_factory=list)
     total: int = 0
+    degraded: bool = False  # 沙箱服务不可用导致用例未执行（区别于预算耗尽的 skipped）
 
     @property
     def pass_ratio(self) -> float:
@@ -162,13 +180,23 @@ def run_tests(
     full_code = (starter_code + "\n" if starter_code.strip() else "") + (code or "")
     result = TestRunResult(total=len(cases))
     deadline = time.monotonic() + _TESTS_TOTAL_BUDGET_S
-    for idx, tc in cases:
+    for pos, (idx, tc) in enumerate(cases):
         if time.monotonic() > deadline:
             # 预算耗尽=基础设施限速，不计入 failed/total（不拉低学生 ratio）
             result.skipped.append(idx)
             result.total -= 1
             continue
-        ok, detail = run_code(full_code + "\n\n" + tc, timeout=timeout_per_test)
+        try:
+            ok, detail = run_code(full_code + "\n\n" + tc, timeout=timeout_per_test)
+        except SandboxUnavailableError as exc:
+            # 沙箱服务不可用：剩余用例（含当前）全部跳过、不计分母，degraded 供
+            # 判分反馈区分「沙箱暂不可用」vs「预算耗尽」。不重试、不回退本地执行。
+            logger.warning("沙箱服务不可用，剩余用例跳过：%s", exc, exc_info=True)
+            result.degraded = True
+            for rem_idx, _ in cases[pos:]:
+                result.skipped.append(rem_idx)
+                result.total -= 1
+            break
         if ok:
             result.passed.append(idx)
         else:
@@ -177,15 +205,75 @@ def run_tests(
 
 
 def run_code(code: str, timeout: int = DEFAULT_TIMEOUT_S) -> tuple[bool, str]:
-    """在独立临时目录跑一段 python 代码，返回 (ok, detail)。
+    """跑一段 python 代码，返回 (ok, detail)。按 settings.sandbox.mode 分派执行域。
 
     ok=False 的情形：编译/运行期异常（非零退出）或超时。ok=True 仅表示退出码 0
     ——不保证语义正确（那是 critic LLM 的职责）。失败 detail 截 500 字进 issues。
+    service 模式不可用抛 SandboxUnavailableError（见类 docstring）。
+    """
+    if get_settings().sandbox.mode == "service":
+        with _EXEC_GATE:  # 服务端另有并发闸；本端闸统一两模式的 backend 并发纪律
+            return _run_code_service(code, timeout)
+    return _run_code_local(code, timeout)
+
+
+def _service_transport_factory() -> httpx.BaseTransport:
+    """service 模式 HTTP transport（uds）。独立工厂便于测试注入 MockTransport。"""
+    return httpx.HTTPTransport(uds=get_settings().sandbox.socket, retries=0)
+
+
+def _run_code_service(
+    code: str, timeout: int, *, transport: httpx.BaseTransport | None = None
+) -> tuple[bool, str]:
+    """service 模式：经 uds 调沙箱容器 /execute，响应映射回 (ok, detail)。
+
+    词表与本地路径同口径（timed_out → timeout>Ns；非零退出 → exit=N: stderr）。
+    rlimit preamble 由服务端注入（本端发原始代码）。URL host 无意义（uds transport
+    只看路径），用 sandbox.local 占位。
+    """
+    if len(code.encode("utf-8", errors="ignore")) > _SERVICE_CODE_MAX_BYTES:
+        return False, "code too long for sandbox service"
+    cfg = get_settings().sandbox
+    tp = transport if transport is not None else _service_transport_factory()
+    try:
+        with httpx.Client(transport=tp) as client:
+            resp = client.post(
+                "http://sandbox.local/execute",
+                json={"code": code, "timeout_s": int(timeout)},
+                headers={"X-Sandbox-Token": cfg.token.get_secret_value()},
+                timeout=httpx.Timeout(
+                    connect=cfg.connect_timeout_s,
+                    read=timeout + cfg.margin_s,
+                    write=10.0,
+                    pool=cfg.connect_timeout_s,
+                ),
+            )
+    except httpx.HTTPError as exc:
+        raise SandboxUnavailableError(f"sandbox service unreachable: {exc}") from exc
+    if resp.status_code == 403:
+        raise SandboxUnavailableError("sandbox service rejected token")
+    if resp.status_code != 200:
+        raise SandboxUnavailableError(
+            f"sandbox service error HTTP {resp.status_code}"
+        )
+    data = resp.json()
+    if data.get("timed_out"):
+        return False, f"timeout>{timeout}s"
+    exit_code = data.get("exit_code")
+    if exit_code != 0:
+        err = (data.get("stderr") or data.get("stdout") or "").strip()
+        return False, f"exit={exit_code}: {err[:500]}"
+    return True, ""
+
+
+def _run_code_local(code: str, timeout: int = DEFAULT_TIMEOUT_S) -> tuple[bool, str]:
+    """local 模式：在独立临时目录起子进程跑一段 python 代码，返回 (ok, detail)。
+
     加固口径：`-I`（忽略 PYTHONPATH / 用户 site / PYTHON* env）+ `env=_sandbox_env()`
     （剥凭据 + 线程数封 1）+ `stdin=DEVNULL`（input() 挂不住）+ `-X utf8` + utf-8
     解码（防子进程输出按 locale 编码炸 UnicodeDecodeError——异常属调用方 issue
     而非崩溃）+ POSIX 下 rlimit preamble（内存/CPU/进程数 hard 上限）+ `_EXEC_GATE`
-    并发闸（同时最多 4 个子进程）。
+    并发闸（同时最多 4 个子进程）。仅 dev/CI（见模块 docstring 的模式说明）。
     """
     with tempfile.TemporaryDirectory(prefix="quiz_sandbox_") as td:
         path = Path(td) / "snippet.py"
@@ -214,6 +302,7 @@ def run_code(code: str, timeout: int = DEFAULT_TIMEOUT_S) -> tuple[bool, str]:
 __all__ = [
     "TestRunResult",
     "DEFAULT_TIMEOUT_S",
+    "SandboxUnavailableError",
     "extract_code_blocks",
     "run_code",
     "run_tests",
