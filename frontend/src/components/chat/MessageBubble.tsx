@@ -18,6 +18,7 @@ import {
 import type { Message } from '../../types'
 import ThinkingProcess from './ThinkingProcess'
 import SourceCard from './SourceCard'
+import ErrorRefLine from './ErrorRefLine'
 import QuizCard from '../quiz/QuizCard'
 
 interface Props {
@@ -194,11 +195,22 @@ export default function MessageBubble({ message, thinkingSteps, courseId, sessio
     if (meta.mode === 'research') intentBadges.push({ icon: Search, label: '深度研究' })
   }
 
+  // 错误信封变体（可观测性重整）：失败 turn 的气泡红框 + 错误码/编号/一键复制，
+  // 与普通回答视觉区分；metadata.error 由 ChatWindow error 事件与服务端落盘行共同供给
+  const errMeta = message.metadata?.error
+
   return (
     <div className="flex justify-start mb-4">
-      <div className="max-w-[95%] md:max-w-[80%] rounded-[var(--radius-lg)] px-4 py-3 bg-surface border border-line text-ink rounded-bl-[3px]">
+      <div
+        className={`max-w-[95%] md:max-w-[80%] rounded-[var(--radius-lg)] px-4 py-3 bg-surface border text-ink rounded-bl-[3px] ${
+          errMeta ? 'border-danger-fg' : 'border-line'
+        }`}
+      >
         {thinkingSteps && thinkingSteps.length > 0 && (
           <ThinkingProcess steps={thinkingSteps} isStreaming={isStreaming} />
+        )}
+        {errMeta && (
+          <ErrorRefLine code={errMeta.code} errorRef={errMeta.ref} />
         )}
 
         {message.content && (

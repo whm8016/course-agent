@@ -59,6 +59,8 @@ export interface AgentMetadata {
   usage?: MessageUsage
   /** done 事件携带：最终答案是否因输出长度上限（finish_reason=length）被截断 */
   truncated?: boolean
+  /** 错误信封（可观测性重整）：失败 turn 的错误码与报障编号（服务端落盘同字段，重载恢复样式） */
+  error?: { code: string; ref: string }
 }
 
 export interface SSEEvent {
@@ -67,6 +69,9 @@ export interface SSEEvent {
   /** error 事件携带的错误文案。后端 stream_bus 发的是 `message` 字段（非 content），
    *  前端读 error 事件时须同时认 content / message，否则显示「出错了: undefined」。 */
   message?: string
+  /** 错误信封（可观测性重整）：机器可读错误码 + 学生可报障的 8 位引用号 */
+  code?: string
+  ref?: string
   tool?: string
   input?: Record<string, unknown>
   chunks?: RagChunk[]
@@ -109,6 +114,8 @@ export interface Message {
     call_state?: string
     usage?: MessageUsage
     timestamp?: number
+    /** 错误信封（可观测性重整）：失败 turn 的错误码与报障编号（服务端落盘行同字段，重载恢复红框样式） */
+    error?: { code: string; ref: string }
   }
 }
 

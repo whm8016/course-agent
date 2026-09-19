@@ -43,6 +43,14 @@ type ApiMessageRow = {
   metadata?: Message['metadata'] & { attachments?: AttachmentInfo[] }
 }
 
+/** 错误信封文案 + 编号（可观测性重整）：WS error 事件带 ref 时拼进提示，
+ * 学生可把它报给老师/管理员（后端按编号查 turn_errors / grep 日志）。 */
+function withErrorRef(msg: Record<string, unknown>, fallback: string): string {
+  const base = String(msg.message ?? msg.content ?? fallback)
+  const ref = typeof msg.ref === 'string' && msg.ref ? `（编号 ${msg.ref}）` : ''
+  return base + ref
+}
+
 function rowToMessage(row: ApiMessageRow): Message {
   const mt = row.msg_type || 'text'
   return {
@@ -717,7 +725,7 @@ export default function ChatWindow({
             setQuizTraces([])
             quizCloseRef.current?.()
           } else if (t === 'error') {
-            setQuizError(String(msg.message ?? msg.content ?? '出题失败，请重试'))
+            setQuizError(withErrorRef(msg as Record<string, unknown>, '出题失败，请重试'))
             resetQuizOverlays()
           }
         },
@@ -884,7 +892,7 @@ export default function ChatWindow({
               researchCloseRef.current?.()
             } else if (t === 'error') {
               awaitingClarification = false
-              setResearchError(String(msg.message ?? msg.content ?? '研究失败，请重试'))
+              setResearchError(withErrorRef(msg as Record<string, unknown>, '研究失败，请重试'))
               resetResearchOverlays()
             }
           },
@@ -987,6 +995,9 @@ export default function ChatWindow({
 
     const thinkingSteps: Message[] = []
     let answerContent = ''
+    // 错误信封（可观测性重整）：error 事件携带的 code/ref，随消息挂 metadata.error
+    //（MessageBubble 红框变体 + ErrorRefLine 编号复制）
+    let errorInfo: { code: string; ref: string } | undefined
     let ragChunks: RagChunk[] = []
     let quizData: QuizData | undefined
     let intent = ''
@@ -1189,6 +1200,10 @@ export default function ChatWindow({
           case 'error':
             // 后端 stream_bus 的 error 事件字段是 `message`（非 content）；两个都认，避免「出错了: undefined」
             answerContent = `出错了: ${event.content || event.message || '未知错误，请查看后端日志'}`
+            // 信封字段（旧后端缺省时不挂，普通气泡）
+            if (event.code) {
+              errorInfo = { code: event.code, ref: event.ref || '' }
+            }
             break
         }
       },
@@ -1226,6 +1241,7 @@ export default function ChatWindow({
         stopped: wasAborted || undefined,
         truncated: truncated || undefined,
         usage,
+        error: errorInfo,
       },
     }
     // @ts-expect-error attach thinking steps for rendering
