@@ -8,7 +8,7 @@
 
 ## 0. TL;DR
 
-- 31 张表 / 10 个域，对标 Moodle（468 表）属**健康范围**——表多本身不是病。
+- 32 张表 / 10 个域，对标 Moodle（468 表）属**健康范围**——表多本身不是病。
 - 分层方向（事件→rollup→展示、FK/no-FK 故意分裂）已是**业界中上水准**。
 - 2026-08-08 体检发现的 3 类病（缺 `course_id` / 双真相源 / 死 rollup）经 P0–P4 整改**已全部治理**；当前体检 **27 ✅ / 4 ⚠️ / 0 🔴**，无结构级违规。
 - 2026-08 后新增 4 表（`course_faq` / `course_topic` / `course_topic_edge` / `mastery_observation`）已入册体检，全部合规。
@@ -41,7 +41,7 @@
 
 | 层 | 特征 | 本项目表 |
 |---|---|---|
-| ① 原始事件 | 只追加，内容永不 UPDATE | `messages` `learning_events` `memory_episodes` `llm_usage_records` `mastery_observation` |
+| ① 原始事件 | 只追加，内容永不 UPDATE | `messages` `learning_events` `memory_episodes` `llm_usage_records` `mastery_observation` `turn_errors` |
 | ② 派生读模型 | cron 重算（delete-then-reinsert），从不 read-modify-write | `course_daily_rollup` `student_course_rollup` `llm_usage_daily` `course_faq` |
 | ③ 可变状态 | 频繁 UPDATE 的当前事实 | `sessions` `kb_builds` `knowledge_mastery` `research_checkpoints` |
 | ④ 引用/配置 | 读多写少 | `knowledge_bases` `enrollments` `course_topic` `course_topic_edge` `user_*` 配置表 |
@@ -207,4 +207,4 @@
 
 ---
 
-*2026-08-08 审计产出（三维调研 + 27 表体检 + P0–P4 路线图）；2026-09-16 复核刷新：P0–P4 全部核销（Part 3 存档状态）、4 张新表入册（`course_faq`/`course_topic`/`course_topic_edge`/`mastery_observation`）、体检重打分 27✅/4⚠️/0🔴、迁移对齐 001→037。*
+*2026-08-08 审计产出（三维调研 + 27 表体检 + P0–P4 路线图）；2026-09-16 复核刷新：P0–P4 全部核销（Part 3 存档状态）、4 张新表入册（`course_faq`/`course_topic`/`course_topic_edge`/`mastery_observation`）、体检重打分 27✅/4⚠️/0🔴、迁移对齐 001→037。**2026-09-19 第 32 表入册：`turn_errors`（迁移 038，错误处理与可观测性重整）——失败 turn 的 append-only 运维流水，与 messages（学生叙事流）两概念两真相源；无 FK 裸字符串（原则 4，用户/课程删除后存活）；消费方 `GET /admin/errors/recent?ref=`（学生报障精确查）。*

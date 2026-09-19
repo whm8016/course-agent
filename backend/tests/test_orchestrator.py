@@ -108,7 +108,11 @@ async def test_unknown_mode_emits_error():
 
 @pytest.mark.asyncio
 async def test_capability_exception_emits_error():
-    """Capability.run() 抛异常时，orchestrator 捕获并发 error 事件，不向上抛。"""
+    """Capability.run() 抛异常时，orchestrator 捕获并发**错误信封**事件，不向上抛。
+
+    可观测性重整后契约：message 是分类后的中文文案（裸 str(exc) 不再透传——
+    "capability crash" 只留在 exc_head 与服务端日志），并携带 code/exc_type。
+    """
     cap = _CrashCapability()
 
     with patch("core.orchestrator.get_capability_registry", return_value=_make_registry(cap)):
@@ -117,4 +121,8 @@ async def test_capability_exception_emits_error():
 
     error_events = [e for e in events if e["type"] == "error"]
     assert len(error_events) >= 1
-    assert any("capability crash" in e.get("message", "") for e in error_events)
+    err = error_events[0]
+    assert err.get("code") == "internal"
+    assert err.get("exc_type") == "RuntimeError"
+    assert "capability crash" not in err.get("message", "")
+    assert "capability crash" in err.get("exc_head", "")
