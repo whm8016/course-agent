@@ -66,11 +66,12 @@ async def health():
 
 
 @router.get("/health/detailed")
-async def health_detailed():
+async def health_detailed(_: dict = Depends(get_current_admin)):
     """
     详细健康检查（包含熔断器和缓存状态）
 
-    用于运维监控和调试
+    用于运维监控和调试。admin 鉴权：checks 的 error 文案会带连接串/内部主机名
+    等细节，不能对未认证调用方回显（基础存活探测走无鉴权的 /api/health）。
     """
     checks: dict[str, str] = {}
     details: dict = {}
