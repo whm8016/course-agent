@@ -698,6 +698,17 @@ export default function ChatWindow({
               collectedQuestions.push(qq)
               setQuizStreamQuestions((prev) => [...prev, qq])
             }
+          } else if (t === 'quiz_question_error') {
+            // 单题 critic 重试用尽/生成失败：显式提示已跳过，不能静默吞题
+            // （要 5 题只见 4 题、计数对不上，看起来像丢题）
+            const reason = String(msg.reason ?? '').slice(0, 120)
+            setQuizTraces((prev) => [
+              ...prev,
+              {
+                text: `第 ${Number(msg.index ?? 0) + 1} 题生成失败已跳过${reason ? `（${reason}）` : ''}`,
+                kind: 'error',
+              },
+            ])
           } else if (t === 'result') {
             const qs = (msg as { questions?: QAPairRaw[] }).questions
             if (Array.isArray(qs) && qs.length > 0 && collectedQuestions.length === 0) {
@@ -719,6 +730,14 @@ export default function ChatWindow({
               { text: `生成完成，共 ${collectedQuestions.length} 道`, kind: 'done' },
             ])
             resetQuizOverlays()
+            if (collectedQuestions.length === 0) {
+              // 全部题目失败（quiz_question_error 轮空）：不产出空测验卡——
+              // 空卡提交按钮可点但无事发生，像假成功
+              setQuizError('题目全部生成失败，请调整要求后重试')
+              setQuizStreaming(false)
+              quizCloseRef.current?.()
+              return
+            }
             const quizData: QuizData = { questions: [...collectedQuestions] }
             const assistantMsg: Message = {
               role: 'assistant',
@@ -1421,12 +1440,13 @@ export default function ChatWindow({
             isStreaming={loading && i === messages.length - 1}
           />
         ))}
-        {/* 出题流式进度气泡 */}
-        {quizStreaming && (
+        {/* 出题流式进度气泡：结束后有错误也保持挂载——错误文案长在气泡里，
+            只挂 quizStreaming 会让 error 随气泡卸载一闪而过（等于静默） */}
+        {(quizStreaming || quizError) && (
           <QuizStreamingBubble
             traces={quizTraces}
             questions={quizStreamQuestions}
-            done={false}
+            done={!quizStreaming}
             error={quizError}
           />
         )}
