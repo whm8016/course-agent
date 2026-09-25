@@ -13,14 +13,14 @@ claimed_at 判租约超时（NULL = 迁移前遗留行，视同超租约，回�
 - 判龄走 (status, claimed_at) 过滤，行数量级小（outbox 模式，done 即出队），
   复用 idx_episodes_outbox(status, created_at) 前缀即可，不另建索引。
 
-Revision ID: 038
-Revises: 037
+Revision ID: 039
+Revises: 038
 Create Date: 2026-09-25
 """
 
 # revision identifiers, used by Alembic.
-revision = "038"
-down_revision = "037"
+revision = "039"
+down_revision = "038"
 branch_labels: None = None
 depends_on: None = None
 
