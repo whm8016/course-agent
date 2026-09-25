@@ -66,7 +66,7 @@ describe('ChatWindow 出题流式事件', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     quizState.conns.length = 0
-    vi.mocked(fetchMessages).mockResolvedValue([] as never)
+    vi.mocked(fetchMessages).mockResolvedValue([])
   })
 
   it('quiz_question_error：界面出现「已跳过」提示，不再静默吞题', async () => {

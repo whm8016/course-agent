@@ -103,15 +103,14 @@ async def put_my_config(
     uid = str(user.get("id") or "")
     # SSRF 收口：base_url/proxy 过公网校验再落库（空=不校验）；运行时消费点
     # resolve_search_config 另有二次校验（兜 rebinding 与存量脏行）。
-    from utils.url_guard import assert_public_http_url
+    from utils.url_guard import require_public_http_url_fields
 
-    for field in ("base_url", "proxy"):
-        url = str(getattr(payload, field, "") or "").strip()
-        if url:
-            try:
-                assert_public_http_url(url)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=f"{field}: {exc}") from exc
+    from services.search.config import SEARCH_OVERRIDE_URL_FIELDS
+
+    try:
+        require_public_http_url_fields(payload, SEARCH_OVERRIDE_URL_FIELDS)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     from utils.crypto import encrypt_secret
     # 1.5：api_key 加密落库（与 UserLLMProvider 同口径，明文不进 DB）
     encrypted_key = encrypt_secret(payload.api_key or "")

@@ -24,8 +24,6 @@ down_revision = "038"
 branch_labels: None = None
 depends_on: None = None
 
-from typing import Sequence, Union
-
 from alembic import op
 import sqlalchemy as sa
 

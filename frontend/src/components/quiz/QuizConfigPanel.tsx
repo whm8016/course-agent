@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { ChevronDown, ClipboardList } from 'lucide-react'
-import type { QuizConfig } from './types'
+import { QUESTION_TYPE_LABELS, type QuizConfig } from './types'
 
 // 仅 re-export 类型（type-only 不破坏 fast refresh），保持旧 import 路径兼容
 export type { QuizConfig } from './types'
@@ -82,11 +82,11 @@ export default function QuizConfigPanel({ value, onChange }: Props) {
                 onChange={(e) => update('questionType', e.target.value)}
               >
                 <option value="">自动</option>
-                <option value="choice">选择题</option>
-                {/* 判断题用后端合法题型键 concept（无 options、answer true/false）；
-                    旧值 true_false 后端词表里不存在，会退化成打字简答题 */}
-                <option value="concept">判断题</option>
-                <option value="short_answer">简答题</option>
+                {/* 键=后端合法题型（concept 即判断题，词表见 backend pipeline
+                    _VALID_TYPES）；标签单一真相源 QUESTION_TYPE_LABELS */}
+                {Object.entries(QUESTION_TYPE_LABELS).map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
               </select>
             </div>
           </div>

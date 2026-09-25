@@ -18,3 +18,11 @@ export const DEFAULT_QUIZ_CONFIG: QuizConfig = {
   questionType: '',
   preference: '',
 }
+
+/** 题型枚举值 → 中文标签（单一真相源：QuizConfigPanel 的选项与 ChatWindow 的
+ *  请求气泡回显共用；键必须与后端 _VALID_TYPES 词表对齐，判断题=concept）。 */
+export const QUESTION_TYPE_LABELS: Record<string, string> = {
+  choice: '选择题',
+  concept: '判断题',
+  short_answer: '简答题',
+}

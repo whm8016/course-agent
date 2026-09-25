@@ -1,7 +1,8 @@
 """沙箱 service 模式客户端测试：httpx uds 调用映射 / 降级语义 / 判分反馈文案。
 
-Mock 边界：transport 注入 httpx.MockTransport（替换的是进程外 HTTP 依赖）；
-run_tests/grade_answer 本体真跑（service 分派经 settings.sandbox.mode 注入）。
+Mock 边界：monkeypatch `_service_client_factory` 注入 MockTransport Client
+（替换的是进程外 HTTP 依赖，与生产单例工厂同一缝）；run_tests/grade_answer
+本体真跑（service 分派经 settings.sandbox.mode 注入）。
 攻击面验证（网络隔离/密钥不可达）在 test_sandbox_service_attacks.py（需 docker）。
 """
 from __future__ import annotations
@@ -21,8 +22,21 @@ def _enable_service_mode(monkeypatch):
     monkeypatch.setattr(s.sandbox, "token", SecretStr("t0ken"))
 
 
-def _mock_transport(handler) -> httpx.MockTransport:
-    return httpx.MockTransport(handler)
+def _patch_client(monkeypatch, handler) -> None:
+    """把共享 Client 工厂换成 MockTransport 版（单一测试缝）。"""
+    from core.question import sandbox as sb
+
+    monkeypatch.setattr(
+        sb, "_service_client_factory",
+        lambda: httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+def _ok_handler(req: httpx.Request) -> httpx.Response:
+    return httpx.Response(200, json={
+        "ok": True, "exit_code": 0, "stdout": "", "stderr": "",
+        "timed_out": False, "detail": "",
+    })
 
 
 # ── run_code：响应映射 ──────────────────────────────────────────────────────
@@ -32,41 +46,33 @@ def test_service_ok_maps_to_true(monkeypatch):
     from core.question import sandbox as sb
 
     _enable_service_mode(monkeypatch)
-    transport = _mock_transport(
-        lambda req: httpx.Response(200, json={
-            "ok": True, "exit_code": 0, "stdout": "hi\n", "stderr": "",
-            "timed_out": False, "detail": "",
-        })
-    )
-    assert sb._run_code_service("print(1)", 5, transport=transport) == (True, "")
+    _patch_client(monkeypatch, lambda req: httpx.Response(200, json={
+        "ok": True, "exit_code": 0, "stdout": "hi\n", "stderr": "",
+        "timed_out": False, "detail": "",
+    }))
+    assert sb._run_code_service("print(1)", 5) == (True, "")
 
 
 def test_service_timeout_maps_to_detail(monkeypatch):
     from core.question import sandbox as sb
 
     _enable_service_mode(monkeypatch)
-    transport = _mock_transport(
-        lambda req: httpx.Response(200, json={
-            "ok": False, "exit_code": None, "stdout": "", "stderr": "",
-            "timed_out": True, "detail": "timeout>5s",
-        })
-    )
-    assert sb._run_code_service("while True: pass", 5, transport=transport) == (
-        False, "timeout>5s",
-    )
+    _patch_client(monkeypatch, lambda req: httpx.Response(200, json={
+        "ok": False, "exit_code": None, "stdout": "", "stderr": "",
+        "timed_out": True, "detail": "timeout>5s",
+    }))
+    assert sb._run_code_service("while True: pass", 5) == (False, "timeout>5s")
 
 
 def test_service_nonzero_exit_carries_stderr(monkeypatch):
     from core.question import sandbox as sb
 
     _enable_service_mode(monkeypatch)
-    transport = _mock_transport(
-        lambda req: httpx.Response(200, json={
-            "ok": False, "exit_code": 3, "stdout": "", "stderr": "ZeroDivisionError",
-            "timed_out": False, "detail": "",
-        })
-    )
-    ok, detail = sb._run_code_service("1/0", 5, transport=transport)
+    _patch_client(monkeypatch, lambda req: httpx.Response(200, json={
+        "ok": False, "exit_code": 3, "stdout": "", "stderr": "ZeroDivisionError",
+        "timed_out": False, "detail": "",
+    }))
+    ok, detail = sb._run_code_service("1/0", 5)
     assert ok is False and detail.startswith("exit=3:") and "ZeroDivisionError" in detail
 
 
@@ -74,9 +80,9 @@ def test_service_5xx_raises_unavailable(monkeypatch):
     from core.question import sandbox as sb
 
     _enable_service_mode(monkeypatch)
-    transport = _mock_transport(lambda req: httpx.Response(500, text="boom"))
+    _patch_client(monkeypatch, lambda req: httpx.Response(500, text="boom"))
     with pytest.raises(sb.SandboxUnavailableError):
-        sb._run_code_service("print(1)", 5, transport=transport)
+        sb._run_code_service("print(1)", 5)
 
 
 def test_service_connect_error_raises_unavailable(monkeypatch):
@@ -87,17 +93,18 @@ def test_service_connect_error_raises_unavailable(monkeypatch):
     def handler(req):
         raise httpx.ConnectError("no route", request=req)
 
+    _patch_client(monkeypatch, handler)
     with pytest.raises(sb.SandboxUnavailableError):
-        sb._run_code_service("print(1)", 5, transport=_mock_transport(handler))
+        sb._run_code_service("print(1)", 5)
 
 
 def test_service_403_rejected_token_raises(monkeypatch):
     from core.question import sandbox as sb
 
     _enable_service_mode(monkeypatch)
-    transport = _mock_transport(lambda req: httpx.Response(403, text="forbidden"))
+    _patch_client(monkeypatch, lambda req: httpx.Response(403, text="forbidden"))
     with pytest.raises(sb.SandboxUnavailableError, match="token"):
-        sb._run_code_service("print(1)", 5, transport=transport)
+        sb._run_code_service("print(1)", 5)
 
 
 def test_service_sends_token_header_and_payload(monkeypatch):
@@ -109,12 +116,10 @@ def test_service_sends_token_header_and_payload(monkeypatch):
     def handler(req: httpx.Request) -> httpx.Response:
         captured["token"] = req.headers.get("X-Sandbox-Token")
         captured["json"] = __import__("json").loads(req.content)
-        return httpx.Response(200, json={
-            "ok": True, "exit_code": 0, "stdout": "", "stderr": "",
-            "timed_out": False, "detail": "",
-        })
+        return _ok_handler(req)
 
-    sb._run_code_service("print(1)", 7, transport=_mock_transport(handler))
+    _patch_client(monkeypatch, handler)
+    sb._run_code_service("print(1)", 7)
     assert captured["token"] == "t0ken"
     assert captured["json"] == {"code": "print(1)", "timeout_s": 7}
 
@@ -128,8 +133,8 @@ def test_service_oversize_code_rejected_before_transport(monkeypatch):
     def handler(req):  # 若被调用说明没做前置校验
         raise AssertionError("transport should not be hit for oversize code")
 
-    ok, detail = sb._run_code_service("x = 1\n" + "#" * (70 * 1024), 5,
-                                      transport=_mock_transport(handler))
+    _patch_client(monkeypatch, handler)
+    ok, detail = sb._run_code_service("x = 1\n" + "#" * (70 * 1024), 5)
     assert ok is False and "too long" in detail
 
 
@@ -147,13 +152,6 @@ def test_run_code_dispatches_by_mode(monkeypatch):
 # ── run_tests：降级语义（沙箱不可用 → skipped + degraded，不硬失败） ────────
 
 
-def _ok_resp() -> httpx.Response:
-    return httpx.Response(200, json={
-        "ok": True, "exit_code": 0, "stdout": "", "stderr": "",
-        "timed_out": False, "detail": "",
-    })
-
-
 def test_run_tests_degrades_all_when_service_down(monkeypatch):
     from core.question import sandbox as sb
 
@@ -162,9 +160,7 @@ def test_run_tests_degrades_all_when_service_down(monkeypatch):
     def handler(req):
         raise httpx.ConnectError("down", request=req)
 
-    monkeypatch.setattr(
-        sb, "_service_transport_factory", lambda: _mock_transport(handler)
-    )
+    _patch_client(monkeypatch, handler)
     r = sb.run_tests("x=1", ["assert x==1", "assert x==2"])
     assert r.degraded is True
     assert r.total == 0 and r.passed == [] and r.failed == []
@@ -181,11 +177,9 @@ def test_run_tests_degrades_midway_keeps_earlier_results(monkeypatch):
         calls["n"] += 1
         if calls["n"] >= 2:
             raise httpx.ConnectError("down mid-way", request=req)
-        return _ok_resp()
+        return _ok_handler(req)
 
-    monkeypatch.setattr(
-        sb, "_service_transport_factory", lambda: _mock_transport(handler)
-    )
+    _patch_client(monkeypatch, handler)
     r = sb.run_tests("x=1", ["assert x==1", "assert x==2", "assert x==3"])
     assert r.degraded is True
     assert r.passed == [0]                      # 首条已执行且通过
@@ -228,3 +222,46 @@ async def test_grade_coding_budget_exhausted_feedback_distinguishes(monkeypatch)
     })
     assert r.grade == "ungraded"
     assert "预算" in r.feedback and "沙箱不可用" not in r.feedback
+
+
+# ── 双端契约对拍：backend 客户端常量 vs 沙箱服务源码常量 ────────────────────
+
+
+def test_service_constants_in_sync_with_sidecar_source():
+    """backend 预检/词表与 sandbox/app/main.py 的服务端权威值必须一致。
+
+    两端是独立部署单元（沙箱镜像零 backend 依赖），常量靠注释「成对改」——本测试
+    把它升格为契约：漂移即红。backend 预检比服务端宽时会打到服务端吃 400 →
+    SandboxUnavailableError → 判分误报「沙箱故障」；RLIMIT 漂移则 local(CI) 与
+    service(生产) 判分口径分叉。读源文件而非 import：sandbox/ 不在 backend
+    import 路径上（build context 独立）。
+    """
+    import ast
+    import re
+    from pathlib import Path
+
+    from core.question import sandbox as sb
+
+    src = (Path(__file__).resolve().parents[2] / "sandbox" / "app" / "main.py").read_text(
+        encoding="utf-8"
+    )
+
+    def const(name: str):
+        """按值取常量。数值可能是 64 * 1024 这类算术表达式（3.14 起 literal_eval
+        不吃 BinOp），先按纯算术字符集白名单校验再求值；其余走 literal_eval。"""
+        m = re.search(rf"^{name}\s*=\s*(.+)$", src, re.MULTILINE)
+        assert m, f"sandbox/app/main.py 缺常量 {name}"
+        raw = m.group(1).strip()
+        if re.fullmatch(r"[0-9\-+*/(). ]+", raw):
+            return eval(raw, {"__builtins__": {}}, {})  # noqa: S307 — 字符集已白名单的纯算术
+        return ast.literal_eval(raw)
+
+    assert sb._SERVICE_CODE_MAX_BYTES == const("CODE_MAX_BYTES")
+    assert sb._RLIMIT_AS_MB == const("_RLIMIT_AS_MB")
+    assert sb._RLIMIT_CPU_S == const("_RLIMIT_CPU_S")
+    assert sb._RLIMIT_NPROC == const("_RLIMIT_NPROC")
+    # 最小 env 键集：backend _sandbox_env() 的 POSIX 基集 == 服务端 _MINIMAL_ENV 键集
+    # （win32 开发机多带 SYSTEMROOT 启动依赖，服务端容器是 POSIX，剔除后对拍）
+    minimal_env_src = re.search(r"_MINIMAL_ENV = \{(.*?)\}", src, re.DOTALL).group(1)
+    backend_keys = set(sb._sandbox_env()) - {"SYSTEMROOT"}
+    assert backend_keys == set(re.findall(r'"(\w+)"\s*:', minimal_env_src))

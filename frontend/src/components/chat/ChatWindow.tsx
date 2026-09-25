@@ -11,7 +11,7 @@ import VoiceInput from './VoiceInput'
 import { isImage } from './fileUtils'
 import { useStickToBottom } from '../../lib/stickToBottom'
 import QuizConfigPanel from '../quiz/QuizConfigPanel'
-import { DEFAULT_QUIZ_CONFIG, type QuizConfig } from '../quiz/types'
+import { DEFAULT_QUIZ_CONFIG, QUESTION_TYPE_LABELS, type QuizConfig } from '../quiz/types'
 import { chatStream, uploadImage, fetchMessages, createSession, updateSessionMode, fetchLlmProfilesSelectable, fetchMyLlmProvider, deleteMyLlmProvider, requestAnswerNow } from '../../services/api'
 import type { LlmProfileSelectable, UserProviderView } from '../../services/api'
 import {
@@ -157,8 +157,8 @@ export function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
     }
   }
 
-  if (opts && typeof opts === 'object' && Object.keys(opts).length > 0) {
-    const options = Object.entries(opts)
+  if (hasOpts) {
+    const options = Object.entries(opts!)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([letter, text]) => `${letter}. ${text}`)
     const answer = (qa.correct_answer ?? '').charAt(0).toUpperCase() || 'A'
@@ -630,14 +630,9 @@ export default function ChatWindow({
     }
 
     // 先把「用户请求」推入消息列表（气泡显示中文标签，不发枚举值）
-    const typeLabels: Record<string, string> = {
-      choice: '选择题',
-      concept: '判断题',
-      short_answer: '简答题',
-    }
     const userMsg: Message = {
       role: 'user',
-      content: `出题：${topic}（${quizConfig.count} 道，${quizConfig.difficulty || '自动难度'}，${typeLabels[quizConfig.questionType] || '自动题型'}）${quizConfig.preference ? `，偏好：${quizConfig.preference}` : ''}`,
+      content: `出题：${topic}（${quizConfig.count} 道，${quizConfig.difficulty || '自动难度'}，${QUESTION_TYPE_LABELS[quizConfig.questionType] || '自动题型'}）${quizConfig.preference ? `，偏好：${quizConfig.preference}` : ''}`,
       image: firstImagePreview,
       attachments: attachments.length > 0 ? attachments : undefined,
     }
@@ -755,9 +750,10 @@ export default function ChatWindow({
             setQuizError(withErrorRef(msg as Record<string, unknown>, '出题失败，请重试'))
             resetQuizOverlays()
           } else if (t === 'ws_reconnect_failed') {
-            // 断线自动重连（questionWs 层，3 次退避）耗尽：明确告知，不静默
+            // 断线自动重连（questionWs 层，3 次退避）耗尽：明确告知，不静默；
+            // 复位走 error 分支同款（清 streaming + 撤 ask_user 卡，防悬空）
             setQuizError('连接中断且自动重连失败，已生成的题目可能不完整，请重新发起')
-            setQuizStreaming(false)
+            resetQuizOverlays()
           }
         },
         onClose: () => {

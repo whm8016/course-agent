@@ -211,43 +211,59 @@ def run_code(code: str, timeout: int = DEFAULT_TIMEOUT_S) -> tuple[bool, str]:
     ——不保证语义正确（那是 critic LLM 的职责）。失败 detail 截 500 字进 issues。
     service 模式不可用抛 SandboxUnavailableError（见类 docstring）。
     """
-    if get_settings().sandbox.mode == "service":
-        with _EXEC_GATE:  # 服务端另有并发闸；本端闸统一两模式的 backend 并发纪律
+    # 闸在分派层统一包两模式（服务端另有自己的并发闸）：backend 侧同时最多 4 个
+    # 沙箱执行在途，判分 to_thread 与 critic 并发调用都被挡住
+    with _EXEC_GATE:
+        if get_settings().sandbox.mode == "service":
             return _run_code_service(code, timeout)
-    return _run_code_local(code, timeout)
+        return _run_code_local(code, timeout)
 
 
-def _service_transport_factory() -> httpx.BaseTransport:
-    """service 模式 HTTP transport（uds）。独立工厂便于测试注入 MockTransport。"""
-    return httpx.HTTPTransport(uds=get_settings().sandbox.socket, retries=0)
+_service_client_cache: httpx.Client | None = None
 
 
-def _run_code_service(
-    code: str, timeout: int, *, transport: httpx.BaseTransport | None = None
-) -> tuple[bool, str]:
+def _service_client_factory() -> httpx.Client:
+    """service 模式共享 Client（懒加载单例）。独立工厂便于测试注入 MockTransport。
+
+    不每次调用新建：httpx 0.28 的 HTTPTransport 构造无条件建 SSL 上下文（实测
+    ~10ms），而 uds 上 http:// 根本不用 TLS——判分每题最多 10 次调用、critic 轮
+    再加围栏块执行，每次新建是纯浪费。keepalive 关闭：每请求新建 uds 连接
+    （~0.1ms 量级），沙箱容器重启后池内不留死连接。
+    """
+    global _service_client_cache
+    if _service_client_cache is None:
+        _service_client_cache = httpx.Client(
+            transport=httpx.HTTPTransport(
+                uds=get_settings().sandbox.socket,
+                retries=0,
+                limits=httpx.Limits(max_keepalive_connections=0),
+            ),
+        )
+    return _service_client_cache
+
+
+def _run_code_service(code: str, timeout: int) -> tuple[bool, str]:
     """service 模式：经 uds 调沙箱容器 /execute，响应映射回 (ok, detail)。
 
     词表与本地路径同口径（timed_out → timeout>Ns；非零退出 → exit=N: stderr）。
     rlimit preamble 由服务端注入（本端发原始代码）。URL host 无意义（uds transport
-    只看路径），用 sandbox.local 占位。
+    只看路径），用 sandbox.local 占位。共享 Client 不在此关闭（进程级单例）。
     """
     if len(code.encode("utf-8", errors="ignore")) > _SERVICE_CODE_MAX_BYTES:
         return False, "code too long for sandbox service"
     cfg = get_settings().sandbox
-    tp = transport if transport is not None else _service_transport_factory()
     try:
-        with httpx.Client(transport=tp) as client:
-            resp = client.post(
-                "http://sandbox.local/execute",
-                json={"code": code, "timeout_s": int(timeout)},
-                headers={"X-Sandbox-Token": cfg.token.get_secret_value()},
-                timeout=httpx.Timeout(
-                    connect=cfg.connect_timeout_s,
-                    read=timeout + cfg.margin_s,
-                    write=10.0,
-                    pool=cfg.connect_timeout_s,
-                ),
-            )
+        resp = _service_client_factory().post(
+            "http://sandbox.local/execute",
+            json={"code": code, "timeout_s": int(timeout)},
+            headers={"X-Sandbox-Token": cfg.token.get_secret_value()},
+            timeout=httpx.Timeout(
+                connect=cfg.connect_timeout_s,
+                read=timeout + cfg.margin_s,
+                write=10.0,
+                pool=cfg.connect_timeout_s,
+            ),
+        )
     except httpx.HTTPError as exc:
         raise SandboxUnavailableError(f"sandbox service unreachable: {exc}") from exc
     if resp.status_code == 403:
@@ -266,33 +282,32 @@ def _run_code_service(
     return True, ""
 
 
-def _run_code_local(code: str, timeout: int = DEFAULT_TIMEOUT_S) -> tuple[bool, str]:
+def _run_code_local(code: str, timeout: int) -> tuple[bool, str]:
     """local 模式：在独立临时目录起子进程跑一段 python 代码，返回 (ok, detail)。
 
     加固口径：`-I`（忽略 PYTHONPATH / 用户 site / PYTHON* env）+ `env=_sandbox_env()`
     （剥凭据 + 线程数封 1）+ `stdin=DEVNULL`（input() 挂不住）+ `-X utf8` + utf-8
     解码（防子进程输出按 locale 编码炸 UnicodeDecodeError——异常属调用方 issue
-    而非崩溃）+ POSIX 下 rlimit preamble（内存/CPU/进程数 hard 上限）+ `_EXEC_GATE`
-    并发闸（同时最多 4 个子进程）。仅 dev/CI（见模块 docstring 的模式说明）。
+    而非崩溃）+ POSIX 下 rlimit preamble（内存/CPU/进程数 hard 上限）。并发闸在
+    run_code 分派层（两模式同一处）。仅 dev/CI（见模块 docstring 的模式说明）。
     """
     with tempfile.TemporaryDirectory(prefix="quiz_sandbox_") as td:
         path = Path(td) / "snippet.py"
         path.write_text(_inject_preamble(code), encoding="utf-8")
-        with _EXEC_GATE:
-            try:
-                proc = subprocess.run(
-                    [sys.executable, "-I", "-X", "utf8", str(path)],
-                    capture_output=True,
-                    timeout=timeout,
-                    cwd=td,
-                    env=_sandbox_env(),
-                    stdin=subprocess.DEVNULL,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                )
-            except subprocess.TimeoutExpired:
-                return False, f"timeout>{timeout}s"
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-I", "-X", "utf8", str(path)],
+                capture_output=True,
+                timeout=timeout,
+                cwd=td,
+                env=_sandbox_env(),
+                stdin=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+        except subprocess.TimeoutExpired:
+            return False, f"timeout>{timeout}s"
     if proc.returncode != 0:
         err = (proc.stderr or proc.stdout or "").strip()
         return False, f"exit={proc.returncode}: {err[:500]}"

@@ -6,32 +6,12 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { connectQuestionGenerate } from '../services/questionWs'
+import { FakeWebSocket, installFakeWs } from './helpers/wsStubs'
 
 vi.mock('../services/auth', () => ({ getToken: () => 't' }))
 
-class FakeWebSocket {
-  static instances: FakeWebSocket[] = []
-  static CONNECTING = 0
-  static OPEN = 1
-  static CLOSING = 2
-  static CLOSED = 3
-  onopen: (() => void) | null = null
-  onmessage: ((ev: { data: string }) => void) | null = null
-  onerror: (() => void) | null = null
-  onclose: (() => void) | null = null
-  readyState = 1
-  close = vi.fn()
-  send = vi.fn()
-  url: string
-  constructor(url: string) {
-    this.url = url
-    FakeWebSocket.instances.push(this)
-  }
-}
-
 beforeEach(() => {
-  FakeWebSocket.instances = []
-  vi.stubGlobal('WebSocket', FakeWebSocket)
+  installFakeWs()
   vi.useFakeTimers()
 })
 

@@ -288,7 +288,7 @@ async def cron_consolidate_memory(ctx) -> None:
         async with AsyncSessionLocal() as db:
             # 1. 超租约的 processing（崩溃遗留）→ 回 pending。旧口径用 created_at
             #    （对话发生时刻）判龄恒真——运行中的巩固每 5min 被翻回重跑，mem0
-            #    双写 + 掌握度观测双计；claimed_at 才是领取时刻（038）。
+            #    双写 + 掌握度观测双计；claimed_at 才是领取时刻（迁移 039）。
             await db.execute(
                 update(MemoryEpisode)
                 .where(

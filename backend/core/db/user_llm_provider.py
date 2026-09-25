@@ -30,6 +30,10 @@ from utils.crypto import decrypt_secret, encrypt_secret
 
 logger = logging.getLogger(__name__)
 
+# 自配 provider 中受 SSRF 守门约束的 URL 字段：写侧校验（api 层）与读侧守门
+# （get_active_provider_view）共用同一清单——加字段只改这里，两处自动同步。
+PROVIDER_URL_FIELDS = ("base_url", "vision_base_url")
+
 
 class UserProviderPayload(BaseModel):
     """PUT /llm/me 请求体（用户自配 LLM provider）。
@@ -97,7 +101,7 @@ async def get_active_provider_view(user_id: str) -> dict | None:
 
             from utils.url_guard import assert_public_http_url
 
-            for field in ("base_url", "vision_base_url"):
+            for field in PROVIDER_URL_FIELDS:
                 if view[field]:
                     try:
                         await asyncio.to_thread(assert_public_http_url, view[field])

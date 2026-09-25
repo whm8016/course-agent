@@ -1043,7 +1043,8 @@ class Settings(BaseSettings):
                 "code with no network and no credentials; local subprocess mode is "
                 "dev/CI only."
             )
-        if is_prod and self.sandbox.mode == "service" and not self.sandbox.token.get_secret_value():
+        if is_prod and not self.sandbox.token.get_secret_value():
+            # 走到这里 mode 必为 service（上面的分支已拒绝其它值）
             raise RuntimeError(
                 "FATAL: SANDBOX__TOKEN must be set in production (shared secret with "
                 "the sandbox sidecar)."

@@ -86,15 +86,14 @@ async def upsert_my_provider(
         raise HTTPException(status_code=401, detail="未认证")
     # SSRF 收口：自配端点先过公网校验再落库（空=回退默认，不校验）。保存时公网、
     # 调用时解析到私网的 rebinding 由 get_active_provider_view 读取侧二次校验兜底。
-    from utils.url_guard import assert_public_http_url
+    from utils.url_guard import require_public_http_url_fields
 
-    for field in ("base_url", "vision_base_url"):
-        url = str(getattr(payload, field, "") or "").strip()
-        if url:
-            try:
-                assert_public_http_url(url)
-            except ValueError as exc:
-                raise HTTPException(status_code=400, detail=f"{field}: {exc}") from exc
+    from core.db.user_llm_provider import PROVIDER_URL_FIELDS
+
+    try:
+        require_public_http_url_fields(payload, PROVIDER_URL_FIELDS)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     saved = await upsert_provider(user_id, payload)
     clear_llm_client_cache()  # key 变更后强制重建 client 缓存
     logger.info("user %s upsert provider binding=%s", user_id, payload.binding)

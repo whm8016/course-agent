@@ -184,15 +184,13 @@ export function connectQuestionGenerate(
   let turnId: string | null = null
   let seq = 0 // 已收到的 bus 事件数（session 为直发不走 bus，不计入——after_seq 口径）
   let attempt = 0
-  let closedByUser = false
-  let finished = false // 已收到 done/error，之后的 close 是正常收尾
+  let settled = false // 主动 close 或已收 done/error：之后的 close 事件按正常收尾，不重连
   let active: WsHandle | null = null
   let retryTimer: number | undefined
 
   const connect = (first: boolean) => {
     const ws = new WebSocket(questionGenerateWsUrl())
-    const handle = makeWsHandle(ws)
-    active = handle
+    active = makeWsHandle(ws)
 
     ws.onopen = () => {
       handlers.onOpen?.()
@@ -214,7 +212,7 @@ export function connectQuestionGenerate(
           seq += 1
         }
         attempt = 0 // 有事件到达即连接健康，后续再闪断从头计数
-        if (msg.type === 'done' || msg.type === 'error') finished = true
+        if (msg.type === 'done' || msg.type === 'error') settled = true
         handlers.onMessage?.(msg)
       } catch {
         handlers.onMessage?.({ type: 'parse_error', raw: ev.data })
@@ -228,7 +226,7 @@ export function connectQuestionGenerate(
     }
 
     ws.onclose = () => {
-      if (closedByUser || finished) {
+      if (settled) {
         handlers.onClose?.()
         return
       }
@@ -249,7 +247,7 @@ export function connectQuestionGenerate(
 
   return {
     close: () => {
-      closedByUser = true
+      settled = true
       if (retryTimer !== undefined) window.clearTimeout(retryTimer)
       active?.close()
     },
