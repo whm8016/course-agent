@@ -84,7 +84,11 @@ cp .env.example .env
 docker compose up -d
 ```
 
-包含服务：`postgres`、`redis`、`backend`（4 workers）、`worker`（ARQ 后台任务）、`frontend`（Nginx 反代 :80）、`mcp-gateway`（MCP 工具 sidecar）
+包含服务：`postgres`、`redis`、`backend`（4 workers）、`worker`（ARQ 后台任务）、`frontend`（Nginx 反代 :80）、`mcp-gateway`（MCP 工具 sidecar）、`sandbox`（编程题判分沙箱）
+
+> ⚠️ **升级已部署环境必须带 `--build`**：`docker compose up -d --build`。
+> backend/worker 以源码卷热生效，但**前端静态产物烤在镜像里**——不带 `--build`
+> 会出现后端新、前端旧且无任何报错（详见 docs/DELIVERY.md 六节）。
 
 访问：http://localhost
 

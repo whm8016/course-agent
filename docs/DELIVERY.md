@@ -70,7 +70,20 @@ cd backend
   交付期间用上面两步法口径。
 - 前端：`cd frontend && npm test`（67 用例）
 
-## 五、已知问题
+## 五、上线前人工验收（真实 LLM，人工执行）
+
+自动化测试（上节）用假件；以下走真实链路，**由人工执行**。2026-08-16 那轮三角色
+E2E 早于判分/语音/研究等主体功能合入，不覆盖以下项：
+
+1. **quiz 判分三路**：选择题（本地判分）/ 简答·判断（LLM 判分）/ 编程题（沙箱判分，
+   `docker compose ps` 确认 sandbox healthy；判分结果与错题本回写各验 1 题）
+2. **语音输入**：录音 → 转写回填（ASR 已配置时）；未配置环境入口应隐藏
+3. **深度研究**：大纲确认卡 → 生成 → `resume_research_id` 断线恢复抽查
+4. **quiz 断线恢复**：出题中断网 5s 内恢复，已生成题目不丢（本轮新能力）
+5. **跨模式记忆**：同会话先聊天再出题，出题 payload 带 history（devtools 抽查 1 次）
+6. 出题定向（薄弱知识点注入）与 `quiz_question_error` 单题跳过提示各抽查 1 次
+
+## 六、已知问题
 
 1. **Bot 启停偶发 409**：backend 多 worker 选主，非 leader 对启停操作返回 409。前端已带 ~2 秒预算的自动重试（重试可落到其他 worker 命中 leader）；若重试耗尽仍失败，稍候再点一次即可。
 2. **users.knowledge_graph 双真相源**：图谱快照列与 knowledge_mastery 并存是 documented 决策（前端渲染直接消费该列），由巩固流程双写 + `graph_version` OCC（条件 UPDATE + 冲突重试）止血，建议交付后专项收口。
@@ -79,14 +92,14 @@ cd backend
 5. **rerank 开关口径**：代码默认已开（`RERANK__ENABLED=true`，`.env.example` 同步）。本地开发若曾设 `false`，**不要照抄进客户环境**。
 6. **课程主题图构建迁移 032**：`course_topic`/`course_topic_edge` 两表在模型存在早于生产迁移（create_all 自建 vs 032 补票），升级既有库时 032 幂等守卫会跳过已建对象，无需干预。
 
-## 六、升级 / 回滚
+## 七、升级 / 回滚
 
 - 升级：`git pull` → `docker compose up -d --build`（backend/worker 以源码挂载运行；`backend_venv` volume 仅在依赖变更时需删除重建）。**必须带 `--build`**：前端静态产物烤在镜像里，不带则后端新前端旧且无任何报错
 - 数据库 schema：容器启动命令自带 `alembic upgrade head`，失败会重试
 - 回滚：`git checkout <commit>` → `docker compose up -d`；数据卷不受影响
 - 评测环境（可选）：`docker compose -f docker-compose.yml -f docker-compose.eval.yml up -d`
 
-## 七、备份 / 恢复
+## 八、备份 / 恢复
 
 单卷单副本，宿主机盘损 / 误 `down -v` 即全丢——上线前必须配好定时备份并演练过一次恢复。
 
