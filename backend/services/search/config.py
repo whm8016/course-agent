@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import os as _os
 from dataclasses import dataclass
 from pathlib import Path
 
 from settings import get_settings
+from utils.url_guard import assert_public_http_url
+
+logger = logging.getLogger(__name__)
 SEARCH_API_KEY = get_settings().search.api_key.get_secret_value()
 SEARCH_BASE_URL = get_settings().search.base_url
 SEARCH_CONFIG_PATH = get_settings().paths.search_config_path
@@ -76,7 +80,19 @@ def resolve_search_config(user_override: dict | None = None) -> SearchConfig:
     本函数同步、不查 DB——user_override 由调用方（async 层）读好传入。
     """
     admin = load_admin_default()
-    u = user_override or {}
+    u = dict(user_override or {})  # 拷贝：下面的 SSRF 清洗不改调用方原 dict
+    # SSRF 防线：用户保存的 base_url/proxy 指向私网/环回/元数据 → 视同未配置该
+    # 字段，回落 admin/env（搜索是增益能力，fail-safe 降级不抛错）。admin/env 层
+    # 是管理员/部署者控制的信任域，不校验。proxy 仅认 http(s)——socks5 等方案
+    # 一并丢弃（本守门只覆盖 http 系）。
+    for field in ("base_url", "proxy"):
+        value = str(u.get(field) or "").strip()
+        if value:
+            try:
+                assert_public_http_url(value)
+            except ValueError:
+                logger.warning("用户搜索 override %s 非公网 URL，已忽略：%s", field, value)
+                u[field] = ""
 
     # 四层优先级：user > admin > config固化值 > 实时env（测试用monkeypatch时能生效）
     env_provider = _os.environ.get("SEARCH_PROVIDER", "")

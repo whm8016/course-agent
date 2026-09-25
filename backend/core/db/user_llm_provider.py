@@ -77,7 +77,7 @@ async def get_active_provider_view(user_id: str) -> dict | None:
                 if prov.vision_api_key_encrypted
                 else ""
             )
-            return {
+            view = {
                 # 对话供应商
                 "binding": prov.binding or "",
                 "api_key": api_key_plain,
@@ -90,6 +90,24 @@ async def get_active_provider_view(user_id: str) -> dict | None:
                 "vision_base_url": prov.vision_base_url or "",
                 "vision_model": prov.vision_model or "",
             }
+            # SSRF 读取侧守门：私网/元数据 base_url 视同无自配（回落平台默认）。
+            # 兜两类：收口前已落库的脏行；保存时公网、调用时解析到私网的 rebinding
+            # （此处按调用时刻重新解析）。getaddrinfo 走 to_thread 防卡事件循环。
+            import asyncio
+
+            from utils.url_guard import assert_public_http_url
+
+            for field in ("base_url", "vision_base_url"):
+                if view[field]:
+                    try:
+                        await asyncio.to_thread(assert_public_http_url, view[field])
+                    except ValueError:
+                        logger.warning(
+                            "user %s provider %s=%s 非公网，忽略自配回落平台默认",
+                            user_id, field, view[field],
+                        )
+                        return None
+            return view
     except Exception:
         logger.exception("get_active_provider_view failed user=%s", user_id)
         return None
