@@ -260,7 +260,7 @@ def test_prod_rejects_missing_provider_key(monkeypatch):
 
 
 def test_prod_passes_with_full_config(monkeypatch):
-    """production + 合规 JWT/CORS/PROVIDER_KEY/DB密码 → 正常实例化。"""
+    """production + 合规 JWT/CORS/PROVIDER_KEY/DB密码/沙箱配置 → 正常实例化。"""
     s = _fresh(
         monkeypatch,
         ENVIRONMENT="production",
@@ -268,9 +268,12 @@ def test_prod_passes_with_full_config(monkeypatch):
         SECURITY__ALLOWED_ORIGINS="https://example.com",
         SECURITY__PROVIDER_ENCRYPTION_KEY="some-fernet-key",
         DB__URL="postgresql+asyncpg://postgres:strong-pass@localhost:5432/course_agent",
+        SANDBOX__MODE="service",
+        SANDBOX__TOKEN="unit-test-sandbox-token",
     )
     assert s.environment == "production"
     assert s.is_production is True
+    assert s.sandbox.mode == "service"
 
 
 def test_prod_rejects_default_db_password(monkeypatch):

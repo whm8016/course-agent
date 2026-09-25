@@ -1,0 +1,10 @@
+[project]
+name = "quiz-sandbox"
+version = "0.1.0"
+description = "编程题沙箱执行服务（sidecar：无网络/非 root/零凭据）"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.118",
+    "uvicorn>=0.30",
+    "pydantic>=2",
+]

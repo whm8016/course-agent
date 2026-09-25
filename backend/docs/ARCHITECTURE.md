@@ -312,6 +312,34 @@ deepwiki 直连官方 https://mcp.deepwiki.com/mcp（streamableHttp，免认证�
 - **lazy 解耦**：backend 不 `depends_on` gateway——MCP 懒连接（首 turn），gateway 未就绪只令该 server
   标 `error`，不阻塞 backend 启动。
 
+### 编程题沙箱 sidecar（`sandbox/` + `core/question/sandbox.py`）
+
+coding 题判分要真实执行**不可信学生代码**，local 子进程模式（rlimit+最小 env+超时，
+dev/CI 用）不是安全边界：无网络隔离、root 容器下 RLIMIT_NPROC 失效、密钥文件在容器内
+可读。生产形态是独立 `sandbox` 容器（执行数据流对齐 Piston `api/src/job.js` 的
+prime→execute→cleanup）：
+
+```
+backend / worker ──uds（sandbox_sock 共享卷）──> sandbox 容器
+              POST /execute {code, timeout_s}      network_mode: none（无出网/无内网）
+              Header: X-Sandbox-Token              非 root（NPROC 生效）+ 零凭据零业务卷
+                                                  mem 1g / cpus 2 / pids 128 限额
+```
+
+- **隔离即架构**：学生代码攻击面从「backend 容器 root + .env + 出网」坍缩为「无网络、
+  无凭据的空容器」；唯一接口是 uds（token 认证），子进程 env 只有 3 个线程数变量。
+- **fail 降可用性不降安全性**：沙箱不可用 → `SandboxUnavailableError` → 判分 `ungraded`
+  （`TestRunResult.degraded` 区别于预算耗尽）、critic 轮进既有 issue 重试；**绝不回退
+  本地执行**。backend 对 sandbox 是软依赖（不等健康检查）。
+- **模式分派**（`settings.sandbox.mode`）：compose 部署默认注入 `service`；Windows/CI
+  直跑默认 `local`。`_check_prod` 在 production 拒绝 `mode=local` 与空 token（防漏配
+  使 P0 复活）。
+- **攻击面回归**：`pytest -m sandbox_service`（tests/test_sandbox_service_attacks.py 经
+  `docker compose exec` 注入 sandbox_selftest.py 到容器内执行：密钥不可达/无网络/fork
+  炸弹/内存炸弹/非 root/token）。默认 addopts 排除，CI 不受影响。
+- **升级路径**：更强的 per-exec 命名空间隔离（isolate，Piston/judge0 同款）需特权容器，
+  当前课程场景接受同容器并发共享 loopback 的低危残留（闸=4、单次≤5s）。
+
 ### Leader 选举（`core/leader.py`）
 
 Redis SETNX 效率型锁（单实例 Redis 足够，无需 Redlock）+ **竞选者循环 + CAS 原子续约**，TTL 30s：

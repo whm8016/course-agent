@@ -29,7 +29,7 @@ from __future__ import annotations
 import os
 import warnings
 from functools import lru_cache
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
@@ -804,6 +804,22 @@ class QuestionConfig(BaseModel):
     faq_cache_threshold: int = 3
 
 
+class SandboxConfig(BaseModel):
+    """编程题代码执行沙箱（core/question/sandbox.py）。
+
+    mode=local（默认）：本进程子进程执行——尽力而为防护（rlimit+最小env+超时），
+    Windows 开发机与 CI 用；mode=service：经 Unix domain socket 调独立沙箱容器
+    （network none/非root/零凭据，上线口径，见 sandbox/ 与 docker-compose.yml）。
+    service 不可用时判分降级 ungraded，绝不回退本地执行（fail 降可用性不降安全性）。
+    """
+
+    mode: Literal["local", "service"] = "local"
+    socket: str = ""  # uds 路径（service 模式必填，compose 注入 /run/sandbox/sandbox.sock）
+    token: SecretStr = SecretStr("")  # 与沙箱服务 SANDBOX_TOKEN 一致
+    connect_timeout_s: float = 1.0
+    margin_s: float = 2.0  # 读超时 = 单条 timeout + margin（服务端 kill+进程回收余量）
+
+
 class ElasticsearchConfig(BaseModel):
     """Elasticsearch BM25（Phase 3 hybrid search）。
 
@@ -878,6 +894,7 @@ class Settings(BaseSettings):
     mem0: Mem0Config = Field(default_factory=Mem0Config)
     summary: SummaryConfig = Field(default_factory=SummaryConfig)
     question: QuestionConfig = Field(default_factory=QuestionConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     elasticsearch: ElasticsearchConfig = Field(default_factory=ElasticsearchConfig)
     context_policy: ContextPolicyConfig = Field(default_factory=ContextPolicyConfig)
     context_budget: ContextBudgetConfig = Field(default_factory=ContextBudgetConfig)
@@ -1015,6 +1032,21 @@ class Settings(BaseSettings):
                 "FATAL: DB__URL uses the default weak password (postgres:postgres). "
                 "Set POSTGRES_PASSWORD in the project-root .env and recreate the "
                 "postgres volume before production deployment."
+            )
+
+        # 编程题沙箱：生产必须走独立容器（local 子进程=无网络隔离+可读走容器内
+        # .env 密钥，P0；见 sandbox.py 风险披露与 docs/DELIVERY.md 上线清单）
+        if is_prod and self.sandbox.mode != "service":
+            raise RuntimeError(
+                "FATAL: SANDBOX__MODE must be 'service' in production. "
+                "The sandbox sidecar (docker-compose.yml) executes untrusted student "
+                "code with no network and no credentials; local subprocess mode is "
+                "dev/CI only."
+            )
+        if is_prod and self.sandbox.mode == "service" and not self.sandbox.token.get_secret_value():
+            raise RuntimeError(
+                "FATAL: SANDBOX__TOKEN must be set in production (shared secret with "
+                "the sandbox sidecar)."
             )
 
         return self

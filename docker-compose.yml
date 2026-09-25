@@ -66,15 +66,25 @@ services:
       LLM_TIMEOUT_SEC: "${LLM_TIMEOUT_SEC:-120}"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
       PROMETHEUS_MULTIPROC_DIR: /dev/shm/prometheus_multiproc
+      # 编程题沙箱（core/question/sandbox.py service 模式）：socket/token 注入，
+      # mode 默认 service（compose 部署即容器隔离口径；Windows 直跑 dev 不进
+      # compose，settings 默认 local 不受影响）。生产漏配由 settings._check_prod 拒启。
+      SANDBOX__MODE: "${SANDBOX__MODE:-service}"
+      SANDBOX__TOKEN: "${SANDBOX_TOKEN:-}"
+      SANDBOX__SOCKET: /run/sandbox/sandbox.sock
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      # 软依赖：不等健康检查——沙箱挂了 backend 照常起，判分降级 ungraded
+      sandbox:
+        condition: service_started
     volumes:
       - ./backend:/app
       - backend_venv:/app/.venv
       - backend_uploads:/app/uploads
+      - sandbox_sock:/run/sandbox
     command: ["sh", "-c", "mkdir -p /dev/shm/prometheus_multiproc && rm -rf /dev/shm/prometheus_multiproc/* && until .venv/bin/alembic upgrade head; do echo 'alembic failed, retrying in 5s...'; sleep 5; done && .venv/bin/gunicorn main:app -k uvicorn.workers.UvicornWorker -w $${BACKEND_WORKERS:-4} --bind 0.0.0.0:8002 --timeout 300 --graceful-timeout 30"]
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/api/health')\""]
@@ -101,6 +111,9 @@ services:
       ENVIRONMENT: "${ENVIRONMENT:-development}"
       LLM_TIMEOUT_SEC: "${LLM_TIMEOUT_SEC:-120}"
       PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      SANDBOX__MODE: "${SANDBOX__MODE:-service}"
+      SANDBOX__TOKEN: "${SANDBOX_TOKEN:-}"
+      SANDBOX__SOCKET: /run/sandbox/sandbox.sock
     depends_on:
       postgres:
         condition: service_healthy
@@ -108,10 +121,13 @@ services:
         condition: service_healthy
       backend:
         condition: service_healthy
+      sandbox:
+        condition: service_started
     volumes:
       - ./backend:/app
       - backend_venv:/app/.venv
       - backend_uploads:/app/uploads
+      - sandbox_sock:/run/sandbox
     # 与 backend 一致：先建 PROMETHEUS_MULTIPROC_DIR（Dockerfile ENV 对 worker 也生效，
     # 但 ENV 不创建目录）。缺目录会让多进程模式下指标构造 FileNotFoundError（eval 注释已记录
     # 同坑）→ 模块体中途失败被驱逐 → ARQ 重试二次 import 撞 Duplicated timeseries。
@@ -159,6 +175,37 @@ services:
       retries: 5
       start_period: 15s
 
+  # ── 编程题沙箱 sidecar ──────────────────────────────────────────────────
+  # 学生代码执行域：backend/worker 的 core/question/sandbox.py（service 模式）经
+  # uds 调 /execute。隔离性质：network none（无出网、无内网可达）+ 非 root
+  # （RLIMIT_NPROC 生效）+ 唯一挂载为 uds 共享卷 + 容器内零凭据零业务卷 + 容器级
+  # 资源限额。攻击面回归：backend 侧 `pytest -m sandbox_service`。
+  # 升级路径（更强的 per-exec 命名空间隔离）见 sandbox/app/main.py docstring 与
+  # docs/DELIVERY.md。
+  sandbox:
+    build:
+      context: ./sandbox
+      args:
+        UV_INDEX_URL: "${UV_INDEX_URL:-}"
+    restart: unless-stopped
+    network_mode: "none"   # 学生代码唯一接口 = uds（需 token）；无 eth/无默认路由
+    mem_limit: 1g          # 4 并发 × RLIMIT_AS 256MB 头寸 + 服务自身开销
+    cpus: 2
+    pids_limit: 128        # fork 炸弹第二道闸（第一道 = 非 root 下 RLIMIT_NPROC）
+    tmpfs:
+      - /tmp               # 执行临时目录走内存盘，不给盘
+    environment:
+      SANDBOX_TOKEN: "${SANDBOX_TOKEN:-}"
+      SANDBOX_CONCURRENCY: "4"
+    volumes:
+      - sandbox_sock:/run/sandbox   # 唯一挂载：uds socket；绝不挂代码/.env/uploads
+    healthcheck:
+      test: ["CMD", ".venv/bin/python", "-c", "import socket;s=socket.socket(socket.AF_UNIX);s.settimeout(2);s.connect('/run/sandbox/sandbox.sock')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   frontend:
     build:
       context: ./frontend
@@ -177,3 +224,4 @@ volumes:
   backend_uploads:
   backend_venv:
   redisdata:
+  sandbox_sock:
