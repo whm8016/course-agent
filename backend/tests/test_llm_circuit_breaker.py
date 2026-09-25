@@ -338,6 +338,47 @@ async def test_half_open_client_error_releases_quota():
     assert cb.state is CircuitState.CLOSED
 
 
+@pytest.mark.asyncio
+async def test_half_open_cancelled_call_releases_quota():
+    """CancelledError（用户停止生成/断流 cancel_turn）必须归还探测名额。
+
+    with_retry_and_circuit 的 except Exception 接不住 CancelledError（BaseException），
+    泄漏的名额在 HALF_OPEN 态无超时逃生——恢复期几次取消就把该供应商闸门永久
+    卡死（probe quota exhausted），只能重启进程。
+    """
+    import asyncio
+
+    cb = _fast_cb("ho_cancel", probes=3, open_timeout=0.0)
+    await _open_breaker(cb)
+    cb._opened_at = 0.0  # 手动老化；OPEN→HALF_OPEN 惰性转换，首个 before_call 时发生
+
+    async def hang(*args, **kwargs):
+        await asyncio.sleep(999)  # 模拟在途 LLM 调用被用户取消
+
+    tasks = [
+        asyncio.create_task(
+            with_retry_and_circuit(
+                hang, retry_config=RetryConfig(max_retries=0), circuit_breaker=cb
+            )
+        )
+        for _ in range(3)
+    ]
+    await asyncio.sleep(0.05)  # 三个探测都占上名额
+    assert cb._half_open_inflight == 3
+    for t in tasks:
+        t.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.gather(*tasks)
+
+    # 名额必须全部归还：新探测能进（否则 CircuitOpenError: probe quota exhausted）
+    async def ok(*args, **kwargs):
+        return "fine"
+
+    out = await with_retry_and_circuit(ok, circuit_breaker=cb)
+    assert out == "fine"
+    assert cb.state is CircuitState.HALF_OPEN  # 1 成功 < half_open_success_needed=2
+
+
 def test_config_guard_raises_probes_to_success_needed():
     """success_needed > probes 时构造器抬升 probes——死锁组合结构性不可能。"""
     cb = CircuitBreaker(

@@ -199,9 +199,11 @@ class CircuitBreaker:
         # 构造即打点：让 /metrics 从一开始就列出全部熔断器（缺省 closed=0）
         self._emit_state()
 
-    async def before_call(self) -> None:
+    async def before_call(self) -> bool:
         """调用前熔断检查（持锁）。不可放行时抛 CircuitOpenError，不发起真实调用。
 
+        返回是否占用了 HALF_OPEN 探测名额——with_retry_and_circuit 依赖它在
+        CancelledError 路径精确归还（只还自己占的，不误伤并发探测的名额）。
         OPEN→HALF_OPEN 被动转换：无后台定时器，open_timeout 由下一个到达的请求检查
         （resilience4j automaticTransitionFromOpenToHalfOpenEnabled=false 默认行为）。
         """
@@ -217,6 +219,8 @@ class CircuitBreaker:
                         f"CircuitBreaker [{self.name}] is HALF_OPEN, probe quota exhausted"
                     )
                 self._half_open_inflight += 1
+                return True
+            return False
 
     async def record_success(self) -> None:
         """记录一次成功（持锁）。"""
@@ -295,6 +299,17 @@ class CircuitBreaker:
         self._half_open_successes = 0
         self._emit_state()
 
+    def release_probe(self) -> None:
+        """归还一个半开探测名额（同步、不持锁、不进失败记账）——cancel 路径专用。
+
+        with_retry_and_circuit 捕到 CancelledError 等调用方中止时调用：中止不是
+        供应商失败，不该计入窗口；也不能走 record_failure 的锁路径——cancel 上下文
+        里再 await 可能被二次 cancel 掐断，归还本身必须无 await。不持锁的减法与
+        _transition 清零的竞态由 max(0, ·) 钳制（最坏等效丢一次归还，下个探测照常）。
+        """
+        if self.state is CircuitState.HALF_OPEN:
+            self._half_open_inflight = max(0, self._half_open_inflight - 1)
+
 
 class CircuitOpenError(Exception):
     """熔断器打开时抛出的异常"""
@@ -340,8 +355,9 @@ async def with_retry_and_circuit(
 
     for attempt in range(config.max_retries + 1):
         # per-attempt 熔断检查（语义与设计依据见模块 docstring「与旧实现的关键差异」）
+        holds_probe = False
         if circuit_breaker is not None:
-            await circuit_breaker.before_call()
+            holds_probe = await circuit_breaker.before_call()
 
         try:
             result = await func(*args, **kwargs)
@@ -352,6 +368,8 @@ async def with_retry_and_circuit(
             last_error = e
             if circuit_breaker is not None:
                 await circuit_breaker.record_failure(e)
+            # 记账路径已处理名额（HALF_OPEN 释放或转 OPEN 清零），本 attempt 不再持有
+            holds_probe = False
 
             if not _is_retryable(e, config) or attempt >= config.max_retries:
                 logger.error(
@@ -376,6 +394,14 @@ async def with_retry_and_circuit(
                 f"retrying in {delay:.2f}s: {e}"
             )
             await asyncio.sleep(delay)
+        except BaseException:
+            # CancelledError（用户停止生成/断流 cancel_turn）是 BaseException，
+            # 上面的 except Exception 接不住——泄漏的半开探测名额在 HALF_OPEN 态
+            # 无超时逃生，恢复期几次取消就把该供应商闸门永久卡死。中止≠供应商
+            # 失败：只归还本 attempt 实际占的名额（holds_probe），不记账，原样上抛。
+            if circuit_breaker is not None and holds_probe:
+                circuit_breaker.release_probe()
+            raise
 
     # 不应该到达这里
     raise LLMRetryError(
