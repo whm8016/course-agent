@@ -754,6 +754,10 @@ export default function ChatWindow({
           } else if (t === 'error') {
             setQuizError(withErrorRef(msg as Record<string, unknown>, '出题失败，请重试'))
             resetQuizOverlays()
+          } else if (t === 'ws_reconnect_failed') {
+            // 断线自动重连（questionWs 层，3 次退避）耗尽：明确告知，不静默
+            setQuizError('连接中断且自动重连失败，已生成的题目可能不完整，请重新发起')
+            setQuizStreaming(false)
           }
         },
         onClose: () => {

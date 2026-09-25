@@ -169,32 +169,92 @@ export interface QuestionGenHandlers {
 
 /**
  * 建立 WebSocket 连接后立刻发送 payload，返回 close 函数。
+ *
+ * 断线恢复（后端 /api/run/quiz 协议）：收到 `session` 记 turn_id、按 bus 事件计数
+ * 维护 seq；意外断开（非主动 close、未 done/error）在宽限窗内带
+ * `subscribe_turn{turn_id, after_seq}` 重连续流，已流式生成的题目不丢、整轮不重付。
+ * 指数退避最多 3 次，耗尽发 `ws_reconnect_failed` 消息后按普通 onClose 收尾。
  */
 export function connectQuestionGenerate(
   payload: QuestionGeneratePayload,
   handlers: QuestionGenHandlers = {},
 ): WsHandle {
-  const ws = new WebSocket(questionGenerateWsUrl())
-  const { close, send } = makeWsHandle(ws)
+  const MAX_RETRY = 3
 
-  ws.onopen = () => {
-    handlers.onOpen?.()
-    ws.send(JSON.stringify(payload))
-  }
+  let turnId: string | null = null
+  let seq = 0 // 已收到的 bus 事件数（session 为直发不走 bus，不计入——after_seq 口径）
+  let attempt = 0
+  let closedByUser = false
+  let finished = false // 已收到 done/error，之后的 close 是正常收尾
+  let active: WsHandle | null = null
+  let retryTimer: number | undefined
 
-  ws.onmessage = (ev) => {
-    try {
-      const msg = JSON.parse(String(ev.data)) as QuestionGenMessage
-      handlers.onMessage?.(msg)
-    } catch {
-      handlers.onMessage?.({ type: 'parse_error', raw: ev.data })
+  const connect = (first: boolean) => {
+    const ws = new WebSocket(questionGenerateWsUrl())
+    const handle = makeWsHandle(ws)
+    active = handle
+
+    ws.onopen = () => {
+      handlers.onOpen?.()
+      ws.send(
+        JSON.stringify(
+          first
+            ? payload
+            : { type: 'subscribe_turn', turn_id: turnId, after_seq: seq },
+        ),
+      )
+    }
+
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(String(ev.data)) as QuestionGenMessage
+        if (msg.type === 'session' && typeof msg.turn_id === 'string') {
+          turnId = msg.turn_id
+        } else {
+          seq += 1
+        }
+        attempt = 0 // 有事件到达即连接健康，后续再闪断从头计数
+        if (msg.type === 'done' || msg.type === 'error') finished = true
+        handlers.onMessage?.(msg)
+      } catch {
+        handlers.onMessage?.({ type: 'parse_error', raw: ev.data })
+      }
+    }
+
+    // 初始建连阶段（还没有 turn）的 error 才上抛——有 turn 后错误由重连逻辑接管，
+    // 逐次尝试的瞬时错误不该直接砸出「连接失败」
+    ws.onerror = () => {
+      if (!turnId) handlers.onError?.()
+    }
+
+    ws.onclose = () => {
+      if (closedByUser || finished) {
+        handlers.onClose?.()
+        return
+      }
+      if (turnId && attempt < MAX_RETRY) {
+        attempt += 1
+        retryTimer = window.setTimeout(() => connect(false), 1000 * 2 ** (attempt - 1))
+        return
+      }
+      if (turnId) {
+        // 有 turn 但重连耗尽：显式通知上层（区别于从未连上的初始失败）
+        handlers.onMessage?.({ type: 'ws_reconnect_failed', attempts: attempt })
+      }
+      handlers.onClose?.()
     }
   }
 
-  ws.onerror = () => handlers.onError?.()
-  ws.onclose = () => handlers.onClose?.()
+  connect(true)
 
-  return { close, send }
+  return {
+    close: () => {
+      closedByUser = true
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer)
+      active?.close()
+    },
+    send: (msg: object) => active?.send(msg),
+  }
 }
 
 /** 单题追问（/api/question/followup），服务端流式 token + answer + done */

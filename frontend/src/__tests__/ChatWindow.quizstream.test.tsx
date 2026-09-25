@@ -9,7 +9,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import ChatWindow from '../components/chat/ChatWindow'
 import { fetchMessages } from '../services/api'
-import { connectQuestionGenerate } from '../services/questionWs'
 
 type Handlers = {
   onMessage?: (m: Record<string, unknown>) => void
