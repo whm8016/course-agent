@@ -317,3 +317,38 @@ async def test_cron_consolidate_stale_window(db):
         )).scalar_one()
     assert orphan.status == "pending"   # 崩溃遗留被翻回
     assert fresh.status == "pending"    # 窗内 pending 原样不动
+
+
+async def test_cron_consolidate_running_job_not_reset(db):
+    """租约回归：运行中的巩固（processing 且 claimed_at 新鲜）不得被 cron 翻回。
+
+    旧口径用 created_at（对话发生时刻）判 processing 超时——被 cron 捞走的 episode
+    按定义已 pending ≥1800s，条件恒真：巩固 job 只要在一次 cron 周期（300s）内没跑完
+    （最坏 20 段 × 并发 4 × 120s 判定超时，超 300s 是常态），就被翻回 pending 重领
+    重跑——mem0 event 槽双写、persona 双抽取、掌握度观测双计（mem0 v2 无去重，
+    见 consolidation 模块 docstring；观测 append-only 无法事后去重）。
+    """
+    import time
+
+    from core.db.database import AsyncSessionLocal, MemoryEpisode
+    from sqlalchemy import select
+    from worker import cron_consolidate_memory
+
+    now = time.time()
+    await _seed([
+        # 老会话（created_at 4000s 前）的 episode 刚被巩固 job 领走 5min：必须仍 processing
+        MemoryEpisode(user_id="u_running", course_id="c1", session_id="s", turn_id="t9",
+                      user_msg="q", assistant_msg="a", status="processing",
+                      created_at=now - 4000, claimed_at=now - 301),
+    ])
+    pool = MagicMock()
+    pool.enqueue_job = AsyncMock()
+    with patch("core.arq_pool.get_arq_pool", AsyncMock(return_value=pool)):
+        await cron_consolidate_memory(ctx=None)
+
+    async with AsyncSessionLocal() as s:
+        row = (await s.execute(
+            select(MemoryEpisode).where(MemoryEpisode.user_id == "u_running")
+        )).scalar_one()
+    assert row.status == "processing"   # 租约（claimed_at 301s < 600s）未超时，不得翻回
+    pool.enqueue_job.assert_not_awaited()  # 无 pending 可捞，enqueue 不该被调

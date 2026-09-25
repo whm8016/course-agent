@@ -125,7 +125,7 @@ async def claim_pending(db, user_id: str, course_id: str, *, limit: int = _CLAIM
             MemoryEpisode.id.in_([r.id for r in rows]),
             MemoryEpisode.status == "pending",
         )
-        .values(status="processing")
+        .values(status="processing", claimed_at=time.time())
         .returning(MemoryEpisode.id)
         .execution_options(synchronize_session=False)
     )

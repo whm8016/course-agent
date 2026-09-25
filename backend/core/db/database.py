@@ -557,6 +557,11 @@ class MemoryEpisode(Base):
     # pending=待巩固 / processing=巩固中 / done=已升格 / dead=永久失败
     status = Column(String(16), nullable=False, default="pending")
     created_at = Column(Float, nullable=False, default=time.time)
+    # 领取时刻（租约）：claim_pending 与 status='processing' 同一 UPDATE 原子写入。
+    # cron 据此判 processing 超时——created_at 是对话发生时刻，被捞走的 episode 按
+    # 定义已 pending≥1800s，用它判龄恒真，会把运行中的巩固每 5min 翻回重跑
+    # （mem0 双写 + 掌握度观测双计，无库层去重）。
+    claimed_at = Column(Float, nullable=True)
     consolidated_at = Column(Float, nullable=True)
 
     __table_args__ = (

@@ -265,14 +265,16 @@ async def consolidate_memory(ctx, user_id: str, course_id: str = "") -> None:
 
 
 async def cron_consolidate_memory(ctx) -> None:
-    """5min safety net：捞长期 pending + 超时 processing 孤儿 → enqueue consolidate_memory。
+    """5min safety net：捞长期 pending + 超租约 processing 孤儿 → enqueue consolidate_memory。
 
     两种孤儿：
     1. pending 超过 _PENDING_STALE_SECONDS（session 空闲等价触发，importance 未攒够也兜底）
-    2. processing 超过 _PROCESSING_TIMEOUT_SECONDS（崩溃遗留，用 created_at 近似）→ 回 pending 重领
+    2. processing 超过 _PROCESSING_TIMEOUT_SECONDS（按 claimed_at 租约判，NULL=迁移前
+       遗留行视同超租约）→ 回 pending 重领。幂等靠不重复领取（claim 条件 UPDATE）；
+       mem0 v2 无去重，重复升格会双写，勿以任何口径放宽重领。
     """
     import time
-    from sqlalchemy import select, update
+    from sqlalchemy import or_, select, update
 
     from core.arq_pool import get_arq_pool
     from core.db.database import AsyncSessionLocal, MemoryEpisode
@@ -284,14 +286,19 @@ async def cron_consolidate_memory(ctx) -> None:
     now = time.time()
     try:
         async with AsyncSessionLocal() as db:
-            # 1. 崩溃遗留的 processing → 回 pending（下次 consolidate 重领；mem0 去重保证幂等）
+            # 1. 超租约的 processing（崩溃遗留）→ 回 pending。旧口径用 created_at
+            #    （对话发生时刻）判龄恒真——运行中的巩固每 5min 被翻回重跑，mem0
+            #    双写 + 掌握度观测双计；claimed_at 才是领取时刻（038）。
             await db.execute(
                 update(MemoryEpisode)
                 .where(
                     MemoryEpisode.status == "processing",
-                    MemoryEpisode.created_at < now - _PROCESSING_TIMEOUT_SECONDS,
+                    or_(
+                        MemoryEpisode.claimed_at.is_(None),
+                        MemoryEpisode.claimed_at < now - _PROCESSING_TIMEOUT_SECONDS,
+                    ),
                 )
-                .values(status="pending")
+                .values(status="pending", claimed_at=None)
             )
             await db.commit()
             # 2. 长期 pending 的 (user, course) → 收集去重
