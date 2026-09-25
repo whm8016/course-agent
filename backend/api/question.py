@@ -52,7 +52,9 @@ async def websocket_question_followup(websocket: WebSocket):
             user_message=user_message,
             question_context=ctx,
             history_context=hist,
-            user_id=str(getattr(user, "user_id", "") or ""),
+            # ws_authenticate 返回 dict（键 "id"，与 run.py 同口径）——旧 getattr
+            # (user, "user_id", "") 作用在 dict 上恒为 ""，埋点归因失效
+            user_id=str(user["id"]),
         ):
             full += chunk
             try:
