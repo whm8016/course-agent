@@ -131,11 +131,14 @@ interface QAPairRaw {
   language?: string
 }
 
-function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
+export function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
   const opts = qa.options
   const type = (qa.question_type ?? '').toLowerCase()
+  const hasOpts = !!(opts && typeof opts === 'object' && Object.keys(opts).length > 0)
 
-  if (type === 'true_false') {
+  // 判断题：后端题型键是 concept（options 为空，correct_answer 为 true/false）——
+  // 归一成 A/B 判断卡走本地判分；true_false 为历史存量键，同样收编
+  if (type === 'true_false' || (type === 'concept' && !hasOpts)) {
     return {
       question: qa.question ?? '',
       options: ['A. 正确', 'B. 错误'],
@@ -626,10 +629,15 @@ export default function ChatWindow({
       }
     }
 
-    // 先把「用户请求」推入消息列表
+    // 先把「用户请求」推入消息列表（气泡显示中文标签，不发枚举值）
+    const typeLabels: Record<string, string> = {
+      choice: '选择题',
+      concept: '判断题',
+      short_answer: '简答题',
+    }
     const userMsg: Message = {
       role: 'user',
-      content: `出题：${topic}（${quizConfig.count} 道，${quizConfig.difficulty || '自动难度'}，${quizConfig.questionType || '自动题型'}）${quizConfig.preference ? `，偏好：${quizConfig.preference}` : ''}`,
+      content: `出题：${topic}（${quizConfig.count} 道，${quizConfig.difficulty || '自动难度'}，${typeLabels[quizConfig.questionType] || '自动题型'}）${quizConfig.preference ? `，偏好：${quizConfig.preference}` : ''}`,
       image: firstImagePreview,
       attachments: attachments.length > 0 ? attachments : undefined,
     }

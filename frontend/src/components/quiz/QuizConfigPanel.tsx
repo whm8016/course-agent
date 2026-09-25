@@ -83,7 +83,9 @@ export default function QuizConfigPanel({ value, onChange }: Props) {
               >
                 <option value="">自动</option>
                 <option value="choice">选择题</option>
-                <option value="true_false">判断题</option>
+                {/* 判断题用后端合法题型键 concept（无 options、answer true/false）；
+                    旧值 true_false 后端词表里不存在，会退化成打字简答题 */}
+                <option value="concept">判断题</option>
                 <option value="short_answer">简答题</option>
               </select>
             </div>
