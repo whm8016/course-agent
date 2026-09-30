@@ -321,7 +321,7 @@ class FileTypeRouter:
                         parts.append(" | ".join(cells))
             return "\n\n".join(parts)
         except Exception as exc:
-            logger.warning("Failed to read .docx %s: %s", p.name, exc)
+            logger.warning("Failed to read .docx %s: %s", p.name, exc, exc_info=True)
             return ""
 
     @classmethod
@@ -353,7 +353,7 @@ class FileTypeRouter:
         try:
             d = _DocxDocument(str(p))
         except Exception as exc:
-            logger.warning("Failed to open .docx %s: %s", p.name, exc)
+            logger.warning("Failed to open .docx %s: %s", p.name, exc, exc_info=True)
             return []
 
         # 表格序列化用模块级 serialize_table（docx/pptx 共用，见文件顶部）
@@ -459,7 +459,7 @@ class FileTypeRouter:
         try:
             prs = Presentation(str(p))
         except Exception as exc:
-            logger.warning("Failed to open .pptx %s: %s", p.name, exc)
+            logger.warning("Failed to open .pptx %s: %s", p.name, exc, exc_info=True)
             return []
 
         sections: list[dict] = []
@@ -533,7 +533,7 @@ class FileTypeRouter:
             doc.close()
             return "\n\n".join(texts)
         except Exception as exc:
-            logger.warning("Failed to extract PDF text %s: %s", file_path, exc)
+            logger.warning("Failed to extract PDF text %s: %s", file_path, exc, exc_info=True)
             return ""
 
     @classmethod
@@ -562,7 +562,7 @@ class FileTypeRouter:
         try:
             doc = fitz.open(file_path)
         except Exception as exc:
-            logger.warning("mupdf 打开 PDF 失败 %s: %s", file_path, exc)
+            logger.warning("mupdf 打开 PDF 失败 %s: %s", file_path, exc, exc_info=True)
             return []
         try:
             toc = doc.get_toc()  # [[level, title, page_1based], ...]；无书签 → []
@@ -581,7 +581,7 @@ class FileTypeRouter:
                     sections.append({"title": title, "content": content, "page": start_page})
             return sections
         except Exception as exc:
-            logger.warning("mupdf 解析 PDF 失败 %s: %s", file_path, exc)
+            logger.warning("mupdf 解析 PDF 失败 %s: %s", file_path, exc, exc_info=True)
             return []
         finally:
             doc.close()
@@ -601,7 +601,7 @@ class FileTypeRouter:
             result = converter.convert(file_path)
             ddoc = result.document
         except Exception as exc:
-            logger.warning("docling 解析 PDF 失败 %s: %s", file_path, exc)
+            logger.warning("docling 解析 PDF 失败 %s: %s", file_path, exc, exc_info=True)
             return []
 
         sections: list[dict] = []

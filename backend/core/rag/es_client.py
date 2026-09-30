@@ -72,7 +72,7 @@ class ESChunkStore:
             self._ready = True
             return True
         except Exception as exc:
-            logger.warning("ES 连接/建索引失败（BM25 将降级）: %s", exc)
+            logger.warning("ES 连接/建索引失败（BM25 将降级）: %s", exc, exc_info=True)
             await self._close()
             return False
 
@@ -116,7 +116,7 @@ class ESChunkStore:
             await async_bulk(self._client, actions)
             return True
         except Exception as exc:
-            logger.warning("ES index_chunks 失败 course=%s: %s", course_id, exc)
+            logger.warning("ES index_chunks 失败 course=%s: %s", course_id, exc, exc_info=True)
             return False
 
     async def delete_course(self, course_id: str) -> bool:
@@ -134,7 +134,7 @@ class ESChunkStore:
             )
             return True
         except Exception as exc:
-            logger.warning("ES delete_course 失败 course=%s: %s", course_id, exc)
+            logger.warning("ES delete_course 失败 course=%s: %s", course_id, exc, exc_info=True)
             return False
 
     async def bm25_search(self, query: str, course_id: str, top_k: int = 50) -> list[dict]:
@@ -163,7 +163,7 @@ class ESChunkStore:
                 for hit in resp["hits"]["hits"]
             ]
         except Exception as exc:
-            logger.warning("ES bm25_search 失败 course=%s: %s", course_id, exc)
+            logger.warning("ES bm25_search 失败 course=%s: %s", course_id, exc, exc_info=True)
             return []
 
 

@@ -344,7 +344,7 @@ class MCPConnectionManager:
             if not ready.done():
                 ready.set_exception(exc)
             else:
-                logger.warning("MCP server %r connection task ended: %s", conn.name, exc)
+                logger.warning("MCP server %r connection task ended: %s", conn.name, exc, exc_info=True)
                 conn.status = "error"
                 conn.error = f"{type(exc).__name__}: {exc}"
         finally:

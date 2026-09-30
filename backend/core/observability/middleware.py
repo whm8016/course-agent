@@ -27,6 +27,10 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
         response: Response | None = None
         try:
             response = await call_next(request)
+            # 编号回传：前端错误提示展示它，学生报障 → 运维按编号 grep 日志/查
+            # turn_errors（CORS 需 expose_headers 放行跨域读取，见 main.py）
+            if response is not None:
+                response.headers["X-Request-Id"] = request_id
         finally:
             elapsed = int((time.perf_counter() - t0) * 1000)
             path = request.url.path

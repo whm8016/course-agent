@@ -93,7 +93,7 @@ class AgentLoop:
             except asyncio.TimeoutError:
                 continue
             except Exception as e:
-                logger.warning("Error consuming inbound message: %s", e)
+                logger.warning("Error consuming inbound message: %s", e, exc_info=True)
                 continue
 
             if msg.content.strip().lower() == "/stop":

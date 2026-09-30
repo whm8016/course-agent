@@ -301,7 +301,7 @@ class LightRAGRetriever(Retriever):
                         return context_text
                     logger.info("hybrid 返回空，降级 naive course=%s", course_id)
             except Exception as exc:
-                logger.warning("hybrid retrieve 失败，降级 naive course=%s: %s", course_id, exc)
+                logger.warning("hybrid retrieve 失败，降级 naive course=%s: %s", course_id, exc, exc_info=True)
 
         try:
             rag = await _get_instance(course_id)

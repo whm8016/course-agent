@@ -29,7 +29,7 @@ def _load(module: str, name: str) -> Any:
         mod = importlib.import_module(module)
         return getattr(mod, name)()
     except ImportError as exc:
-        logger.warning("解析引擎 %s 加载失败（依赖缺失？）: %s", module, exc)
+        logger.warning("解析引擎 %s 加载失败（依赖缺失？）: %s", module, exc, exc_info=True)
         raise
 
 

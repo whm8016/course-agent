@@ -868,6 +868,27 @@ async def test_resolve_hub_claimed_by_two_groups_keeps_fine_topics_apart():
     assert alias2["示波器探头补偿"] == "示波器探头补偿"  # 细点独立不动
 
 
+@pytest.mark.asyncio
+async def test_resolve_arbitration_treats_containment_as_strongest_claim():
+    """跨组争夺同一枢纽的裁决分与 blocking 同口径：包含对是 1.0 强信号，优先于
+    带内余弦。旧裁决键 max(cos) 把「叠加定理 ⊂ 叠加定理的验证」（余弦恰为 0）当
+    最弱认领，枢纽反而被并进仅带内相似的「谐振电路分析」。"""
+    topics = [
+        _rtopic("叠加定理", "电路大纲.docx", 0, emb=[1.0, 0.0, 0.0]),
+        _rtopic("叠加定理的验证", "实验四 叠加定理", 1, emb=[0.0, 1.0, 0.0]),  # 包含对，cos=0
+        _rtopic("谐振电路分析", "实验五 谐振电路", 2, emb=[0.8, 0.6, 0.0]),   # 带内 cos=0.8
+    ]
+    alias = {t["label"]: t["topic_id"] for t in topics}
+    llm = _fake_llm([json.dumps({"groups": [
+        ["叠加定理", "叠加定理的验证"],
+        ["叠加定理", "谐振电路分析"],
+    ]}, ensure_ascii=False)])
+    out, alias2, merged = await resolve_synonyms_llm("c1", topics, alias, llm, "m")
+    assert merged == 1 and len(out) == 2
+    assert alias2["叠加定理"] == "叠加定理的验证"   # 包含 1.0 > 带内 0.8
+    assert alias2["谐振电路分析"] == "谐振电路分析"  # 落败组整组放弃，独立保留
+
+
 def test_candidate_pairs_containment_requires_min_length():
     """P2 回归：归一后短词（「电路」2 字）被包含不算强信号，只走余弦带——否则
     半门课的长标签都和它配对；「叠加定理」（4 字）级包含仍走包含通道。"""

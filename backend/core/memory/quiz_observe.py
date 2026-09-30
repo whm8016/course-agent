@@ -73,7 +73,7 @@ async def record_quiz_observation(
     try:
         hits = await match_topics(question_text, course_id, db)
     except Exception as exc:
-        logger.warning("[quiz_observe] match_topics failed q=%s: %s", question_id, exc)
+        logger.warning("[quiz_observe] match_topics failed q=%s: %s", question_id, exc, exc_info=True)
         return False
     if not hits:
         return False

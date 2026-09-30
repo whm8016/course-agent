@@ -87,6 +87,11 @@ async def grade_answer(payload: dict, track: dict[str, str] | None = None) -> Gr
         async with _GRADING_SEMAPHORE:
             r = await asyncio.to_thread(run_tests, code, test_cases)
         if r.total == 0:
+            if r.degraded:
+                # 沙箱服务不可用（连接失败/token 拒绝）——基础设施问题，区别于预算耗尽
+                return GradeResult(
+                    question_id=qid, feedback="判分沙箱暂不可用，请稍后重试"
+                )
             # 全部用例被预算耗尽跳过（skipped）→ 无可判证据，不能记 poor
             return GradeResult(
                 question_id=qid, feedback="测试用例未执行（沙箱执行预算耗尽），请稍后重试"

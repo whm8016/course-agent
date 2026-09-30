@@ -51,4 +51,32 @@ def assert_public_http_url(url: str) -> None:
             raise ValueError(f"URL 指向非公网地址 {ip_str}（拒绝 SSRF）")
 
 
-__all__ = ["assert_public_http_url"]
+def is_public_http_url(url: str) -> bool:
+    """非抛错版守门（读取侧降级路径用：非公网 → False 而非异常）。"""
+    try:
+        assert_public_http_url(url)
+    except ValueError:
+        return False
+    return True
+
+
+def require_public_http_url_fields(obj, fields: tuple[str, ...]) -> None:
+    """批量校验对象上多个 URL 字段（空值=未配置，跳过不校验）。
+
+    写侧（PUT /llm/me、PUT /search_config/me 等）统一走这里——字段清单与错误
+    文案（"{field}: {reason}"）单一真相源，api 层只需一个 try/except 映射 400。
+    """
+    for field in fields:
+        url = str(getattr(obj, field, "") or "").strip()
+        if url:
+            try:
+                assert_public_http_url(url)
+            except ValueError as exc:
+                raise ValueError(f"{field}: {exc}") from exc
+
+
+__all__ = [
+    "assert_public_http_url",
+    "is_public_http_url",
+    "require_public_http_url_fields",
+]

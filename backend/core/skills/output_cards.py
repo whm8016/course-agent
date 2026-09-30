@@ -197,5 +197,5 @@ async def _generate_one(
             await track_llm_response(resp, model=TEXT_MODEL, mode="skill_card", **track)
         return (resp.choices[0].message.content or "").strip()
     except Exception as e:
-        logger.warning("Output card generation failed card=%s: %s", card.id, e)
+        logger.warning("Output card generation failed card=%s: %s", card.id, e, exc_info=True)
         return ""

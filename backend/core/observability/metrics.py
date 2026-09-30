@@ -46,6 +46,15 @@ TURN_DURATION = _metric(
     buckets=(0.5, 1, 2, 5, 10, 30, 60, 120),
 )
 
+# 失败 turn 计数（错误处理与可观测性重整）：turn_runtime 记账点在 finally 统一打点
+# （单一记账点，code 取错误信封 code，缺省 internal）。cancelled 单独走 status 不进本表。
+TURN_ERRORS = _metric(
+    Counter,
+    "ca_turn_errors_total",
+    "Failed turns by mode and error code (envelope code, see observability/errors.py)",
+    labelnames=["mode", "code"],
+)
+
 # --------------------------------------------------------------------------
 # Agent Loop（每轮 LLM 调用）
 # --------------------------------------------------------------------------
@@ -236,6 +245,11 @@ STORAGE_GC_DELETED_BYTES = _metric(
 
 def observe_turn(mode: str, status: str, elapsed_ms: int) -> None:
     TURN_DURATION.labels(mode=mode, status=status).observe(elapsed_ms / 1000)
+
+
+def observe_turn_error(mode: str, code: str) -> None:
+    """失败 turn 计数（status=error 时由 turn_runtime finally 与 observe_turn 并排调）。"""
+    TURN_ERRORS.labels(mode=mode, code=code).inc()
 
 
 def observe_llm_round(mode: str, elapsed_ms: int, ttft_ms: int | None) -> None:

@@ -90,7 +90,7 @@ def cleanup_failed(workdir: Path) -> None:
         if workdir.is_dir() and not is_ready(workdir):
             shutil.rmtree(workdir, ignore_errors=True)
     except Exception as exc:  # best-effort
-        logger.warning("清理失败解析目录 %s 失败: %s", workdir, exc)
+        logger.warning("清理失败解析目录 %s 失败: %s", workdir, exc, exc_info=True)
 
 
 def load_ir(workdir: Path) -> tuple[str, Optional[list[dict]], Optional[Path]]:
@@ -105,7 +105,7 @@ def load_ir(workdir: Path) -> tuple[str, Optional[list[dict]], Optional[Path]]:
         try:
             markdown = md_files[0].read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            logger.warning("读取 markdown 失败 %s: %s", md_files[0], exc)
+            logger.warning("读取 markdown 失败 %s: %s", md_files[0], exc, exc_info=True)
 
     blocks: Optional[list[dict]] = None
     # 显式排除 *_content_list_v2.json：v2 是 list[list[dict]]（按页分组的嵌套结构），
@@ -123,7 +123,7 @@ def load_ir(workdir: Path) -> tuple[str, Optional[list[dict]], Optional[Path]]:
             if isinstance(loaded, list) and (not loaded or isinstance(loaded[0], dict)):
                 blocks = loaded
         except (OSError, json.JSONDecodeError) as exc:
-            logger.warning("读取 content_list 失败 %s: %s", json_files[0], exc)
+            logger.warning("读取 content_list 失败 %s: %s", json_files[0], exc, exc_info=True)
 
     images_dir = workdir / "images"
     # 绝对路径：markdown 里的图片引用是相对 images/xxx，消费者用 asset_dir / 相对名拼接定位文件

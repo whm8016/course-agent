@@ -125,7 +125,7 @@ async def claim_pending(db, user_id: str, course_id: str, *, limit: int = _CLAIM
             MemoryEpisode.id.in_([r.id for r in rows]),
             MemoryEpisode.status == "pending",
         )
-        .values(status="processing")
+        .values(status="processing", claimed_at=time.time())
         .returning(MemoryEpisode.id)
         .execution_options(synchronize_session=False)
     )
@@ -581,7 +581,7 @@ async def _judge_and_record(
                 deferred_ids.extend(seg_ids)
                 return
             except Exception as exc:
-                logger.warning("[consolidate] judge failed: %s", exc)
+                logger.warning("[consolidate] judge failed: %s", exc, exc_info=True)
                 deferred_ids.extend(seg_ids)
                 return
             if result is None:
@@ -600,7 +600,7 @@ async def _judge_and_record(
                 except Exception as exc:
                     # 写库失败必须延期：观测没落库就标 done，这段对话的掌握度证据
                     # 永久丢失（episode 不再被巩固领走）。回 pending 等下轮重判重写。
-                    logger.warning("[consolidate] mastery write failed: %s", exc)
+                    logger.warning("[consolidate] mastery write failed: %s", exc, exc_info=True)
                     await db.rollback()
                     deferred_ids.extend(seg_ids)
                     return
@@ -614,7 +614,7 @@ async def _judge_and_record(
                             course_id,
                         )
                     except Exception as exc:
-                        logger.warning("[consolidate] error_patterns merge failed: %s", exc)
+                        logger.warning("[consolidate] error_patterns merge failed: %s", exc, exc_info=True)
                         await db.rollback()
 
     # 段级 try 兜底：单段意外异常不拖垮整批（其余段照常判定/写回）。
@@ -625,7 +625,7 @@ async def _judge_and_record(
         try:
             await _one(seg, seg_ids)
         except Exception as exc:
-            logger.warning("[consolidate] segment judge crashed: %s", exc)
+            logger.warning("[consolidate] segment judge crashed: %s", exc, exc_info=True)
             deferred_ids.extend(seg_ids)
 
     await asyncio.gather(*(_guard(seg) for seg in budget))
@@ -668,7 +668,7 @@ async def consolidate(db, user_id: str, course_id: str = "") -> dict[str, int]:
                     )
                 )
             except Exception as exc:
-                logger.warning("[consolidate] match_topics failed ep=%s: %s", ep.id, exc)
+                logger.warning("[consolidate] match_topics failed ep=%s: %s", ep.id, exc, exc_info=True)
                 hits_per_ep.append([])
         topic_ids_per_ep = [hits[0][0] if hits else None for hits in hits_per_ep]
 

@@ -445,9 +445,17 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 @app.exception_handler(Exception)
 async def unhandled_exception_handler(request: Request, exc: Exception):
     logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    # 错误信封（HTTP 侧）：detail 保持字符串（前端 readErrorMessage 只读 detail/message），
+    # 带学生可报障的编号（request_id 前 8 位——Sentry 500 页渲染 event_id 同款模式）
+    from core.observability.context import get_context_fields
+
+    request_id = get_context_fields().get("request_id") or ""
+    ref = request_id[:8]
+    detail = f"服务器内部错误（编号 {ref}）" if ref else "服务器内部错误"
     return JSONResponse(
         status_code=500,
-        content={"detail": "服务器内部错误"},
+        content={"detail": detail, "code": "internal", "ref": ref},
+        headers={"X-Request-Id": request_id} if request_id else None,
     )
 
 
@@ -462,6 +470,8 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # X-Request-Id 需显式放行，跨域前端才能读到（学生报障编号的回传通道）
+    expose_headers=["X-Request-Id"],
 )
 
 # gunicorn 多 worker：worker 退出时清理本进程的 multiproc 文件，防 'all' 模式的 pid-labeled

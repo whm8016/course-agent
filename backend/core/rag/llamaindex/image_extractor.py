@@ -234,7 +234,7 @@ def _load_desc_cache(cache_path: Path | None) -> dict[str, str]:
         if isinstance(raw, dict):
             return {str(k): str(v) for k, v in raw.items()}
     except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("无法读取图片描述缓存 %s: %s", cache_path, exc)
+        logger.warning("无法读取图片描述缓存 %s: %s", cache_path, exc, exc_info=True)
     return {}
 
 
@@ -248,7 +248,7 @@ def _save_desc_cache(cache_path: Path | None, cache: dict[str, str]) -> None:
             encoding="utf-8",
         )
     except OSError as exc:
-        logger.warning("无法写入图片描述缓存 %s: %s", cache_path, exc)
+        logger.warning("无法写入图片描述缓存 %s: %s", cache_path, exc, exc_info=True)
 
 
 # 位置清单文件名（与 image_desc_cache.json 同目录）。key=原图 blob sha256，
@@ -273,7 +273,7 @@ def _load_blob_manifest(path: Path | None) -> dict[str, dict[str, str]]:
         if isinstance(raw, dict):
             return {str(k): dict(v) for k, v in raw.items() if isinstance(v, dict)}
     except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("无法读取图片位置清单 %s: %s", path, exc)
+        logger.warning("无法读取图片位置清单 %s: %s", path, exc, exc_info=True)
     return {}
 
 
@@ -287,7 +287,7 @@ def _save_blob_manifest(path: Path | None, manifest: dict[str, dict[str, str]]) 
             encoding="utf-8",
         )
     except OSError as exc:
-        logger.warning("无法写入图片位置清单 %s: %s", path, exc)
+        logger.warning("无法写入图片位置清单 %s: %s", path, exc, exc_info=True)
 
 
 def _build_b64_to_blob(candidates: list[_ImageCandidate]) -> dict[str, str]:
@@ -460,7 +460,7 @@ def _extract_pdf_images(
     try:
         doc = fitz.open(str(src))
     except Exception as exc:
-        logger.warning("无法打开 PDF %s: %s", src.name, exc)
+        logger.warning("无法打开 PDF %s: %s", src.name, exc, exc_info=True)
         return []
 
     try:
@@ -542,7 +542,7 @@ def _extract_docx_images(
     try:
         doc = DocxDocument(str(p))
     except Exception as exc:
-        logger.warning("无法打开 DOCX %s: %s", p.name, exc)
+        logger.warning("无法打开 DOCX %s: %s", p.name, exc, exc_info=True)
         return []
 
     _NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"

@@ -133,7 +133,7 @@ def chunk_docx_structured(
     try:
         d = _DocxDocument(str(p))
     except Exception as exc:
-        logger.warning("打开 .docx 失败 %s: %s", p.name, exc)
+        logger.warning("打开 .docx 失败 %s: %s", p.name, exc, exc_info=True)
         return [], []
 
     body = d.element.body

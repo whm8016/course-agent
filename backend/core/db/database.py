@@ -557,6 +557,11 @@ class MemoryEpisode(Base):
     # pending=待巩固 / processing=巩固中 / done=已升格 / dead=永久失败
     status = Column(String(16), nullable=False, default="pending")
     created_at = Column(Float, nullable=False, default=time.time)
+    # 领取时刻（租约）：claim_pending 与 status='processing' 同一 UPDATE 原子写入。
+    # cron 据此判 processing 超时——created_at 是对话发生时刻，被捞走的 episode 按
+    # 定义已 pending≥1800s，用它判龄恒真，会把运行中的巩固每 5min 翻回重跑
+    # （mem0 双写 + 掌握度观测双计，无库层去重）。
+    claimed_at = Column(Float, nullable=True)
     consolidated_at = Column(Float, nullable=True)
 
     __table_args__ = (
@@ -902,6 +907,38 @@ class LlmUsageDaily(Base):
     __table_args__ = (
         UniqueConstraint("day", "user_id", "course_id", "model", name="uq_usage_daily"),
         Index("idx_usage_daily_day", "day"),
+    )
+
+
+class TurnErrorRecord(Base):
+    """失败 turn 流水（错误处理与可观测性重整，2026-09）：运维排障读模型。
+
+    与 messages（学生叙事流）两概念两真相源：错误是 append-only 运维事件，admin 读者，
+    查询主路径 = 学生报障 ref 精确匹配。无 FK 裸字符串（用户/课程删除后须存活，对齐
+    llm_usage_records）；ref 是 turn_id/request_id 前 8 位（排障起点，非唯一键，完整
+    turn_id 在本表）。量级远小于 messages，暂不清理（日后可对齐 purge cron）。
+    """
+
+    __tablename__ = "turn_errors"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    turn_id = Column(String(64), nullable=False, default="")
+    ref = Column(String(16), nullable=False, default="")    # 学生报障引用号（8 位）
+    session_id = Column(String(32), nullable=False, default="")
+    user_id = Column(String(32), nullable=False, default="")
+    course_id = Column(String(64), nullable=False, default="")
+    mode = Column(String(32), nullable=False, default="")
+    code = Column(String(32), nullable=False, default="internal")  # 错误信封 code（errors.py 注册表）
+    message = Column(String(512), nullable=False, default="")      # 信封用户文案
+    exc_type = Column(String(128), nullable=False, default="")
+    exc_head = Column(String(256), nullable=False, default="")     # str(exc)[:200] 排障摘要
+    created_at = Column(Float, nullable=False, default=time.time)
+
+    __table_args__ = (
+        Index("idx_turn_errors_course_time", "course_id", "created_at"),
+        Index("idx_turn_errors_user_time", "user_id", "created_at"),
+        Index("idx_turn_errors_ref", "ref"),
+        Index("idx_turn_errors_created", "created_at"),
     )
 
 

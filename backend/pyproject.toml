@@ -170,8 +170,10 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
 # slow：重/慢测试（docling 解析需下模型），默认跳过，需 pytest -m slow 显式开启。
-# 命令行 -m slow 会覆盖此默认（pytest 对 -m 是 last-wins），故显式跑 slow 仍可用。
+# sandbox_service：沙箱容器攻击面回归，需 docker compose 起 sandbox 服务。
+# 命令行 -m X 会覆盖此默认（pytest 对 -m 是 last-wins），故显式跑仍可用。
 markers = [
     "slow: 重/慢测试（docling 解析需下模型），默认跳过，需 pytest -m slow 显式开启",
+    "sandbox_service: 沙箱容器攻击面回归（需 docker compose up -d sandbox），默认跳过",
 ]
-addopts = ["-m", "not slow"]
+addopts = ["-m", "not slow and not sandbox_service"]

@@ -106,6 +106,14 @@ _preview_resumes.py
 gen_budget_doc.py
 blisubs.py
 pdf_extract.txt
+pdf_probe.txt
+docx_extract*.txt
+# 课程设计 docx/pdf 与开题备忘（私人学术材料）
+/面向*.docx
+/面向*.pdf
+/notes/
+# 本地 DB 预览/dump 工具（会全量导 sessions/messages，绝不入库）
+backend/scripts/_db_preview.py
 rerank_debug*.txt
 *_preview.png
 backend/subs/
@@ -114,13 +122,17 @@ subtitles/
 # --- Generated artifacts & local scratch (do not commit) ---
 # 数据库 dump（含数据/凭证，绝不入库）
 *_pg_dump.sql
-# 评测缓存与带时间戳的评测报告（每次本地跑出来的产物）
+# 评测缓存与评测报告（每次本地跑出来的产物，整目录不入库；datasets 语料保留）
 backend/scripts/eval_rag/cache/
-backend/scripts/eval_rag/results/*_20[0-9][0-9][0-9][0-9][0-9][0-9]_*
+backend/scripts/eval_rag/results/
 # 记忆/学情评测产物（results 全目录 + 截图 + 调试脚本，本地跑出来的不入库）
 backend/scripts/eval_memory/results/
+# 压测产物：tokens.json 由 seed 重签（含真实 JWT）、*_result.json 是机器产物
+backend/scripts/loadtest/tokens.json
+backend/scripts/loadtest/*_result.json
 **/_e2e_shots/
 **/_debug*
+**/_dbg*
 # 论文图临时文件（ regenerate 中间产物）
 /docs/figures/_stitch_tmp.png
 # 排版脚本派生的样式模板（可由脚本重建）

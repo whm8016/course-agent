@@ -101,6 +101,16 @@ async def put_my_config(
 ):
     """保存当前用户的搜索 override（全员，upsert）。"""
     uid = str(user.get("id") or "")
+    # SSRF 收口：base_url/proxy 过公网校验再落库（空=不校验）；运行时消费点
+    # resolve_search_config 另有二次校验（兜 rebinding 与存量脏行）。
+    from utils.url_guard import require_public_http_url_fields
+
+    from services.search.config import SEARCH_OVERRIDE_URL_FIELDS
+
+    try:
+        require_public_http_url_fields(payload, SEARCH_OVERRIDE_URL_FIELDS)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     from utils.crypto import encrypt_secret
     # 1.5：api_key 加密落库（与 UserLLMProvider 同口径，明文不进 DB）
     encrypted_key = encrypt_secret(payload.api_key or "")

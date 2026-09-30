@@ -209,7 +209,7 @@ async def judge_segment(
             logger.warning("[judge] JSON 解析失败，raw 前200字：%s", raw[:200])
             return None
     except Exception as exc:
-        logger.warning("[judge] LLM 判定失败（fail-safe 返回 None）：%s", exc)
+        logger.warning("[judge] LLM 判定失败（fail-safe 返回 None）：%s", exc, exc_info=True)
         return None
 
     result = _validate(data, [t[0] for t in topics], segment_text)

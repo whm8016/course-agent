@@ -222,6 +222,11 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
     # ---- 8. 通过 TurnRuntimeManager 启动 turn ----
     trm = get_turn_runtime_manager()
     # bind_context 在 start_turn 内部执行（含 turn_id 注入）；此处先绑定 WS 特有字段
+    # request_id 经 bind_ws_request_id（WS 不走 BaseHTTPMiddleware）——错误信封 ref
+    # 由此而来（有 turn_id 后 ref 用 turn_id），学生报障可 grep
+    from core.observability.context import bind_ws_request_id
+
+    bind_ws_request_id(websocket)
     bind_context(user_id=str(user["id"]), course_id=course_id, mode=capability_name)
     turn_id = await trm.start_turn(context)
     log_flow("ws.run.start_turn", turn_id=turn_id, capability=capability_name,
@@ -279,12 +284,48 @@ async def websocket_run(websocket: WebSocket, capability_name: str) -> None:
     for task in pending:
         task.cancel()
 
-    await trm.cancel_turn(turn_id)
+    # 断线宽限：不立刻杀 turn（服务端权威回合日志下生成继续跑），给网络闪断的
+    # 客户端一次 subscribe_turn 重连机会；宽限内无人认领才真取消。正常 done 后
+    # 同样走这里——cancel_turn 对已完成的 turn 是 no-op（task.done() 短路）。
+    _arm_disconnect_grace(trm, turn_id)
     log_flow("ws.run.disconnect", turn_id=turn_id, capability=capability_name)
     try:
         await websocket.close()
     except Exception:
         pass
+
+
+# ── 断线重连宽限（quiz WS 断线恢复的服务端半边）───────────────────────────
+# per-worker 内存字典，与 TurnRuntimeManager 的进程内 executions 同生命周期假设
+# （nginx ip_hash 粘性，见 backend/docs/ARCHITECTURE.md「粘性会话」）。
+_RECONNECT_GRACE_S = 15.0
+_disconnect_grace: dict[str, asyncio.Task] = {}
+
+
+def _arm_disconnect_grace(trm, turn_id: str) -> None:
+    """挂起延迟取消；重连（_handle_subscribe_turn）经 _disarm 掐掉，可重复挂。"""
+    _disarm_disconnect_grace(turn_id)
+
+    async def _cancel_after_grace() -> None:
+        task = _disconnect_grace.get(turn_id)
+        try:
+            await asyncio.sleep(_RECONNECT_GRACE_S)
+            await trm.cancel_turn(turn_id)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            # 只清自己的占位（期间可能已被重连后的新 grace 覆盖）
+            if _disconnect_grace.get(turn_id) is task:
+                del _disconnect_grace[turn_id]
+
+    _disconnect_grace[turn_id] = asyncio.create_task(_cancel_after_grace())
+
+
+def _disarm_disconnect_grace(turn_id: str) -> None:
+    """掐掉 turn 的延迟取消（重连认领时调用）。"""
+    task = _disconnect_grace.pop(turn_id, None)
+    if task is not None:
+        task.cancel()
 
 
 async def _handle_subscribe_turn(
@@ -303,16 +344,24 @@ async def _handle_subscribe_turn(
     after_seq = int(payload.get("after_seq", 0))
 
     trm = get_turn_runtime_manager()
+    subscribed = False
     try:
         async for event in trm.subscribe_turn(
             turn_id, after_seq=after_seq, user_id=str(user["id"])
         ):
+            if not subscribed:
+                # 认领成功：掐掉断线时挂的延迟取消
+                _disarm_disconnect_grace(turn_id)
+                subscribed = True
             await websocket.send_text(json.dumps(event.to_dict(), ensure_ascii=False))
     except KeyError:
         await send({"type": "error", "message": f"turn_id 不存在或已过期：{turn_id}"})
     except (WebSocketDisconnect, RuntimeError):
         pass
     finally:
+        # 重连也可能再闪断：已认领过的 turn 重新挂宽限；未知 turn 不挂
+        if subscribed:
+            _arm_disconnect_grace(trm, turn_id)
         try:
             await websocket.close()
         except Exception:

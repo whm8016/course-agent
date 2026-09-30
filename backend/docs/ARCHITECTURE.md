@@ -140,7 +140,7 @@ Each capability externalizes its prompts to `core/<cap>/prompts/zh/*.yaml`, load
 | `quiz_question` / `result` | per-question in quiz / capability finalization |
 | `quiz_question_error` | a single quiz question failed/invalid (M-8/M-9: per-question fault tolerance — other questions still generate) |
 | `progress` | sub-stage progress; in research, parallel blocks emit `block_start`/`block_end` with `block_id` (M-10: per-block event isolation — each block's events flush as one contiguous segment, not interleaved) |
-| `error` | unrecoverable failure |
+| `error` | unrecoverable failure. **错误信封**（2026-09 可观测性重整）：`message`（用户中文文案）之外携带 `code`（错误分类，见 `observability/errors.py` 注册表）/ `ref`（turn_id[:8] 学生报障引用号）/ `exc_type` / `exc_head`（排障摘要，前端不渲染）；中途 LLM 失败发真 error 事件不再伪装成固定文案的 answer（done 带 `error_code`，防前端 loading 悬挂） |
 
 ---
 
@@ -312,6 +312,34 @@ deepwiki 直连官方 https://mcp.deepwiki.com/mcp（streamableHttp，免认证�
 - **lazy 解耦**：backend 不 `depends_on` gateway——MCP 懒连接（首 turn），gateway 未就绪只令该 server
   标 `error`，不阻塞 backend 启动。
 
+### 编程题沙箱 sidecar（`sandbox/` + `core/question/sandbox.py`）
+
+coding 题判分要真实执行**不可信学生代码**，local 子进程模式（rlimit+最小 env+超时，
+dev/CI 用）不是安全边界：无网络隔离、root 容器下 RLIMIT_NPROC 失效、密钥文件在容器内
+可读。生产形态是独立 `sandbox` 容器（执行数据流对齐 Piston `api/src/job.js` 的
+prime→execute→cleanup）：
+
+```
+backend / worker ──uds（sandbox_sock 共享卷）──> sandbox 容器
+              POST /execute {code, timeout_s}      network_mode: none（无出网/无内网）
+              Header: X-Sandbox-Token              非 root（NPROC 生效）+ 零凭据零业务卷
+                                                  mem 1g / cpus 2 / pids 128 限额
+```
+
+- **隔离即架构**：学生代码攻击面从「backend 容器 root + .env + 出网」坍缩为「无网络、
+  无凭据的空容器」；唯一接口是 uds（token 认证），子进程 env 只有 3 个线程数变量。
+- **fail 降可用性不降安全性**：沙箱不可用 → `SandboxUnavailableError` → 判分 `ungraded`
+  （`TestRunResult.degraded` 区别于预算耗尽）、critic 轮进既有 issue 重试；**绝不回退
+  本地执行**。backend 对 sandbox 是软依赖（不等健康检查）。
+- **模式分派**（`settings.sandbox.mode`）：compose 部署默认注入 `service`；Windows/CI
+  直跑默认 `local`。`_check_prod` 在 production 拒绝 `mode=local` 与空 token（防漏配
+  使 P0 复活）。
+- **攻击面回归**：`pytest -m sandbox_service`（tests/test_sandbox_service_attacks.py 经
+  `docker compose exec` 注入 sandbox_selftest.py 到容器内执行：密钥不可达/无网络/fork
+  炸弹/内存炸弹/非 root/token）。默认 addopts 排除，CI 不受影响。
+- **升级路径**：更强的 per-exec 命名空间隔离（isolate，Piston/judge0 同款）需特权容器，
+  当前课程场景接受同容器并发共享 loopback 的低危残留（闸=4、单次≤5s）。
+
 ### Leader 选举（`core/leader.py`）
 
 Redis SETNX 效率型锁（单实例 Redis 足够，无需 Redlock）+ **竞选者循环 + CAS 原子续约**，TTL 30s：
@@ -459,6 +487,18 @@ Management API (`api/llm.py`, admin): CRUD profiles + `/probe` test connection +
 **粒度与隔离**：熔断器按注册名隔离——主链路按 binding（`dashscope`/`deepseek`/…，`loop._one_round` 按本轮 binding 解析）、fallback 供应商接自己的实例（对称保护，主路径 OPEN 时毫秒级切 fallback）、ASR `asr:{model}`、vision `vision:{model}`、topic_build。全部并入 `get_llm_circuit_breaker` 注册表：阈值统一吃 settings、`/health/detailed` 全量可见、`POST /admin/circuit-breaker/reset` 一键覆盖。**H-16 不变**：自配/profile client 传 `circuit_breaker=None`（只重试不熔断，用户私有资源不连累平台）。**半开结构化无死锁**：探测名额(3) ≥ 合闸所需成功数(2) 由构造器钳制保证（旧 H-11 死锁守卫随重写删除）。
 
 **单层重试**：全部 client 构造点（`provider_factory`/`asr`/`vision`/`anthropic_adapter`）显式 `max_retries=0`——SDK 内置重试（默认 2）与外层 4 波相乘曾是三层叠加（最坏 24 次 HTTP），重试收归 reliability 单层。**多 worker**：各进程独立记账（阈值单进程语义，不做 //workers 缩放），`ca_llm_circuit_state` gauge（liveall，取 max 即"是否有进程 OPEN"）+ `ca_llm_circuit_transitions_total`/`ca_llm_retries_total`/`ca_llm_fallback_triggers_total` counter 聚合观测；运维 reset 仅当前进程，其余靠 open_timeout(30s) 后 HALF_OPEN 自动恢复兜底。**用户文案**：`CircuitOpenError`/`LLMRetryError` 到达 SSE error 事件时映射为统一中文提示（`reliability.LLM_SERVICE_UNAVAILABLE`），不再把英文内部信息漏给学生。已知缺口：`session_summary` 裸调未接入（L2 压缩有自己的双温重试）。
+
+### 错误处理与可观测性：统一错误信封（2026-09 重整）
+
+错误曾对四路同时不可见：失败 turn 在 Prometheus 计成 empty/ok（SSE 恒 200，HTTP 指标失明）、能力异常经 `orchestrator` 裸透 `str(exc)` 英文给学生、loop 中途失败伪装成正常 answer、错误回合在 messages 落成空行、学生报障无引用号。重整为「挂号单」架构（对标 litellm exceptions 注册表 / OTel「异常在边界记录一次」/ Sentry event_id 用户引用号），两条铁律：
+
+**单一信封**：`core/observability/errors.py` 的 `ERROR_REGISTRY`（8 码封闭集：llm_unavailable/context_overflow/schema_invalid/tool_failed/capability_failed/cancelled/unauthorized/internal）+ `classify(exc)`（isinstance 链 → 状态码 → 复用熔断重写的供应商侧判定 → internal 兜底）+ `normalize_error()` 五元组（code/message/ref/exc_type/exc_head）+ `emit_error_event()`（现场 `logger.exception` + 完整信封入 bus）。SSE/WS error 事件与 HTTP 错误响应共用；`ref = turn_id[:8]`（HTTP 层 request_id[:8]）——复用现有 contextvars，不另造 id 体系。
+
+**单一记账点**：counter 打点与 turn_errors 落库只发生在 `turn_runtime._run_turn` 事件循环的 ERROR 分支（首写为准防多事件双计）——orchestrator/TrackedCapability/agent loop/turn_runtime 四边界产生的错误最终都以 error 事件流经此处，天然只记一次。`normalize_error` 是纯函数；堆栈留在抛错现场（OTel 语义的落点）。
+
+**四路可见性**：① 指标——`observe_turn` status 增 error/cancelled + `ca_turn_errors_total{mode,code}`（失败率首次可算可告警）；② 落库——错误回合 assistant 行带 `metadata.error={code,ref}`（前端重载恢复红框）+ `turn_errors` 流水表（第 32 张，`GET /admin/errors/recent?ref=` 学生报障精确查）；③ 用户——前端 MessageBubble 红框变体 + ErrorRefLine（错误码/编号/一键复制），quiz/research 错误文案拼编号；HTTP 500 detail 带「编号 xxx」+ `X-Request-Id` 响应头回传（CORS expose）；④ 日志——91 处 `logger.warning` 补 `exc_info`（memory/RAG/leader 降级路径不再丢堆栈），`StreamEvent.from_dict` 未知类型降级留痕。
+
+**边界语义**：agent loop 非首轮失败发 error 事件 + done(error_code)、跳过 answer（首轮仍 re-raise 由 TrackedCapability 兜底；bot H-15 已消费 ERROR 事件渠道无感）；HTTP 层领域校验类 `detail=str(e)`（str(e) 即用户文案）与 probe 诊断端点保留原文，内部 500（JoinCode 等）改固定中文 + logger.exception。
 
 ## RAG 检索架构（`core/rag/`）
 

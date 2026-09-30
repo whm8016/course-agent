@@ -34,6 +34,7 @@ from core.db.database import (
     KnowledgeBase,
     TeacherApplication,
     TeacherInvite,
+    TurnErrorRecord,
     User,
     get_db,
 )
@@ -144,8 +145,9 @@ async def create_kb(
     # 与教师建课一致：建库即自动生成课程码（管理员库历史漏生成，前端凭此渲染二维码）
     try:
         kb.join_code = await ensure_unique_join_code(db)
-    except JoinCodeExhaustedError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except JoinCodeExhaustedError:
+        logger.exception("join code exhausted")
+        raise HTTPException(status_code=500, detail="课程码生成失败，请稍后重试")
     await db.flush()
 
     _kb_raw_dir(body.course_id).mkdir(parents=True, exist_ok=True)
@@ -694,6 +696,45 @@ async def llm_usage_summary(
     return await query_usage(
         db, start=start_day, end=end_day, group_by=dims, limit=limit
     )
+
+
+# ── 错误流水（可观测性重整）────────────────────────────────────────────────────
+
+@router.get("/errors/recent")
+async def errors_recent(
+    limit: int = Query(50, ge=1, le=500),
+    code: str | None = Query(None, description="按错误信封 code 过滤（llm_unavailable/…）"),
+    course_id: str | None = Query(None, description="按课程过滤"),
+    ref: str | None = Query(None, description="学生报障引用号精确匹配（主排障路径）"),
+    _: dict = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    """最近失败 turn 流水（turn_errors 表，倒序）。
+
+    学生报障主路径：错误气泡带的 8 位编号 → ?ref= 精确命中该行 → turn_id 拿去 grep
+    后端日志（ContextFilter 注入每行）。cancelled 不入流水（非错误）。
+    """
+    q = select(TurnErrorRecord).order_by(TurnErrorRecord.created_at.desc())
+    if ref:
+        q = q.where(TurnErrorRecord.ref == ref)
+    if code:
+        q = q.where(TurnErrorRecord.code == code)
+    if course_id:
+        q = q.where(TurnErrorRecord.course_id == course_id)
+    rows = (await db.execute(q.limit(limit))).scalars().all()
+    return {"items": [{
+        "turn_id": r.turn_id,
+        "ref": r.ref,
+        "session_id": r.session_id,
+        "user_id": r.user_id,
+        "course_id": r.course_id,
+        "mode": r.mode,
+        "code": r.code,
+        "message": r.message,
+        "exc_type": r.exc_type,
+        "exc_head": r.exc_head,
+        "created_at": r.created_at,
+    } for r in rows]}
 
 
 # ── 磁盘派生数据 GC（offline，对标 Bazel 磁盘缓存 GC）──────────────────────────

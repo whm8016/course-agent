@@ -361,6 +361,8 @@ async def _execute_solve_plan(analysis: str, steps, **kwargs) -> ToolResult:
     }
     return ToolResult(content=json.dumps(payload, ensure_ascii=False), success=True)
 
+#steps的格式：[{"id": "S1", "goal": "查定义", "done": false},{"id": "S2", "goal": "套公式", "done": false}
+
 
 async def _execute_solve_finish_step(step_id: str, summary: str, **kwargs) -> ToolResult:
     """标记当前步骤完成并前进；折叠该步的中间工具输出为摘要。"""

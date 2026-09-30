@@ -41,7 +41,7 @@ def _resolve_image_data_url(att: Any) -> str | None:
                 raw = Path(fp).read_bytes()
                 b64 = _b64.b64encode(raw).decode("ascii")
             except OSError as exc:
-                logger.warning("vision_describe: 读图失败 %s: %s", fp, exc)
+                logger.warning("vision_describe: 读图失败 %s: %s", fp, exc, exc_info=True)
                 return None
     if not b64:
         return None
@@ -127,10 +127,10 @@ async def describe_image_attachments(
                 logger.warning("vision_describe: 图片 %d 返回空描述", idx + 1)
         except (CircuitOpenError, LLMRetryError) as exc:
             # 熔断 OPEN / 重试耗尽：降级空串，不抛（主链路由调用方回退剥图）
-            logger.warning("vision_describe: 描述图片 %d 失败（熔断/重试耗尽）: %s", idx + 1, exc)
+            logger.warning("vision_describe: 描述图片 %d 失败（熔断/重试耗尽）: %s", idx + 1, exc, exc_info=True)
             descriptions.append("")
         except Exception as exc:  # 其它意外错误：单张失败不阻断其余
-            logger.warning("vision_describe: 描述图片 %d 失败: %s", idx + 1, exc)
+            logger.warning("vision_describe: 描述图片 %d 失败: %s", idx + 1, exc, exc_info=True)
             descriptions.append("")
     return descriptions
 

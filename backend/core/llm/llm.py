@@ -379,9 +379,9 @@ async def chat_complete(
         return response.choices[0].message.content or ""
 
     except (CircuitOpenError, LLMRetryError) as e:
-        logger.warning("chat_complete: primary+fallback 均失败: %s", e)
-        # except 已把类型收窄为这两种，文案必命中常量（llm_user_message 的 or 回退
-        # 只服务于 turn_runtime 的宽 except Exception 边界，那里回退是活分支）
+        logger.warning("chat_complete: primary+fallback 均失败: %s", e, exc_info=True)
+        # 文案真值在 observability/errors.py 错误信封注册表（经 LLM_SERVICE_UNAVAILABLE
+        # re-export）——事件流边界走 emit_error_event 分类，此处常量直用即可
         raise RuntimeError(LLM_SERVICE_UNAVAILABLE) from e
 
 

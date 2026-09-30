@@ -615,7 +615,7 @@ export default function QuizCard({ quiz, sessionId }: Props) {
         <div className="px-4 pb-4">
           <button
             onClick={handleSubmit}
-            disabled={choiceQuestions.length > 0 && !allChoiceAnswered}
+            disabled={quiz.questions.length === 0 || (choiceQuestions.length > 0 && !allChoiceAnswered)}
             className="w-full py-2 rounded-[var(--radius)] bg-accent hover:bg-accent-2 text-white text-sm font-medium disabled:opacity-40 disabled:cursor-not-allowed transition"
           >
             提交答案

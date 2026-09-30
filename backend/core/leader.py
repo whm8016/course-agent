@@ -130,7 +130,7 @@ async def try_become_leader() -> bool:
                 await _become_leader()
                 return True
         except Exception as exc:
-            logger.warning("Leader election: initial acquire failed: %s", exc)
+            logger.warning("Leader election: initial acquire failed: %s", exc, exc_info=True)
 
     logger.info(
         "Leader election: worker %s is NOT leader yet; entering campaign loop (every %ds)",
@@ -215,7 +215,7 @@ def _ensure_client() -> None:
             decode_responses=True,
         )
     except Exception as exc:
-        logger.warning("Leader: redis client init failed: %s", exc)
+        logger.warning("Leader: redis client init failed: %s", exc, exc_info=True)
         _redis_client = None
 
 
@@ -273,7 +273,7 @@ async def _renew_lease_loop() -> None:
                     )
                     await _lose_leader()
                     return
-                logger.warning("Leader lease renewal failed (will retry): %s", exc)
+                logger.warning("Leader lease renewal failed (will retry): %s", exc, exc_info=True)
     except asyncio.CancelledError:
         logger.info("Leader renew task cancelled")
         raise
@@ -315,7 +315,7 @@ async def _campaign_loop() -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                logger.warning("Leader campaign attempt failed: %s", exc)
+                logger.warning("Leader campaign attempt failed: %s", exc, exc_info=True)
     except asyncio.CancelledError:
         logger.info("Leader campaign task cancelled")
         raise

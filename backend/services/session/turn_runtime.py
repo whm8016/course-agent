@@ -40,7 +40,7 @@ from typing import AsyncIterator
 
 from core.context import UnifiedContext
 from core.observability import bind_context, log_flow
-from core.observability.metrics import observe_turn
+from core.observability.metrics import observe_turn, observe_turn_error
 from core.stream import StreamEvent, StreamEventType
 from core.stream_bus import StreamBus
 from services.session import reply_channel
@@ -130,6 +130,8 @@ async def _persist_turn_rows(
     token_text: str,
     cancelled: bool,
     error_text: str | None,
+    error_code: str = "",
+    error_ref: str = "",
     done_metadata: dict,
     result_metadata: dict,
     result_questions: list | None,
@@ -217,6 +219,10 @@ async def _persist_turn_rows(
                 asst_meta["quiz"] = {"questions": result_questions}
             if cancelled:
                 asst_meta["stopped"] = True
+            if error_text is not None:
+                # 错误信封元数据：重载会话时前端按此恢复错误样式与报障编号
+                #（content 保持「出错了: 」前缀，兼容旧读取方）
+                asst_meta["error"] = {"code": error_code or "internal", "ref": error_ref}
             # assistant 行时间戳严格大于 user 行（同回合顺序由时间戳而非随机 id 决定）
             await add_message(
                 db, session_id, "assistant", content, "text",
@@ -233,6 +239,46 @@ async def _persist_turn_rows(
         logger.warning(
             "TurnRuntime: persist turn rows failed turn_id=%s session=%s",
             execution.turn_id, session_id, exc_info=True,
+        )
+
+
+async def _persist_turn_error(
+    execution: _TurnExecution,
+    *,
+    error_code: str,
+    error_ref: str,
+    message: str,
+    exc_type: str,
+    exc_head: str,
+) -> None:
+    """失败 turn 落 turn_errors 流水行（append-only 运维读模型，best-effort 不阻塞 turn）。
+
+    与 messages 落盘解耦：错误流水是 admin 排障数据（GET /admin/errors/recent 按学生
+    报障 ref 精确查），失败也不影响叙事流落盘。无 FK 裸字符串——用户/课程删除后行须
+    存活（对齐 llm_usage_records）。
+    """
+    ctx = execution.context
+    try:
+        from core.db.database import AsyncSessionLocal, TurnErrorRecord
+
+        async with AsyncSessionLocal() as db:
+            db.add(TurnErrorRecord(
+                turn_id=execution.turn_id,
+                ref=(error_ref or execution.turn_id[:8])[:16],
+                session_id=ctx.session_id or "",
+                user_id=str(ctx.user_id or ""),
+                course_id=str(ctx.course_id or ""),
+                mode=ctx.mode or "chat",
+                code=error_code or "internal",
+                message=message[:512],
+                exc_type=exc_type[:128],
+                exc_head=exc_head[:256],
+            ))
+            await db.commit()
+    except Exception:
+        logger.warning(
+            "TurnRuntime: persist turn error row failed turn_id=%s",
+            execution.turn_id, exc_info=True,
         )
 
 
@@ -605,6 +651,12 @@ class TurnRuntimeManager:
         done_metadata: dict = {}  # loop/quiz 收尾 done 事件的 metadata（usage/tools_used/...）
         turn_cancelled = False
         turn_error: str | None = None
+        # 错误信封五元组的其余四员（turn_error 是 message）：由 ERROR 记账点或
+        # generator 级 except 赋值，供 status/落盘/turn_errors 表消费
+        turn_error_code = ""
+        turn_error_ref = ""
+        turn_error_exc_type = ""
+        turn_error_exc_head = ""
         seq = 0
         first_event_logged = False
         t0 = time.monotonic()
@@ -699,6 +751,17 @@ class TurnRuntimeManager:
                         if isinstance(_dm, dict):
                             done_metadata.update(_dm)
 
+                    # 错误信封记账点（单一）：orchestrator/能力/loop/本层四边界产生的
+                    # 错误最终都以 ERROR 事件流经此处——回写五元组供 finally 统一
+                    # status/指标/落库，天然只记一次。首写为准：多 ERROR 事件
+                    # （loop 发完 pipeline 又抛）不双计。
+                    if event.type == StreamEventType.ERROR and turn_error is None:
+                        turn_error = str(event.payload.get("message") or "")
+                        turn_error_code = str(event.payload.get("code") or "internal")
+                        turn_error_ref = str(event.payload.get("ref") or "")
+                        turn_error_exc_type = str(event.payload.get("exc_type") or "")
+                        turn_error_exc_head = str(event.payload.get("exc_head") or "")
+
                     # fan-out 给所有 subscribe_turn 订阅者
                     await execution.bus.emit(event)
 
@@ -706,30 +769,28 @@ class TurnRuntimeManager:
                 turn_cancelled = True
                 log_flow("turn.cancel", turn_id=execution.turn_id,
                          elapsed_ms=int((time.monotonic() - t0) * 1000), events=seq)
-                await execution.bus.emit({
-                    "type": "error",
-                    "message": "turn 被取消",
-                    "source": "turn_runtime",
-                })
-            except Exception as exc:
-                turn_error = str(exc)
-                logger.exception(
-                    "TurnRuntime: turn_id=%s unhandled error: %s",
-                    execution.turn_id, exc,
+                # 取消也走信封（code=cancelled；ref 空串时 bus.error 按协议省略键）
+                from core.observability.errors import error_ref
+
+                await execution.bus.error(
+                    "turn 被取消", source="turn_runtime",
+                    code="cancelled", ref=error_ref(),
                 )
+            except Exception as exc:
+                # 统一错误信封：分类（code）+ 中文文案 + ref；堆栈由 emit_error_event
+                # 现场记录（turn_id 已在 contextvars，ContextFilter 注入每行日志）
                 log_flow("turn.error", turn_id=execution.turn_id,
                          elapsed_ms=int((time.monotonic() - t0) * 1000), error=str(exc))
-                # LLM 可靠性层异常（熔断 OPEN / 重试耗尽）给用户统一中文文案，
-                # 不把 CircuitOpenError 内部英文信息漏进 SSE 错误气泡（映射见
-                # reliability.llm_user_message——异常定义旁单一真相源）
-                from core.llm.reliability import llm_user_message
+                from core.observability.errors import emit_error_event
 
-                _user_msg = llm_user_message(exc) or str(exc)
-                await execution.bus.emit({
-                    "type": "error",
-                    "message": _user_msg,
-                    "source": "turn_runtime",
-                })
+                envelope = await emit_error_event(
+                    execution.bus, exc, source="turn_runtime",
+                )
+                turn_error = envelope["message"]
+                turn_error_code = envelope["code"]
+                turn_error_ref = envelope["ref"]
+                turn_error_exc_type = envelope["exc_type"]
+                turn_error_exc_head = envelope["exc_head"]
             finally:
                 execution.finished_at = time.monotonic()
                 elapsed_total = int((execution.finished_at - t0) * 1000)
@@ -738,9 +799,19 @@ class TurnRuntimeManager:
                 # 让 CapabilityCompleteEvent（记忆三层）对这些能力也触发。
                 if not agent_output and result_text_parts:
                     agent_output = "\n\n".join(result_text_parts)
-                status = "ok" if agent_output else "empty"
+                # 错误/取消轮不再伪装成 empty/ok——失败率对 Prometheus 可见
+                #（SSE 恒 200，HTTP 指标对本链路天然失明）
+                if turn_error is not None:
+                    status = "error"
+                elif turn_cancelled:
+                    status = "cancelled"
+                else:
+                    status = "ok" if agent_output else "empty"
                 log_flow("turn.complete", turn_id=execution.turn_id,
                          elapsed_ms=elapsed_total, events=seq,
+                         status=status, error_code=turn_error_code or None,
+                         error_exc_type=turn_error_exc_type or None,
+                         error_exc=turn_error_exc_head or None,
                          answer_chars=len(agent_output),
                          llm_usage=execution.context.metadata.get("llm_usage"),
                          llm_cost_usd=execution.context.metadata.get("llm_cost_usd"))
@@ -749,6 +820,11 @@ class TurnRuntimeManager:
                     status=status,
                     elapsed_ms=elapsed_total,
                 )
+                if turn_error is not None:
+                    observe_turn_error(
+                        execution.context.mode or "chat",
+                        turn_error_code or "internal",
+                    )
 
                 # 清理 reply_channel 进程内回退态（Redis 的 key 靠 TTL 自清理）。
                 # turn 被取消时 waiter 的 BLPOP 由 CancelledError 解除，无需再 put(None)。
@@ -778,12 +854,27 @@ class TurnRuntimeManager:
                         token_text="".join(token_parts) if turn_cancelled else "",
                         cancelled=turn_cancelled,
                         error_text=turn_error,
+                        error_code=turn_error_code,
+                        error_ref=turn_error_ref,
                         done_metadata=done_metadata,
                         result_metadata=result_metadata,
                         result_questions=result_questions,
                     ))
                 except asyncio.CancelledError:
                     pass  # 落盘在后台继续；继续收尾（close bus 释放订阅者）
+                # 失败 turn 的运维流水（turn_errors）：与叙事行独立 best-effort，互不拖累
+                if turn_error is not None:
+                    try:
+                        await asyncio.shield(_persist_turn_error(
+                            execution,
+                            error_code=turn_error_code,
+                            error_ref=turn_error_ref,
+                            message=turn_error,
+                            exc_type=turn_error_exc_type,
+                            exc_head=turn_error_exc_head,
+                        ))
+                    except asyncio.CancelledError:
+                        pass
                 if not execution.bus._closed:
                     await execution.bus.close()
 

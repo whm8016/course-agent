@@ -117,7 +117,7 @@ async def match_topics(
 
         q_emb = await get_embed_model()._aget_query_embedding(text)
     except Exception as exc:
-        logger.warning("[topic_match] embedding 不可用（返回空命中）：%s", exc)
+        logger.warning("[topic_match] embedding 不可用（返回空命中）：%s", exc, exc_info=True)
         return []
 
     thr = threshold if threshold is not None else TOPIC_MATCH_THRESHOLD

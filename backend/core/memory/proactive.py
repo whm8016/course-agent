@@ -346,7 +346,7 @@ async def commit_stitch_cooldown(db, user_id: str, course_id: str, topic_id: str
             )
         await db.commit()
     except Exception as exc:
-        logger.warning("[stitch] cooldown 落盘失败（非致命）：%s", exc)
+        logger.warning("[stitch] cooldown 落盘失败（非致命）：%s", exc, exc_info=True)
         await db.rollback()
 
 
@@ -373,7 +373,7 @@ async def _mark_stitched(db, row_id: str) -> None:
             )
         await db.commit()
     except Exception as exc:
-        logger.warning("[stitch] 回写 last_stitched_at 失败（非致命）：%s", exc)
+        logger.warning("[stitch] 回写 last_stitched_at 失败（非致命）：%s", exc, exc_info=True)
         await db.rollback()
 
 
@@ -400,7 +400,7 @@ async def _match_topic(query: str, course_id: str, db, embed_model) -> tuple[str
     try:
         q_emb = await embed_model._aget_query_embedding(query)
     except Exception as exc:
-        logger.warning("[stitch] query embedding 失败（fail-safe 不拼）：%s", exc)
+        logger.warning("[stitch] query embedding 失败（fail-safe 不拼）：%s", exc, exc_info=True)
         return None
 
     best_tid, best_sim = max(

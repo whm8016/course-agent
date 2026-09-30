@@ -51,7 +51,7 @@ class ChannelManager:
                 self.channels[name] = channel
                 logger.info("%s channel enabled", cls.display_name)
             except Exception as e:
-                logger.warning("%s channel not available: %s", name, e)
+                logger.warning("%s channel not available: %s", name, e, exc_info=True)
 
     async def start_all(self) -> None:
         """Start all channels and the outbound dispatcher."""

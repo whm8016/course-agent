@@ -122,8 +122,9 @@ async def create_course(
     # 建课即自动生成课程码（替代旧的"教师手动点生成"）
     try:
         kb.join_code = await ensure_unique_join_code(db)
-    except JoinCodeExhaustedError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except JoinCodeExhaustedError:
+        logger.exception("join code exhausted")
+        raise HTTPException(status_code=500, detail="课程码生成失败，请稍后重试")
     await db.flush()
     _kb_raw_dir(body.course_id).mkdir(parents=True, exist_ok=True)
     logger.info("教师创建课程 course_id=%s owner=%s", body.course_id, teacher["id"])
@@ -359,8 +360,9 @@ async def refresh_join_code(
     kb = await _get_owned_kb(db, course_id, teacher)
     try:
         kb.join_code = await ensure_unique_join_code(db, exclude_course_id=course_id)
-    except JoinCodeExhaustedError as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except JoinCodeExhaustedError:
+        logger.exception("join code exhausted")
+        raise HTTPException(status_code=500, detail="课程码生成失败，请稍后重试")
     kb.updated_at = time.time()
     await db.flush()
     await invalidate_courses_cache()

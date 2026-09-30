@@ -123,7 +123,7 @@ async def judge_answer(
             logger.warning("[answer_judge] JSON 解析失败，raw 前200字：%s", raw[:200])
             return None
     except Exception as exc:
-        logger.warning("[answer_judge] LLM 判分失败（fail-safe 返回 None）：%s", exc)
+        logger.warning("[answer_judge] LLM 判分失败（fail-safe 返回 None）：%s", exc, exc_info=True)
         return None
 
     result = _validate(data, user_answer, correct_answer)

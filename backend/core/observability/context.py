@@ -39,6 +39,18 @@ def bind_context(**kwargs: str) -> None:
             var.set(str(value) if value is not None else "")
 
 
+def bind_ws_request_id(websocket) -> None:
+    """WS 入口绑定 request_id（X-Trace-Id 透传或生成 12 位 hex）。
+
+    WebSocket 不经过 BaseHTTPMiddleware，两个 WS handler（run.py/question.py）
+    须手动调本 helper——抽出来是防"各自记得抄三行"的漂移（HTTP 侧同语义见
+    observability/middleware.py）。
+    """
+    import uuid
+
+    bind_context(request_id=websocket.headers.get("x-trace-id") or uuid.uuid4().hex[:12])
+
+
 def get_context_fields() -> dict[str, Any]:
     """返回当前上下文中所有非空字段（供 ContextFilter 注入 LogRecord）。"""
     return {key: var.get() for key, var in _ALL_VARS.items() if var.get()}

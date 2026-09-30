@@ -33,7 +33,7 @@ async def get_course_entities(course_id: str) -> list[dict]:
         async with lease_instance(course_id) as rag:
             return await _collect_entities(rag, course_id)
     except RuntimeError as e:
-        logger.warning("get_course_entities failed to get instance: %s", e)
+        logger.warning("get_course_entities failed to get instance: %s", e, exc_info=True)
         return []
 
 
@@ -66,7 +66,7 @@ async def _collect_entities(rag, course_id: str) -> list[dict]:
                     course_id, len(entities)
                 )
             except Exception as e:
-                logger.warning("get_course_entities get_all_nodes failed: %s", e)
+                logger.warning("get_course_entities get_all_nodes failed: %s", e, exc_info=True)
         else:
             # 降级：直接读取 NetworkX 图的节点
             try:
@@ -85,7 +85,7 @@ async def _collect_entities(rag, course_id: str) -> list[dict]:
                         course_id, len(entities)
                     )
             except Exception as e:
-                logger.warning("get_course_entities NetworkX fallback failed: %s", e)
+                logger.warning("get_course_entities NetworkX fallback failed: %s", e, exc_info=True)
 
     return entities
 
@@ -113,7 +113,7 @@ async def get_course_relations(course_id: str) -> list[dict]:
         async with lease_instance(course_id) as rag:
             return await _collect_relations(rag, course_id)
     except RuntimeError as e:
-        logger.warning("get_course_relations failed to get instance: %s", e)
+        logger.warning("get_course_relations failed to get instance: %s", e, exc_info=True)
         return []
 
 
@@ -141,7 +141,7 @@ async def _collect_relations(rag, course_id: str) -> list[dict]:
                     course_id, len(relations)
                 )
             except Exception as e:
-                logger.warning("get_course_relations get_all_edges failed: %s", e)
+                logger.warning("get_course_relations get_all_edges failed: %s", e, exc_info=True)
         else:
             # 降级：直接读取 NetworkX 图的边
             try:
@@ -159,7 +159,7 @@ async def _collect_relations(rag, course_id: str) -> list[dict]:
                         course_id, len(relations)
                     )
             except Exception as e:
-                logger.warning("get_course_relations NetworkX fallback failed: %s", e)
+                logger.warning("get_course_relations NetworkX fallback failed: %s", e, exc_info=True)
 
     return relations
 

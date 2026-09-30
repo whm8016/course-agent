@@ -75,10 +75,14 @@ class CourseOrchestrator:
             try:
                 await capability.run(context, bus)
             except Exception as exc:
-                logger.exception("Capability '%s' raised: %s", cap_name, exc)
+                # 主链路错误的实际出口（chat 裸委托无兜底、能力漏抛都落到这里）：
+                # 统一错误信封——分类 code + 中文文案 + ref，裸 str(exc) 不再直发学生
+                #（堆栈由 emit_error_event 现场记录，turn_id 在 contextvars 进每行日志）
                 log_flow("orchestrator.capability_error", level=logging.ERROR,
                          capability=cap_name, error=str(exc))
-                await bus.error(str(exc), source=cap_name)
+                from core.observability.errors import emit_error_event
+
+                await emit_error_event(bus, exc, source=cap_name)
             finally:
                 if turn_id:
                     unregister_bus(turn_id)

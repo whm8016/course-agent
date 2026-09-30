@@ -11,7 +11,7 @@ import VoiceInput from './VoiceInput'
 import { isImage } from './fileUtils'
 import { useStickToBottom } from '../../lib/stickToBottom'
 import QuizConfigPanel from '../quiz/QuizConfigPanel'
-import { DEFAULT_QUIZ_CONFIG, type QuizConfig } from '../quiz/types'
+import { DEFAULT_QUIZ_CONFIG, QUESTION_TYPE_LABELS, type QuizConfig } from '../quiz/types'
 import { chatStream, uploadImage, fetchMessages, createSession, updateSessionMode, fetchLlmProfilesSelectable, fetchMyLlmProvider, deleteMyLlmProvider, requestAnswerNow } from '../../services/api'
 import type { LlmProfileSelectable, UserProviderView } from '../../services/api'
 import {
@@ -19,7 +19,7 @@ import {
   connectDeepResearch,
   type DeepResearchSource,
 } from '../../services/questionWs'
-import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode, HallucinationInfo, KBStatus, QuizQuestion, AttachmentInfo, MessageUsage } from '../../types'
+import type { Message, Session, SSEEvent, RagChunk, QuizData, ChatMode, HallucinationInfo, KBStatus, QuizQuestion, AttachmentInfo, MessageUsage, ErrorEnvelope } from '../../types'
 
 interface Props {
   courseId: string
@@ -41,6 +41,14 @@ type ApiMessageRow = {
   content: string
   msg_type?: string
   metadata?: Message['metadata'] & { attachments?: AttachmentInfo[] }
+}
+
+/** 错误信封文案 + 编号（可观测性重整）：WS error 事件带 ref 时拼进提示，
+ * 学生可把它报给老师/管理员（后端按编号查 turn_errors / grep 日志）。 */
+function withErrorRef(msg: Record<string, unknown>, fallback: string): string {
+  const base = String(msg.message ?? msg.content ?? fallback)
+  const ref = typeof msg.ref === 'string' && msg.ref ? `（编号 ${msg.ref}）` : ''
+  return base + ref
 }
 
 function rowToMessage(row: ApiMessageRow): Message {
@@ -123,11 +131,14 @@ interface QAPairRaw {
   language?: string
 }
 
-function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
+export function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
   const opts = qa.options
   const type = (qa.question_type ?? '').toLowerCase()
+  const hasOpts = !!(opts && typeof opts === 'object' && Object.keys(opts).length > 0)
 
-  if (type === 'true_false') {
+  // 判断题：后端题型键是 concept（options 为空，correct_answer 为 true/false）——
+  // 归一成 A/B 判断卡走本地判分；true_false 为历史存量键，同样收编
+  if (type === 'true_false' || (type === 'concept' && !hasOpts)) {
     return {
       question: qa.question ?? '',
       options: ['A. 正确', 'B. 错误'],
@@ -146,8 +157,8 @@ function toQuizQuestion(qa: QAPairRaw): QuizQuestion {
     }
   }
 
-  if (opts && typeof opts === 'object' && Object.keys(opts).length > 0) {
-    const options = Object.entries(opts)
+  if (hasOpts) {
+    const options = Object.entries(opts!)
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([letter, text]) => `${letter}. ${text}`)
     const answer = (qa.correct_answer ?? '').charAt(0).toUpperCase() || 'A'
@@ -618,10 +629,10 @@ export default function ChatWindow({
       }
     }
 
-    // 先把「用户请求」推入消息列表
+    // 先把「用户请求」推入消息列表（气泡显示中文标签，不发枚举值）
     const userMsg: Message = {
       role: 'user',
-      content: `出题：${topic}（${quizConfig.count} 道，${quizConfig.difficulty || '自动难度'}，${quizConfig.questionType || '自动题型'}）${quizConfig.preference ? `，偏好：${quizConfig.preference}` : ''}`,
+      content: `出题：${topic}（${quizConfig.count} 道，${quizConfig.difficulty || '自动难度'}，${QUESTION_TYPE_LABELS[quizConfig.questionType] || '自动题型'}）${quizConfig.preference ? `，偏好：${quizConfig.preference}` : ''}`,
       image: firstImagePreview,
       attachments: attachments.length > 0 ? attachments : undefined,
     }
@@ -682,6 +693,17 @@ export default function ChatWindow({
               collectedQuestions.push(qq)
               setQuizStreamQuestions((prev) => [...prev, qq])
             }
+          } else if (t === 'quiz_question_error') {
+            // 单题 critic 重试用尽/生成失败：显式提示已跳过，不能静默吞题
+            // （要 5 题只见 4 题、计数对不上，看起来像丢题）
+            const reason = String(msg.reason ?? '').slice(0, 120)
+            setQuizTraces((prev) => [
+              ...prev,
+              {
+                text: `第 ${Number(msg.index ?? 0) + 1} 题生成失败已跳过${reason ? `（${reason}）` : ''}`,
+                kind: 'error',
+              },
+            ])
           } else if (t === 'result') {
             const qs = (msg as { questions?: QAPairRaw[] }).questions
             if (Array.isArray(qs) && qs.length > 0 && collectedQuestions.length === 0) {
@@ -703,6 +725,14 @@ export default function ChatWindow({
               { text: `生成完成，共 ${collectedQuestions.length} 道`, kind: 'done' },
             ])
             resetQuizOverlays()
+            if (collectedQuestions.length === 0) {
+              // 全部题目失败（quiz_question_error 轮空）：不产出空测验卡——
+              // 空卡提交按钮可点但无事发生，像假成功
+              setQuizError('题目全部生成失败，请调整要求后重试')
+              setQuizStreaming(false)
+              quizCloseRef.current?.()
+              return
+            }
             const quizData: QuizData = { questions: [...collectedQuestions] }
             const assistantMsg: Message = {
               role: 'assistant',
@@ -717,7 +747,12 @@ export default function ChatWindow({
             setQuizTraces([])
             quizCloseRef.current?.()
           } else if (t === 'error') {
-            setQuizError(String(msg.message ?? msg.content ?? '出题失败，请重试'))
+            setQuizError(withErrorRef(msg as Record<string, unknown>, '出题失败，请重试'))
+            resetQuizOverlays()
+          } else if (t === 'ws_reconnect_failed') {
+            // 断线自动重连（questionWs 层，3 次退避）耗尽：明确告知，不静默；
+            // 复位走 error 分支同款（清 streaming + 撤 ask_user 卡，防悬空）
+            setQuizError('连接中断且自动重连失败，已生成的题目可能不完整，请重新发起')
             resetQuizOverlays()
           }
         },
@@ -884,7 +919,7 @@ export default function ChatWindow({
               researchCloseRef.current?.()
             } else if (t === 'error') {
               awaitingClarification = false
-              setResearchError(String(msg.message ?? msg.content ?? '研究失败，请重试'))
+              setResearchError(withErrorRef(msg as Record<string, unknown>, '研究失败，请重试'))
               resetResearchOverlays()
             }
           },
@@ -987,6 +1022,9 @@ export default function ChatWindow({
 
     const thinkingSteps: Message[] = []
     let answerContent = ''
+    // 错误信封（可观测性重整）：error 事件携带的 code/ref，随消息挂 metadata.error
+    //（MessageBubble 红框变体 + ErrorRefLine 编号复制）
+    let errorInfo: ErrorEnvelope | undefined
     let ragChunks: RagChunk[] = []
     let quizData: QuizData | undefined
     let intent = ''
@@ -1189,6 +1227,10 @@ export default function ChatWindow({
           case 'error':
             // 后端 stream_bus 的 error 事件字段是 `message`（非 content）；两个都认，避免「出错了: undefined」
             answerContent = `出错了: ${event.content || event.message || '未知错误，请查看后端日志'}`
+            // 信封字段（旧后端缺省时不挂，普通气泡）
+            if (event.code) {
+              errorInfo = { code: event.code, ref: event.ref || '' }
+            }
             break
         }
       },
@@ -1226,6 +1268,7 @@ export default function ChatWindow({
         stopped: wasAborted || undefined,
         truncated: truncated || undefined,
         usage,
+        error: errorInfo,
       },
     }
     // @ts-expect-error attach thinking steps for rendering
@@ -1397,12 +1440,13 @@ export default function ChatWindow({
             isStreaming={loading && i === messages.length - 1}
           />
         ))}
-        {/* 出题流式进度气泡 */}
-        {quizStreaming && (
+        {/* 出题流式进度气泡：结束后有错误也保持挂载——错误文案长在气泡里，
+            只挂 quizStreaming 会让 error 随气泡卸载一闪而过（等于静默） */}
+        {(quizStreaming || quizError) && (
           <QuizStreamingBubble
             traces={quizTraces}
             questions={quizStreamQuestions}
-            done={false}
+            done={!quizStreaming}
             error={quizError}
           />
         )}

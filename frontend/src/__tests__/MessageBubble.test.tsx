@@ -103,3 +103,37 @@ describe('MessageBubble 用量小字（usage collected 口径）', () => {
     expect(container.textContent).toContain('输入')
   })
 })
+
+describe('MessageBubble 错误信封呈现（可观测性重整）', () => {
+  const mkErr = (ref = 'turnabcd'): Message => ({
+    role: 'assistant',
+    content: '出错了: AI 服务暂时不可用，请稍后重试。',
+    metadata: { error: { code: 'llm_unavailable', ref } },
+  } as Message)
+
+  it('metadata.error → 错误变体：红框样式 + 错误码 + 编号', () => {
+    const { container, getByText } = render(<MessageBubble message={mkErr()} />)
+    // 红框变体（危险色边框类）
+    expect(container.querySelector('.border-danger-fg, [class*="border-danger"]')).not.toBeNull()
+    expect(getByText('llm_unavailable')).toBeTruthy()
+    expect(getByText(/turnabcd/)).toBeTruthy()
+  })
+
+  it('一键复制：点击复制按钮写入剪贴板（ref/code/时间）', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.assign(navigator, { clipboard: { writeText } })
+    const { getByRole } = render(<MessageBubble message={mkErr()} />)
+    await act(async () => {
+      getByRole('button', { name: /复制/ }).click()
+    })
+    expect(writeText).toHaveBeenCalledTimes(1)
+    expect(writeText.mock.calls[0][0]).toContain('turnabcd')
+    expect(writeText.mock.calls[0][0]).toContain('llm_unavailable')
+  })
+
+  it('无 metadata.error 的普通消息不走错误变体', () => {
+    const { container } = render(<MessageBubble message={mk('正常回答')} />)
+    expect(container.querySelector('.border-danger-fg, [class*="border-danger"]')).toBeNull()
+    expect(container.textContent).not.toContain('编号')
+  })
+})

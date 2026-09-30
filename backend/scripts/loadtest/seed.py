@@ -178,5 +178,19 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+def _confirm_non_local(base_url: str) -> None:
+    """非 localhost 目标需显式确认：seed 会造 testpass123 弱口令账号并升 admin，
+    误指向生产库 = 在生产里塞后门账号。"""
+    from urllib.parse import urlparse
+
+    host = (urlparse(base_url).hostname or "").lower()
+    if host in ("localhost", "127.0.0.1", "::1", ""):
+        return
+    if input(f"目标 {base_url} 非 localhost——确认要在这个环境造压测账号? 输入 yes 继续: ").strip() != "yes":
+        sys.exit("已取消")
+
+
 if __name__ == "__main__":
-    sys.exit(asyncio.run(main(parse_args())))
+    _args = parse_args()
+    _confirm_non_local(_args.base_url)
+    sys.exit(asyncio.run(main(_args)))

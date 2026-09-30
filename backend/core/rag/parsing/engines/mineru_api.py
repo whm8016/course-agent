@@ -410,7 +410,7 @@ def _count_pages(pdf_path: Path) -> Optional[int]:
     try:
         doc = fitz.open(pdf_path)
     except Exception as exc:  # 损坏 / 非 PDF
-        logger.warning("读取 %s 页数失败（%s），整文件提交不拆", pdf_path.name, exc)
+        logger.warning("读取 %s 页数失败（%s），整文件提交不拆", pdf_path.name, exc, exc_info=True)
         return None
     try:
         if doc.is_encrypted and not doc.authenticate(""):
