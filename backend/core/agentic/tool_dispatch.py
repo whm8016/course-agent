@@ -50,6 +50,7 @@ async def dispatch_tool_calls(
             await stream.emit({"type": "tool_call", "tool": tc.name, "input": tc.arguments})
             _t = time.perf_counter()
             status = "ok"
+            result = None  # 异常路径未赋值；下面 sources 转发要读它
             try:
                 # rag 工具注入用户选择的检索模式（mode 由用户每请求选，不由 LLM 决定）
                 call_kwargs = dict(tc.arguments)
@@ -86,7 +87,15 @@ async def dispatch_tool_calls(
                 log_flow("tool.slow", level=logging.WARNING,
                          tool_name=tc.name, elapsed_ms=_elapsed)
 
-            await stream.emit({"type": "tool_result", "tool": tc.name, "content": content[:2000]})
+            # 来源卡链路：rag 命中时 _execute_rag 在 sources[0].chunks 回带逐条命中
+            # （正文摘录+章节来源+名次分），这里转发上 SSE 事件——前端 ChatWindow 读
+            # event.chunks 渲染「知识来源」卡。其它工具无此字段，事件形状不变。
+            payload: dict[str, Any] = {"type": "tool_result", "tool": tc.name, "content": content[:2000]}
+            for s in getattr(result, "sources", None) or []:
+                if isinstance(s, dict) and s.get("chunks"):
+                    payload["chunks"] = s["chunks"]
+                    break
+            await stream.emit(payload)
             # 写入 messages 的 tool content：默认全量（行为等价）；开启 context_policy 时单条
             # 上限裁（cap_tool_result 头尾保留），消除「前端事件截 2000 / messages 收全量」的不对称。
             # 前端事件（上一行 content[:2000]）保持现状，两者解耦。

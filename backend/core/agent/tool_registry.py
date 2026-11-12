@@ -142,6 +142,12 @@ async def _execute_rag(course_id: str, query: str, **kwargs) -> ToolResult:
         sources: list[dict] = [{"type": "rag", "query": query}]
         if file_paths:
             sources[0]["file_paths"] = file_paths
+        # 逐条命中（正文摘录+章节来源+名次分）：pg 路 retriever 回带 last_chunks，
+        # 经 tool_dispatch 转发到 tool_result SSE 事件供前端渲染「知识来源」卡。
+        # LightRAG 未回带时缺省——与 file_paths 同一容错口径。
+        last_chunks = getattr(retriever, "last_chunks", None) or []
+        if last_chunks:
+            sources[0]["chunks"] = last_chunks
         return ToolResult(content=content, sources=sources)
     except Exception as e:
         logger.exception("rag tool failed")

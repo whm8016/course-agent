@@ -23,10 +23,14 @@ from sqlalchemy import text as sa_text
 
 from core.rag.llamaindex.pg_store import PG_TABLE_NAME, TEXT_SEARCH_CONFIG
 from core.rag.retriever.base import Retriever
-from core.rag.source_utils import strip_chunk_suffix
+from core.rag.source_utils import parse_source_prefix, strip_chunk_suffix
 from core.rag.types import ChunkMeta, RetrievalResult
 
 logger = logging.getLogger(__name__)
+
+# 来源卡（tool_result chunks）逐条摘录上限：与旧 lightrag SSE 路 TOOL_RESULT_CONTEXT_LIMIT 对齐
+_LAST_CHUNKS_LIMIT = 4
+_LAST_CHUNKS_PREVIEW_CHARS = 300
 
 # 证据头里的来源文件名提取自 file_path：摄入端无 LightRAG 的 ::chunk- 后缀，但共用
 # strip_chunk_suffix 做防御性剥离 + 过滤 unknown_source（与 lightrag._extract_file_path 同口径），
@@ -128,11 +132,15 @@ class LlamaIndexRetriever(Retriever):
     """pgvector 检索器（dense + sparse → RRF 融合，course 隔离）。
 
     ``last_sources``：最近一次 ``retrieve_context`` 命中的来源文件名列表（去重保序）。
-    retriever 是进程内单例（registry 缓存实例），此属性只在同一次工具调用内被
-    ``_execute_rag`` 读取——取值发生在下一次检索覆写前，无跨请求读到旧值的竞态面。
+    ``last_chunks``：最近一次命中的逐条摘录（{content, source, score}），供 _execute_rag
+    组装 sources.chunks → tool_result SSE 事件 → 前端「知识来源」卡。
+    竞态面：get_retriever 每次调用新建实例（registry.py ``return cls()``，非缓存单例），
+    且 _execute_rag 在同一协程内 retrieve_context 返回后无 await 直读这两个属性——
+    写读之间不存在交错窗口。若日后 registry 改为缓存实例，此处需重新论证。
     """
 
     last_sources: list[str] = []
+    last_chunks: list[dict] = []
 
     async def is_available(self) -> tuple[bool, str]:
         from core.rag.llamaindex.pg_store import is_llamaindex_pg_available  # noqa: PLC0415
@@ -254,8 +262,9 @@ class LlamaIndexRetriever(Retriever):
         **kwargs,
     ) -> str:
         """检索并拼接为上下文字符串（供 LLM prompt）。"""
-        # 先清空再检索：空命中/异常路径不会残留上一轮的 last_sources
+        # 先清空再检索：空命中/异常路径不会残留上一轮的 last_sources / last_chunks
         self.last_sources = []
+        self.last_chunks = []
         try:
             t0 = time.perf_counter()
             results = await self._fuse(course_id, query, top_k)
@@ -273,6 +282,21 @@ class LlamaIndexRetriever(Retriever):
             context_text = _format_contexts(contexts, limit=top_k, max_chars=max_chars)
             # 本轮命中来源（去重保序，剥后缀后的真实文件名），供 _execute_rag 组装 sources
             self.last_sources = list(dict.fromkeys(c["file_path"] for c in contexts if c["file_path"]))
+            # 逐条摘录（前端「知识来源」卡数据源）：正文剥【章节/来源】前缀取预览；
+            # 来源名优先取章节（干净、无上传 uuid 前缀），退化 basename；score 用名次
+            # 启发（1-idx*0.01，与前端 api.ts 旧兜底同式）——RRF 融合分 ~0.03，直显
+            # 会成「3% 匹配」，名次才是卡片要传达的信息。
+            self.last_chunks = []
+            for idx, r in enumerate(results[:_LAST_CHUNKS_LIMIT]):
+                section, body = parse_source_prefix(str(r.get("content", "")))
+                source_name = section or Path(r.get("file_path") or "").name
+                if not source_name and not body:
+                    continue
+                self.last_chunks.append({
+                    "content": body[:_LAST_CHUNKS_PREVIEW_CHARS],
+                    "source": source_name,
+                    "score": round(1.0 - idx * 0.01, 2),
+                })
             logger.info(
                 "llamaindex_pg.retrieve_context course=%s query=%.60s top_k=%d chars=%d elapsed_ms=%d",
                 course_id, query[:60], top_k, len(context_text), elapsed_ms,

@@ -16,6 +16,7 @@ import asyncio
 import logging
 import time
 from pathlib import Path
+from typing import Any
 
 from core.agentic.loop import run_agent_loop
 from core.context import UnifiedContext
@@ -80,8 +81,25 @@ async def retrieve_kb_seed(context: UnifiedContext, stream: StreamBus, header: s
         return ""
     if len(text) > cfg.max_chars:
         text = text[: cfg.max_chars].rstrip() + "\n...[已截断]"
-    await stream.emit({"type": "tool_result", "tool": "rag", "content": text[:2000]})
+    await stream.emit(_rag_tool_result_event(result, text))
     return f"{header}\n\n{text}" if header else text
+
+
+def _rag_tool_result_event(result: Any, text: str) -> dict[str, Any]:
+    """tool_result 事件组装：rag 命中的 sources.chunks（逐条摘录）随事件转发——
+    前端 ChatWindow 读 event.chunks 渲染「知识来源」卡。
+
+    kb_seed 与 tool_dispatch 两处发 rag tool_result，本函数是 kb_seed 侧的单一出口
+    （tool_dispatch 侧在 _run_one 内联同款转发）。chunks 提取逻辑两边一致：sources[0]
+    里第一个带非空 chunks 的条目。无 sources / 无 chunks 时不带键——旧客户端与无命中
+    场景事件形状不变。
+    """
+    payload: dict[str, Any] = {"type": "tool_result", "tool": "rag", "content": text[:2000]}
+    for s in getattr(result, "sources", None) or []:
+        if isinstance(s, dict) and s.get("chunks"):
+            payload["chunks"] = s["chunks"]
+            break
+    return payload
 
 
 def assemble_system_prompt(
